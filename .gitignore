@@ -1,0 +1,13 @@
+/target/
+Cargo.lock
+
+# Rust backup files
+**/*.rs.bk
+
+# Editor settings
+.vscode/
+.idea/
+
+# OS-generated files
+.DS_Store
+Thumbs.db
