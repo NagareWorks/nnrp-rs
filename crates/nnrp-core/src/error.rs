@@ -2,6 +2,6 @@ use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum NnrpError {
-    #[error("unsupported preview stage: {0}")]
-    UnsupportedPreviewStage(u8),
+    #[error("unsupported wire format: {0}")]
+    UnsupportedWireFormat(u8),
 }

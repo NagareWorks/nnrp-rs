@@ -24,4 +24,4 @@
 - [ ] Export preview3 canonical golden vectors from Rust.
 - [ ] Export cross-language fixture manifests for Python/C# binding tests.
 - [ ] Publish a binding-consumption contract for Python and C#.
-- [ ] Document feature negotiation rules for preview2 compatibility versus preview3 native paths.
+- [ ] Document feature negotiation rules for the current `NNRP/1` path versus legacy planning assumptions, without restoring preview compatibility shims.

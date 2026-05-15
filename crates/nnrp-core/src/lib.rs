@@ -1,5 +1,5 @@
 pub mod error;
-pub mod preview;
+pub mod version;
 
 pub use error::NnrpError;
-pub use preview::{PreviewStage, ProtocolVersion};
+pub use version::{ProtocolVersion, CURRENT_WIRE_FORMAT};

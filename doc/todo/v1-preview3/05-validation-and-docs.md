@@ -15,4 +15,4 @@
 - [ ] Document the frozen preview3 connection/session, cache, schema, and operation lifecycle semantics.
 - [ ] Document the FFI contract and binding responsibilities.
 - [ ] Document the conformance workflow for Python, C#, and future bindings.
-- [ ] Document which preview2 semantics remain compatibility-only and which must move fully into preview3 Rust handles.
+- [ ] Document which historical preview-era semantics are retired and which must move fully into Rust-owned handles.
