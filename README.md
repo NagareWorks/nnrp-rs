@@ -10,6 +10,16 @@ This repository is intended to become the single implementation source for:
 4. Stable FFI for Python, C#, and future language bindings.
 5. Golden vectors and conformance fixtures.
 
+## Contributors
+
+<a href="https://github.com/NagareWorks/nnrp-rs/graphs/contributors" title="Open the contributors graph for individual GitHub profiles and IDs.">
+	<img src="https://contrib.rocks/image?repo=NagareWorks/nnrp-rs" alt="Contributors" />
+</a>
+
+The avatar wall above updates automatically from the repository contributor list once this repository is published at the matching GitHub location.
+
+GitHub README rendering does not support per-avatar dynamic tooltips for an auto-generated contributor wall, so use the linked contributors graph if you want individual profile pages and account IDs.
+
 ## Workspace Layout
 
 - `crates/nnrp-core`: wire primitives, protocol models, validation, and state-machine-facing core types.
