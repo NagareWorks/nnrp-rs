@@ -1,21 +1,20 @@
 # Rust Preview3 Connection, Session, And Flow Control
 
-## Host-Neutral State Machines
+## Scope
 
-- [ ] Add preview3 version/stage primitives beyond the initial placeholder.
-- [ ] Implement fixed-width common-header codecs and strict preview3 stage handling.
-- [ ] Implement fixed metadata models for connection/session lifecycle messages.
-- [ ] Implement host-neutral connection/session state machines for multi-session orchestration.
-- [ ] Implement explicit session-close and resume concepts once frozen.
+1. `02` owns the canonical Rust implementation of preview3 connection/session state machines, scheduling enums, credit semantics, and recovery validation.
+2. `02` may only implement semantics that are already frozen in `nnrp-doc`; if a lifecycle, credit, or recovery rule is still under design, it must not be silently finalized here.
+3. `02` defines the host-neutral source of truth that `nnrp-cs` and `nnrp-py` consume; downstream SDKs must not fork these semantics.
 
-## Scheduling And Operation Model
+## Sub-Shards
 
-- [ ] Implement session priority classes and operation lifecycle/cancel-scope enums.
-- [ ] Implement operation/workflow identifiers, parent/group relationships, and lifecycle transitions.
-- [ ] Implement the 32B `FLOW_UPDATE` metadata model and three-scope credit semantics.
-- [ ] Implement strict validation for illegal lifecycle and scheduling combinations.
+1. `02a-connection-session-lifecycle.md`: header/version primitives, lifecycle metadata, and host-neutral multi-session state machines.
+2. `02b-scheduling-and-operation-model.md`: priority classes, operation lifecycle, cancel scope, and `FLOW_UPDATE` scheduling semantics.
+3. `02c-recovery-and-binding-consumption.md`: recovery validation plus the consumption rules exported to downstream SDKs.
 
-## Recovery
+## Dependency Gates
 
-- [ ] Implement resume-token, resume-window, and recovery-object validation once the upstream concept freezes.
-- [ ] Export recovery semantics in a way that Python/C# can consume without inventing their own retry state machines.
+1. `02a` depends on `nnrp-doc` freezing connection/session lifecycle metadata and common-header rules; it should not wait on FFI packaging.
+2. `02b` depends on `nnrp-doc` freezing priority, lifecycle, cancel-scope, and `FLOW_UPDATE` semantics; it must not let crate-local convenience leak into protocol behavior.
+3. `02c` depends on `nnrp-doc` freezing recovery-object and resume-window semantics; it should export opaque recovery consumption rules rather than SDK-specific retry policies.
+4. `04b` and downstream SDK shards may consume `02`, but must not redefine `02` semantics through FFI helper behavior.

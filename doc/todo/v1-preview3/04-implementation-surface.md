@@ -1,27 +1,20 @@
 # Rust Preview3 Implementation Surface
 
-## Crate Ownership
+## Scope
 
-- [ ] Keep `nnrp-core` responsible for wire primitives, protocol validation, state-machine core types, cache/schema semantics, and host-neutral logic.
-- [ ] Keep `nnrp-ffi` responsible for stable ABI, handle lifecycle, callback/polling surfaces, and cross-language buffer ownership rules.
-- [ ] Keep `nnrp-conformance` responsible for golden vectors, fixture manifests, cross-language conformance exports, and protocol regression baselines.
+1. `04` owns how frozen preview3 semantics are materialized across `nnrp-core`, `nnrp-ffi`, and `nnrp-conformance`.
+2. `04` must not be used to finalize protocol behavior that is still unfrozen in `nnrp-doc`; crate and FFI work here is implementation of frozen semantics, not a substitute for protocol design.
+3. `04` is the upstream dependency surface for C#/Python SDK wiring and therefore must keep handle, ABI, and export contracts narrower than host-specific convenience APIs.
 
-## nnrp-core
+## Sub-Shards
 
-- [ ] Implement preview3 typed payload descriptors, extension descriptors, and schema/profile binding rules.
-- [ ] Implement strict validation for illegal lifecycle, cache, and schema combinations.
+1. `04a-core-surface.md`: `nnrp-core` wire primitives, descriptors, and validation core.
+2. `04b-ffi-surface.md`: `nnrp-ffi` handle/ABI/event-delivery/buffer-ownership surface.
+3. `04c-conformance-and-binding-rollout.md`: `nnrp-conformance` exports and downstream binding-consumption contract.
 
-## nnrp-ffi
+## Dependency Gates
 
-- [ ] Define stable ABI-safe handle layouts and ownership rules.
-- [ ] Expose connection bootstrap, session open/patch/close, submit, result/event pump, and control operations through FFI.
-- [ ] Expose zero-copy or bounded-copy buffer-view APIs suitable for Python and C# bindings.
-- [ ] Expose callback-driven and polling-driven event delivery surfaces.
-- [ ] Expose stable preview3 error codes and diagnostics to binding layers.
-
-## nnrp-conformance And Binding Rollout Support
-
-- [ ] Export preview3 canonical golden vectors from Rust.
-- [ ] Export cross-language fixture manifests for Python/C# binding tests.
-- [ ] Publish a binding-consumption contract for Python and C#.
-- [ ] Document feature negotiation rules for the current `NNRP/1` path versus legacy planning assumptions, without restoring preview compatibility shims.
+1. `04a` depends on `01/02/03` semantics already being frozen enough to implement in `nnrp-core`; it must not invent descriptor or lifecycle rules locally.
+2. `04b` depends on `04a` plus frozen `02` semantics; it exposes handles and delivery primitives, not host-language orchestration policy.
+3. `04c` depends on `04a/04b` artifacts and owns canonical vectors, fixture manifests, and binding-consumption notes.
+4. Downstream SDK `04` shards may depend on `04b/04c`, but they must not back-port host policy into Rust ABI shape without updating `nnrp-rs` explicitly.

@@ -9,16 +9,24 @@
 ## 1. Shard Map
 
 1. `01-foundation-and-contract.md`: land the frozen preview3 contract as code, ABI, and downstream-consumption baseline.
-2. `02-connection-session-flow-control.md`: connection/session lifecycle, scheduling enums, recovery concepts, and host-neutral state machines.
-3. `03-cache-schema-profile-registry.md`: cache lease contract, schema/profile registry, standard profiles, typed payload descriptors.
-4. `04-implementation-surface.md`: crate ownership, `nnrp-core`, `nnrp-ffi`, `nnrp-conformance`, and binding-consumption contract work.
-5. `05-validation-and-docs.md`: workspace validation, conformance exports, and rollout documentation.
+2. `02-connection-session-flow-control.md`: ownership and dependency map for the `02a/02b/02c` connection/session shards.
+3. `02a-connection-session-lifecycle.md`: common-header, connection/session lifecycle metadata, and host-neutral multi-session state machines.
+4. `02b-scheduling-and-operation-model.md`: priority, operation lifecycle, cancel scope, and `FLOW_UPDATE` scheduling semantics.
+5. `02c-recovery-and-binding-consumption.md`: recovery validation and export rules consumed by Python/C#.
+6. `03-cache-schema-profile-registry.md`: cache lease contract, schema/profile registry, standard profiles, typed payload descriptors.
+7. `04-implementation-surface.md`: ownership and dependency map for the `04a/04b/04c` implementation-surface shards.
+8. `04a-core-surface.md`: `nnrp-core` wire primitives, descriptors, and validation core.
+9. `04b-ffi-surface.md`: `nnrp-ffi` handle/ABI/event-delivery/buffer-ownership surface.
+10. `04c-conformance-and-binding-rollout.md`: `nnrp-conformance` exports and downstream binding-consumption contract.
+11. `05-validation-and-docs.md`: workspace validation, conformance exports, and rollout documentation.
 
 ## 2. PR Rules
 
 1. One shard per PR by default; foundation/contract work should land before binding-facing implementation PRs depend on it.
 2. `main` should accept reviewed PRs only after GitHub publication.
 3. If a preview3 item changes wire shape, lifecycle semantics, error behavior, or descriptor layout, it must land here before Python/C# consume it.
+4. `02` and `03` may not invent protocol semantics that are not already frozen in `nnrp-doc`; if the contract is still open, update `nnrp-doc` first.
+5. `04` may wire frozen semantics into Rust crates and exports, but it must not use FFI or conformance work as a backdoor to freeze new protocol behavior.
 
 ## 3. Protocol Coverage Check
 
