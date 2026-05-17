@@ -6,6 +6,30 @@ on:
   workflow_dispatch:
 
 jobs:
+  commit-policy:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Enforce single-commit PR policy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          head_ref="${{ github.head_ref }}"
+          base_ref="${{ github.base_ref }}"
+
+          if [[ "$head_ref" =~ ^release/ ]] || [[ "$base_ref" =~ ^release/ ]]; then
+            echo "Release/version branch PR detected; multi-commit history is allowed when needed."
+            exit 0
+          fi
+
+          commit_count='${{ github.event.pull_request.commits }}'
+          if [ "$commit_count" -ne 1 ]; then
+            echo "Normal PRs from feature/fix/docs/chore branches must contain exactly one commit before review. Current PR has $commit_count commits. Squash the history before requesting review."
+            exit 1
+          fi
+
   test:
     runs-on: ubuntu-latest
 
@@ -23,3 +47,24 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+  required-checks:
+    needs:
+      - commit-policy
+      - test
+    if: always()
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Enforce required CI path
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ needs.commit-policy.result }}" != "success" ]; then
+            echo "PR commit policy validation failed."
+            exit 1
+          fi
+
+          if [ "${{ needs.test.result }}" != "success" ]; then
+            echo "Format or test validation failed."
+            exit 1
+          fi
