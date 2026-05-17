@@ -51,7 +51,7 @@ Rules:
 Every PR should:
 
 - target `main`
-- start from the closest GitHub PR template in `.github/PULL_REQUEST_TEMPLATE/`
+- use the default GitHub PR template that auto-loads on the PR page; specialized reference variants remain in `.github/PULL_REQUEST_TEMPLATE/` when you need to adapt the structure
 - explain the user-facing or engineering motivation
 - summarize the main crates or modules changed
 - list the validation performed
