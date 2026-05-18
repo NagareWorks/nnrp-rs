@@ -82,6 +82,13 @@ When preparing a release PR:
 - confirm release assets have the expected names
 - note any manual steps required on registries
 
+Public crate publication is gated through the `Release` workflow and should only happen from a short release tag or an explicit manual dispatch.
+
+- `Release` runs on pushed `v*` tags and on manual `workflow_dispatch`; normal branch pushes must not publish GitHub releases or crates.io artifacts.
+- Use the `release` GitHub environment for any publish-capable job.
+- Set `CARGO_PUBLISH_MODE` on the `release` environment to `disabled` or `token`.
+- If you use token-based crates.io publishing, store `CARGO_REGISTRY_TOKEN` as an environment secret on `release`.
+
 ## Review Guidelines
 
 Review for:
