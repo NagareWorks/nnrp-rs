@@ -10,8 +10,60 @@ permissions:
   contents: write
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Classify change set
+        id: classify
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          base="${{ github.event.before }}"
+          head="${{ github.sha }}"
+
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          mapfile -t changed_files < <(git diff --name-only "$base" "$head")
+
+          if [ "${#changed_files[@]}" -eq 0 ]; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          docs_only=true
+          for path in "${changed_files[@]}"; do
+            if [[ "$path" == *.md ]] || [[ "$path" =~ ^(doc/|docs/|\.github/PULL_REQUEST_TEMPLATE/) ]] || [[ "$path" =~ ^\.github/[^/]+\.md$ ]]; then
+              continue
+            fi
+
+            docs_only=false
+            break
+          done
+
+          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+
   package:
     runs-on: ubuntu-latest
+    needs:
+      - changes
+    if: needs.changes.outputs.docs_only != 'true'
 
     steps:
       - name: Checkout
@@ -30,12 +82,11 @@ jobs:
       - name: Resolve version
         id: version
         run: |
-          python - <<'PY' >> "$GITHUB_OUTPUT"
-          import pathlib
-          import tomllib
-          data = tomllib.loads(pathlib.Path('Cargo.toml').read_text(encoding='utf-8'))
-          print(f"value={data['workspace']['package']['version']}")
-          PY
+          python scripts/resolve_version.py show --github-output
+
+      - name: Apply build version
+        run: |
+          python scripts/resolve_version.py apply --package-version "${{ steps.version.outputs.package_version }}"
 
       - name: Format check
         run: cargo fmt --all --check
@@ -49,7 +100,7 @@ jobs:
           import pathlib
           import zipfile
 
-          version = '${{ steps.version.outputs.value }}'
+          version = '${{ steps.version.outputs.package_version }}'
           dist_dir = pathlib.Path('artifacts')
           dist_dir.mkdir(exist_ok=True)
           artifact = dist_dir / f'nnrp-rs-source-{version}.zip'
@@ -76,35 +127,31 @@ jobs:
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: nnrp-rs-release-${{ steps.version.outputs.value }}
-          path: artifacts/nnrp-rs-source-${{ steps.version.outputs.value }}.zip
+          name: nnrp-rs-release-${{ steps.version.outputs.package_version }}
+          path: artifacts/nnrp-rs-source-${{ steps.version.outputs.package_version }}.zip
           if-no-files-found: error
           retention-days: 14
 
       - name: Create git tag
         if: github.ref == 'refs/heads/master'
-        id: tag
         run: |
           git fetch --tags
-          tag="v${{ steps.version.outputs.value }}"
+          tag="${{ steps.version.outputs.tag_name }}"
           if [ -z "$(git tag --list "$tag")" ]; then
             git tag "$tag"
             git push origin "$tag"
-            echo "created=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "created=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Publish GitHub release
         if: github.ref == 'refs/heads/master'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.version.outputs.value }}
-          name: nnrp-rs v${{ steps.version.outputs.value }}
-          files: artifacts/nnrp-rs-source-${{ steps.version.outputs.value }}.zip
+          tag_name: ${{ steps.version.outputs.tag_name }}
+          name: nnrp-rs v${{ steps.version.outputs.release_version }}
+          files: artifacts/nnrp-rs-source-${{ steps.version.outputs.package_version }}.zip
 
       - name: Publish crates to crates.io
-        if: github.ref == 'refs/heads/master' && env.CARGO_REGISTRY_TOKEN != '' && steps.tag.outputs.created == 'true'
+        if: github.ref == 'refs/heads/master' && env.CARGO_REGISTRY_TOKEN != ''
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
