@@ -12,7 +12,8 @@
 - [ ] Implement schema descriptor common header at the frozen 32B layout.
 - [ ] Implement typed payload descriptor common layout at the frozen 24B layout.
 - [ ] Implement `descriptor_flags` semantics and validation.
-- [ ] Implement binding between schema/profile identifiers and typed payload descriptors.
+- [ ] Implement binding between frozen schema/profile identifiers and typed payload descriptors, including `profile_id = 0` as `unspecified` rather than an implicit tensor default.
+- [ ] Land the first-round standard registry assignments consumed by conformance, including the peer `tensor` / `token` profile IDs and the canonical token delta schema anchor.
 
 ## Standard Profiles And Payload Families
 
