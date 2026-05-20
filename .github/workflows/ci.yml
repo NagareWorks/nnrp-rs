@@ -48,10 +48,39 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+  conformance:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout nnrp-conformance action
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/nnrp-conformance
+          path: nnrp-conformance-action
+          fetch-depth: 1
+
+      - name: Run suite-owned conformance action
+        uses: ./nnrp-conformance-action/.github/actions/run-conformance
+        with:
+          protocol-version: nnrp-1-preview3
+          capabilities-path: conformance/nnrp-1-preview3.capabilities.json
+          working-directory: .
+          artifact-name: nnrp-rs-conformance
+          adapter-command: >-
+            cargo run -p nnrp-conformance --bin nnrp-conformance-adapter --
+            --plan $env:NNRP_CONFORMANCE_ADAPTER_PLAN
+            --output $env:NNRP_CONFORMANCE_ADAPTER_RESULTS
+
   required-checks:
     needs:
       - commit-policy
       - test
+      - conformance
     if: always()
     runs-on: ubuntu-latest
 
@@ -66,5 +95,10 @@ jobs:
 
           if [ "${{ needs.test.result }}" != "success" ]; then
             echo "Format or test validation failed."
+            exit 1
+          fi
+
+          if [ "${{ needs.conformance.result }}" != "success" ]; then
+            echo "Conformance validation failed."
             exit 1
           fi

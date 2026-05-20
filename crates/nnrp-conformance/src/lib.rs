@@ -1,3 +1,5 @@
+pub mod adapter_conformance;
+
 use nnrp_core::ProtocolVersion;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
