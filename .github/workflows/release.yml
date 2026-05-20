@@ -10,11 +10,16 @@ on:
         description: Git ref to release when running manually
         required: true
         default: master
+      create_tag:
+        description: Create and push the resolved release tag before publishing
+        required: true
+        type: boolean
+        default: false
       publish_github_release:
         description: Publish or update the GitHub Release
         required: true
         type: boolean
-        default: true
+        default: false
       publish_to_crates:
         description: Publish crates to crates.io
         required: true
@@ -72,8 +77,24 @@ jobs:
             exit 1
           fi
 
-      - name: Create git tag
+      - name: Validate manual release options
         if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ inputs.publish_github_release }}" = "true" ] && [ "${{ inputs.create_tag }}" != "true" ]; then
+            echo "Manual GitHub Release publishing requires create_tag=true so the release is anchored to an explicit tag."
+            exit 1
+          fi
+
+          if [ "${{ inputs.publish_to_crates }}" = "true" ] && [ "${{ inputs.create_tag }}" != "true" ]; then
+            echo "Manual crates.io publishing requires create_tag=true so crate publication cannot start from an untagged ref."
+            exit 1
+          fi
+
+      - name: Create git tag
+        if: github.event_name == 'workflow_dispatch' && inputs.create_tag
         shell: bash
         run: |
           set -euo pipefail
@@ -136,7 +157,7 @@ jobs:
           retention-days: 14
 
       - name: Publish GitHub release
-        if: github.event_name == 'push' || inputs.publish_github_release
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.create_tag && inputs.publish_github_release)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag_name }}
@@ -144,7 +165,7 @@ jobs:
           files: artifacts/nnrp-rs-source-${{ steps.version.outputs.package_version }}.zip
 
       - name: Publish crates to crates.io
-        if: (github.event_name == 'push' || inputs.publish_to_crates) && env.CARGO_PUBLISH_MODE == 'token' && env.CARGO_REGISTRY_TOKEN != ''
+        if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.create_tag && inputs.publish_to_crates)) && env.CARGO_PUBLISH_MODE == 'token' && env.CARGO_REGISTRY_TOKEN != ''
         run: |
           for crate in nnrp-core nnrp-ffi nnrp-conformance; do
             published=0
