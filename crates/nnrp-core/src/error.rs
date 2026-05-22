@@ -47,6 +47,21 @@ pub enum NnrpError {
     #[error("session is not open: {0}")]
     SessionNotOpen(u32),
 
+    #[error("operation already exists: {0}")]
+    OperationAlreadyExists(u64),
+
+    #[error("operation is unknown: {0}")]
+    UnknownOperation(u64),
+
+    #[error("invalid operation relationship: {rule}")]
+    InvalidOperationRelationship { rule: &'static str },
+
+    #[error("invalid operation transition from {from:?} to {to:?}")]
+    InvalidOperationTransition {
+        from: crate::OperationState,
+        to: crate::OperationState,
+    },
+
     #[error("reserved field is non-zero: {field}")]
     NonZeroReservedField { field: &'static str },
 

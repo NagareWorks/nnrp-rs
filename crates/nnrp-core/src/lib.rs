@@ -4,6 +4,7 @@ pub mod error;
 pub mod flow;
 pub mod header;
 pub mod lifecycle;
+pub mod operation;
 pub mod schema;
 pub mod session;
 pub mod version;
@@ -31,6 +32,9 @@ pub use flow::{
 pub use header::{CommonHeader, ALPN, COMMON_HEADER_LEN, CURRENT_VERSION_MAJOR};
 pub use lifecycle::{
     ConnectionLifecycle, ConnectionLifecycleState, SessionLifecycle, SessionLifecycleState,
+};
+pub use operation::{
+    OperationCancelRequest, OperationDescriptor, OperationRecord, OperationRegistry,
 };
 pub use schema::{
     SchemaDescriptorHeader, TypedPayloadDescriptor, DESCRIPTOR_FLAGS_KNOWN_MASK,
