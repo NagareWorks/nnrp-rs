@@ -97,22 +97,74 @@ impl HeaderFlags {
 
 #[cfg(test)]
 mod tests {
-    use super::MessageType;
+    use crate::NnrpError;
+
+    use super::{HeaderFlags, MessageType};
 
     #[test]
-    fn preview3_session_message_type_assignments_are_frozen() {
-        assert_eq!(MessageType::try_from_u8(0x07), Ok(MessageType::SessionOpen));
+    fn preview3_message_type_assignments_are_frozen() {
+        let assignments = [
+            (0x01, MessageType::ClientHello),
+            (0x02, MessageType::ServerHelloAck),
+            (0x03, MessageType::SessionPatch),
+            (0x04, MessageType::SessionPatchAck),
+            (0x05, MessageType::Close),
+            (0x06, MessageType::Error),
+            (0x07, MessageType::SessionOpen),
+            (0x08, MessageType::SessionOpenAck),
+            (0x09, MessageType::SessionClose),
+            (0x0a, MessageType::SessionCloseAck),
+            (0x10, MessageType::FrameSubmit),
+            (0x11, MessageType::FrameCancel),
+            (0x12, MessageType::ResultPush),
+            (0x13, MessageType::ResultDrop),
+            (0x14, MessageType::CachePut),
+            (0x15, MessageType::CacheAck),
+            (0x16, MessageType::CacheInvalidate),
+            (0x17, MessageType::FlowUpdate),
+            (0x18, MessageType::ResultHint),
+            (0x19, MessageType::TransportProbe),
+            (0x1a, MessageType::TransportProbeAck),
+            (0x1b, MessageType::SessionMigrate),
+            (0x1c, MessageType::SessionMigrateAck),
+            (0x20, MessageType::Ping),
+            (0x21, MessageType::Pong),
+        ];
+
+        for (wire_value, message_type) in assignments {
+            assert_eq!(MessageType::try_from_u8(wire_value), Ok(message_type));
+            assert_eq!(message_type as u8, wire_value);
+        }
+    }
+
+    #[test]
+    fn message_type_rejects_unknown_values() {
         assert_eq!(
-            MessageType::try_from_u8(0x08),
-            Ok(MessageType::SessionOpenAck)
+            MessageType::try_from_u8(0xff),
+            Err(NnrpError::UnknownMessageType(0xff))
         );
-        assert_eq!(
-            MessageType::try_from_u8(0x09),
-            Ok(MessageType::SessionClose)
+    }
+
+    #[test]
+    fn header_flags_accept_known_bits_and_reject_reserved_bits() {
+        let all_known = HeaderFlags(
+            HeaderFlags::NONE.0
+                | HeaderFlags::ACK_REQUIRED.0
+                | HeaderFlags::CAN_DROP.0
+                | HeaderFlags::STALE.0
+                | HeaderFlags::EOS.0
+                | HeaderFlags::RETRANSMIT.0
+                | HeaderFlags::KEYFRAME.0,
         );
+
+        assert_eq!(HeaderFlags::KNOWN_MASK, 0x0000_003f);
+        assert_eq!(all_known.validate_known(), Ok(()));
         assert_eq!(
-            MessageType::try_from_u8(0x0a),
-            Ok(MessageType::SessionCloseAck)
+            HeaderFlags(0x0000_0040).validate_known(),
+            Err(NnrpError::ReservedBitsSet {
+                value: 0x0000_0040,
+                allowed: 0x0000_003f
+            })
         );
     }
 }

@@ -14,8 +14,12 @@ pub struct AdapterOptions {
 }
 
 pub fn write_results_report(plan_path: &Path, output_path: &Path) -> Result<(), String> {
-    let raw_plan = fs::read_to_string(plan_path)
-        .map_err(|error| format!("failed to read adapter execution plan '{}': {error}", plan_path.display()))?;
+    let raw_plan = fs::read_to_string(plan_path).map_err(|error| {
+        format!(
+            "failed to read adapter execution plan '{}': {error}",
+            plan_path.display()
+        )
+    })?;
     let plan: Value = serde_json::from_str(&raw_plan)
         .map_err(|error| format!("adapter execution plan must be valid JSON: {error}"))?;
     let report = build_results_report(&plan)?;
@@ -50,7 +54,9 @@ pub fn build_results_report(plan: &Value) -> Result<Value, String> {
         .get("protocol_version")
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| "adapter execution plan field 'protocol_version' must be a non-empty string".to_string())?;
+        .ok_or_else(|| {
+            "adapter execution plan field 'protocol_version' must be a non-empty string".to_string()
+        })?;
     let cases = plan_object
         .get("cases")
         .and_then(Value::as_array)
@@ -65,7 +71,9 @@ pub fn build_results_report(plan: &Value) -> Result<Value, String> {
             .get("id")
             .and_then(Value::as_str)
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| "adapter execution plan case field 'id' must be a non-empty string".to_string())?;
+            .ok_or_else(|| {
+                "adapter execution plan case field 'id' must be a non-empty string".to_string()
+            })?;
 
         results.push(json!({
             "id": case_id,
@@ -114,12 +122,16 @@ pub fn parse_arguments(
         index += 1;
     }
 
-    let plan_path = plan_path
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| "adapter execution plan path is required via --plan or NNRP_CONFORMANCE_ADAPTER_PLAN".to_string())?;
+    let plan_path = plan_path.filter(|value| !value.is_empty()).ok_or_else(|| {
+        "adapter execution plan path is required via --plan or NNRP_CONFORMANCE_ADAPTER_PLAN"
+            .to_string()
+    })?;
     let output_path = output_path
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| "adapter result path is required via --output or NNRP_CONFORMANCE_ADAPTER_RESULTS".to_string())?;
+        .ok_or_else(|| {
+            "adapter result path is required via --output or NNRP_CONFORMANCE_ADAPTER_RESULTS"
+                .to_string()
+        })?;
 
     Ok(AdapterOptions {
         plan_path,
@@ -131,7 +143,7 @@ pub fn parse_arguments(
 mod tests {
     use std::{env, fs};
 
-    use super::{build_results_report, parse_arguments, write_results_report};
+    use super::{build_results_report, parse_arguments, write_results_report, RESULTS_SCHEMA_URL};
     use serde_json::{json, Value};
 
     #[test]
@@ -145,10 +157,22 @@ mod tests {
         }))
         .expect("report should build");
 
-        assert_eq!(report["implementation_name"], Value::String("nnrp-rs".to_string()));
-        assert_eq!(report["results"].as_array().expect("results array").len(), 2);
-        assert_eq!(report["results"][0]["id"], Value::String("l1.handshake.basic".to_string()));
-        assert_eq!(report["results"][0]["failure_kind"], Value::String("not_implemented".to_string()));
+        assert_eq!(
+            report["implementation_name"],
+            Value::String("nnrp-rs".to_string())
+        );
+        assert_eq!(
+            report["results"].as_array().expect("results array").len(),
+            2
+        );
+        assert_eq!(
+            report["results"][0]["id"],
+            Value::String("l1.handshake.basic".to_string())
+        );
+        assert_eq!(
+            report["results"][0]["failure_kind"],
+            Value::String("not_implemented".to_string())
+        );
     }
 
     #[test]
@@ -170,6 +194,123 @@ mod tests {
     }
 
     #[test]
+    fn build_results_report_rejects_invalid_plan_shapes() {
+        assert_eq!(
+            build_results_report(&json!(null)),
+            Err("adapter execution plan must be a JSON object".to_string())
+        );
+        assert_eq!(
+            build_results_report(&json!({ "cases": [] })),
+            Err(
+                "adapter execution plan field 'protocol_version' must be a non-empty string"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            build_results_report(&json!({ "protocol_version": "nnrp-1-preview3" })),
+            Err("adapter execution plan must contain a cases array".to_string())
+        );
+        assert_eq!(
+            build_results_report(&json!({
+                "protocol_version": "nnrp-1-preview3",
+                "cases": [null]
+            })),
+            Err("adapter execution plan cases must be JSON objects".to_string())
+        );
+        assert_eq!(
+            build_results_report(&json!({
+                "protocol_version": "nnrp-1-preview3",
+                "cases": [{}]
+            })),
+            Err("adapter execution plan case field 'id' must be a non-empty string".to_string())
+        );
+    }
+
+    #[test]
+    fn build_results_report_sets_schema_and_protocol_version() {
+        let report = build_results_report(&json!({
+            "protocol_version": "nnrp-1-preview3",
+            "cases": []
+        }))
+        .expect("report should build");
+
+        assert_eq!(
+            report["$schema"],
+            Value::String(RESULTS_SCHEMA_URL.to_string())
+        );
+        assert_eq!(
+            report["protocol_version"],
+            Value::String("nnrp-1-preview3".to_string())
+        );
+        assert_eq!(
+            report["results"].as_array().expect("results array").len(),
+            0
+        );
+    }
+
+    #[test]
+    fn parse_arguments_uses_environment_defaults_when_cli_is_absent() {
+        let options = parse_arguments(
+            Vec::<String>::new(),
+            Some("env-plan.json".to_string()),
+            Some("env-results.json".to_string()),
+        )
+        .expect("environment defaults should parse");
+
+        assert_eq!(options.plan_path, "env-plan.json");
+        assert_eq!(options.output_path, "env-results.json");
+    }
+
+    #[test]
+    fn parse_arguments_rejects_missing_required_values_and_unknown_flags() {
+        assert_eq!(
+            parse_error(Vec::<String>::new(), None, Some("results.json".to_string())),
+            "adapter execution plan path is required via --plan or NNRP_CONFORMANCE_ADAPTER_PLAN"
+        );
+        assert_eq!(
+            parse_error(Vec::<String>::new(), Some("plan.json".to_string()), None),
+            "adapter result path is required via --output or NNRP_CONFORMANCE_ADAPTER_RESULTS"
+        );
+        assert_eq!(
+            parse_error(vec!["--plan".to_string()], None, None),
+            "missing value for --plan"
+        );
+        assert_eq!(
+            parse_error(vec!["--output".to_string()], None, None),
+            "missing value for --output"
+        );
+        assert_eq!(
+            parse_error(vec!["--bogus".to_string()], None, None),
+            "unknown argument: --bogus"
+        );
+    }
+
+    #[test]
+    fn write_results_report_rejects_invalid_input_files() {
+        let temp_directory = env::temp_dir().join(format!(
+            "nnrp-adapter-invalid-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        fs::create_dir_all(&temp_directory).expect("temp directory should be created");
+
+        let missing_plan_path = temp_directory.join("missing-plan.json");
+        let output_path = temp_directory.join("adapter-results.json");
+        let error = write_results_report(&missing_plan_path, &output_path)
+            .expect_err("missing plan should fail");
+        assert!(error.starts_with("failed to read adapter execution plan"));
+
+        let invalid_plan_path = temp_directory.join("invalid-plan.json");
+        fs::write(&invalid_plan_path, "{").expect("invalid plan should be written");
+        assert_eq!(
+            write_results_report(&invalid_plan_path, &output_path),
+            Err("adapter execution plan must be valid JSON: EOF while parsing an object at line 1 column 1".to_string())
+        );
+
+        fs::remove_dir_all(&temp_directory).expect("temp directory should be removed");
+    }
+
+    #[test]
     fn write_results_report_reads_plan_and_writes_output_file() {
         let temp_directory = env::temp_dir().join(format!(
             "nnrp-adapter-{}-{}",
@@ -179,7 +320,9 @@ mod tests {
         fs::create_dir_all(&temp_directory).expect("temp directory should be created");
 
         let plan_path = temp_directory.join("adapter-plan.json");
-        let output_path = temp_directory.join("artifacts").join("adapter-results.json");
+        let output_path = temp_directory
+            .join("artifacts")
+            .join("adapter-results.json");
         fs::write(
             &plan_path,
             json!({
@@ -192,9 +335,15 @@ mod tests {
 
         write_results_report(&plan_path, &output_path).expect("report should be written");
 
-        let output: Value = serde_json::from_str(&fs::read_to_string(&output_path).expect("output should exist"))
-            .expect("output should be valid JSON");
-        assert_eq!(output["results"][0]["message"], Value::String("Preview3 adapter execution is not implemented in nnrp-rs yet.".to_string()));
+        let output: Value =
+            serde_json::from_str(&fs::read_to_string(&output_path).expect("output should exist"))
+                .expect("output should be valid JSON");
+        assert_eq!(
+            output["results"][0]["message"],
+            Value::String(
+                "Preview3 adapter execution is not implemented in nnrp-rs yet.".to_string()
+            )
+        );
 
         fs::remove_dir_all(&temp_directory).expect("temp directory should be removed");
     }
@@ -204,5 +353,16 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system time should be after unix epoch")
             .as_nanos()
+    }
+
+    fn parse_error(
+        args: impl IntoIterator<Item = String>,
+        env_plan_path: Option<String>,
+        env_output_path: Option<String>,
+    ) -> String {
+        match parse_arguments(args, env_plan_path, env_output_path) {
+            Ok(_) => panic!("arguments should fail"),
+            Err(error) => error,
+        }
     }
 }

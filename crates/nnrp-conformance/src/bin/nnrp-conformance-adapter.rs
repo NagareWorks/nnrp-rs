@@ -8,6 +8,9 @@ fn main() -> Result<(), String> {
         env::var("NNRP_CONFORMANCE_ADAPTER_PLAN").ok(),
         env::var("NNRP_CONFORMANCE_ADAPTER_RESULTS").ok(),
     )?;
-    write_results_report(Path::new(&options.plan_path), Path::new(&options.output_path))?;
+    write_results_report(
+        Path::new(&options.plan_path),
+        Path::new(&options.output_path),
+    )?;
     Ok(())
 }
