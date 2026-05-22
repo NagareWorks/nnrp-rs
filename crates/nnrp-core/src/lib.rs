@@ -13,7 +13,11 @@ pub use codes::{
     SCHEMA_ERROR_HASH_CONFLICT, SCHEMA_ERROR_INCOMPATIBLE, SCHEMA_ERROR_NONE, SCHEMA_ERROR_UNKNOWN,
     SCHEMA_ERROR_UPDATE_REJECTED, SCHEMA_ERROR_VERSION_UNKNOWN,
 };
-pub use enums::{HeaderFlags, MessageType};
+pub use enums::{
+    BackpressureLevel, CancelScope, FlowScopeKind, FlowUpdateReason, HeaderFlags, InFlightPolicy,
+    MessageType, OperationState, SessionCloseReason, SessionCloseStatus, SessionPriorityClass,
+    SessionStatus,
+};
 pub use error::NnrpError;
 pub use flow::{FlowUpdateMetadata, FLOW_UPDATE_FLAGS_KNOWN_MASK, FLOW_UPDATE_METADATA_LEN};
 pub use header::{CommonHeader, ALPN, COMMON_HEADER_LEN, CURRENT_VERSION_MAJOR};

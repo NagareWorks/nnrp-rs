@@ -23,8 +23,14 @@ pub enum NnrpError {
     #[error("unknown message type: {0:#04x}")]
     UnknownMessageType(u8),
 
+    #[error("unknown {enum_name} value: {value:#x}")]
+    UnknownEnumValue { enum_name: &'static str, value: u64 },
+
     #[error("reserved bits are set: value {value:#x}, allowed mask {allowed:#x}")]
     ReservedBitsSet { value: u64, allowed: u64 },
+
+    #[error("invalid protocol combination: {rule}")]
+    InvalidProtocolCombination { rule: &'static str },
 
     #[error("reserved field is non-zero: {field}")]
     NonZeroReservedField { field: &'static str },

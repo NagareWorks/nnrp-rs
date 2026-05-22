@@ -66,6 +66,287 @@ impl MessageType {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum SessionPriorityClass {
+    Interactive = 0,
+    Balanced = 1,
+    Background = 2,
+}
+
+impl SessionPriorityClass {
+    pub fn try_from_u8(value: u8) -> Result<Self, NnrpError> {
+        match value {
+            0 => Ok(Self::Interactive),
+            1 => Ok(Self::Balanced),
+            2 => Ok(Self::Background),
+            _ => Err(NnrpError::UnknownEnumValue {
+                enum_name: "session_priority_class",
+                value: value as u64,
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum SessionStatus {
+    Opened = 0,
+    Rejected = 1,
+    RetryLater = 2,
+    Resumed = 3,
+}
+
+impl SessionStatus {
+    pub fn try_from_u8(value: u8) -> Result<Self, NnrpError> {
+        match value {
+            0 => Ok(Self::Opened),
+            1 => Ok(Self::Rejected),
+            2 => Ok(Self::RetryLater),
+            3 => Ok(Self::Resumed),
+            _ => Err(NnrpError::UnknownEnumValue {
+                enum_name: "session_status",
+                value: value as u64,
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+pub enum SessionCloseReason {
+    Normal = 0,
+    ClientShutdown = 1,
+    ServerShutdown = 2,
+    IdleTimeout = 3,
+    ProtocolError = 4,
+    AuthRevoked = 5,
+}
+
+impl SessionCloseReason {
+    pub fn try_from_u16(value: u16) -> Result<Self, NnrpError> {
+        match value {
+            0 => Ok(Self::Normal),
+            1 => Ok(Self::ClientShutdown),
+            2 => Ok(Self::ServerShutdown),
+            3 => Ok(Self::IdleTimeout),
+            4 => Ok(Self::ProtocolError),
+            5 => Ok(Self::AuthRevoked),
+            _ => Err(NnrpError::UnknownEnumValue {
+                enum_name: "close_reason",
+                value: value as u64,
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum InFlightPolicy {
+    Drain = 0,
+    Abort = 1,
+}
+
+impl InFlightPolicy {
+    pub fn try_from_u8(value: u8) -> Result<Self, NnrpError> {
+        match value {
+            0 => Ok(Self::Drain),
+            1 => Ok(Self::Abort),
+            _ => Err(NnrpError::UnknownEnumValue {
+                enum_name: "in_flight_policy",
+                value: value as u64,
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum SessionCloseStatus {
+    Acknowledged = 0,
+    Draining = 1,
+    Closed = 2,
+    Rejected = 3,
+}
+
+impl SessionCloseStatus {
+    pub fn try_from_u8(value: u8) -> Result<Self, NnrpError> {
+        match value {
+            0 => Ok(Self::Acknowledged),
+            1 => Ok(Self::Draining),
+            2 => Ok(Self::Closed),
+            3 => Ok(Self::Rejected),
+            _ => Err(NnrpError::UnknownEnumValue {
+                enum_name: "close_status",
+                value: value as u64,
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum OperationState {
+    Accepted = 0,
+    Running = 1,
+    Partial = 2,
+    WaitingTool = 3,
+    Superseded = 4,
+    Cancelled = 5,
+    Failed = 6,
+    Completed = 7,
+}
+
+impl OperationState {
+    pub fn try_from_u8(value: u8) -> Result<Self, NnrpError> {
+        match value {
+            0 => Ok(Self::Accepted),
+            1 => Ok(Self::Running),
+            2 => Ok(Self::Partial),
+            3 => Ok(Self::WaitingTool),
+            4 => Ok(Self::Superseded),
+            5 => Ok(Self::Cancelled),
+            6 => Ok(Self::Failed),
+            7 => Ok(Self::Completed),
+            _ => Err(NnrpError::UnknownEnumValue {
+                enum_name: "operation_state",
+                value: value as u64,
+            }),
+        }
+    }
+
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Superseded | Self::Cancelled | Self::Failed | Self::Completed
+        )
+    }
+
+    pub fn can_transition_to(self, next: Self) -> bool {
+        if self.is_terminal() {
+            return false;
+        }
+
+        matches!(
+            (self, next),
+            (Self::Accepted, Self::Running)
+                | (Self::Accepted, Self::Cancelled)
+                | (Self::Accepted, Self::Failed)
+                | (Self::Accepted, Self::Superseded)
+                | (Self::Running, Self::Partial)
+                | (Self::Running, Self::WaitingTool)
+                | (Self::Running, Self::Cancelled)
+                | (Self::Running, Self::Failed)
+                | (Self::Running, Self::Completed)
+                | (Self::Running, Self::Superseded)
+                | (Self::Partial, Self::Partial)
+                | (Self::Partial, Self::WaitingTool)
+                | (Self::Partial, Self::Cancelled)
+                | (Self::Partial, Self::Failed)
+                | (Self::Partial, Self::Completed)
+                | (Self::Partial, Self::Superseded)
+                | (Self::WaitingTool, Self::Running)
+                | (Self::WaitingTool, Self::Cancelled)
+                | (Self::WaitingTool, Self::Failed)
+                | (Self::WaitingTool, Self::Superseded)
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CancelScope {
+    Operation = 0,
+    Subtree = 1,
+    Group = 2,
+    Session = 3,
+}
+
+impl CancelScope {
+    pub fn try_from_u8(value: u8) -> Result<Self, NnrpError> {
+        match value {
+            0 => Ok(Self::Operation),
+            1 => Ok(Self::Subtree),
+            2 => Ok(Self::Group),
+            3 => Ok(Self::Session),
+            _ => Err(NnrpError::UnknownEnumValue {
+                enum_name: "cancel_scope",
+                value: value as u64,
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum FlowScopeKind {
+    Connection = 0,
+    Session = 1,
+    Operation = 2,
+}
+
+impl FlowScopeKind {
+    pub fn try_from_u8(value: u8) -> Result<Self, NnrpError> {
+        match value {
+            0 => Ok(Self::Connection),
+            1 => Ok(Self::Session),
+            2 => Ok(Self::Operation),
+            _ => Err(NnrpError::UnknownEnumValue {
+                enum_name: "scope_kind",
+                value: value as u64,
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum FlowUpdateReason {
+    Grant = 0,
+    Reduce = 1,
+    Pause = 2,
+    Resume = 3,
+    Congestion = 4,
+}
+
+impl FlowUpdateReason {
+    pub fn try_from_u8(value: u8) -> Result<Self, NnrpError> {
+        match value {
+            0 => Ok(Self::Grant),
+            1 => Ok(Self::Reduce),
+            2 => Ok(Self::Pause),
+            3 => Ok(Self::Resume),
+            4 => Ok(Self::Congestion),
+            _ => Err(NnrpError::UnknownEnumValue {
+                enum_name: "update_reason",
+                value: value as u64,
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum BackpressureLevel {
+    None = 0,
+    Soft = 1,
+    Hard = 2,
+}
+
+impl BackpressureLevel {
+    pub fn try_from_u8(value: u8) -> Result<Self, NnrpError> {
+        match value {
+            0 => Ok(Self::None),
+            1 => Ok(Self::Soft),
+            2 => Ok(Self::Hard),
+            _ => Err(NnrpError::UnknownEnumValue {
+                enum_name: "backpressure_level",
+                value: value as u64,
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HeaderFlags(pub u32);
 
 impl HeaderFlags {
@@ -99,7 +380,11 @@ impl HeaderFlags {
 mod tests {
     use crate::NnrpError;
 
-    use super::{HeaderFlags, MessageType};
+    use super::{
+        BackpressureLevel, CancelScope, FlowScopeKind, FlowUpdateReason, HeaderFlags,
+        InFlightPolicy, MessageType, OperationState, SessionCloseReason, SessionCloseStatus,
+        SessionPriorityClass, SessionStatus,
+    };
 
     #[test]
     fn preview3_message_type_assignments_are_frozen() {
@@ -164,6 +449,90 @@ mod tests {
             Err(NnrpError::ReservedBitsSet {
                 value: 0x0000_0040,
                 allowed: 0x0000_003f
+            })
+        );
+    }
+
+    #[test]
+    fn preview3_session_and_operation_enums_are_frozen() {
+        assert_enum_u8(
+            "session_priority_class",
+            SessionPriorityClass::try_from_u8,
+            0,
+            2,
+        );
+        assert_eq!(
+            SessionPriorityClass::try_from_u8(3),
+            Err(NnrpError::UnknownEnumValue {
+                enum_name: "session_priority_class",
+                value: 3
+            })
+        );
+
+        assert_enum_u8("session_status", SessionStatus::try_from_u8, 0, 3);
+        assert_enum_u16("close_reason", SessionCloseReason::try_from_u16, 0, 5);
+        assert_enum_u8("in_flight_policy", InFlightPolicy::try_from_u8, 0, 1);
+        assert_enum_u8("close_status", SessionCloseStatus::try_from_u8, 0, 3);
+        assert_enum_u8("operation_state", OperationState::try_from_u8, 0, 7);
+        assert_enum_u8("cancel_scope", CancelScope::try_from_u8, 0, 3);
+    }
+
+    #[test]
+    fn preview3_flow_enums_are_frozen() {
+        assert_enum_u8("scope_kind", FlowScopeKind::try_from_u8, 0, 2);
+        assert_enum_u8("update_reason", FlowUpdateReason::try_from_u8, 0, 4);
+        assert_enum_u8("backpressure_level", BackpressureLevel::try_from_u8, 0, 2);
+    }
+
+    #[test]
+    fn operation_state_terminal_and_transition_rules_are_stable() {
+        assert!(!OperationState::Accepted.is_terminal());
+        assert!(OperationState::Completed.is_terminal());
+        assert!(OperationState::Running.can_transition_to(OperationState::Partial));
+        assert!(OperationState::Partial.can_transition_to(OperationState::Completed));
+        assert!(OperationState::WaitingTool.can_transition_to(OperationState::Running));
+        assert!(!OperationState::Completed.can_transition_to(OperationState::Running));
+        assert!(!OperationState::Accepted.can_transition_to(OperationState::Partial));
+    }
+
+    fn assert_enum_u8<T: Copy>(
+        enum_name: &'static str,
+        parse: fn(u8) -> Result<T, NnrpError>,
+        first: u8,
+        last: u8,
+    ) {
+        for value in first..=last {
+            assert!(
+                parse(value).is_ok(),
+                "{enum_name} value {value} should parse"
+            );
+        }
+        assert_eq!(
+            parse(last + 1).map(|_| ()),
+            Err(NnrpError::UnknownEnumValue {
+                enum_name,
+                value: (last + 1) as u64
+            })
+        );
+    }
+
+    fn assert_enum_u16<T: Copy>(
+        enum_name: &'static str,
+        parse: fn(u16) -> Result<T, NnrpError>,
+        first: u16,
+        last: u16,
+    ) {
+        for value in first..=last {
+            assert!(
+                parse(value).is_ok(),
+                "{enum_name} value {value} should parse"
+            );
+        }
+        assert_eq!(
+            parse(last + 1).map(|_| ()),
+            Err(NnrpError::UnknownEnumValue {
+                enum_name,
+                value: (last + 1) as u64
             })
         );
     }

@@ -1,4 +1,7 @@
-use crate::NnrpError;
+use crate::{
+    InFlightPolicy, NnrpError, SessionCloseReason, SessionCloseStatus, SessionPriorityClass,
+    SessionStatus,
+};
 
 pub const SESSION_OPEN_METADATA_LEN: usize = 48;
 pub const SESSION_OPEN_ACK_METADATA_LEN: usize = 56;
@@ -12,7 +15,7 @@ pub const SESSION_FLAGS_ACK_KNOWN_MASK: u32 = 0x0000_001f;
 pub struct SessionOpenMetadata {
     pub requested_session_id: u32,
     pub profile_id: u16,
-    pub priority_class: u8,
+    pub priority_class: SessionPriorityClass,
     pub session_flags: u8,
     pub schema_id: u32,
     pub schema_version: u32,
@@ -37,7 +40,7 @@ impl SessionOpenMetadata {
         Ok(Self {
             requested_session_id: read_u32(source, 0),
             profile_id: read_u16(source, 4),
-            priority_class: source[6],
+            priority_class: SessionPriorityClass::try_from_u8(source[6])?,
             session_flags,
             schema_id: read_u32(source, 8),
             schema_version: read_u32(source, 12),
@@ -58,7 +61,7 @@ impl SessionOpenMetadata {
         destination[..SESSION_OPEN_METADATA_LEN].fill(0);
         write_u32(destination, 0, self.requested_session_id);
         write_u16(destination, 4, self.profile_id);
-        destination[6] = self.priority_class;
+        destination[6] = self.priority_class as u8;
         destination[7] = self.session_flags;
         write_u32(destination, 8, self.schema_id);
         write_u32(destination, 12, self.schema_version);
@@ -83,8 +86,8 @@ impl SessionOpenMetadata {
 pub struct SessionOpenAckMetadata {
     pub session_id: u32,
     pub accepted_profile_id: u16,
-    pub accepted_priority_class: u8,
-    pub session_status: u8,
+    pub accepted_priority_class: SessionPriorityClass,
+    pub session_status: SessionStatus,
     pub schema_id: u32,
     pub schema_version: u32,
     pub granted_operation_credit: u16,
@@ -108,8 +111,8 @@ impl SessionOpenAckMetadata {
         Ok(Self {
             session_id: read_u32(source, 0),
             accepted_profile_id: read_u16(source, 4),
-            accepted_priority_class: source[6],
-            session_status: source[7],
+            accepted_priority_class: SessionPriorityClass::try_from_u8(source[6])?,
+            session_status: SessionStatus::try_from_u8(source[7])?,
             schema_id: read_u32(source, 8),
             schema_version: read_u32(source, 12),
             granted_operation_credit: read_u16(source, 16),
@@ -132,8 +135,8 @@ impl SessionOpenAckMetadata {
         destination[..SESSION_OPEN_ACK_METADATA_LEN].fill(0);
         write_u32(destination, 0, self.session_id);
         write_u16(destination, 4, self.accepted_profile_id);
-        destination[6] = self.accepted_priority_class;
-        destination[7] = self.session_status;
+        destination[6] = self.accepted_priority_class as u8;
+        destination[7] = self.session_status as u8;
         write_u32(destination, 8, self.schema_id);
         write_u32(destination, 12, self.schema_version);
         write_u16(destination, 16, self.granted_operation_credit);
@@ -158,8 +161,8 @@ impl SessionOpenAckMetadata {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionCloseMetadata {
-    pub close_reason: u16,
-    pub in_flight_policy: u8,
+    pub close_reason: SessionCloseReason,
+    pub in_flight_policy: InFlightPolicy,
     pub drain_timeout_ms: u32,
     pub last_operation_id: u64,
     pub session_error_code: u32,
@@ -172,8 +175,8 @@ impl SessionCloseMetadata {
         validate_zero_u8("session_close.reserved0", source[3])?;
 
         Ok(Self {
-            close_reason: read_u16(source, 0),
-            in_flight_policy: source[2],
+            close_reason: SessionCloseReason::try_from_u16(read_u16(source, 0))?,
+            in_flight_policy: InFlightPolicy::try_from_u8(source[2])?,
             drain_timeout_ms: read_u32(source, 4),
             last_operation_id: read_u64(source, 8),
             session_error_code: read_u32(source, 16),
@@ -185,8 +188,8 @@ impl SessionCloseMetadata {
         require_destination_len(destination, SESSION_CLOSE_METADATA_LEN)?;
 
         destination[..SESSION_CLOSE_METADATA_LEN].fill(0);
-        write_u16(destination, 0, self.close_reason);
-        destination[2] = self.in_flight_policy;
+        write_u16(destination, 0, self.close_reason as u16);
+        destination[2] = self.in_flight_policy as u8;
         write_u32(destination, 4, self.drain_timeout_ms);
         write_u64(destination, 8, self.last_operation_id);
         write_u32(destination, 16, self.session_error_code);
@@ -203,7 +206,7 @@ impl SessionCloseMetadata {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionCloseAckMetadata {
-    pub close_status: u8,
+    pub close_status: SessionCloseStatus,
     pub last_operation_id: u64,
     pub session_error_code: u32,
 }
@@ -215,7 +218,7 @@ impl SessionCloseAckMetadata {
         validate_zero_u16("session_close_ack.reserved1", read_u16(source, 2))?;
 
         Ok(Self {
-            close_status: source[0],
+            close_status: SessionCloseStatus::try_from_u8(source[0])?,
             last_operation_id: read_u64(source, 4),
             session_error_code: read_u32(source, 12),
         })
@@ -225,7 +228,7 @@ impl SessionCloseAckMetadata {
         require_destination_len(destination, SESSION_CLOSE_ACK_METADATA_LEN)?;
 
         destination[..SESSION_CLOSE_ACK_METADATA_LEN].fill(0);
-        destination[0] = self.close_status;
+        destination[0] = self.close_status as u8;
         write_u64(destination, 4, self.last_operation_id);
         write_u32(destination, 12, self.session_error_code);
         Ok(())
@@ -327,7 +330,10 @@ mod tests {
     use super::{
         SessionCloseAckMetadata, SessionCloseMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
     };
-    use crate::NnrpError;
+    use crate::{
+        InFlightPolicy, NnrpError, SessionCloseReason, SessionCloseStatus, SessionPriorityClass,
+        SessionStatus,
+    };
 
     #[test]
     fn session_open_metadata_round_trips_golden_vector() {
@@ -337,7 +343,7 @@ mod tests {
 
         assert_eq!(metadata.requested_session_id, 42);
         assert_eq!(metadata.profile_id, 2);
-        assert_eq!(metadata.priority_class, 1);
+        assert_eq!(metadata.priority_class, SessionPriorityClass::Balanced);
         assert_eq!(metadata.session_flags, 0x05);
         assert_eq!(metadata.schema_id, 0x0000_1001);
         assert_eq!(metadata.schema_version, 3);
@@ -373,8 +379,11 @@ mod tests {
 
         assert_eq!(metadata.session_id, 42);
         assert_eq!(metadata.accepted_profile_id, 2);
-        assert_eq!(metadata.accepted_priority_class, 1);
-        assert_eq!(metadata.session_status, 0);
+        assert_eq!(
+            metadata.accepted_priority_class,
+            SessionPriorityClass::Balanced
+        );
+        assert_eq!(metadata.session_status, SessionStatus::Opened);
         assert_eq!(metadata.schema_id, 0x0000_1001);
         assert_eq!(metadata.schema_version, 3);
         assert_eq!(metadata.granted_operation_credit, 2);
@@ -396,8 +405,8 @@ mod tests {
 
         let metadata = SessionCloseMetadata::parse(&bytes).expect("metadata should parse");
 
-        assert_eq!(metadata.close_reason, 1);
-        assert_eq!(metadata.in_flight_policy, 0);
+        assert_eq!(metadata.close_reason, SessionCloseReason::ClientShutdown);
+        assert_eq!(metadata.in_flight_policy, InFlightPolicy::Drain);
         assert_eq!(metadata.drain_timeout_ms, 1000);
         assert_eq!(metadata.last_operation_id, 99);
         assert_eq!(metadata.session_error_code, 0);
@@ -411,7 +420,7 @@ mod tests {
 
         let metadata = SessionCloseAckMetadata::parse(&bytes).expect("metadata should parse");
 
-        assert_eq!(metadata.close_status, 1);
+        assert_eq!(metadata.close_status, SessionCloseStatus::Draining);
         assert_eq!(metadata.last_operation_id, 99);
         assert_eq!(metadata.session_error_code, 0);
         assert_eq!(metadata.to_bytes().unwrap().as_slice(), bytes.as_slice());

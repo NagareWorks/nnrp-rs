@@ -1,13 +1,15 @@
-use crate::NnrpError;
+use crate::{
+    BackpressureLevel, CommonHeader, FlowScopeKind, FlowUpdateReason, MessageType, NnrpError,
+};
 
 pub const FLOW_UPDATE_METADATA_LEN: usize = 32;
 pub const FLOW_UPDATE_FLAGS_KNOWN_MASK: u32 = 0x0000_000f;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FlowUpdateMetadata {
-    pub scope_kind: u8,
-    pub update_reason: u8,
-    pub backpressure_level: u8,
+    pub scope_kind: FlowScopeKind,
+    pub update_reason: FlowUpdateReason,
+    pub backpressure_level: BackpressureLevel,
     pub connection_credit: u16,
     pub session_credit: u16,
     pub operation_credit: u16,
@@ -27,9 +29,9 @@ impl FlowUpdateMetadata {
         validate_flags(flow_flags)?;
 
         Ok(Self {
-            scope_kind: source[0],
-            update_reason: source[1],
-            backpressure_level: source[2],
+            scope_kind: FlowScopeKind::try_from_u8(source[0])?,
+            update_reason: FlowUpdateReason::try_from_u8(source[1])?,
+            backpressure_level: BackpressureLevel::try_from_u8(source[2])?,
             connection_credit: read_u16(source, 4),
             session_credit: read_u16(source, 6),
             operation_credit: read_u16(source, 8),
@@ -45,9 +47,9 @@ impl FlowUpdateMetadata {
         validate_flags(self.flow_flags)?;
 
         destination[..FLOW_UPDATE_METADATA_LEN].fill(0);
-        destination[0] = self.scope_kind;
-        destination[1] = self.update_reason;
-        destination[2] = self.backpressure_level;
+        destination[0] = self.scope_kind as u8;
+        destination[1] = self.update_reason as u8;
+        destination[2] = self.backpressure_level as u8;
         write_u16(destination, 4, self.connection_credit);
         write_u16(destination, 6, self.session_credit);
         write_u16(destination, 8, self.operation_credit);
@@ -62,6 +64,40 @@ impl FlowUpdateMetadata {
         let mut bytes = [0u8; FLOW_UPDATE_METADATA_LEN];
         self.write(&mut bytes)?;
         Ok(bytes)
+    }
+
+    pub fn validate_routing(&self, header: &CommonHeader) -> Result<(), NnrpError> {
+        if header.message_type != MessageType::FlowUpdate {
+            return Err(NnrpError::InvalidProtocolCombination {
+                rule: "FLOW_UPDATE routing validation requires a FLOW_UPDATE header",
+            });
+        }
+
+        match self.scope_kind {
+            FlowScopeKind::Connection => {
+                if header.session_id != 0 || self.operation_id != 0 {
+                    return Err(NnrpError::InvalidProtocolCombination {
+                        rule: "connection-scope FLOW_UPDATE requires header.session_id=0 and operation_id=0",
+                    });
+                }
+            }
+            FlowScopeKind::Session => {
+                if header.session_id == 0 || self.operation_id != 0 {
+                    return Err(NnrpError::InvalidProtocolCombination {
+                        rule: "session-scope FLOW_UPDATE requires header.session_id!=0 and operation_id=0",
+                    });
+                }
+            }
+            FlowScopeKind::Operation => {
+                if header.session_id == 0 || self.operation_id == 0 {
+                    return Err(NnrpError::InvalidProtocolCombination {
+                        rule: "operation-scope FLOW_UPDATE requires header.session_id!=0 and operation_id!=0",
+                    });
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -141,7 +177,10 @@ fn write_u64(destination: &mut [u8], offset: usize, value: u64) {
 #[cfg(test)]
 mod tests {
     use super::FlowUpdateMetadata;
-    use crate::{CommonHeader, MessageType, NnrpError, FLOW_UPDATE_FLAGS_KNOWN_MASK};
+    use crate::{
+        BackpressureLevel, CommonHeader, FlowScopeKind, FlowUpdateReason, MessageType, NnrpError,
+        FLOW_UPDATE_FLAGS_KNOWN_MASK,
+    };
 
     #[test]
     fn flow_update_session_hard_packet_round_trips_golden_vector() {
@@ -152,9 +191,9 @@ mod tests {
 
         assert_eq!(header.message_type, MessageType::FlowUpdate);
         assert!(body.is_empty());
-        assert_eq!(metadata.scope_kind, 1);
-        assert_eq!(metadata.update_reason, 4);
-        assert_eq!(metadata.backpressure_level, 2);
+        assert_eq!(metadata.scope_kind, FlowScopeKind::Session);
+        assert_eq!(metadata.update_reason, FlowUpdateReason::Congestion);
+        assert_eq!(metadata.backpressure_level, BackpressureLevel::Hard);
         assert_eq!(metadata.connection_credit, 0);
         assert_eq!(metadata.session_credit, 2);
         assert_eq!(metadata.operation_credit, 0);
@@ -162,6 +201,7 @@ mod tests {
         assert_eq!(metadata.retry_after_ms, 120);
         assert_eq!(metadata.credit_epoch, 7);
         assert_eq!(metadata.flow_flags, 3);
+        metadata.validate_routing(&header).unwrap();
         assert_eq!(metadata.to_bytes().unwrap().as_slice(), metadata_bytes);
     }
 
@@ -174,14 +214,15 @@ mod tests {
 
         assert_eq!(header.session_id, 0);
         assert!(body.is_empty());
-        assert_eq!(metadata.scope_kind, 0);
-        assert_eq!(metadata.update_reason, 0);
-        assert_eq!(metadata.backpressure_level, 1);
+        assert_eq!(metadata.scope_kind, FlowScopeKind::Connection);
+        assert_eq!(metadata.update_reason, FlowUpdateReason::Grant);
+        assert_eq!(metadata.backpressure_level, BackpressureLevel::Soft);
         assert_eq!(metadata.connection_credit, 6);
         assert_eq!(metadata.session_credit, 0);
         assert_eq!(metadata.operation_id, 0);
         assert_eq!(metadata.credit_epoch, 11);
         assert_eq!(metadata.flow_flags, 1);
+        metadata.validate_routing(&header).unwrap();
         assert_eq!(metadata.to_bytes().unwrap().as_slice(), metadata_bytes);
     }
 
@@ -189,18 +230,19 @@ mod tests {
     fn flow_update_operation_pause_packet_round_trips_golden_vector() {
         let packet = hex_to_bytes("4e4e5250010017280000000020000000000000002a000000000000000000090011223344556677880202020000000000010000003412000000000000fa0000000c0000000b000000");
 
-        let (_, metadata_bytes, body) = CommonHeader::parse_packet(&packet).unwrap();
+        let (header, metadata_bytes, body) = CommonHeader::parse_packet(&packet).unwrap();
         let metadata = FlowUpdateMetadata::parse(metadata_bytes).unwrap();
 
         assert!(body.is_empty());
-        assert_eq!(metadata.scope_kind, 2);
-        assert_eq!(metadata.update_reason, 2);
-        assert_eq!(metadata.backpressure_level, 2);
+        assert_eq!(metadata.scope_kind, FlowScopeKind::Operation);
+        assert_eq!(metadata.update_reason, FlowUpdateReason::Pause);
+        assert_eq!(metadata.backpressure_level, BackpressureLevel::Hard);
         assert_eq!(metadata.operation_credit, 1);
         assert_eq!(metadata.operation_id, 0x1234);
         assert_eq!(metadata.retry_after_ms, 250);
         assert_eq!(metadata.credit_epoch, 12);
         assert_eq!(metadata.flow_flags, 11);
+        metadata.validate_routing(&header).unwrap();
         assert_eq!(metadata.to_bytes().unwrap().as_slice(), metadata_bytes);
     }
 
@@ -214,6 +256,45 @@ mod tests {
             Err(NnrpError::ReservedBitsSet {
                 value: 0x10,
                 allowed: FLOW_UPDATE_FLAGS_KNOWN_MASK as u64
+            })
+        );
+    }
+
+    #[test]
+    fn flow_update_rejects_illegal_scope_routing() {
+        let metadata = FlowUpdateMetadata {
+            scope_kind: FlowScopeKind::Connection,
+            update_reason: FlowUpdateReason::Grant,
+            backpressure_level: BackpressureLevel::None,
+            connection_credit: 1,
+            session_credit: 0,
+            operation_credit: 0,
+            operation_id: 7,
+            retry_after_ms: 0,
+            credit_epoch: 1,
+            flow_flags: 1,
+        };
+        let mut header = CommonHeader::new(MessageType::FlowUpdate, 32, 0);
+
+        assert_eq!(
+            metadata.validate_routing(&header),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule:
+                    "connection-scope FLOW_UPDATE requires header.session_id=0 and operation_id=0"
+            })
+        );
+
+        let metadata = FlowUpdateMetadata {
+            scope_kind: FlowScopeKind::Operation,
+            operation_id: 0,
+            ..metadata
+        };
+        header.session_id = 42;
+        assert_eq!(
+            metadata.validate_routing(&header),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule:
+                    "operation-scope FLOW_UPDATE requires header.session_id!=0 and operation_id!=0"
             })
         );
     }

@@ -2,7 +2,7 @@
 
 ## Validation
 
-- [ ] Keep `cargo test` green across the workspace.
+- [x] Keep `cargo test` green across the workspace.
 - [ ] Add fixture-driven tests for all frozen preview3 enum/message/error values.
 - [ ] Add integration tests for multi-session orchestration on one connection.
 - [ ] Add validation for cache lease expiry, schema mismatch, cancellation, priority-aware flow updates, and resume behavior.
@@ -11,7 +11,7 @@
 
 ## Documentation
 
-- [ ] Document the workspace layout and crate ownership boundaries.
+- [x] Document the workspace layout and crate ownership boundaries.
 - [ ] Document the frozen preview3 connection/session, cache, schema, and operation lifecycle semantics.
 - [ ] Document the FFI contract and binding responsibilities.
 - [ ] Document the conformance workflow for Python, C#, and future bindings.
