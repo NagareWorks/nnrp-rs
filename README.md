@@ -22,11 +22,11 @@ GitHub README rendering does not support per-avatar dynamic tooltips for an auto
 
 ## Workspace Layout
 
-- `crates/nnrp-core`: canonical preview3 wire primitives, protocol enums, strict validation, state-machine-facing core types, and host-neutral cache/schema semantics.
+- `crates/nnrp-core`: canonical NNRP/1 wire primitives, preview3 extension models, strict validation, state-machine-facing core types, and host-neutral cache/schema semantics.
 - `crates/nnrp-ffi`: stable ABI facade over `nnrp-core`, including handle ownership, buffer views, callbacks, polling, and downstream error mapping.
 - `crates/nnrp-conformance`: Rust-owned golden vectors, fixture manifests, adapter wrappers, and cross-language conformance export surface.
 - `doc/todo/`: implementation planning and rollout checklists.
 
 ## Current Status
 
-The workspace has moved past the initial skeleton. `nnrp-core` now owns the frozen preview3 common header, fixed session lifecycle metadata, host-neutral connection/session lifecycle state, `FLOW_UPDATE` metadata, schema/payload descriptors, protocol enums, and cache/schema error code constants. The preview3 protocol design remains in `nnrp-doc/docs/developers/design/v1-preview3.md`, while this repository is the canonical implementation source consumed by downstream SDKs.
+The workspace has moved past the initial skeleton. `nnrp-core` now owns the inherited NNRP/1 common header, inherited `FLOW_UPDATE` metadata contract, preview3 session lifecycle metadata, host-neutral connection/session lifecycle state, schema/payload descriptors, protocol enums, and cache/schema error code constants. The preview3 protocol design remains in `nnrp-doc/docs/developers/design/v1-preview3.md`, while this repository is the canonical implementation source consumed by downstream SDKs.

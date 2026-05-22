@@ -10,7 +10,7 @@
 
 - [ ] Implement schema/profile registry primitives, install/update/invalidate/version-conflict handling.
 - [x] Implement schema descriptor common header at the frozen 32B layout.
-- [x] Implement typed payload descriptor common layout at the frozen 24B layout.
+- [x] Implement typed payload descriptor common layout at the inherited/preview3 24B layout.
 - [x] Implement `descriptor_flags` semantics and validation.
 - [ ] Implement binding between frozen schema/profile identifiers and typed payload descriptors, including `profile_id = 0` as `unspecified` rather than an implicit tensor default.
 - [ ] Land the first-round standard registry assignments consumed by conformance, including the peer `tensor` / `token` profile IDs and the canonical token delta schema anchor.

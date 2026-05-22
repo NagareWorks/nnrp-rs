@@ -23,7 +23,11 @@ pub use enums::{
     SessionStatus,
 };
 pub use error::NnrpError;
-pub use flow::{FlowUpdateMetadata, FLOW_UPDATE_FLAGS_KNOWN_MASK, FLOW_UPDATE_METADATA_LEN};
+pub use flow::{
+    FlowUpdateMetadata, FLOW_UPDATE_FLAGS_KNOWN_MASK, FLOW_UPDATE_FLAG_BACKGROUND_ONLY,
+    FLOW_UPDATE_FLAG_CREDIT_VALID, FLOW_UPDATE_FLAG_DRAIN_IN_FLIGHT_ONLY,
+    FLOW_UPDATE_FLAG_RETRY_AFTER_VALID, FLOW_UPDATE_METADATA_LEN,
+};
 pub use header::{CommonHeader, ALPN, COMMON_HEADER_LEN, CURRENT_VERSION_MAJOR};
 pub use lifecycle::{
     ConnectionLifecycle, ConnectionLifecycleState, SessionLifecycle, SessionLifecycleState,

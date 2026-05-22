@@ -469,7 +469,9 @@ mod tests {
     fn connection_scope_flow_update_does_not_require_session() {
         let connection = ConnectionLifecycle::new();
         let flow_header = crate::CommonHeader::new(MessageType::FlowUpdate, 32, 0);
-        let flow = flow_update(FlowScopeKind::Connection, 0);
+        let mut flow = flow_update(FlowScopeKind::Connection, 0);
+        flow.connection_credit = 1;
+        flow.session_credit = 0;
 
         connection
             .validate_flow_update(&flow_header, &flow)

@@ -4,6 +4,10 @@ use crate::{
 
 pub const FLOW_UPDATE_METADATA_LEN: usize = 32;
 pub const FLOW_UPDATE_FLAGS_KNOWN_MASK: u32 = 0x0000_000f;
+pub const FLOW_UPDATE_FLAG_CREDIT_VALID: u32 = 0x0000_0001;
+pub const FLOW_UPDATE_FLAG_RETRY_AFTER_VALID: u32 = 0x0000_0002;
+pub const FLOW_UPDATE_FLAG_BACKGROUND_ONLY: u32 = 0x0000_0004;
+pub const FLOW_UPDATE_FLAG_DRAIN_IN_FLIGHT_ONLY: u32 = 0x0000_0008;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FlowUpdateMetadata {
@@ -75,16 +79,24 @@ impl FlowUpdateMetadata {
 
         match self.scope_kind {
             FlowScopeKind::Connection => {
-                if header.session_id != 0 || self.operation_id != 0 {
+                if header.session_id != 0
+                    || self.session_credit != 0
+                    || self.operation_credit != 0
+                    || self.operation_id != 0
+                {
                     return Err(NnrpError::InvalidProtocolCombination {
-                        rule: "connection-scope FLOW_UPDATE requires header.session_id=0 and operation_id=0",
+                        rule: "connection-scope FLOW_UPDATE requires header.session_id=0 and non-connection fields cleared",
                     });
                 }
             }
             FlowScopeKind::Session => {
-                if header.session_id == 0 || self.operation_id != 0 {
+                if header.session_id == 0
+                    || self.connection_credit != 0
+                    || self.operation_credit != 0
+                    || self.operation_id != 0
+                {
                     return Err(NnrpError::InvalidProtocolCombination {
-                        rule: "session-scope FLOW_UPDATE requires header.session_id!=0 and operation_id=0",
+                        rule: "session-scope FLOW_UPDATE requires header.session_id!=0 and non-session fields cleared",
                     });
                 }
             }
@@ -95,6 +107,12 @@ impl FlowUpdateMetadata {
                     });
                 }
             }
+        }
+
+        if self.retry_after_ms != 0 && self.flow_flags & FLOW_UPDATE_FLAG_RETRY_AFTER_VALID == 0 {
+            return Err(NnrpError::InvalidProtocolCombination {
+                rule: "FLOW_UPDATE retry_after_ms requires retry_after_valid flag",
+            });
         }
 
         Ok(())
@@ -179,7 +197,7 @@ mod tests {
     use super::FlowUpdateMetadata;
     use crate::{
         BackpressureLevel, CommonHeader, FlowScopeKind, FlowUpdateReason, MessageType, NnrpError,
-        FLOW_UPDATE_FLAGS_KNOWN_MASK,
+        FLOW_UPDATE_FLAGS_KNOWN_MASK, FLOW_UPDATE_FLAG_RETRY_AFTER_VALID,
     };
 
     #[test]
@@ -280,7 +298,7 @@ mod tests {
             metadata.validate_routing(&header),
             Err(NnrpError::InvalidProtocolCombination {
                 rule:
-                    "connection-scope FLOW_UPDATE requires header.session_id=0 and operation_id=0"
+                    "connection-scope FLOW_UPDATE requires header.session_id=0 and non-connection fields cleared"
             })
         );
 
@@ -297,6 +315,44 @@ mod tests {
                     "operation-scope FLOW_UPDATE requires header.session_id!=0 and operation_id!=0"
             })
         );
+    }
+
+    #[test]
+    fn flow_update_preserves_preview2_scope_zeroing_and_retry_after_rules() {
+        let mut header = CommonHeader::new(MessageType::FlowUpdate, 32, 0);
+        header.session_id = 42;
+        let mut metadata = FlowUpdateMetadata {
+            scope_kind: FlowScopeKind::Session,
+            update_reason: FlowUpdateReason::Reduce,
+            backpressure_level: BackpressureLevel::Soft,
+            connection_credit: 1,
+            session_credit: 2,
+            operation_credit: 0,
+            operation_id: 0,
+            retry_after_ms: 0,
+            credit_epoch: 1,
+            flow_flags: 1,
+        };
+
+        assert_eq!(
+            metadata.validate_routing(&header),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule:
+                    "session-scope FLOW_UPDATE requires header.session_id!=0 and non-session fields cleared"
+            })
+        );
+
+        metadata.connection_credit = 0;
+        metadata.retry_after_ms = 100;
+        assert_eq!(
+            metadata.validate_routing(&header),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "FLOW_UPDATE retry_after_ms requires retry_after_valid flag"
+            })
+        );
+
+        metadata.flow_flags |= FLOW_UPDATE_FLAG_RETRY_AFTER_VALID;
+        metadata.validate_routing(&header).unwrap();
     }
 
     fn hex_to_bytes(hex: &str) -> Vec<u8> {
