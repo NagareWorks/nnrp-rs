@@ -8,7 +8,7 @@
 
 ## Protocol Contract Landing
 
-- [ ] Land the frozen connection/session lifecycle, explicit session-close, and recovery contract in `nnrp-core`.
+- [x] Land the frozen connection/session lifecycle and explicit session-close contract in `nnrp-core`; recovery contract remains tracked in `02c`.
 - [x] Land the frozen priority, operation-state, cancel-scope, and `FLOW_UPDATE` metadata/enum contract in `nnrp-core`.
 - [ ] Land the frozen cache lease, schema registry, and typed payload descriptor contract in `nnrp-core`.
 - [ ] Land the frozen payload-family and public lifecycle boundary in `nnrp-core`.

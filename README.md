@@ -29,4 +29,4 @@ GitHub README rendering does not support per-avatar dynamic tooltips for an auto
 
 ## Current Status
 
-The workspace has moved past the initial skeleton. `nnrp-core` now owns the frozen preview3 common header, fixed session lifecycle metadata, `FLOW_UPDATE` metadata, schema/payload descriptors, protocol enums, and cache/schema error code constants. The preview3 protocol design remains in `nnrp-doc/docs/developers/design/v1-preview3.md`, while this repository is the canonical implementation source consumed by downstream SDKs.
+The workspace has moved past the initial skeleton. `nnrp-core` now owns the frozen preview3 common header, fixed session lifecycle metadata, host-neutral connection/session lifecycle state, `FLOW_UPDATE` metadata, schema/payload descriptors, protocol enums, and cache/schema error code constants. The preview3 protocol design remains in `nnrp-doc/docs/developers/design/v1-preview3.md`, while this repository is the canonical implementation source consumed by downstream SDKs.

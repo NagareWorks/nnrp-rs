@@ -32,6 +32,21 @@ pub enum NnrpError {
     #[error("invalid protocol combination: {rule}")]
     InvalidProtocolCombination { rule: &'static str },
 
+    #[error("connection is not open")]
+    ConnectionNotOpen,
+
+    #[error("connection is already closed")]
+    ConnectionAlreadyClosed,
+
+    #[error("session already exists: {0}")]
+    SessionAlreadyExists(u32),
+
+    #[error("session is unknown: {0}")]
+    UnknownSession(u32),
+
+    #[error("session is not open: {0}")]
+    SessionNotOpen(u32),
+
     #[error("reserved field is non-zero: {field}")]
     NonZeroReservedField { field: &'static str },
 
