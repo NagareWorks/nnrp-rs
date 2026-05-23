@@ -8,4 +8,5 @@ authors.workspace = true
 
 [dependencies]
 nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.2" }
+nnrp-ffi = { path = "../nnrp-ffi", version = "1.0.0-preview.2" }
 serde_json = "1.0"

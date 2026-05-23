@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use nnrp_core::{
     token_delta_schema_descriptor, validate_cache_dependencies, validate_session_recovery_ack,
     validate_session_recovery_request, CacheDependency, CacheDependencyState, CacheLease,
@@ -8,9 +10,20 @@ use nnrp_core::{
     SESSION_ERROR_RESUME_REJECTED, SESSION_FLAG_ALLOW_RESUME, STREAM_SEMANTICS_TOKEN_DELTA,
     TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
 };
+use nnrp_ffi::{
+    nnrp_client_await_event, nnrp_client_cancel, nnrp_client_close, nnrp_client_connect,
+    nnrp_client_open_session, nnrp_client_submit, nnrp_server_accept, nnrp_server_bind,
+    nnrp_server_close, nnrp_server_receive_submit, nnrp_server_send_flow_update,
+    nnrp_server_send_result, NnrpBufferView, NnrpClientCancelRequest, NnrpClientConnectRequest,
+    NnrpEvent, NnrpEventKind, NnrpFfiStatus, NnrpFfiStatusCode, NnrpHandle, NnrpPollResult,
+    NnrpServerAcceptRequest, NnrpServerBindRequest, NnrpServerFlowUpdateRequest,
+    NnrpServerReceiveSubmitRequest, NnrpServerSendResultRequest, NnrpSessionOpenRequest,
+    NnrpSubmitRequest,
+};
 use serde_json::{json, Value};
 
 pub const PREVIEW3_PROTOCOL_VERSION: &str = "nnrp-1-preview3";
+static RUNTIME_CASE_ID_BASE: AtomicU64 = AtomicU64::new(810_000);
 
 pub fn export_preview3_golden_vectors() -> Value {
     json!({
@@ -69,6 +82,8 @@ pub fn preview3_case_ids() -> &'static [&'static str] {
         "l1.preview3.schema.binding.validation",
         "l1.preview3.cache.lease.validation",
         "l1.preview3.recovery.session_resume.validation",
+        "l2.preview3.runtime.ffi.client_event_flow",
+        "l2.preview3.runtime.ffi.server_event_flow",
     ]
 }
 
@@ -84,6 +99,8 @@ pub fn execute_preview3_case(case_id: &str) -> Option<Result<(), String>> {
         "l1.preview3.schema.binding.validation" => l1_schema_binding_validation(),
         "l1.preview3.cache.lease.validation" => l1_cache_lease_validation(),
         "l1.preview3.recovery.session_resume.validation" => l1_session_resume_validation(),
+        "l2.preview3.runtime.ffi.client_event_flow" => l2_runtime_ffi_client_event_flow(),
+        "l2.preview3.runtime.ffi.server_event_flow" => l2_runtime_ffi_server_event_flow(),
         _ => return None,
     };
     Some(result)
@@ -244,6 +261,116 @@ fn l1_session_resume_validation() -> Result<(), String> {
     Ok(())
 }
 
+fn l2_runtime_ffi_client_event_flow() -> Result<(), String> {
+    unsafe {
+        let id_base = next_runtime_case_id_base();
+        let mut connection = NnrpHandle::invalid();
+        require_status(nnrp_client_connect(
+            NnrpClientConnectRequest {
+                connection_id: id_base + 1,
+                generation: 1,
+                transport_id: 1,
+            },
+            &mut connection,
+        ))?;
+        require_event(connection, NnrpEventKind::ConnectionOpened, 0)?;
+
+        let mut session = NnrpHandle::invalid();
+        require_status(nnrp_client_open_session(
+            NnrpSessionOpenRequest {
+                connection,
+                requested_session_id: (id_base + 2) as u32,
+                generation: 1,
+                profile_id: PROFILE_TOKEN,
+                schema_id: TOKEN_DELTA_SCHEMA_ID,
+                schema_version: TOKEN_DELTA_SCHEMA_VERSION,
+            },
+            &mut session,
+        ))?;
+        require_event(connection, NnrpEventKind::SessionOpened, 0)?;
+
+        let payload = [b'a', b'b', b'c'];
+        let mut operation = NnrpHandle::invalid();
+        require_status(nnrp_client_submit(
+            NnrpSubmitRequest {
+                session,
+                operation_id: id_base + 3,
+                frame_id: 7,
+                payload: buffer_view(&payload),
+            },
+            &mut operation,
+        ))?;
+        require_event(connection, NnrpEventKind::SubmitAccepted, 7)?;
+
+        require_status(nnrp_client_cancel(NnrpClientCancelRequest {
+            session,
+            frame_id: 7,
+        }))?;
+        require_event(connection, NnrpEventKind::Control, 7)?;
+
+        require_status(nnrp_client_close(session))?;
+        require_event(connection, NnrpEventKind::SessionClosed, 0)
+    }
+}
+
+fn l2_runtime_ffi_server_event_flow() -> Result<(), String> {
+    unsafe {
+        let id_base = next_runtime_case_id_base();
+        let mut server = NnrpHandle::invalid();
+        require_status(nnrp_server_bind(
+            NnrpServerBindRequest {
+                server_id: id_base + 1,
+                generation: 1,
+                transport_id: 1,
+            },
+            &mut server,
+        ))?;
+        require_event(server, NnrpEventKind::ConnectionOpened, 0)?;
+
+        let mut session = NnrpHandle::invalid();
+        require_status(nnrp_server_accept(
+            NnrpServerAcceptRequest {
+                server,
+                session_id: (id_base + 2) as u32,
+                generation: 1,
+                profile_id: PROFILE_TOKEN,
+                schema_id: TOKEN_DELTA_SCHEMA_ID,
+                schema_version: TOKEN_DELTA_SCHEMA_VERSION,
+            },
+            &mut session,
+        ))?;
+        require_event(server, NnrpEventKind::SessionOpened, 0)?;
+
+        let payload = [b'x', b'y', b'z'];
+        let mut operation = NnrpHandle::invalid();
+        require_status(nnrp_server_receive_submit(
+            NnrpServerReceiveSubmitRequest {
+                session,
+                operation_id: id_base + 3,
+                frame_id: 9,
+                payload: buffer_view(&payload),
+            },
+            &mut operation,
+        ))?;
+        require_event(server, NnrpEventKind::SubmitAccepted, 9)?;
+
+        require_status(nnrp_server_send_result(NnrpServerSendResultRequest {
+            operation,
+            payload: buffer_view(&payload),
+        }))?;
+        require_event(server, NnrpEventKind::ResultPushed, 9)?;
+
+        require_status(nnrp_server_send_flow_update(NnrpServerFlowUpdateRequest {
+            session,
+            frame_id: 9,
+        }))?;
+        require_event(server, NnrpEventKind::FlowUpdated, 9)?;
+
+        require_status(nnrp_server_close(session))?;
+        require_event(server, NnrpEventKind::SessionClosed, 0)
+    }
+}
+
 fn token_delta_descriptor() -> TypedPayloadDescriptor {
     TypedPayloadDescriptor {
         profile_id: PROFILE_TOKEN,
@@ -292,6 +419,54 @@ fn resume_ack() -> SessionOpenAckMetadata {
         route_scope_id: 7,
         session_error_code: SESSION_ERROR_NONE,
         session_flags_ack: SESSION_ACK_FLAG_RESUME_ENABLED,
+    }
+}
+
+fn require_status(status: NnrpFfiStatus) -> Result<(), String> {
+    if status.status_code == NnrpFfiStatusCode::Ok as u32 {
+        Ok(())
+    } else {
+        Err(format!("unexpected FFI status: {status:?}"))
+    }
+}
+
+fn next_runtime_case_id_base() -> u64 {
+    RUNTIME_CASE_ID_BASE.fetch_add(10, Ordering::Relaxed)
+}
+
+unsafe fn require_event(
+    connection: NnrpHandle,
+    kind: NnrpEventKind,
+    frame_id: u32,
+) -> Result<(), String> {
+    let mut result = NnrpPollResult {
+        status: NnrpFfiStatus::ok(),
+        has_event: 0,
+        event: NnrpEvent::none(),
+    };
+    require_status(nnrp_client_await_event(connection, &mut result))?;
+    if result.has_event != 1 {
+        return Err("runtime FFI event poll returned no event".to_string());
+    }
+    if result.event.kind != kind as u32 {
+        return Err(format!(
+            "runtime FFI event kind changed: expected {kind:?}, got {}",
+            result.event.kind
+        ));
+    }
+    if result.event.frame_id != frame_id {
+        return Err(format!(
+            "runtime FFI event frame changed: expected {frame_id}, got {}",
+            result.event.frame_id
+        ));
+    }
+    Ok(())
+}
+
+fn buffer_view(payload: &[u8]) -> NnrpBufferView {
+    NnrpBufferView {
+        ptr: payload.as_ptr(),
+        len: payload.len(),
     }
 }
 
@@ -349,5 +524,46 @@ mod tests {
         for case_id in preview3_case_ids() {
             assert_eq!(execute_preview3_case(case_id), Some(Ok(())));
         }
+    }
+
+    #[test]
+    fn runtime_ffi_case_helpers_report_event_mismatches() {
+        unsafe {
+            assert!(require_status(NnrpFfiStatus::invalid_argument(99))
+                .expect_err("invalid status should be reported")
+                .contains("unexpected FFI status"));
+
+            let first = connect_runtime_case_connection();
+            assert!(require_event(first, NnrpEventKind::SessionOpened, 0)
+                .expect_err("wrong event kind should be reported")
+                .contains("event kind changed"));
+
+            let second = connect_runtime_case_connection();
+            assert!(require_event(second, NnrpEventKind::ConnectionOpened, 99)
+                .expect_err("wrong frame id should be reported")
+                .contains("event frame changed"));
+
+            let third = connect_runtime_case_connection();
+            require_event(third, NnrpEventKind::ConnectionOpened, 0)
+                .expect("connection event should be consumed");
+            assert!(require_event(third, NnrpEventKind::ConnectionOpened, 0)
+                .expect_err("empty queue should be reported")
+                .contains("unexpected FFI status"));
+        }
+    }
+
+    unsafe fn connect_runtime_case_connection() -> NnrpHandle {
+        let id_base = next_runtime_case_id_base();
+        let mut connection = NnrpHandle::invalid();
+        require_status(nnrp_client_connect(
+            NnrpClientConnectRequest {
+                connection_id: id_base + 1,
+                generation: 1,
+                transport_id: 1,
+            },
+            &mut connection,
+        ))
+        .expect("connection should open");
+        connection
     }
 }
