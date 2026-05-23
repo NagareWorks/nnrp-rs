@@ -9,7 +9,7 @@ on:
       ref:
         description: Git ref to release when running manually
         required: true
-        default: master
+        default: main
       create_tag:
         description: Create and push the resolved release tag before publishing
         required: true
@@ -38,7 +38,6 @@ jobs:
       contents: write
       id-token: write
     env:
-      CARGO_PUBLISH_MODE: ${{ vars.CARGO_PUBLISH_MODE }}
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
     steps:
@@ -185,9 +184,9 @@ jobs:
           files: artifacts/nnrp-rs-source-${{ steps.version.outputs.package_version }}.zip
 
       - name: Publish crates to crates.io
-        if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.create_tag && inputs.publish_to_crates)) && env.CARGO_PUBLISH_MODE == 'token' && env.CARGO_REGISTRY_TOKEN != ''
+        if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.create_tag && inputs.publish_to_crates)) && env.CARGO_REGISTRY_TOKEN != ''
         run: |
-          for crate in nnrp-core nnrp-ffi nnrp-conformance; do
+          for crate in nnrp-core nnrp-runtime nnrp-transport-provider nnrp-ffi nnrp-transport-tcp nnrp-transport-quic nnrp-wasm nnrp-conformance; do
             published=0
             for attempt in 1 2 3; do
               if cargo publish -p "$crate" --token "$CARGO_REGISTRY_TOKEN"; then

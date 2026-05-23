@@ -14,7 +14,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.2" }
-nnrp-runtime = { path = "../nnrp-runtime", version = "1.0.0-preview.2" }
-nnrp-transport-provider = { path = "../nnrp-transport-provider", version = "1.0.0-preview.2" }
+nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.3" }
+nnrp-runtime = { path = "../nnrp-runtime", version = "1.0.0-preview.3" }
+nnrp-transport-provider = { path = "../nnrp-transport-provider", version = "1.0.0-preview.3" }
 tokio.workspace = true

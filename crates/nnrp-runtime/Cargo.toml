@@ -15,6 +15,6 @@ categories.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.2" }
+nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.3" }
 thiserror.workspace = true
 tokio.workspace = true

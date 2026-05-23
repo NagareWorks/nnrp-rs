@@ -36,15 +36,15 @@ After the Preview3 crates are published, choose only the pieces your application
 
 ```toml
 [dependencies]
-nnrp-core = "1.0.0-preview.2"
-nnrp-runtime = "1.0.0-preview.2"
-nnrp-transport-tcp = "1.0.0-preview.2"
+nnrp-core = "1.0.0-preview.3"
+nnrp-runtime = "1.0.0-preview.3"
+nnrp-transport-tcp = "1.0.0-preview.3"
 
 # Optional packages
-nnrp-transport-provider = "1.0.0-preview.2"
-nnrp-transport-quic = "1.0.0-preview.2"
-nnrp-ffi = "1.0.0-preview.2"
-nnrp-wasm = "1.0.0-preview.2"
+nnrp-transport-provider = "1.0.0-preview.3"
+nnrp-transport-quic = "1.0.0-preview.3"
+nnrp-ffi = "1.0.0-preview.3"
+nnrp-wasm = "1.0.0-preview.3"
 ```
 
 For repository builds before publishing:
