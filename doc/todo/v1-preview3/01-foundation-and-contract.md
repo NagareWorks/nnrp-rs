@@ -17,4 +17,4 @@
 
 - [x] Land the frozen handle families, lifecycle rules, callback/polling model, and buffer-view contract in `nnrp-ffi`.
 - [x] Land stable preview3 error families and downstream mapping guidance in `nnrp-ffi`.
-- [ ] Export Rust-generated conformance fixtures as the only canonical preview3 baseline for downstream SDKs.
+- [x] Export Rust-generated conformance fixtures as the only canonical preview3 baseline for downstream SDKs.
