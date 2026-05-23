@@ -4,7 +4,9 @@ This repository publishes Rust SDK crates and release assets, so contribution fl
 
 ## Branch Strategy
 
-`main` is the protected integration branch.
+The repository mainline is the stable branch for released or release-ready crate state. In the current private repository this branch is `master`; if the public repository is later renamed to `main`, the same rule applies to `main`.
+
+`develop` is the version integration branch for active preview work once multi-branch release preparation starts. Until this repository needs a separate integration branch, preview3 implementation may continue directly on the private mainline.
 
 Use short-lived topic branches for day-to-day work:
 
@@ -12,18 +14,27 @@ Use short-lived topic branches for day-to-day work:
 - `fix/<scope>-<topic>` for bug fixes
 - `docs/<scope>-<topic>` for documentation-only changes
 - `chore/<scope>-<topic>` for maintenance and tooling updates
-- `release/<version>` only when stabilizing a public crate release candidate
+- `release/<version>` only after `develop` or the private mainline is ready to freeze into a public crate release candidate
 
 Rules:
 
-- Branch from the latest `main`.
+- Branch from the latest `develop` when an active develop branch exists.
+- Otherwise, branch from the private mainline.
+- Branch from the stable mainline only for hotfixes against already released stable state.
 - Keep topic branches focused on one slice of work.
-- Rebase or merge from `main` regularly if the branch stays open.
-- Merge back to `main` through a pull request.
-- Do not push directly to `main`; enforce this with a GitHub ruleset or branch protection rule.
+- Rebase or merge from the target integration branch regularly if the branch stays open.
+- Merge normal preview work back to `develop` when it exists, or to the private mainline while the repository remains single-branch.
+- Do not push directly to protected branches; enforce this with a GitHub ruleset or branch protection rule when the repository is public.
 - Do not publish crates directly from topic branches.
 
-`release/<version>` branches are optional and should be used only when a version needs stabilization passes, packaging rehearsals, or manual workflow runs without publishing from `main`.
+`release/<version>` branches are freeze branches. Cut them only when the version is feature-complete enough for stabilization passes, packaging rehearsals, or manual workflow runs. Keep release branches short-lived unless a published line needs explicit long-term maintenance.
+
+After a release branch is cut:
+
+- accept only release-blocking fixes, version metadata, package metadata, and release documentation on that branch
+- merge accepted fixes back to `develop` or the private mainline
+- tag the final release from the release branch or from the merged stable state, according to the release workflow
+- delete the release branch after publication unless it represents an explicitly maintained LTS line
 
 ## Commit Message Convention
 
@@ -50,7 +61,7 @@ Rules:
 
 Every PR should:
 
-- target `main`
+- target `develop` for normal preview work when it exists, the private mainline while the repository remains single-branch, `main` for stable hotfixes, or `release/<version>` only during an active release freeze
 - use the default GitHub PR template that auto-loads on the PR page; specialized reference variants remain in `.github/PULL_REQUEST_TEMPLATE/` when you need to adapt the structure
 - explain the user-facing or engineering motivation
 - summarize the main crates or modules changed
