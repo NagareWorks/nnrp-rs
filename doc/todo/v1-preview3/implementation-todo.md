@@ -20,6 +20,7 @@
 10. `04b-ffi-surface.md`: `nnrp-ffi` handle/ABI/event-delivery/buffer-ownership surface.
 11. `04c-conformance-and-binding-rollout.md`: `nnrp-conformance` exports and downstream binding-consumption contract.
 12. `05-validation-and-docs.md`: workspace validation, conformance exports, and rollout documentation.
+13. `06-client-server-runtime.md`: usable Rust client/server SDK surface, transport pump, and runtime-backed FFI entrypoints.
 
 ## 2. PR Rules
 
@@ -38,3 +39,4 @@
 5. Inherited cache/typed-payload pieces plus preview3 cache lease/version/dependency rules, schema descriptor 32B, typed payload descriptor 24B, and `descriptor_flags` are tracked in `00`, `01`, and `03`.
 6. `tensor` / `token` first-round standard profiles plus `structured_event` / `tool_delta` ownership boundaries are tracked in `01` and `03`.
 7. Rust conformance-first enum/message/error baselines and downstream binding-consumption rules are tracked in `00`, `01`, `04`, and `05`.
+8. Usable Rust client/server APIs, transport runtime, loopback integration, and runtime-backed FFI entrypoints are tracked in `06`.
