@@ -5,6 +5,13 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
+description = "Transport-neutral NNRP client/server session runtime over framed async transport slots."
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/nnrp-runtime"
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 async-trait.workspace = true

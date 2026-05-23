@@ -5,6 +5,13 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
+description = "C-compatible NNRP FFI surface with value handles, event polling, and native library packaging."
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/nnrp-ffi"
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [lib]
 crate-type = ["cdylib", "rlib"]

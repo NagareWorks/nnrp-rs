@@ -5,6 +5,13 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
+description = "Canonical NNRP wire codecs, protocol validation, state machines, and preview3 core types."
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/nnrp-core"
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 thiserror.workspace = true

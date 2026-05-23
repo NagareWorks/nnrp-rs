@@ -5,6 +5,13 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
+description = "NNRP transport provider registry, capability intersection, native discovery, and probe scoring."
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/nnrp-transport-provider"
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [features]
 default = ["tcp"]

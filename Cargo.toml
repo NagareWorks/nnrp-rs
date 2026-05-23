@@ -17,6 +17,12 @@ license = "Apache-2.0"
 version = "1.0.0-preview.2"
 rust-version = "1.82"
 authors = ["NagareWorks"]
+repository = "https://github.com/NagareWorks/nnrp-rs"
+homepage = "https://nagareworks.github.io/nnrp-doc/"
+documentation = "https://docs.rs/nnrp-core"
+readme = "README.md"
+keywords = ["nnrp", "ai", "runtime", "protocol", "streaming"]
+categories = ["network-programming", "asynchronous", "api-bindings"]
 
 [workspace.dependencies]
 async-trait = "0.1"

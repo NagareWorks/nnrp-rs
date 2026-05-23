@@ -5,6 +5,13 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
+description = "WASM primitive package for NNRP protocol version, probe scoring, and transport selection bindings."
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/nnrp-wasm"
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [lib]
 crate-type = ["cdylib", "rlib"]

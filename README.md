@@ -1,39 +1,124 @@
+<p align="center">
+  <img src="assets/nnrp-readme-banner.svg" alt="NNRP - Neural Network Runtime Protocol" width="100%" />
+</p>
+
+<p align="center">
+  <a href="https://github.com/NagareWorks/nnrp-rs/actions"><img alt="CI" src="https://img.shields.io/badge/CI-preview3-22c55e"></a>
+  <a href="https://www.rust-lang.org"><img alt="Rust 1.82+" src="https://img.shields.io/badge/Rust-1.82%2B-f97316?logo=rust&logoColor=white"></a>
+  <a href="https://nagareworks.github.io/nnrp-doc/"><img alt="Docs" src="https://img.shields.io/badge/docs-nnrp--doc-38bdf8"></a>
+  <a href="https://github.com/NagareWorks/nnrp-rs/blob/master/LICENSE"><img alt="Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-64748b"></a>
+  <img alt="Native FFI" src="https://img.shields.io/badge/native-FFI-0f766e">
+  <img alt="WASM primitives" src="https://img.shields.io/badge/WASM-primitives-b45309">
+</p>
+
 # nnrp-rs
 
-Rust canonical SDK workspace for NNRP preview3.
+`nnrp-rs` is the Rust canonical SDK workspace for NNRP Preview3. NNRP is a domain-level application-layer protocol for long-lived, real-time AI model runtime communication: session lifecycle, flow control, cache/schema negotiation, recovery, transport selection, and typed payload exchange live above TCP/QUIC/Web transports.
 
-This repository is intended to become the single implementation source for:
+This repository is intended to be the implementation source for Rust users and for downstream language bindings.
 
-1. Wire codecs and strict protocol validation.
-2. Connection/session state machines.
-3. Cache/schema lifecycle semantics.
-4. Stable FFI for Python, C#, and future language bindings.
-5. Golden vectors and conformance fixtures.
+## What Ships Here
+
+| Package | Purpose |
+|---|---|
+| `nnrp-core` | Wire codecs, strict validation, protocol enums/errors, lifecycle state machines, cache/schema semantics, recovery, and conformance-facing core types. |
+| `nnrp-runtime` | Transport-neutral async client/server session runtime over framed transport slots. |
+| `nnrp-transport-provider` | Provider registry, local/remote capability intersection, native library discovery, policy resolution, and probe-score selection. |
+| `nnrp-transport-tcp` | TCP provider package for runtime transport/listener slots. |
+| `nnrp-transport-quic` | QUIC provider slot and injection helpers without freezing a concrete TLS/QUIC backend. |
+| `nnrp-ffi` | C-compatible ABI facade, handle/event model, header surface, and native link-library packaging. |
+| `nnrp-wasm` | Low-level WASM primitives and TypeScript declarations for future `nnrp-js` wrappers. |
+| `nnrp-conformance` | Rust-owned golden vectors, fixture manifests, adapter wrappers, and conformance export helpers. |
+
+## Install
+
+After the Preview3 crates are published, choose only the pieces your application needs:
+
+```toml
+[dependencies]
+nnrp-core = "1.0.0-preview.2"
+nnrp-runtime = "1.0.0-preview.2"
+nnrp-transport-tcp = "1.0.0-preview.2"
+
+# Optional packages
+nnrp-transport-provider = "1.0.0-preview.2"
+nnrp-transport-quic = "1.0.0-preview.2"
+nnrp-ffi = "1.0.0-preview.2"
+nnrp-wasm = "1.0.0-preview.2"
+```
+
+For repository builds before publishing:
+
+```toml
+[dependencies]
+nnrp-runtime = { git = "https://github.com/NagareWorks/nnrp-rs", package = "nnrp-runtime" }
+nnrp-transport-tcp = { git = "https://github.com/NagareWorks/nnrp-rs", package = "nnrp-transport-tcp" }
+```
+
+## Runtime Shape
+
+```rust
+use nnrp_runtime::{NnrpClient, NnrpClientConfig, RuntimeTransportKind};
+
+# async fn run() -> Result<(), Box<dyn std::error::Error>> {
+let config = NnrpClientConfig::default().with_transport(RuntimeTransportKind::Tcp);
+let client = NnrpClient::connect_tcp("127.0.0.1:4433", config).await?;
+let session = client.open_session().await?;
+# let _ = session;
+# Ok(())
+# }
+```
+
+TCP is available as a provider package today. QUIC is exposed as a slot so deployments can inject a concrete backend without `nnrp-core` freezing one TLS/QUIC stack for everyone.
+
+## Native And WASM Artifacts
+
+Native link libraries are for C#/Python/Unity and Node.js backend native-addon scenarios:
+
+```powershell
+python scripts\package_native_artifacts.py --out artifacts\native
+```
+
+WASM primitives are for future `nnrp-js` wrapping. Node.js should probe native libraries first and fall back to WASM when native loading is unavailable; browsers consume WASM plus WebSocket/WebTransport adapters from the JS/TS layer.
+
+```powershell
+rustup target add wasm32-unknown-unknown
+python scripts\package_wasm_primitives.py --out artifacts\wasm
+```
+
+## Workspace Layout
+
+- `crates/`: Rust crates listed above.
+- `include/nnrp/`: C ABI headers for native consumers.
+- `scripts/`: native and WASM packaging helpers.
+- `doc/todo/`: Preview3 implementation planning and rollout checklists.
+
+## Quality Gates
+
+Before commits, the Rust workspace is expected to pass:
+
+```powershell
+cargo fmt --all --check
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo llvm-cov --workspace --lcov --output-path target\llvm-cov\lcov.info
+```
+
+The current project rule is 90%+ total line coverage and 90%+ incremental line coverage for every commit.
+
+## Documentation
+
+- Protocol and SDK docs: <https://nagareworks.github.io/nnrp-doc/>
+- Rust SDK docs: <https://nagareworks.github.io/nnrp-doc/en/sdk/rust/>
+- Conformance docs: <https://nagareworks.github.io/nnrp-doc/en/conformance/>
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).
 
 ## Contributors
 
 <a href="https://github.com/NagareWorks/nnrp-rs/graphs/contributors" title="Open the contributors graph for individual GitHub profiles and IDs.">
-	<img src="https://contrib.rocks/image?repo=NagareWorks/nnrp-rs" alt="Contributors" />
+  <img src="https://contrib.rocks/image?repo=NagareWorks/nnrp-rs" alt="Contributors" />
 </a>
 
-The avatar wall above updates automatically from the repository contributor list once this repository is published at the matching GitHub location.
-
-GitHub README rendering does not support per-avatar dynamic tooltips for an auto-generated contributor wall, so use the linked contributors graph if you want individual profile pages and account IDs.
-
-## Workspace Layout
-
-- `crates/nnrp-core`: canonical NNRP/1 wire primitives, preview3 extension models, strict validation, state-machine-facing core types, and host-neutral cache/schema semantics.
-- `crates/nnrp-runtime`: transport-neutral client/server session runtime over framed async transport slots.
-- `crates/nnrp-transport-provider`: provider registry, local transport discovery helpers, and transport policy selection.
-- `crates/nnrp-transport-tcp`: TCP provider package for the runtime transport/listener slots.
-- `crates/nnrp-ffi`: stable ABI facade over `nnrp-core`, including handle ownership, buffer views, callbacks, polling, downstream error mapping, and native `cdylib` packaging.
-- `crates/nnrp-wasm`: low-level WASM primitives and TypeScript declarations consumed by the future `nnrp-js` wrapper.
-- `crates/nnrp-conformance`: Rust-owned golden vectors, fixture manifests, adapter wrappers, and cross-language conformance export surface.
-- `include/nnrp/`: C ABI headers and native link-library packaging surface for downstream loaders.
-- `scripts/package_native_artifacts.py`: builds, verifies, and packages `nnrp-ffi` native artifacts for Windows, Linux, and macOS hosts.
-- `scripts/package_wasm_primitives.py`: builds and packages `nnrp-wasm` plus the minimal `.d.ts` surface for downstream JS/TS wrappers.
-- `doc/todo/`: implementation planning and rollout checklists.
-
-## Current Status
-
-The workspace has moved past the initial skeleton. `nnrp-core` now owns the inherited NNRP/1 common header, inherited `FLOW_UPDATE` metadata contract, preview3 session lifecycle metadata, host-neutral connection/session lifecycle state, schema/payload descriptors, protocol enums, and cache/schema error code constants. The preview3 protocol design remains in `nnrp-doc/docs/developers/design/v1-preview3.md`, while this repository is the canonical implementation source consumed by downstream SDKs.

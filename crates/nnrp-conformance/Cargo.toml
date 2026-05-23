@@ -5,6 +5,13 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
+description = "Rust-owned NNRP conformance fixtures, golden vectors, and adapter helpers."
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/nnrp-conformance"
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.2" }
