@@ -127,6 +127,59 @@ impl PayloadKindBitmap {
     pub fn contains_tensor(self) -> bool {
         self.0 & Self::TENSOR != 0
     }
+
+    pub fn contains(self, family: PayloadFamily) -> bool {
+        self.0 & family.bit() != 0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum PayloadFamily {
+    Tensor = PayloadKindBitmap::TENSOR,
+    TokenChunk = PayloadKindBitmap::TOKEN_CHUNK,
+    AudioChunk = PayloadKindBitmap::AUDIO_CHUNK,
+    VideoChunk = PayloadKindBitmap::VIDEO_CHUNK,
+    StructuredEvent = PayloadKindBitmap::STRUCTURED_EVENT,
+    ToolDelta = PayloadKindBitmap::TOOL_DELTA,
+    OpaqueBytes = PayloadKindBitmap::OPAQUE_BYTES,
+}
+
+impl PayloadFamily {
+    pub fn try_from_bit(bit: u32) -> Result<Self, NnrpError> {
+        match bit {
+            PayloadKindBitmap::TENSOR => Ok(Self::Tensor),
+            PayloadKindBitmap::TOKEN_CHUNK => Ok(Self::TokenChunk),
+            PayloadKindBitmap::AUDIO_CHUNK => Ok(Self::AudioChunk),
+            PayloadKindBitmap::VIDEO_CHUNK => Ok(Self::VideoChunk),
+            PayloadKindBitmap::STRUCTURED_EVENT => Ok(Self::StructuredEvent),
+            PayloadKindBitmap::TOOL_DELTA => Ok(Self::ToolDelta),
+            PayloadKindBitmap::OPAQUE_BYTES => Ok(Self::OpaqueBytes),
+            _ => Err(NnrpError::UnknownEnumValue {
+                enum_name: "payload_family_bit",
+                value: bit as u64,
+            }),
+        }
+    }
+
+    pub fn bit(self) -> u32 {
+        self as u32
+    }
+
+    pub fn is_standard_profile(self) -> bool {
+        matches!(self, Self::Tensor | Self::TokenChunk)
+    }
+
+    pub fn is_registry_bound_family(self) -> bool {
+        matches!(
+            self,
+            Self::AudioChunk
+                | Self::VideoChunk
+                | Self::StructuredEvent
+                | Self::ToolDelta
+                | Self::OpaqueBytes
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1099,6 +1152,34 @@ mod tests {
             metadata.to_bytes(),
             Err(NnrpError::InvalidProtocolCombination {
                 rule: "non-tensor RESULT_PUSH must clear tensor coverage fields"
+            })
+        );
+    }
+
+    #[test]
+    fn payload_family_boundary_keeps_tool_and_event_out_of_profile_space() {
+        let bitmap = PayloadKindBitmap(
+            PayloadKindBitmap::TOKEN_CHUNK
+                | PayloadKindBitmap::STRUCTURED_EVENT
+                | PayloadKindBitmap::TOOL_DELTA,
+        );
+
+        assert!(bitmap.contains(PayloadFamily::TokenChunk));
+        assert!(bitmap.contains(PayloadFamily::StructuredEvent));
+        assert!(PayloadFamily::TokenChunk.is_standard_profile());
+        assert!(!PayloadFamily::StructuredEvent.is_standard_profile());
+        assert!(!PayloadFamily::ToolDelta.is_standard_profile());
+        assert!(PayloadFamily::StructuredEvent.is_registry_bound_family());
+        assert!(PayloadFamily::ToolDelta.is_registry_bound_family());
+        assert_eq!(
+            PayloadFamily::try_from_bit(PayloadKindBitmap::TOOL_DELTA),
+            Ok(PayloadFamily::ToolDelta)
+        );
+        assert_eq!(
+            PayloadFamily::try_from_bit(0x8000_0000),
+            Err(NnrpError::UnknownEnumValue {
+                enum_name: "payload_family_bit",
+                value: 0x8000_0000
             })
         );
     }

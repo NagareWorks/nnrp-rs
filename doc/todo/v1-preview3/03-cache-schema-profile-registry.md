@@ -20,4 +20,4 @@
 - [x] Keep the public preview3 layer profile-neutral.
 - [x] Implement `tensor` and `token` as peer first-round standard profiles.
 - [x] Implement minimum token-profile public semantics before downstream bindings expose token-native host APIs.
-- [ ] Keep `structured_event` and `tool_delta` as payload families unless the protocol doc promotes them.
+- [x] Keep `structured_event` and `tool_delta` as payload families unless the protocol doc promotes them.

@@ -42,7 +42,7 @@ pub use control::{
 };
 pub use data::{
     validate_result_drop_header, validate_submit_object_ref_mask, BodyRegionPrelude,
-    FrameSubmitMetadata, InputProfile, ObjectReferenceBlock, ObjectReferenceRegion,
+    FrameSubmitMetadata, InputProfile, ObjectReferenceBlock, ObjectReferenceRegion, PayloadFamily,
     PayloadKindBitmap, ResultClass, ResultPushMetadata, SubmitMode, TileIndexMode,
     TypedPayloadFrameView, TypedPayloadRegion, BODY_REGION_PRELUDE_LEN, BUDGET_POLICY_KNOWN_MASK,
     FRAME_SUBMIT_METADATA_LEN, OBJECT_REFERENCE_BLOCK_LEN, PAYLOAD_KIND_KNOWN_MASK,
