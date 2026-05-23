@@ -8,6 +8,7 @@ pub const OBJECT_REFERENCE_BLOCK_LEN: usize = 20;
 pub const BUDGET_POLICY_KNOWN_MASK: u8 = 0x0f;
 pub const RESULT_FLAGS_KNOWN_MASK: u16 = 0x0007;
 pub const PAYLOAD_KIND_KNOWN_MASK: u32 = 0x0000_007f;
+pub const SUBMIT_OBJECT_REF_MASK_KNOWN_BITS: u32 = 0x0000_000f;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -486,6 +487,139 @@ impl ObjectReferenceBlock {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectReferenceRegion {
+    blocks: Vec<ObjectReferenceBlock>,
+}
+
+impl ObjectReferenceRegion {
+    pub fn parse(source: &[u8]) -> Result<Self, NnrpError> {
+        if source.len() % OBJECT_REFERENCE_BLOCK_LEN != 0 {
+            return Err(NnrpError::InvalidProtocolCombination {
+                rule: "object reference region length must be a multiple of object reference block length",
+            });
+        }
+
+        let blocks = source
+            .chunks_exact(OBJECT_REFERENCE_BLOCK_LEN)
+            .map(ObjectReferenceBlock::parse)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Self { blocks })
+    }
+
+    pub fn from_blocks(blocks: Vec<ObjectReferenceBlock>) -> Self {
+        Self { blocks }
+    }
+
+    pub fn blocks(&self) -> &[ObjectReferenceBlock] {
+        &self.blocks
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, NnrpError> {
+        let mut bytes = vec![0u8; self.blocks.len() * OBJECT_REFERENCE_BLOCK_LEN];
+        for (index, block) in self.blocks.iter().enumerate() {
+            block.write(
+                &mut bytes
+                    [index * OBJECT_REFERENCE_BLOCK_LEN..(index + 1) * OBJECT_REFERENCE_BLOCK_LEN],
+            )?;
+        }
+        Ok(bytes)
+    }
+
+    pub fn validate_submit_mask(
+        &self,
+        submit_mode: SubmitMode,
+        object_ref_mask: u32,
+    ) -> Result<(), NnrpError> {
+        validate_submit_object_ref_mask(submit_mode, object_ref_mask)?;
+
+        let mut expected_slot = 0usize;
+        let mut seen_mask = 0u32;
+        for block in &self.blocks {
+            let Some(slot) = submit_object_slot_index(block.object_kind) else {
+                continue;
+            };
+            if slot < expected_slot {
+                return Err(NnrpError::InvalidProtocolCombination {
+                    rule: "object reference region standard slots must be sorted",
+                });
+            }
+            expected_slot = slot;
+            let bit = 1u32 << slot;
+            if seen_mask & bit != 0 {
+                return Err(NnrpError::InvalidProtocolCombination {
+                    rule: "object reference region must not duplicate standard slots",
+                });
+            }
+            if object_ref_mask & bit == 0 {
+                return Err(NnrpError::InvalidProtocolCombination {
+                    rule: "object reference block requires matching object_ref_mask bit",
+                });
+            }
+            seen_mask |= bit;
+        }
+
+        if seen_mask != object_ref_mask {
+            return Err(NnrpError::InvalidProtocolCombination {
+                rule: "object reference region must exactly match object_ref_mask",
+            });
+        }
+
+        Ok(())
+    }
+
+    pub fn validate_resolved<F>(&self, mut contains: F) -> Result<(), NnrpError>
+    where
+        F: FnMut(&ObjectReferenceBlock) -> bool,
+    {
+        for block in &self.blocks {
+            if !contains(block) {
+                return Err(NnrpError::InvalidProtocolCombination {
+                    rule: "object reference must resolve from cache",
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+pub fn validate_submit_object_ref_mask(
+    submit_mode: SubmitMode,
+    object_ref_mask: u32,
+) -> Result<(), NnrpError> {
+    validate_mask_u32(object_ref_mask, SUBMIT_OBJECT_REF_MASK_KNOWN_BITS)?;
+
+    match submit_mode {
+        SubmitMode::Inline => {
+            if object_ref_mask != 0 {
+                return Err(NnrpError::InvalidProtocolCombination {
+                    rule: "inline FRAME_SUBMIT must not declare object_ref_mask",
+                });
+            }
+        }
+        SubmitMode::Reference | SubmitMode::Mixed => {
+            if object_ref_mask == 0 {
+                return Err(NnrpError::InvalidProtocolCombination {
+                    rule: "reference or mixed FRAME_SUBMIT requires non-zero object_ref_mask",
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn submit_object_slot_index(object_kind: CacheObjectKind) -> Option<usize> {
+    match object_kind {
+        CacheObjectKind::CameraBlock => Some(0),
+        CacheObjectKind::TileIndexBlock => Some(1),
+        CacheObjectKind::TensorSectionTable => Some(2),
+        CacheObjectKind::PayloadLayoutTemplate => Some(3),
+        _ => None,
+    }
+}
+
 pub fn validate_result_drop_header(header: &CommonHeader) -> Result<(), NnrpError> {
     if header.message_type != MessageType::ResultDrop
         || header.meta_len != 0
@@ -775,6 +909,17 @@ mod tests {
             ObjectReferenceBlock::parse(&object_ref_bytes).unwrap(),
             object_ref
         );
+
+        let region = ObjectReferenceRegion::from_blocks(vec![object_ref]);
+        let region_bytes = region.to_bytes().unwrap();
+        let parsed_region = ObjectReferenceRegion::parse(&region_bytes).unwrap();
+        assert_eq!(parsed_region.blocks(), &[object_ref]);
+        parsed_region
+            .validate_submit_mask(SubmitMode::Mixed, 1 << 1)
+            .unwrap();
+        parsed_region
+            .validate_resolved(|block| block.cache_namespace == 7)
+            .unwrap();
     }
 
     #[test]
@@ -800,6 +945,80 @@ mod tests {
             prelude.to_bytes(),
             Err(NnrpError::InvalidProtocolCombination {
                 rule: "object_reference_bytes must be a multiple of object reference block length"
+            })
+        );
+    }
+
+    #[test]
+    fn object_reference_region_rejects_mask_order_duplicate_and_unresolved_cases() {
+        assert_eq!(
+            ObjectReferenceRegion::parse(&[0u8; OBJECT_REFERENCE_BLOCK_LEN - 1]),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "object reference region length must be a multiple of object reference block length"
+            })
+        );
+
+        let camera = ObjectReferenceBlock {
+            object_kind: CacheObjectKind::CameraBlock,
+            ref_flags: 0,
+            cache_namespace: 1,
+            cache_key_hi: 1,
+            cache_key_lo: 1,
+        };
+        let tile = ObjectReferenceBlock {
+            object_kind: CacheObjectKind::TileIndexBlock,
+            ref_flags: 0,
+            cache_namespace: 1,
+            cache_key_hi: 2,
+            cache_key_lo: 2,
+        };
+
+        assert_eq!(
+            validate_submit_object_ref_mask(SubmitMode::Inline, 1),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "inline FRAME_SUBMIT must not declare object_ref_mask"
+            })
+        );
+        assert_eq!(
+            validate_submit_object_ref_mask(SubmitMode::Reference, 0),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "reference or mixed FRAME_SUBMIT requires non-zero object_ref_mask"
+            })
+        );
+
+        let reversed = ObjectReferenceRegion::from_blocks(vec![tile, camera]);
+        assert_eq!(
+            reversed.validate_submit_mask(SubmitMode::Mixed, 0b0011),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "object reference region standard slots must be sorted"
+            })
+        );
+
+        let duplicate = ObjectReferenceRegion::from_blocks(vec![camera, camera]);
+        assert_eq!(
+            duplicate.validate_submit_mask(SubmitMode::Mixed, 0b0001),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "object reference region must not duplicate standard slots"
+            })
+        );
+
+        let missing_mask_bit = ObjectReferenceRegion::from_blocks(vec![camera]);
+        assert_eq!(
+            missing_mask_bit.validate_submit_mask(SubmitMode::Mixed, 0b0010),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "object reference block requires matching object_ref_mask bit"
+            })
+        );
+        assert_eq!(
+            missing_mask_bit.validate_submit_mask(SubmitMode::Mixed, 0b0011),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "object reference region must exactly match object_ref_mask"
+            })
+        );
+        assert_eq!(
+            missing_mask_bit.validate_resolved(|_| false),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "object reference must resolve from cache"
             })
         );
     }

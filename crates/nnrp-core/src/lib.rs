@@ -38,11 +38,12 @@ pub use control::{
     TRANSPORT_PROBE_ACK_METADATA_LEN, TRANSPORT_PROBE_METADATA_LEN,
 };
 pub use data::{
-    validate_result_drop_header, BodyRegionPrelude, FrameSubmitMetadata, InputProfile,
-    ObjectReferenceBlock, PayloadKindBitmap, ResultClass, ResultPushMetadata, SubmitMode,
-    TileIndexMode, BODY_REGION_PRELUDE_LEN, BUDGET_POLICY_KNOWN_MASK, FRAME_SUBMIT_METADATA_LEN,
+    validate_result_drop_header, validate_submit_object_ref_mask, BodyRegionPrelude,
+    FrameSubmitMetadata, InputProfile, ObjectReferenceBlock, ObjectReferenceRegion,
+    PayloadKindBitmap, ResultClass, ResultPushMetadata, SubmitMode, TileIndexMode,
+    BODY_REGION_PRELUDE_LEN, BUDGET_POLICY_KNOWN_MASK, FRAME_SUBMIT_METADATA_LEN,
     OBJECT_REFERENCE_BLOCK_LEN, PAYLOAD_KIND_KNOWN_MASK, RESULT_FLAGS_KNOWN_MASK,
-    RESULT_PUSH_METADATA_LEN,
+    RESULT_PUSH_METADATA_LEN, SUBMIT_OBJECT_REF_MASK_KNOWN_BITS,
 };
 pub use enums::{
     BackpressureLevel, CancelScope, FlowScopeKind, FlowUpdateReason, HeaderFlags, InFlightPolicy,
