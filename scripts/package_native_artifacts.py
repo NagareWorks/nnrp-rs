@@ -141,18 +141,36 @@ def verify_exports(library: Path, os_name: str) -> None:
         )
 
 
+def copy_headers(package_dir: Path) -> list[str]:
+    include_root = ROOT / "include" / "nnrp"
+    package_include = package_dir / "include" / "nnrp"
+    package_include.mkdir(parents=True, exist_ok=True)
+
+    headers = sorted(include_root.glob("*.h"))
+    for header in headers:
+        shutil.copy2(header, package_include / header.name)
+
+    # Keep the legacy root-level FFI header for early Preview3 consumers.
+    shutil.copy2(include_root / "nnrp_ffi.h", package_dir / "nnrp_ffi.h")
+    return [f"include/nnrp/{header.name}" for header in headers]
+
+
 def package_artifact(library: Path, os_name: str, arch_name: str, out_dir: Path, release: bool) -> Path:
     package_dir = out_dir / f"{os_name}-{arch_name}"
+    if package_dir.exists():
+        shutil.rmtree(package_dir)
     package_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(library, package_dir / library.name)
-    shutil.copy2(ROOT / "include" / "nnrp" / "nnrp_ffi.h", package_dir / "nnrp_ffi.h")
+    headers = copy_headers(package_dir)
     manifest = {
         "package": "nnrp-ffi",
         "profile": "release" if release else "debug",
         "os": os_name,
         "arch": arch_name,
         "library": library.name,
-        "header": "nnrp_ffi.h",
+        "header": "include/nnrp/nnrp.h",
+        "headers": headers,
+        "legacy_header": "nnrp_ffi.h",
         "exports": EXPECTED_EXPORTS,
     }
     (package_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")

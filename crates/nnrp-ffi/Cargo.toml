@@ -17,4 +17,4 @@ categories.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.3" }
+nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.3.1" }

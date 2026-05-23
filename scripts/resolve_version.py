@@ -10,10 +10,7 @@ import tomllib
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 WORKSPACE_TOML_PATH = REPO_ROOT / "Cargo.toml"
-PATH_DEPENDENCY_FILES = [
-    REPO_ROOT / "crates" / "nnrp-ffi" / "Cargo.toml",
-    REPO_ROOT / "crates" / "nnrp-conformance" / "Cargo.toml",
-]
+CRATE_TOML_PATHS = sorted((REPO_ROOT / "crates").glob("*/Cargo.toml"))
 
 
 def read_release_version() -> str:
@@ -67,10 +64,17 @@ def cmd_apply(args: argparse.Namespace) -> None:
     package_version = args.package_version
     replace_once(WORKSPACE_TOML_PATH, r'^version = "[^"]+"$', f'version = "{package_version}"')
 
-    dependency_pattern = r'^nnrp-core = \{ path = "\.\./nnrp-core", version = "[^"]+" \}$'
-    dependency_replacement = f'nnrp-core = {{ path = "../nnrp-core", version = "{package_version}" }}'
-    for path in PATH_DEPENDENCY_FILES:
-        replace_once(path, dependency_pattern, dependency_replacement)
+    dependency_pattern = r'^(nnrp-[a-z-]+ = \{ path = "\.\./nnrp-[a-z-]+", version = ")[^"]+(".*\})$'
+    for path in CRATE_TOML_PATHS:
+        text = path.read_text(encoding="utf-8")
+        updated, count = re.subn(
+            dependency_pattern,
+            rf'\g<1>{package_version}\2',
+            text,
+            flags=re.MULTILINE,
+        )
+        if count:
+            path.write_text(updated, encoding="utf-8")
 
 
 def build_parser() -> argparse.ArgumentParser:

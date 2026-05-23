@@ -36,15 +36,15 @@ After the Preview3 crates are published, choose only the pieces your application
 
 ```toml
 [dependencies]
-nnrp-core = "1.0.0-preview.3"
-nnrp-runtime = "1.0.0-preview.3"
-nnrp-transport-tcp = "1.0.0-preview.3"
+nnrp-core = "1.0.0-preview.3.1"
+nnrp-runtime = "1.0.0-preview.3.1"
+nnrp-transport-tcp = "1.0.0-preview.3.1"
 
 # Optional packages
-nnrp-transport-provider = "1.0.0-preview.3"
-nnrp-transport-quic = "1.0.0-preview.3"
-nnrp-ffi = "1.0.0-preview.3"
-nnrp-wasm = "1.0.0-preview.3"
+nnrp-transport-provider = "1.0.0-preview.3.1"
+nnrp-transport-quic = "1.0.0-preview.3.1"
+nnrp-ffi = "1.0.0-preview.3.1"
+nnrp-wasm = "1.0.0-preview.3.1"
 ```
 
 For repository builds before publishing:
@@ -78,6 +78,9 @@ Native link libraries are for C#/Python/Unity and Node.js backend native-addon s
 ```powershell
 python scripts\package_native_artifacts.py --out artifacts\native
 ```
+
+Native artifacts include `include/nnrp/nnrp.h` as the C/C++ umbrella header,
+plus `nnrp_ffi.h`, `nnrp_error.h`, `nnrp_runtime.h`, and `nnrp_version.h`.
 
 WASM primitives are for future `nnrp-js` wrapping. Node.js should probe native libraries first and fall back to WASM when native loading is unavailable; browsers consume WASM plus WebSocket/WebTransport adapters from the JS/TS layer.
 
