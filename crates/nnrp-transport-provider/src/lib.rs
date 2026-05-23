@@ -390,11 +390,10 @@ pub fn score_provider_probe(
         .iter()
         .map(|sample| sample.bytes_sent.saturating_add(sample.bytes_received))
         .sum::<u64>();
-    let throughput_bytes_per_sec = if elapsed_us == 0 {
-        0
-    } else {
-        transferred.saturating_mul(1_000_000) / elapsed_us
-    };
+    let throughput_bytes_per_sec = transferred
+        .saturating_mul(1_000_000)
+        .checked_div(elapsed_us)
+        .unwrap_or(0);
     let throughput_bonus = (throughput_bytes_per_sec / 1_000).min(500) as f64;
     let policy_penalty = policy.preference_rank(provider.transport_id) as f64 * 1_000.0;
     let score =
