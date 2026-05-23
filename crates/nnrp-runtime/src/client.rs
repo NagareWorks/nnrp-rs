@@ -1,10 +1,12 @@
 use nnrp_core::{
-    CommonHeader, ConnectionLifecycle, FrameSubmitMetadata, InFlightPolicy, MessageType,
-    ResultPushMetadata, SessionCloseAckMetadata, SessionCloseMetadata, SessionCloseReason,
-    SessionOpenAckMetadata, SessionOpenMetadata, SessionPriorityClass, SessionStatus,
+    validate_result_drop_header, CommonHeader, ConnectionLifecycle, FlowUpdateMetadata,
+    FrameSubmitMetadata, InFlightPolicy, MessageType, ResultPushMetadata, SessionCloseAckMetadata,
+    SessionCloseMetadata, SessionCloseReason, SessionOpenAckMetadata, SessionOpenMetadata,
+    SessionPatchAckMetadata, SessionPatchMetadata, SessionPriorityClass, SessionStatus,
     FRAME_SUBMIT_METADATA_LEN, RESULT_PUSH_METADATA_LEN, SESSION_CLOSE_ACK_METADATA_LEN,
     SESSION_CLOSE_METADATA_LEN, SESSION_ERROR_NONE, SESSION_OPEN_METADATA_LEN,
-    STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
+    SESSION_PATCH_ACK_METADATA_LEN, SESSION_PATCH_METADATA_LEN, STANDARD_PROFILE_TOKEN,
+    TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
 };
 
 use crate::{FramedTransport, RuntimeError, RuntimePacket, TcpTransport};
@@ -56,6 +58,13 @@ pub struct NnrpResult {
     pub frame_id: u32,
     pub metadata: ResultPushMetadata,
     pub body: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NnrpClientEvent {
+    Result(NnrpResult),
+    ResultDrop { frame_id: u32 },
+    FlowUpdate(FlowUpdateMetadata),
 }
 
 impl NnrpClient {
@@ -185,28 +194,92 @@ impl NnrpClientSession {
     }
 
     pub async fn await_result(&mut self) -> Result<NnrpResult, RuntimeError> {
-        let packet = self.transport.read_packet().await?;
-        if packet.header.message_type != MessageType::ResultPush {
-            return Err(RuntimeError::UnexpectedMessage(
-                "client expected RESULT_PUSH",
-            ));
+        match self.await_event().await? {
+            NnrpClientEvent::Result(result) => Ok(result),
+            NnrpClientEvent::ResultDrop { .. } => Err(RuntimeError::UnexpectedMessage(
+                "client expected RESULT_PUSH but received RESULT_DROP",
+            )),
+            NnrpClientEvent::FlowUpdate(_) => Err(RuntimeError::UnexpectedMessage(
+                "client expected RESULT_PUSH but received FLOW_UPDATE",
+            )),
         }
-        if packet.header.session_id != self.session_id {
-            return Err(RuntimeError::UnexpectedMessage(
-                "client received result for another session",
-            ));
-        }
-        if packet.metadata.len() != RESULT_PUSH_METADATA_LEN {
-            return Err(RuntimeError::UnexpectedMessage(
-                "client received malformed RESULT_PUSH metadata length",
-            ));
-        }
+    }
 
-        Ok(NnrpResult {
-            frame_id: packet.header.frame_id,
-            metadata: ResultPushMetadata::parse(&packet.metadata)?,
-            body: packet.body,
-        })
+    pub async fn await_event(&mut self) -> Result<NnrpClientEvent, RuntimeError> {
+        let packet = self.transport.read_packet().await?;
+        match packet.header.message_type {
+            MessageType::ResultPush => {
+                self.require_session_packet(&packet, "client received result for another session")?;
+                if packet.metadata.len() != RESULT_PUSH_METADATA_LEN {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "client received malformed RESULT_PUSH metadata length",
+                    ));
+                }
+                Ok(NnrpClientEvent::Result(NnrpResult {
+                    frame_id: packet.header.frame_id,
+                    metadata: ResultPushMetadata::parse(&packet.metadata)?,
+                    body: packet.body,
+                }))
+            }
+            MessageType::ResultDrop => {
+                self.require_session_packet(&packet, "client received drop for another session")?;
+                validate_result_drop_header(&packet.header)?;
+                Ok(NnrpClientEvent::ResultDrop {
+                    frame_id: packet.header.frame_id,
+                })
+            }
+            MessageType::FlowUpdate => {
+                let metadata = FlowUpdateMetadata::parse(&packet.metadata)?;
+                self.lifecycle
+                    .validate_flow_update(&packet.header, &metadata)?;
+                Ok(NnrpClientEvent::FlowUpdate(metadata))
+            }
+            _ => Err(RuntimeError::UnexpectedMessage(
+                "client expected RESULT_PUSH, RESULT_DROP, or FLOW_UPDATE",
+            )),
+        }
+    }
+
+    pub async fn cancel_frame(&mut self, frame_id: u32) -> Result<(), RuntimeError> {
+        let mut header = CommonHeader::new(MessageType::FrameCancel, 0, 0);
+        header.session_id = self.session_id;
+        header.frame_id = frame_id;
+        self.transport
+            .write_packet(&RuntimePacket::new(header, Vec::new(), Vec::new())?)
+            .await
+    }
+
+    pub async fn patch_session(
+        &mut self,
+        patch: SessionPatchMetadata,
+    ) -> Result<SessionPatchAckMetadata, RuntimeError> {
+        let mut header = CommonHeader::new(
+            MessageType::SessionPatch,
+            SESSION_PATCH_METADATA_LEN as u32,
+            patch.profile_patch_bytes,
+        );
+        header.session_id = self.session_id;
+        self.transport
+            .write_packet(&RuntimePacket::new(
+                header,
+                patch.to_bytes()?.to_vec(),
+                Vec::new(),
+            )?)
+            .await?;
+
+        let ack_packet = self.transport.read_packet().await?;
+        if ack_packet.header.message_type != MessageType::SessionPatchAck {
+            return Err(RuntimeError::UnexpectedMessage(
+                "client expected SESSION_PATCH_ACK",
+            ));
+        }
+        self.require_session_packet(&ack_packet, "client received patch ack for another session")?;
+        if ack_packet.metadata.len() != SESSION_PATCH_ACK_METADATA_LEN {
+            return Err(RuntimeError::UnexpectedMessage(
+                "client received malformed SESSION_PATCH_ACK metadata length",
+            ));
+        }
+        Ok(SessionPatchAckMetadata::parse(&ack_packet.metadata)?)
     }
 
     pub async fn close(mut self) -> Result<(), RuntimeError> {
@@ -266,5 +339,16 @@ impl NnrpClientSession {
 
     pub async fn close_transport(mut self) -> Result<(), RuntimeError> {
         self.transport.close().await
+    }
+
+    fn require_session_packet(
+        &self,
+        packet: &RuntimePacket,
+        message: &'static str,
+    ) -> Result<(), RuntimeError> {
+        if packet.header.session_id != self.session_id {
+            return Err(RuntimeError::UnexpectedMessage(message));
+        }
+        Ok(())
     }
 }

@@ -20,7 +20,7 @@
 - [x] Implement `NnrpClient::connect_tcp` and `NnrpClient::connect_quic` over the transport abstraction.
 - [x] Implement `NnrpClient::open_session` and `NnrpClientSession` lifecycle ownership.
 - [x] Implement submit, submit-nowait, await-result, and session close APIs.
-- [ ] Implement cancel, session patch, and result/event stream APIs.
+- [x] Implement cancel, session patch, and result/drop/flow event stream APIs.
 - [ ] Implement client-side resume and transport migration consumption using `nnrp-core` recovery semantics.
 
 ## Server API
@@ -29,7 +29,7 @@
 - [ ] Add server capability advertisement, cache limits, and schema/profile registry inputs.
 - [x] Implement TCP bind/listen/accept and QUIC bind hooks.
 - [x] Implement `NnrpServerSession` with receive-submit, send-result, and close ack APIs.
-- [ ] Implement `NnrpServerSession` send-result-drop, send-flow-update, and patch ack APIs.
+- [x] Implement `NnrpServerSession` send-result-drop, send-flow-update, and patch ack APIs.
 - [ ] Implement server-side session registry, operation registry, cache/schema validation, and recovery token handling.
 - [ ] Keep authentication and application policy pluggable rather than built into the protocol layer.
 
