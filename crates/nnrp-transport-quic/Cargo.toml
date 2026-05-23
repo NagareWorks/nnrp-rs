@@ -24,6 +24,8 @@ nnrp-runtime = { path = "../nnrp-runtime", version = "1.0.0-preview.3" }
 nnrp-transport-provider = { path = "../nnrp-transport-provider", version = "1.0.0-preview.3", default-features = false, features = ["quic"] }
 async-trait.workspace = true
 quinn = "0.11.9"
-rcgen = "0.14"
+rcgen = "=0.14.7"
 rustls = "0.23"
+# Keep the rcgen transitive dependency tree compatible with the CI MSRV.
+time = { version = "=0.3.45", default-features = false }
 tokio.workspace = true
