@@ -35,14 +35,14 @@
     <text x="334" y="196" fill="#bae6fd" font-size="28" font-weight="650" letter-spacing="0">Neural Network Runtime Protocol</text>
     <text x="336" y="238" fill="#d1fae5" font-size="20" font-weight="500" letter-spacing="0">A lightweight long-lived real-time application-layer protocol for AI model runtimes.</text>
     <g font-size="15" font-weight="650">
-      <rect x="336" y="264" width="118" height="34" rx="17" fill="#0f766e" opacity="0.95"/>
-      <text x="358" y="286" fill="#ecfeff">Preview3</text>
-      <rect x="468" y="264" width="132" height="34" rx="17" fill="#1d4ed8" opacity="0.9"/>
-      <text x="490" y="286" fill="#eff6ff">Rust SDK</text>
-      <rect x="614" y="264" width="130" height="34" rx="17" fill="#15803d" opacity="0.9"/>
-      <text x="636" y="286" fill="#f0fdf4">Native FFI</text>
-      <rect x="758" y="264" width="158" height="34" rx="17" fill="#b45309" opacity="0.9"/>
-      <text x="780" y="286" fill="#fffbeb">WASM primitives</text>
+      <rect x="336" y="264" width="172" height="34" rx="17" fill="#0f766e" opacity="0.95"/>
+      <text x="358" y="286" fill="#ecfeff">Application layer</text>
+      <rect x="522" y="264" width="126" height="34" rx="17" fill="#1d4ed8" opacity="0.9"/>
+      <text x="544" y="286" fill="#eff6ff">AI runtime</text>
+      <rect x="662" y="264" width="150" height="34" rx="17" fill="#15803d" opacity="0.9"/>
+      <text x="684" y="286" fill="#f0fdf4">Real-time flow</text>
+      <rect x="826" y="264" width="136" height="34" rx="17" fill="#b45309" opacity="0.9"/>
+      <text x="840" y="286" fill="#fffbeb">Open protocol</text>
     </g>
   </g>
 </svg>
