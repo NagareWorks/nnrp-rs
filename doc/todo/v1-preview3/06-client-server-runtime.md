@@ -21,7 +21,8 @@
 - [x] Implement `NnrpClient::open_session` and `NnrpClientSession` lifecycle ownership.
 - [x] Implement submit, submit-nowait, await-result, and session close APIs.
 - [x] Implement cancel, session patch, and result/drop/flow event stream APIs.
-- [ ] Implement client-side resume and transport migration consumption using `nnrp-core` recovery semantics.
+- [x] Implement client-side resume consumption using `nnrp-core` recovery semantics.
+- [ ] Implement transport migration consumption using `nnrp-core` recovery semantics.
 
 ## Server API
 
@@ -31,7 +32,7 @@
 - [x] Implement `NnrpServerSession` with receive-submit, send-result, and close ack APIs.
 - [x] Implement `NnrpServerSession` send-result-drop, send-flow-update, and patch ack APIs.
 - [x] Implement server-side operation registry and cache/schema validation.
-- [ ] Implement server-side session registry and recovery token handling.
+- [x] Implement server-side session registry and recovery token handling.
 - [ ] Keep authentication and application policy pluggable rather than built into the protocol layer.
 
 ## FFI Runtime Binding

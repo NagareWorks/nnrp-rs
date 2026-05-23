@@ -247,6 +247,62 @@ async fn server_rejects_unsupported_profile_before_session_install() -> Result<(
 }
 
 #[tokio::test]
+async fn server_registry_tracks_resume_enabled_sessions() -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp(
+        "127.0.0.1:0",
+        NnrpServerConfig::default().with_resume_token_bytes(24),
+    )
+    .await?;
+    let addr = server.local_addr()?;
+
+    let server_task = tokio::spawn(async move {
+        let mut first = server.accept().await?;
+        assert_eq!(server.session_count()?, 1);
+        assert_eq!(first.session_id(), 77);
+
+        let mut resumed = server.accept().await?;
+        assert_eq!(server.session_count()?, 1);
+        assert_eq!(resumed.session_id(), 77);
+        assert_eq!(resumed.client_open().resume_token_bytes, 24);
+
+        let close = resumed.receive_close().await?;
+        resumed.ack_close(&close).await?;
+        resumed.close().await?;
+        assert_eq!(server.session_count()?, 0);
+
+        let close = first.receive_close().await?;
+        first.ack_close(&close).await?;
+        first.close().await
+    });
+
+    let initial_config = NnrpClientConfig {
+        requested_session_id: 77,
+        ..Default::default()
+    }
+    .with_resume(0);
+    let initial = NnrpClient::connect_tcp(addr, initial_config)
+        .await?
+        .open_session()
+        .await?;
+
+    let resume_config = NnrpClientConfig {
+        requested_session_id: 77,
+        ..Default::default()
+    }
+    .with_resume(24);
+    let resumed = NnrpClient::connect_tcp(addr, resume_config)
+        .await?
+        .open_session()
+        .await?;
+    assert_eq!(resumed.session_id(), 77);
+
+    resumed.close().await?;
+    initial.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn client_result_reader_rejects_wrong_session_and_metadata_shape() -> Result<(), RuntimeError>
 {
     let wrong_message = {

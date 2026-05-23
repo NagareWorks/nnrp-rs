@@ -16,4 +16,7 @@ pub enum RuntimeError {
 
     #[error("unexpected runtime message: {0}")]
     UnexpectedMessage(&'static str),
+
+    #[error("runtime internal error: {0}")]
+    Internal(&'static str),
 }

@@ -1,3 +1,6 @@
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex, MutexGuard};
+
 use nnrp_core::{
     validate_profile_assignment, validate_result_drop_header, CacheObjectId, CacheObjectKind,
     CommonHeader, ConnectionLifecycle, FlowUpdateMetadata, FrameSubmitMetadata, MessageType,
@@ -5,9 +8,10 @@ use nnrp_core::{
     SchemaRegistry, SessionCloseAckMetadata, SessionCloseMetadata, SessionCloseStatus,
     SessionOpenAckMetadata, SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchMetadata,
     SessionStatus, FLOW_UPDATE_METADATA_LEN, FRAME_SUBMIT_METADATA_LEN, RESULT_PUSH_METADATA_LEN,
-    SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_LIMIT_REACHED, SESSION_ERROR_NONE,
-    SESSION_ERROR_PROFILE_UNSUPPORTED, SESSION_ERROR_SCHEMA_UNSUPPORTED,
-    SESSION_OPEN_ACK_METADATA_LEN, SESSION_PATCH_ACK_METADATA_LEN, SESSION_PATCH_METADATA_LEN,
+    SESSION_ACK_FLAG_RESUME_ENABLED, SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_LIMIT_REACHED,
+    SESSION_ERROR_NONE, SESSION_ERROR_PROFILE_UNSUPPORTED, SESSION_ERROR_RESUME_REJECTED,
+    SESSION_ERROR_SCHEMA_UNSUPPORTED, SESSION_FLAG_ALLOW_RESUME, SESSION_OPEN_ACK_METADATA_LEN,
+    SESSION_PATCH_ACK_METADATA_LEN, SESSION_PATCH_METADATA_LEN,
 };
 use tokio::net::TcpListener;
 
@@ -21,6 +25,7 @@ pub struct NnrpServerConfig {
     pub max_cache_objects: usize,
     pub max_cache_object_bytes: u32,
     pub schema_registry: SchemaRegistry,
+    pub resume_token_bytes: u32,
     pub max_in_flight_operations: u16,
     pub granted_operation_credit: u16,
     pub lease_ttl_ms: u32,
@@ -36,6 +41,7 @@ impl Default for NnrpServerConfig {
             max_cache_objects: 0,
             max_cache_object_bytes: 0,
             schema_registry: SchemaRegistry::with_standard_preview3_profiles(),
+            resume_token_bytes: 24,
             max_in_flight_operations: 4,
             granted_operation_credit: 2,
             lease_ttl_ms: 30_000,
@@ -74,6 +80,11 @@ impl NnrpServerConfig {
         self
     }
 
+    pub fn with_resume_token_bytes(mut self, resume_token_bytes: u32) -> Self {
+        self.resume_token_bytes = resume_token_bytes;
+        self
+    }
+
     fn validate_client_open(&self, open: &SessionOpenMetadata) -> Result<(), u32> {
         if !self.supported_profiles.contains(&open.profile_id)
             || validate_profile_assignment(open.profile_id).is_err()
@@ -101,6 +112,7 @@ impl NnrpServerConfig {
 pub struct NnrpServer {
     listener: TcpListener,
     config: NnrpServerConfig,
+    sessions: SharedSessionRegistry,
 }
 
 #[derive(Debug)]
@@ -112,7 +124,21 @@ pub struct NnrpServerSession {
     operations: OperationRegistry,
     cache_objects: Vec<CacheObjectId>,
     max_cache_objects: usize,
+    sessions: SharedSessionRegistry,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeSessionRecord {
+    pub session_id: u32,
+    pub profile_id: u16,
+    pub schema_id: u32,
+    pub schema_version: u32,
+    pub resume_enabled: bool,
+    pub resume_token_bytes: u32,
+    pub last_operation_id: u64,
+}
+
+type SharedSessionRegistry = Arc<Mutex<BTreeMap<u32, RuntimeSessionRecord>>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NnrpSubmit {
@@ -139,6 +165,7 @@ impl NnrpServer {
         Ok(Self {
             listener: TcpListener::bind(addr).await?,
             config,
+            sessions: Arc::new(Mutex::new(BTreeMap::new())),
         })
     }
 
@@ -160,6 +187,10 @@ impl NnrpServer {
         Ok(self.listener.local_addr()?)
     }
 
+    pub fn session_count(&self) -> Result<usize, RuntimeError> {
+        Ok(self.session_registry()?.len())
+    }
+
     pub async fn accept(&self) -> Result<NnrpServerSession, RuntimeError> {
         let (stream, _) = self.listener.accept().await?;
         let mut transport = TcpTransport::new(stream);
@@ -171,6 +202,7 @@ impl NnrpServer {
         }
 
         let open = SessionOpenMetadata::parse(&packet.metadata)?;
+        nnrp_core::validate_session_recovery_request(&open)?;
         let ack = self.accept_ack(&open);
         let mut ack_bytes = vec![0u8; SESSION_OPEN_ACK_METADATA_LEN];
         ack.write(&mut ack_bytes)?;
@@ -196,6 +228,18 @@ impl NnrpServer {
 
         let mut lifecycle = ConnectionLifecycle::new();
         lifecycle.apply_session_open_ack(&ack)?;
+        self.session_registry()?.insert(
+            ack.session_id,
+            RuntimeSessionRecord {
+                session_id: ack.session_id,
+                profile_id: ack.accepted_profile_id,
+                schema_id: ack.schema_id,
+                schema_version: ack.schema_version,
+                resume_enabled: ack.session_flags_ack & SESSION_ACK_FLAG_RESUME_ENABLED != 0,
+                resume_token_bytes: ack.resume_token_bytes,
+                last_operation_id: 0,
+            },
+        );
 
         Ok(NnrpServerSession {
             session_id: ack.session_id,
@@ -205,14 +249,38 @@ impl NnrpServer {
             operations: OperationRegistry::new(),
             cache_objects: Vec::new(),
             max_cache_objects: self.config.max_cache_objects,
+            sessions: Arc::clone(&self.sessions),
         })
     }
 
     fn accept_ack(&self, open: &SessionOpenMetadata) -> SessionOpenAckMetadata {
         let validation_error = self.config.validate_client_open(open).err();
-        let accepted = validation_error.is_none();
+        let resume_attempt = open.resume_token_bytes > 0;
+        let existing_session = self
+            .session_registry()
+            .ok()
+            .and_then(|registry| registry.get(&open.requested_session_id).cloned());
+        let known_resume = resume_attempt
+            && existing_session
+                .as_ref()
+                .filter(|record| record.resume_enabled)
+                .is_some();
+        let recovery_error = if resume_attempt && !known_resume {
+            Some(SESSION_ERROR_RESUME_REJECTED)
+        } else if !resume_attempt && existing_session.is_some() {
+            Some(SESSION_ERROR_LIMIT_REACHED)
+        } else {
+            None
+        };
+        let accepted = validation_error.is_none() && recovery_error.is_none();
         let session_id = if accepted {
             open.requested_session_id.max(1)
+        } else {
+            0
+        };
+        let resume_enabled = open.session_flags & SESSION_FLAG_ALLOW_RESUME != 0;
+        let ack_resume_token_bytes = if accepted && resume_enabled {
+            self.config.resume_token_bytes
         } else {
             0
         };
@@ -220,10 +288,12 @@ impl NnrpServer {
             session_id,
             accepted_profile_id: open.profile_id,
             accepted_priority_class: open.priority_class,
-            session_status: if accepted {
-                SessionStatus::Opened
-            } else {
+            session_status: if !accepted {
                 SessionStatus::Rejected
+            } else if resume_attempt {
+                SessionStatus::Resumed
+            } else {
+                SessionStatus::Opened
             },
             schema_id: open.schema_id,
             schema_version: open.schema_version,
@@ -231,13 +301,27 @@ impl NnrpServer {
             max_in_flight_operations: self.config.max_in_flight_operations,
             lease_ttl_ms: self.config.lease_ttl_ms,
             resume_window_ms: self.config.resume_window_ms,
-            resume_token_bytes: 0,
+            resume_token_bytes: ack_resume_token_bytes,
             session_extension_bytes: 0,
             server_session_tag: session_id as u64,
             route_scope_id: 0,
-            session_error_code: validation_error.unwrap_or(SESSION_ERROR_NONE),
-            session_flags_ack: 0,
+            session_error_code: validation_error
+                .or(recovery_error)
+                .unwrap_or(SESSION_ERROR_NONE),
+            session_flags_ack: if ack_resume_token_bytes > 0 {
+                SESSION_ACK_FLAG_RESUME_ENABLED
+            } else {
+                0
+            },
         }
+    }
+
+    fn session_registry(
+        &self,
+    ) -> Result<MutexGuard<'_, BTreeMap<u32, RuntimeSessionRecord>>, RuntimeError> {
+        self.sessions
+            .lock()
+            .map_err(|_| RuntimeError::Internal("server session registry lock poisoned"))
     }
 }
 
@@ -284,6 +368,7 @@ impl NnrpServerSession {
             self.session_id,
             packet.header.frame_id as u64,
         ))?;
+        self.update_registry_last_operation(packet.header.frame_id as u64)?;
 
         Ok(NnrpSubmit {
             frame_id: packet.header.frame_id,
@@ -454,6 +539,7 @@ impl NnrpServerSession {
     }
 
     pub async fn close(mut self) -> Result<(), RuntimeError> {
+        self.remove_from_registry()?;
         self.transport.close().await
     }
 
@@ -466,5 +552,26 @@ impl NnrpServerSession {
             return Err(RuntimeError::UnexpectedMessage(message));
         }
         Ok(())
+    }
+
+    fn update_registry_last_operation(&self, operation_id: u64) -> Result<(), RuntimeError> {
+        let mut sessions = self.session_registry()?;
+        if let Some(record) = sessions.get_mut(&self.session_id) {
+            record.last_operation_id = record.last_operation_id.max(operation_id);
+        }
+        Ok(())
+    }
+
+    fn remove_from_registry(&self) -> Result<(), RuntimeError> {
+        self.session_registry()?.remove(&self.session_id);
+        Ok(())
+    }
+
+    fn session_registry(
+        &self,
+    ) -> Result<MutexGuard<'_, BTreeMap<u32, RuntimeSessionRecord>>, RuntimeError> {
+        self.sessions
+            .lock()
+            .map_err(|_| RuntimeError::Internal("server session registry lock poisoned"))
     }
 }

@@ -22,6 +22,8 @@ pub struct NnrpClientConfig {
     pub default_deadline_ms: u32,
     pub max_in_flight_operations: u16,
     pub lease_ttl_hint_ms: u32,
+    pub allow_resume: bool,
+    pub resume_token_bytes: u32,
     pub cache_hints: Vec<CacheObjectKind>,
 }
 
@@ -37,6 +39,8 @@ impl Default for NnrpClientConfig {
             default_deadline_ms: 500,
             max_in_flight_operations: 4,
             lease_ttl_hint_ms: 30_000,
+            allow_resume: false,
+            resume_token_bytes: 0,
             cache_hints: Vec::new(),
         }
     }
@@ -50,6 +54,12 @@ impl NnrpClientConfig {
 
     pub fn with_cache_hints(mut self, cache_hints: impl Into<Vec<CacheObjectKind>>) -> Self {
         self.cache_hints = cache_hints.into();
+        self
+    }
+
+    pub fn with_resume(mut self, resume_token_bytes: u32) -> Self {
+        self.allow_resume = true;
+        self.resume_token_bytes = resume_token_bytes;
         self
     }
 }
@@ -136,6 +146,7 @@ impl NnrpClient {
         }
 
         let ack = SessionOpenAckMetadata::parse(&ack_packet.metadata)?;
+        nnrp_core::validate_session_recovery_ack(&metadata, &ack)?;
         if !matches!(
             ack.session_status,
             SessionStatus::Opened | SessionStatus::Resumed
@@ -159,13 +170,17 @@ impl NnrpClient {
             requested_session_id: self.config.requested_session_id,
             profile_id: self.config.profile_id,
             priority_class: self.config.priority_class,
-            session_flags: 0,
+            session_flags: if self.config.allow_resume {
+                nnrp_core::SESSION_FLAG_ALLOW_RESUME
+            } else {
+                0
+            },
             schema_id: self.config.schema_id,
             schema_version: self.config.schema_version,
             default_deadline_ms: self.config.default_deadline_ms,
             max_in_flight_operations: self.config.max_in_flight_operations,
             lease_ttl_hint_ms: self.config.lease_ttl_hint_ms,
-            resume_token_bytes: 0,
+            resume_token_bytes: self.config.resume_token_bytes,
             auth_bytes: 0,
             session_extension_bytes: 0,
             client_session_tag: self.config.requested_session_id as u64,
