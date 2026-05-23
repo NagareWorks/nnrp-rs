@@ -1,6 +1,6 @@
 use crate::{
-    CacheObjectKind, CommonHeader, MessageType, NnrpError, TypedPayloadDescriptor,
-    TYPED_PAYLOAD_DESCRIPTOR_LEN,
+    CacheObjectKind, CommonHeader, ErrorMetadata, ErrorScope, MessageType, NnrpError,
+    TypedPayloadDescriptor, CACHE_ERROR_MISS, TYPED_PAYLOAD_DESCRIPTOR_LEN,
 };
 
 pub const FRAME_SUBMIT_METADATA_LEN: usize = 72;
@@ -491,6 +491,25 @@ impl ObjectReferenceBlock {
         self.write(&mut bytes)?;
         Ok(bytes)
     }
+
+    pub fn cache_miss_error_metadata(
+        &self,
+        related_session_id: u32,
+        related_frame_id: u32,
+        related_view_id: u32,
+        diagnostic_bytes: u32,
+    ) -> ErrorMetadata {
+        ErrorMetadata {
+            error_code: CACHE_ERROR_MISS,
+            error_scope: ErrorScope::Frame,
+            is_fatal: false,
+            retry_after_ms: 0,
+            related_session_id,
+            related_frame_id,
+            related_view_id,
+            diagnostic_bytes,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -587,6 +606,34 @@ impl ObjectReferenceRegion {
             }
         }
         Ok(())
+    }
+
+    pub fn first_unresolved<F>(&self, mut contains: F) -> Option<ObjectReferenceBlock>
+    where
+        F: FnMut(&ObjectReferenceBlock) -> bool,
+    {
+        self.blocks.iter().copied().find(|block| !contains(block))
+    }
+
+    pub fn validate_resolved_or_cache_miss<F>(
+        &self,
+        contains: F,
+        related_session_id: u32,
+        related_frame_id: u32,
+        related_view_id: u32,
+    ) -> Result<(), ErrorMetadata>
+    where
+        F: FnMut(&ObjectReferenceBlock) -> bool,
+    {
+        match self.first_unresolved(contains) {
+            Some(block) => Err(block.cache_miss_error_metadata(
+                related_session_id,
+                related_frame_id,
+                related_view_id,
+                0,
+            )),
+            None => Ok(()),
+        }
     }
 }
 
@@ -1195,6 +1242,24 @@ mod tests {
                 rule: "object reference must resolve from cache"
             })
         );
+
+        assert_eq!(missing_mask_bit.first_unresolved(|_| false), Some(camera));
+        assert_eq!(
+            missing_mask_bit.validate_resolved_or_cache_miss(|_| false, 10, 20, 30),
+            Err(ErrorMetadata {
+                error_code: CACHE_ERROR_MISS,
+                error_scope: ErrorScope::Frame,
+                is_fatal: false,
+                retry_after_ms: 0,
+                related_session_id: 10,
+                related_frame_id: 20,
+                related_view_id: 30,
+                diagnostic_bytes: 0,
+            })
+        );
+        assert!(missing_mask_bit
+            .validate_resolved_or_cache_miss(|_| true, 10, 20, 30)
+            .is_ok());
     }
 
     #[test]

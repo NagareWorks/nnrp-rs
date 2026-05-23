@@ -35,7 +35,7 @@ This shard tracks protocol work that `nnrp-rs` must implement for `NNRP/1-previe
 - [x] Implement inherited `CACHE_PUT`, `CACHE_ACK`, and `CACHE_INVALIDATE` metadata and lifecycle validation.
 - [x] Implement inherited object kind assignments and reject unassigned object kinds on strict/conformance paths.
 - [x] Implement inherited invalidate-scope assignments and reject unassigned scopes on strict/conformance paths.
-- [ ] Preserve inherited cache miss behavior as explicit stable protocol errors rather than silent fallback.
+- [x] Preserve inherited cache miss behavior as explicit stable protocol errors rather than silent fallback.
 
 ## Conformance Baseline
 
