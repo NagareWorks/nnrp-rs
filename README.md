@@ -118,6 +118,6 @@ Apache-2.0. See [LICENSE](LICENSE).
 
 ## Contributors
 
-<a href="https://github.com/NagareWorks/nnrp-rs/graphs/contributors" title="Open the contributors graph for individual GitHub profiles and IDs.">
-  <img src="https://contrib.rocks/image?repo=NagareWorks/nnrp-rs" alt="Contributors" />
-</a>
+Thanks to everyone shaping NNRP. See the
+[contributors graph](https://github.com/NagareWorks/nnrp-rs/graphs/contributors)
+for individual GitHub profiles and contribution history.
