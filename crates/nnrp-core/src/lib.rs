@@ -1,4 +1,6 @@
+pub mod cache;
 pub mod codes;
+pub mod control;
 pub mod enums;
 pub mod error;
 pub mod flow;
@@ -9,6 +11,11 @@ pub mod schema;
 pub mod session;
 pub mod version;
 
+pub use cache::{
+    CacheAckMetadata, CacheAckStatus, CacheInvalidateMetadata, CacheInvalidateScope,
+    CacheObjectKind, CachePutMetadata, CACHE_ACK_METADATA_LEN, CACHE_INVALIDATE_METADATA_LEN,
+    CACHE_PUT_FLAGS_KNOWN_MASK, CACHE_PUT_METADATA_LEN,
+};
 pub use codes::{
     CACHE_ERROR_DEPENDENCY_INVALID, CACHE_ERROR_LEASE_EXPIRED, CACHE_ERROR_MISS, CACHE_ERROR_NONE,
     CACHE_ERROR_SCHEMA_MISMATCH, CACHE_ERROR_VERSION_MISMATCH, SCHEMA_ERROR_DEPENDENCY_MISSING,
@@ -17,6 +24,17 @@ pub use codes::{
     SESSION_ERROR_LEASE_POLICY_REJECTED, SESSION_ERROR_LIMIT_REACHED, SESSION_ERROR_NONE,
     SESSION_ERROR_PRIORITY_REJECTED, SESSION_ERROR_PROFILE_UNSUPPORTED,
     SESSION_ERROR_RESUME_REJECTED, SESSION_ERROR_SCHEMA_UNSUPPORTED,
+};
+pub use control::{
+    validate_close_header, validate_empty_control_header, ClientHelloMetadata, ErrorMetadata,
+    ErrorScope, ResultHintBudgetPolicy, ResultHintCongestionState, ResultHintMetadata,
+    ResultHintReason, ServerHelloAckMetadata, SessionMigrateAckMetadata, SessionMigrateMetadata,
+    SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata, SessionPatchRejectReason,
+    TransportId, TransportProbeAckMetadata, TransportProbeMetadata, CLIENT_HELLO_METADATA_LEN,
+    ERROR_METADATA_LEN, RESULT_HINT_METADATA_LEN, SERVER_HELLO_ACK_FLAGS_KNOWN_MASK,
+    SERVER_HELLO_ACK_METADATA_LEN, SESSION_MIGRATE_ACK_METADATA_LEN, SESSION_MIGRATE_METADATA_LEN,
+    SESSION_PATCH_ACK_METADATA_LEN, SESSION_PATCH_FIELD_KNOWN_MASK, SESSION_PATCH_METADATA_LEN,
+    TRANSPORT_PROBE_ACK_METADATA_LEN, TRANSPORT_PROBE_METADATA_LEN,
 };
 pub use enums::{
     BackpressureLevel, CancelScope, FlowScopeKind, FlowUpdateReason, HeaderFlags, InFlightPolicy,

@@ -11,14 +11,14 @@ This shard tracks protocol work that `nnrp-rs` must implement for `NNRP/1-previe
 
 ## Preview2 Control Plane
 
-- [ ] Implement inherited `CLIENT_HELLO` fixed metadata and capability-window validation.
-- [ ] Implement inherited `SERVER_HELLO_ACK` fixed metadata and negotiated capability echo/denial semantics.
-- [ ] Implement inherited `SESSION_PATCH` and `SESSION_PATCH_ACK` metadata and validation.
+- [x] Implement inherited `CLIENT_HELLO` fixed metadata and capability-window validation.
+- [x] Implement inherited `SERVER_HELLO_ACK` fixed metadata and negotiated capability echo/denial semantics.
+- [x] Implement inherited `SESSION_PATCH` and `SESSION_PATCH_ACK` metadata and validation.
 - [x] Implement inherited 32B `FLOW_UPDATE` metadata, flags, scope zeroing rules, retry-after validity, and strict routing validation.
-- [ ] Implement inherited `RESULT_HINT` 16B metadata and stable budget/congestion/reason enums.
-- [ ] Implement inherited `TRANSPORT_PROBE` and `TRANSPORT_PROBE_ACK` 16B metadata.
-- [ ] Implement inherited `SESSION_MIGRATE` and `SESSION_MIGRATE_ACK` 24B metadata.
-- [ ] Implement inherited `PING`, `PONG`, connection-level `CLOSE`, and `ERROR` validation rules.
+- [x] Implement inherited `RESULT_HINT` 16B metadata and stable budget/congestion/reason enums.
+- [x] Implement inherited `TRANSPORT_PROBE` and `TRANSPORT_PROBE_ACK` 16B metadata.
+- [x] Implement inherited `SESSION_MIGRATE` and `SESSION_MIGRATE_ACK` 24B metadata.
+- [x] Implement inherited `PING`, `PONG`, connection-level `CLOSE`, and `ERROR` validation rules.
 
 ## Preview2 Data Plane
 
@@ -32,9 +32,9 @@ This shard tracks protocol work that `nnrp-rs` must implement for `NNRP/1-previe
 
 ## Preview2 Cache And Object Semantics
 
-- [ ] Implement inherited `CACHE_PUT`, `CACHE_ACK`, and `CACHE_INVALIDATE` metadata and lifecycle validation.
-- [ ] Implement inherited object kind assignments and reject unassigned object kinds on strict/conformance paths.
-- [ ] Implement inherited invalidate-scope assignments and reject unassigned scopes on strict/conformance paths.
+- [x] Implement inherited `CACHE_PUT`, `CACHE_ACK`, and `CACHE_INVALIDATE` metadata and lifecycle validation.
+- [x] Implement inherited object kind assignments and reject unassigned object kinds on strict/conformance paths.
+- [x] Implement inherited invalidate-scope assignments and reject unassigned scopes on strict/conformance paths.
 - [ ] Preserve inherited cache miss behavior as explicit stable protocol errors rather than silent fallback.
 
 ## Conformance Baseline
