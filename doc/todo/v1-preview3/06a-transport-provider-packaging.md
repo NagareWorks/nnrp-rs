@@ -31,10 +31,10 @@
 
 ## Native Link Library Packaging
 
-- [x] Configure `nnrp-ffi` to build `rlib` and `cdylib` outputs.
-- [x] Add release packaging scripts for Windows DLL, Linux SO, and macOS dylib artifacts.
-- [x] Add header generation or cbindgen output for C ABI consumers.
-- [x] Add CI jobs that verify platform-specific native library names and exported symbols.
+- [x] Configure `nnrp-ffi` to build `rlib`, `cdylib`, and `staticlib` outputs.
+- [x] Add release packaging scripts for Windows DLL, Linux SO, macOS dylib, Android SO, and iOS static library artifacts.
+- [x] Package the C ABI umbrella/header set (`include/nnrp/nnrp.h`, runtime, error, version, and FFI headers) into every native release artifact.
+- [x] Add CI jobs that verify host native library names/exported symbols and release jobs that build cross-platform artifact matrices.
 - [x] Add Node.js native-loading guidance for backend JS/TS users.
 
 ## WASM And JS/TS Packaging Boundary

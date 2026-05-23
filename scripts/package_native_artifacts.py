@@ -31,6 +31,28 @@ EXPECTED_EXPORTS = [
     "nnrp_dispatch_event",
 ]
 
+TARGETS = {
+    "x86_64-unknown-linux-gnu": ("linux", "x86_64", "dynamic"),
+    "i686-unknown-linux-gnu": ("linux", "x86", "dynamic"),
+    "aarch64-unknown-linux-gnu": ("linux", "aarch64", "dynamic"),
+    "armv7-unknown-linux-gnueabihf": ("linux", "armv7", "dynamic"),
+    "x86_64-pc-windows-msvc": ("windows", "x86_64", "dynamic"),
+    "i686-pc-windows-msvc": ("windows", "x86", "dynamic"),
+    "aarch64-pc-windows-msvc": ("windows", "aarch64", "dynamic"),
+    "x86_64-pc-windows-gnu": ("windows", "x86_64", "dynamic"),
+    "i686-pc-windows-gnu": ("windows", "x86", "dynamic"),
+    "aarch64-pc-windows-gnullvm": ("windows", "aarch64", "dynamic"),
+    "x86_64-apple-darwin": ("macos", "x86_64", "dynamic"),
+    "aarch64-apple-darwin": ("macos", "aarch64", "dynamic"),
+    "aarch64-apple-ios": ("ios", "aarch64", "static"),
+    "aarch64-apple-ios-sim": ("ios", "aarch64-sim", "static"),
+    "x86_64-apple-ios": ("ios", "x86_64-sim", "static"),
+    "aarch64-linux-android": ("android", "aarch64", "dynamic"),
+    "armv7-linux-androideabi": ("android", "armv7", "dynamic"),
+    "i686-linux-android": ("android", "x86", "dynamic"),
+    "x86_64-linux-android": ("android", "x86_64", "dynamic"),
+}
+
 
 def host_os_name() -> str:
     value = platform.system().lower()
@@ -52,32 +74,43 @@ def host_arch_name() -> str:
     return value.replace(" ", "_")
 
 
-def expected_library_name(os_name: str) -> str:
+def expected_library_name(os_name: str, library_kind: str) -> str:
+    if library_kind == "static":
+        return "libnnrp_ffi.a"
     if os_name == "windows":
         return "nnrp_ffi.dll"
-    if os_name == "macos":
+    if os_name in {"macos", "ios"}:
         return "libnnrp_ffi.dylib"
-    if os_name == "linux":
+    if os_name in {"linux", "android"}:
         return "libnnrp_ffi.so"
     raise SystemExit(f"unsupported artifact OS: {os_name}")
 
 
-def build_library(release: bool) -> None:
+def build_library(release: bool, target: str | None) -> None:
     command = ["cargo", "build", "-p", "nnrp-ffi"]
+    if target:
+        command.extend(["--target", target])
     if release:
         command.append("--release")
     subprocess.run(command, cwd=ROOT, check=True)
 
 
-def locate_library(os_name: str, release: bool) -> Path:
-    profile_dir = ROOT / "target" / ("release" if release else "debug")
-    library = profile_dir / expected_library_name(os_name)
+def locate_library(os_name: str, library_kind: str, release: bool, target: str | None) -> Path:
+    if target:
+        profile_dir = ROOT / "target" / target / ("release" if release else "debug")
+    else:
+        profile_dir = ROOT / "target" / ("release" if release else "debug")
+    library = profile_dir / expected_library_name(os_name, library_kind)
     if not library.is_file():
         raise SystemExit(f"expected native library was not found: {library}")
     return library
 
 
-def list_exports(library: Path, os_name: str) -> set[str]:
+def list_exports(library: Path, os_name: str, library_kind: str) -> set[str]:
+    if library_kind == "static":
+        output = subprocess.check_output(["nm", "-g", str(library)], text=True)
+        return parse_nm_exports(output)
+
     if os_name == "windows":
         dumpbin = find_dumpbin()
         if dumpbin is None:
@@ -89,6 +122,10 @@ def list_exports(library: Path, os_name: str) -> set[str]:
         output = subprocess.check_output(["nm", "-gU", str(library)], text=True)
     else:
         output = subprocess.check_output(["nm", "-D", "--defined-only", str(library)], text=True)
+    return parse_nm_exports(output)
+
+
+def parse_nm_exports(output: str) -> set[str]:
     exports = set()
     for line in output.splitlines():
         symbol = line.split()[-1]
@@ -132,8 +169,8 @@ def find_dumpbin() -> Path | None:
     return None
 
 
-def verify_exports(library: Path, os_name: str) -> None:
-    exports = list_exports(library, os_name)
+def verify_exports(library: Path, os_name: str, library_kind: str) -> None:
+    exports = list_exports(library, os_name, library_kind)
     missing = [symbol for symbol in EXPECTED_EXPORTS if symbol not in exports]
     if missing:
         raise SystemExit(
@@ -155,19 +192,51 @@ def copy_headers(package_dir: Path) -> list[str]:
     return [f"include/nnrp/{header.name}" for header in headers]
 
 
-def package_artifact(library: Path, os_name: str, arch_name: str, out_dir: Path, release: bool) -> Path:
-    package_dir = out_dir / f"{os_name}-{arch_name}"
+def copy_library_artifacts(library: Path, package_dir: Path, os_name: str) -> list[str]:
+    copied = []
+    shutil.copy2(library, package_dir / library.name)
+    copied.append(library.name)
+    if os_name == "windows":
+        for sidecar_name in (
+            f"{library.name}.lib",
+            f"{library.name}.exp",
+            f"{library.stem}.pdb",
+        ):
+            sidecar = library.with_name(sidecar_name)
+            if sidecar.is_file():
+                shutil.copy2(sidecar, package_dir / sidecar.name)
+                copied.append(sidecar.name)
+    return copied
+
+
+def package_artifact(
+    library: Path,
+    os_name: str,
+    arch_name: str,
+    library_kind: str,
+    target: str | None,
+    package_name: str | None,
+    out_dir: Path,
+    release: bool,
+) -> Path:
+    resolved_package_name = package_name or f"{os_name}-{arch_name}"
+    if target and package_name is None:
+        resolved_package_name = f"{resolved_package_name}-{target}"
+    package_dir = out_dir / resolved_package_name
     if package_dir.exists():
         shutil.rmtree(package_dir)
     package_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(library, package_dir / library.name)
+    libraries = copy_library_artifacts(library, package_dir, os_name)
     headers = copy_headers(package_dir)
     manifest = {
         "package": "nnrp-ffi",
         "profile": "release" if release else "debug",
         "os": os_name,
         "arch": arch_name,
+        "target": target,
+        "library_kind": library_kind,
         "library": library.name,
+        "libraries": libraries,
         "header": "include/nnrp/nnrp.h",
         "headers": headers,
         "legacy_header": "nnrp_ffi.h",
@@ -179,21 +248,41 @@ def package_artifact(library: Path, os_name: str, arch_name: str, out_dir: Path,
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build and package nnrp-ffi native artifacts.")
-    parser.add_argument("--os", choices=["windows", "linux", "macos"], default=host_os_name())
-    parser.add_argument("--arch", default=host_arch_name())
+    parser.add_argument("--target", choices=sorted(TARGETS.keys()))
+    parser.add_argument("--os", choices=["windows", "linux", "macos", "android", "ios"])
+    parser.add_argument("--arch")
+    parser.add_argument("--library-kind", choices=["dynamic", "static"])
+    parser.add_argument("--package-name")
     parser.add_argument("--out", type=Path, default=ROOT / "artifacts" / "native")
     parser.add_argument("--debug", action="store_true", help="Use the debug target profile.")
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--skip-symbol-check", action="store_true")
     args = parser.parse_args()
 
+    target_os, target_arch, target_library_kind = TARGETS.get(
+        args.target,
+        (host_os_name(), host_arch_name(), "dynamic"),
+    )
+    os_name = args.os or target_os
+    arch_name = args.arch or target_arch
+    library_kind = args.library_kind or target_library_kind
+
     release = not args.debug
     if not args.skip_build:
-        build_library(release)
-    library = locate_library(args.os, release)
+        build_library(release, args.target)
+    library = locate_library(os_name, library_kind, release, args.target)
     if not args.skip_symbol_check:
-        verify_exports(library, args.os)
-    package_dir = package_artifact(library, args.os, args.arch, args.out, release)
+        verify_exports(library, os_name, library_kind)
+    package_dir = package_artifact(
+        library,
+        os_name,
+        arch_name,
+        library_kind,
+        args.target,
+        args.package_name,
+        args.out,
+        release,
+    )
     print(package_dir)
 
 

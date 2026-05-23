@@ -81,6 +81,10 @@ python scripts\package_native_artifacts.py --out artifacts\native
 
 Native artifacts include `include/nnrp/nnrp.h` as the C/C++ umbrella header,
 plus `nnrp_ffi.h`, `nnrp_error.h`, `nnrp_runtime.h`, and `nnrp_version.h`.
+Release CI packages Windows, Linux, macOS, Android, and iOS targets, including
+32-bit x86/ARM variants where Rust and the platform toolchain expose supported
+targets. Desktop and Android packages ship dynamic libraries; iOS packages ship
+static libraries for app/toolchain linking.
 
 WASM primitives are for future `nnrp-js` wrapping. Node.js should probe native libraries first and fall back to WASM when native loading is unavailable; browsers consume WASM plus WebSocket/WebTransport adapters from the JS/TS layer.
 
