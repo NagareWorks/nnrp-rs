@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/nnrp-core",
+    "crates/nnrp-runtime",
     "crates/nnrp-ffi",
     "crates/nnrp-conformance",
 ]
@@ -14,4 +15,6 @@ rust-version = "1.82"
 authors = ["NagareWorks"]
 
 [workspace.dependencies]
+async-trait = "0.1"
 thiserror = "2.0"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }

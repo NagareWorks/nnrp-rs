@@ -1,0 +1,13 @@
+[package]
+name = "nnrp-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.2" }
+thiserror.workspace = true
+tokio.workspace = true
