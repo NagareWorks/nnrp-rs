@@ -1,4 +1,7 @@
-use crate::{CacheObjectKind, CommonHeader, MessageType, NnrpError};
+use crate::{
+    CacheObjectKind, CommonHeader, MessageType, NnrpError, TypedPayloadDescriptor,
+    TYPED_PAYLOAD_DESCRIPTOR_LEN,
+};
 
 pub const FRAME_SUBMIT_METADATA_LEN: usize = 72;
 pub const RESULT_PUSH_METADATA_LEN: usize = 64;
@@ -9,6 +12,9 @@ pub const BUDGET_POLICY_KNOWN_MASK: u8 = 0x0f;
 pub const RESULT_FLAGS_KNOWN_MASK: u16 = 0x0007;
 pub const PAYLOAD_KIND_KNOWN_MASK: u32 = 0x0000_007f;
 pub const SUBMIT_OBJECT_REF_MASK_KNOWN_BITS: u32 = 0x0000_000f;
+pub const STANDARD_PROFILE_UNSPECIFIED: u16 = 0x0000;
+pub const STANDARD_PROFILE_TENSOR: u16 = 0x0001;
+pub const STANDARD_PROFILE_TOKEN: u16 = 0x0002;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -584,6 +590,174 @@ impl ObjectReferenceRegion {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TypedPayloadFrameView<'a> {
+    pub descriptor: TypedPayloadDescriptor,
+    pub payload: &'a [u8],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedPayloadRegion<'a> {
+    descriptors: Vec<TypedPayloadDescriptor>,
+    payload_region: &'a [u8],
+}
+
+impl<'a> TypedPayloadRegion<'a> {
+    pub fn parse(
+        payload_kind_bitmap: PayloadKindBitmap,
+        payload_frame_count: u16,
+        descriptor_region: &[u8],
+        payload_region: &'a [u8],
+    ) -> Result<Self, NnrpError> {
+        payload_kind_bitmap.validate()?;
+        let expected_descriptor_bytes = usize::from(payload_frame_count)
+            .checked_mul(TYPED_PAYLOAD_DESCRIPTOR_LEN)
+            .ok_or(NnrpError::MessageLengthOverflow)?;
+        if descriptor_region.len() != expected_descriptor_bytes {
+            return Err(NnrpError::InvalidProtocolCombination {
+                rule: "typed payload descriptor region length must match payload_frame_count",
+            });
+        }
+
+        if payload_frame_count == 0 {
+            if !descriptor_region.is_empty() || !payload_region.is_empty() {
+                return Err(NnrpError::InvalidProtocolCombination {
+                    rule: "zero typed payload frames require empty descriptor and frame regions",
+                });
+            }
+            return Ok(Self {
+                descriptors: Vec::new(),
+                payload_region,
+            });
+        }
+
+        let descriptors = descriptor_region
+            .chunks_exact(TYPED_PAYLOAD_DESCRIPTOR_LEN)
+            .map(TypedPayloadDescriptor::parse)
+            .collect::<Result<Vec<_>, _>>()?;
+        let region = Self {
+            descriptors,
+            payload_region,
+        };
+        region.validate(payload_kind_bitmap, payload_frame_count)?;
+        Ok(region)
+    }
+
+    pub fn from_parts(
+        payload_kind_bitmap: PayloadKindBitmap,
+        descriptors: Vec<TypedPayloadDescriptor>,
+        payload_region: &'a [u8],
+    ) -> Result<Self, NnrpError> {
+        let payload_frame_count =
+            u16::try_from(descriptors.len()).map_err(|_| NnrpError::MessageLengthOverflow)?;
+        let region = Self {
+            descriptors,
+            payload_region,
+        };
+        region.validate(payload_kind_bitmap, payload_frame_count)?;
+        Ok(region)
+    }
+
+    pub fn descriptors(&self) -> &[TypedPayloadDescriptor] {
+        &self.descriptors
+    }
+
+    pub fn payload_region(&self) -> &'a [u8] {
+        self.payload_region
+    }
+
+    pub fn frame_views(&self) -> Result<Vec<TypedPayloadFrameView<'a>>, NnrpError> {
+        self.descriptors
+            .iter()
+            .map(|descriptor| {
+                let start = descriptor.offset as usize;
+                let end = checked_payload_end(descriptor)?;
+                Ok(TypedPayloadFrameView {
+                    descriptor: *descriptor,
+                    payload: &self.payload_region[start..end],
+                })
+            })
+            .collect()
+    }
+
+    pub fn descriptor_region_bytes(&self) -> Result<Vec<u8>, NnrpError> {
+        let mut bytes = vec![0u8; self.descriptors.len() * TYPED_PAYLOAD_DESCRIPTOR_LEN];
+        for (index, descriptor) in self.descriptors.iter().enumerate() {
+            descriptor.write(
+                &mut bytes[index * TYPED_PAYLOAD_DESCRIPTOR_LEN
+                    ..(index + 1) * TYPED_PAYLOAD_DESCRIPTOR_LEN],
+            )?;
+        }
+        Ok(bytes)
+    }
+
+    fn validate(
+        &self,
+        payload_kind_bitmap: PayloadKindBitmap,
+        payload_frame_count: u16,
+    ) -> Result<(), NnrpError> {
+        if self.descriptors.len() != usize::from(payload_frame_count) {
+            return Err(NnrpError::InvalidProtocolCombination {
+                rule: "typed payload descriptor count must match payload_frame_count",
+            });
+        }
+
+        let mut next_expected_offset = 0usize;
+        for descriptor in &self.descriptors {
+            validate_descriptor_profile(payload_kind_bitmap, descriptor)?;
+            if descriptor.offset as usize != next_expected_offset {
+                return Err(NnrpError::InvalidProtocolCombination {
+                    rule: "typed payload descriptors must be packed in strictly contiguous order",
+                });
+            }
+            next_expected_offset = checked_payload_end(descriptor)?;
+            if next_expected_offset > self.payload_region.len() {
+                return Err(NnrpError::InvalidProtocolCombination {
+                    rule: "typed payload descriptor range must fit the frame region",
+                });
+            }
+        }
+
+        if next_expected_offset != self.payload_region.len() {
+            return Err(NnrpError::InvalidProtocolCombination {
+                rule: "typed payload frame region must be exactly covered by descriptors",
+            });
+        }
+
+        Ok(())
+    }
+}
+
+fn validate_descriptor_profile(
+    payload_kind_bitmap: PayloadKindBitmap,
+    descriptor: &TypedPayloadDescriptor,
+) -> Result<(), NnrpError> {
+    let non_tensor_payloads = payload_kind_bitmap.0 & !PayloadKindBitmap::TENSOR;
+    if non_tensor_payloads != 0 && descriptor.profile_id == STANDARD_PROFILE_TENSOR {
+        return Err(NnrpError::InvalidProtocolCombination {
+            rule: "non-tensor typed payload frames must not use tensor profile",
+        });
+    }
+
+    if payload_kind_bitmap.0 == PayloadKindBitmap::TOKEN_CHUNK
+        && descriptor.profile_id != STANDARD_PROFILE_TOKEN
+    {
+        return Err(NnrpError::InvalidProtocolCombination {
+            rule: "token-only typed payload frames require token profile",
+        });
+    }
+
+    Ok(())
+}
+
+fn checked_payload_end(descriptor: &TypedPayloadDescriptor) -> Result<usize, NnrpError> {
+    let end = descriptor
+        .offset
+        .checked_add(descriptor.length)
+        .ok_or(NnrpError::MessageLengthOverflow)?;
+    usize::try_from(end).map_err(|_| NnrpError::MessageLengthOverflow)
+}
+
 pub fn validate_submit_object_ref_mask(
     submit_mode: SubmitMode,
     object_ref_mask: u32,
@@ -1019,6 +1193,152 @@ mod tests {
             missing_mask_bit.validate_resolved(|_| false),
             Err(NnrpError::InvalidProtocolCombination {
                 rule: "object reference must resolve from cache"
+            })
+        );
+    }
+
+    #[test]
+    fn typed_payload_region_packs_descriptors_and_projects_frames() {
+        let first = TypedPayloadDescriptor {
+            profile_id: STANDARD_PROFILE_TOKEN,
+            descriptor_flags: 0x0002,
+            schema_id: 0x0000_1001,
+            schema_version: 3,
+            stream_semantics: 2,
+            offset: 0,
+            length: 2,
+        };
+        let second = TypedPayloadDescriptor {
+            profile_id: STANDARD_PROFILE_TOKEN,
+            descriptor_flags: 0x0001,
+            schema_id: 0x0000_1001,
+            schema_version: 3,
+            stream_semantics: 2,
+            offset: 2,
+            length: 3,
+        };
+        let payload = b"hello";
+        let region = TypedPayloadRegion::from_parts(
+            PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),
+            vec![first, second],
+            payload,
+        )
+        .unwrap();
+
+        let descriptor_bytes = region.descriptor_region_bytes().unwrap();
+        let parsed = TypedPayloadRegion::parse(
+            PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),
+            2,
+            &descriptor_bytes,
+            payload,
+        )
+        .unwrap();
+        let frames = parsed.frame_views().unwrap();
+
+        assert_eq!(parsed.descriptors(), &[first, second]);
+        assert_eq!(frames[0].payload, b"he");
+        assert_eq!(frames[1].payload, b"llo");
+    }
+
+    #[test]
+    fn typed_payload_region_rejects_bad_lengths_offsets_and_profiles() {
+        let token = TypedPayloadDescriptor {
+            profile_id: STANDARD_PROFILE_TOKEN,
+            descriptor_flags: 0,
+            schema_id: 0x0000_1001,
+            schema_version: 3,
+            stream_semantics: 2,
+            offset: 1,
+            length: 2,
+        };
+
+        assert_eq!(
+            TypedPayloadRegion::parse(
+                PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),
+                1,
+                &[],
+                b""
+            ),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "typed payload descriptor region length must match payload_frame_count"
+            })
+        );
+        assert_eq!(
+            TypedPayloadRegion::parse(
+                PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),
+                0,
+                &[],
+                b"x"
+            ),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "zero typed payload frames require empty descriptor and frame regions"
+            })
+        );
+        assert_eq!(
+            TypedPayloadRegion::from_parts(
+                PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),
+                vec![token],
+                b"abc"
+            ),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "typed payload descriptors must be packed in strictly contiguous order"
+            })
+        );
+
+        let too_long = TypedPayloadDescriptor { offset: 0, ..token };
+        assert_eq!(
+            TypedPayloadRegion::from_parts(
+                PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),
+                vec![too_long],
+                b"a"
+            ),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "typed payload descriptor range must fit the frame region"
+            })
+        );
+
+        let short_cover = TypedPayloadDescriptor {
+            length: 1,
+            ..too_long
+        };
+        assert_eq!(
+            TypedPayloadRegion::from_parts(
+                PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),
+                vec![short_cover],
+                b"ab"
+            ),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "typed payload frame region must be exactly covered by descriptors"
+            })
+        );
+
+        let tensor_profile = TypedPayloadDescriptor {
+            profile_id: STANDARD_PROFILE_TENSOR,
+            offset: 0,
+            length: 1,
+            ..token
+        };
+        assert_eq!(
+            TypedPayloadRegion::from_parts(
+                PayloadKindBitmap(PayloadKindBitmap::STRUCTURED_EVENT),
+                vec![tensor_profile],
+                b"x"
+            ),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "non-tensor typed payload frames must not use tensor profile"
+            })
+        );
+        assert_eq!(
+            TypedPayloadRegion::from_parts(
+                PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),
+                vec![TypedPayloadDescriptor {
+                    profile_id: STANDARD_PROFILE_UNSPECIFIED,
+                    ..tensor_profile
+                }],
+                b"x"
+            ),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "token-only typed payload frames require token profile"
             })
         );
     }

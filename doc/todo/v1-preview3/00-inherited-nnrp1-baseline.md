@@ -28,7 +28,7 @@ This shard tracks protocol work that `nnrp-rs` must implement for `NNRP/1-previe
 - [x] Implement inherited body-region prelude layout and fixed region ordering.
 - [x] Implement inherited object-reference block parsing, cache-backed region validation, and unresolved-reference rejection.
 - [x] Implement inherited/preview3 typed payload descriptor fixed layout and strict descriptor flag validation.
-- [ ] Implement inherited typed-payload frame region packing for non-tensor payload families.
+- [x] Implement inherited typed-payload frame region packing for non-tensor payload families.
 
 ## Preview2 Cache And Object Semantics
 
