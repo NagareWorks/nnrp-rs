@@ -11,4 +11,7 @@ pub use server::{
     AllowAllServerPolicy, NnrpCancel, NnrpMigration, NnrpServer, NnrpServerConfig,
     NnrpServerPolicy, NnrpServerSession, NnrpSubmit,
 };
-pub use transport::{FramedTransport, RuntimeTransportKind, TcpTransport};
+pub use transport::{
+    BoxedFramedListener, BoxedFramedTransport, FramedListener, FramedTransport,
+    RuntimeTransportKind, TcpFramedListener, TcpTransport,
+};

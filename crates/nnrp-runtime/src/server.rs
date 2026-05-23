@@ -18,7 +18,10 @@ use nnrp_core::{
 };
 use tokio::net::TcpListener;
 
-use crate::{FramedTransport, RuntimeError, RuntimePacket, RuntimeTransportKind, TcpTransport};
+use crate::{
+    BoxedFramedListener, BoxedFramedTransport, FramedListener, RuntimeError, RuntimePacket,
+    RuntimeTransportKind, TcpFramedListener,
+};
 
 #[derive(Clone)]
 pub struct NnrpServerConfig {
@@ -156,18 +159,16 @@ impl NnrpServerConfig {
     }
 }
 
-#[derive(Debug)]
 pub struct NnrpServer {
-    listener: TcpListener,
+    listener: BoxedFramedListener,
     config: NnrpServerConfig,
     sessions: SharedSessionRegistry,
 }
 
-#[derive(Debug)]
 pub struct NnrpServerSession {
     session_id: u32,
     client_open: SessionOpenMetadata,
-    transport: TcpTransport,
+    transport: BoxedFramedTransport,
     lifecycle: ConnectionLifecycle,
     operations: OperationRegistry,
     cache_objects: Vec<CacheObjectId>,
@@ -215,11 +216,10 @@ impl NnrpServer {
                 "server config selected a non-TCP transport for bind_tcp",
             ));
         }
-        Ok(Self {
-            listener: TcpListener::bind(addr).await?,
+        Self::from_listener(
+            TcpFramedListener::new(TcpListener::bind(addr).await?),
             config,
-            sessions: Arc::new(Mutex::new(BTreeMap::new())),
-        })
+        )
     }
 
     pub async fn bind_quic(
@@ -232,12 +232,35 @@ impl NnrpServer {
             ));
         }
         Err(RuntimeError::UnsupportedTransport(
-            "QUIC runtime hook is reserved but not implemented",
+            "QUIC provider is not installed; use from_listener with a QUIC FramedListener",
         ))
     }
 
+    pub fn from_listener<L>(listener: L, config: NnrpServerConfig) -> Result<Self, RuntimeError>
+    where
+        L: FramedListener + 'static,
+    {
+        Self::from_boxed_listener(Box::new(listener), config)
+    }
+
+    pub fn from_boxed_listener(
+        listener: BoxedFramedListener,
+        config: NnrpServerConfig,
+    ) -> Result<Self, RuntimeError> {
+        if listener.transport_kind() != config.transport {
+            return Err(RuntimeError::UnsupportedTransport(
+                "server config transport does not match the provided listener slot",
+            ));
+        }
+        Ok(Self {
+            listener,
+            config,
+            sessions: Arc::new(Mutex::new(BTreeMap::new())),
+        })
+    }
+
     pub fn local_addr(&self) -> Result<std::net::SocketAddr, RuntimeError> {
-        Ok(self.listener.local_addr()?)
+        self.listener.local_addr()
     }
 
     pub fn session_count(&self) -> Result<usize, RuntimeError> {
@@ -245,8 +268,7 @@ impl NnrpServer {
     }
 
     pub async fn accept(&self) -> Result<NnrpServerSession, RuntimeError> {
-        let (stream, _) = self.listener.accept().await?;
-        let mut transport = TcpTransport::new(stream);
+        let mut transport = self.listener.accept().await?;
         let packet = transport.read_packet().await?;
         if packet.header.message_type != MessageType::SessionOpen {
             return Err(RuntimeError::UnexpectedMessage(
@@ -375,6 +397,31 @@ impl NnrpServer {
         self.sessions
             .lock()
             .map_err(|_| RuntimeError::Internal("server session registry lock poisoned"))
+    }
+}
+
+impl fmt::Debug for NnrpServer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NnrpServer")
+            .field("transport", &self.listener.transport_kind())
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for NnrpServerSession {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NnrpServerSession")
+            .field("session_id", &self.session_id)
+            .field("client_open", &self.client_open)
+            .field("transport", &self.transport.transport_kind())
+            .field("lifecycle", &self.lifecycle)
+            .field("operations", &self.operations)
+            .field("cache_objects", &self.cache_objects)
+            .field("max_cache_objects", &self.max_cache_objects)
+            .finish_non_exhaustive()
     }
 }
 

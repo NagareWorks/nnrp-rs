@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use nnrp_core::{CommonHeader, COMMON_HEADER_LEN};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
+    net::{TcpListener, TcpStream, ToSocketAddrs},
 };
 
 use crate::{RuntimeError, RuntimePacket};
@@ -22,11 +22,22 @@ impl RuntimeTransportKind {
     }
 }
 
+pub type BoxedFramedTransport = Box<dyn FramedTransport>;
+pub type BoxedFramedListener = Box<dyn FramedListener>;
+
 #[async_trait]
-pub trait FramedTransport {
+pub trait FramedTransport: Send {
+    fn transport_kind(&self) -> RuntimeTransportKind;
     async fn read_packet(&mut self) -> Result<RuntimePacket, RuntimeError>;
     async fn write_packet(&mut self, packet: &RuntimePacket) -> Result<(), RuntimeError>;
     async fn close(&mut self) -> Result<(), RuntimeError>;
+}
+
+#[async_trait]
+pub trait FramedListener: Send + Sync {
+    fn transport_kind(&self) -> RuntimeTransportKind;
+    fn local_addr(&self) -> Result<std::net::SocketAddr, RuntimeError>;
+    async fn accept(&self) -> Result<BoxedFramedTransport, RuntimeError>;
 }
 
 #[derive(Debug)]
@@ -39,7 +50,7 @@ impl TcpTransport {
         Self { stream }
     }
 
-    pub async fn connect(addr: impl tokio::net::ToSocketAddrs) -> Result<Self, RuntimeError> {
+    pub async fn connect(addr: impl ToSocketAddrs) -> Result<Self, RuntimeError> {
         Ok(Self {
             stream: TcpStream::connect(addr).await?,
         })
@@ -48,6 +59,10 @@ impl TcpTransport {
 
 #[async_trait]
 impl FramedTransport for TcpTransport {
+    fn transport_kind(&self) -> RuntimeTransportKind {
+        RuntimeTransportKind::Tcp
+    }
+
     async fn read_packet(&mut self) -> Result<RuntimePacket, RuntimeError> {
         let mut header_bytes = [0u8; COMMON_HEADER_LEN];
         self.stream.read_exact(&mut header_bytes).await?;
@@ -75,5 +90,38 @@ impl FramedTransport for TcpTransport {
     async fn close(&mut self) -> Result<(), RuntimeError> {
         self.stream.shutdown().await?;
         Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct TcpFramedListener {
+    listener: TcpListener,
+}
+
+impl TcpFramedListener {
+    pub fn new(listener: TcpListener) -> Self {
+        Self { listener }
+    }
+
+    pub async fn bind(addr: impl ToSocketAddrs) -> Result<Self, RuntimeError> {
+        Ok(Self {
+            listener: TcpListener::bind(addr).await?,
+        })
+    }
+}
+
+#[async_trait]
+impl FramedListener for TcpFramedListener {
+    fn transport_kind(&self) -> RuntimeTransportKind {
+        RuntimeTransportKind::Tcp
+    }
+
+    fn local_addr(&self) -> Result<std::net::SocketAddr, RuntimeError> {
+        Ok(self.listener.local_addr()?)
+    }
+
+    async fn accept(&self) -> Result<BoxedFramedTransport, RuntimeError> {
+        let (stream, _) = self.listener.accept().await?;
+        Ok(Box::new(TcpTransport::new(stream)))
     }
 }

@@ -11,9 +11,12 @@ use nnrp_core::{
     TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
 };
 use nnrp_runtime::{
-    FramedTransport, NnrpClient, NnrpClientConfig, NnrpClientEvent, NnrpServer, NnrpServerConfig,
-    NnrpServerPolicy, RuntimeError, RuntimePacket, RuntimeTransportKind, TcpTransport,
+    BoxedFramedTransport, FramedListener, FramedTransport, NnrpClient, NnrpClientConfig,
+    NnrpClientEvent, NnrpServer, NnrpServerConfig, NnrpServerPolicy, RuntimeError, RuntimePacket,
+    RuntimeTransportKind, TcpFramedListener, TcpTransport,
 };
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 
 #[tokio::test]
@@ -774,6 +777,144 @@ async fn quic_hooks_are_reserved_but_not_runtime_backed() {
     ));
 }
 
+#[tokio::test]
+async fn client_accepts_custom_quic_transport_slot() -> Result<(), RuntimeError> {
+    let config = NnrpClientConfig {
+        transport: RuntimeTransportKind::Quic,
+        requested_session_id: 9,
+        ..Default::default()
+    };
+    let ack = open_ack(&SessionOpenMetadata {
+        requested_session_id: config.requested_session_id,
+        profile_id: config.profile_id,
+        priority_class: config.priority_class,
+        session_flags: 0,
+        schema_id: config.schema_id,
+        schema_version: config.schema_version,
+        default_deadline_ms: config.default_deadline_ms,
+        max_in_flight_operations: config.max_in_flight_operations,
+        lease_ttl_hint_ms: config.lease_ttl_hint_ms,
+        resume_token_bytes: 0,
+        auth_bytes: 0,
+        session_extension_bytes: 0,
+        client_session_tag: config.requested_session_id as u64,
+    });
+    let mut ack_header = CommonHeader::new(
+        MessageType::SessionOpenAck,
+        SESSION_OPEN_ACK_METADATA_LEN as u32,
+        0,
+    );
+    ack_header.session_id = ack.session_id;
+    let writes = Arc::new(Mutex::new(Vec::new()));
+    let transport = ScriptedTransport::new(
+        RuntimeTransportKind::Quic,
+        vec![RuntimePacket::new(
+            ack_header,
+            ack.to_bytes()?.to_vec(),
+            Vec::new(),
+        )?],
+        Arc::clone(&writes),
+    );
+
+    let client = NnrpClient::from_transport(transport, config)?;
+    let client_debug = format!("{client:?}");
+    assert!(client_debug.contains("NnrpClient"));
+    assert!(client_debug.contains("Quic"));
+    let session = client.open_session().await?;
+    let session_debug = format!("{session:?}");
+    assert!(session_debug.contains("NnrpClientSession"));
+    assert!(session_debug.contains("Quic"));
+    assert_eq!(session.session_id(), 9);
+    assert_eq!(
+        session
+            .build_migration_request(TransportId::Tcp, 0, 100)
+            .old_transport_id,
+        TransportId::Quic
+    );
+    session.close_transport().await?;
+
+    let writes = writes.lock().expect("writes should lock");
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].header.message_type, MessageType::SessionOpen);
+    Ok(())
+}
+
+#[tokio::test]
+async fn server_accepts_custom_quic_listener_slot() -> Result<(), RuntimeError> {
+    let open = session_open();
+    let mut open_header = CommonHeader::new(
+        MessageType::SessionOpen,
+        SESSION_OPEN_METADATA_LEN as u32,
+        0,
+    );
+    open_header.session_id = 0;
+    let writes = Arc::new(Mutex::new(Vec::new()));
+    let listener = ScriptedListener::new(
+        RuntimeTransportKind::Quic,
+        ScriptedTransport::new(
+            RuntimeTransportKind::Quic,
+            vec![RuntimePacket::new(
+                open_header,
+                open.to_bytes()?.to_vec(),
+                Vec::new(),
+            )?],
+            Arc::clone(&writes),
+        ),
+    );
+    let server = NnrpServer::from_listener(
+        listener,
+        NnrpServerConfig::default().with_transport(RuntimeTransportKind::Quic),
+    )?;
+    assert_eq!(server.local_addr()?.ip().to_string(), "127.0.0.1");
+    let server_debug = format!("{server:?}");
+    assert!(server_debug.contains("NnrpServer"));
+    assert!(server_debug.contains("Quic"));
+
+    let session = server.accept().await?;
+    let session_debug = format!("{session:?}");
+    assert!(session_debug.contains("NnrpServerSession"));
+    assert!(session_debug.contains("Quic"));
+    assert_eq!(session.session_id(), open.requested_session_id);
+    assert_eq!(session.client_open().schema_id, TOKEN_DELTA_SCHEMA_ID);
+    session.close().await?;
+
+    let writes = writes.lock().expect("writes should lock");
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].header.message_type, MessageType::SessionOpenAck);
+    assert_eq!(writes[0].header.session_id, open.requested_session_id);
+    Ok(())
+}
+
+#[tokio::test]
+async fn tcp_framed_listener_slot_exposes_local_addr() -> Result<(), RuntimeError> {
+    let listener = TcpFramedListener::bind("127.0.0.1:0").await?;
+    assert_eq!(listener.transport_kind(), RuntimeTransportKind::Tcp);
+    assert_eq!(listener.local_addr()?.ip().to_string(), "127.0.0.1");
+    Ok(())
+}
+
+#[tokio::test]
+async fn transport_slot_rejects_config_mismatches() {
+    let writes = Arc::new(Mutex::new(Vec::new()));
+    assert!(matches!(
+        NnrpClient::from_transport(
+            ScriptedTransport::new(RuntimeTransportKind::Quic, Vec::new(), Arc::clone(&writes)),
+            NnrpClientConfig::default(),
+        ),
+        Err(RuntimeError::UnsupportedTransport(_))
+    ));
+    assert!(matches!(
+        NnrpServer::from_listener(
+            ScriptedListener::new(
+                RuntimeTransportKind::Quic,
+                ScriptedTransport::new(RuntimeTransportKind::Quic, Vec::new(), writes),
+            ),
+            NnrpServerConfig::default(),
+        ),
+        Err(RuntimeError::UnsupportedTransport(_))
+    ));
+}
+
 fn token_submit() -> FrameSubmitMetadata {
     FrameSubmitMetadata {
         src_width: 0,
@@ -798,6 +939,88 @@ fn token_submit() -> FrameSubmitMetadata {
         dependency_frame_id: 0,
         payload_kind_bitmap: PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),
         payload_frame_count: 1,
+    }
+}
+
+struct ScriptedTransport {
+    kind: RuntimeTransportKind,
+    reads: VecDeque<RuntimePacket>,
+    writes: Arc<Mutex<Vec<RuntimePacket>>>,
+}
+
+impl ScriptedTransport {
+    fn new(
+        kind: RuntimeTransportKind,
+        reads: impl Into<Vec<RuntimePacket>>,
+        writes: Arc<Mutex<Vec<RuntimePacket>>>,
+    ) -> Self {
+        Self {
+            kind,
+            reads: reads.into().into(),
+            writes,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl FramedTransport for ScriptedTransport {
+    fn transport_kind(&self) -> RuntimeTransportKind {
+        self.kind
+    }
+
+    async fn read_packet(&mut self) -> Result<RuntimePacket, RuntimeError> {
+        self.reads
+            .pop_front()
+            .ok_or(RuntimeError::UnexpectedMessage(
+                "scripted transport is empty",
+            ))
+    }
+
+    async fn write_packet(&mut self, packet: &RuntimePacket) -> Result<(), RuntimeError> {
+        self.writes
+            .lock()
+            .expect("writes should lock")
+            .push(packet.clone());
+        Ok(())
+    }
+
+    async fn close(&mut self) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+}
+
+struct ScriptedListener {
+    kind: RuntimeTransportKind,
+    transport: Mutex<Option<BoxedFramedTransport>>,
+}
+
+impl ScriptedListener {
+    fn new(kind: RuntimeTransportKind, transport: ScriptedTransport) -> Self {
+        Self {
+            kind,
+            transport: Mutex::new(Some(Box::new(transport))),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl FramedListener for ScriptedListener {
+    fn transport_kind(&self) -> RuntimeTransportKind {
+        self.kind
+    }
+
+    fn local_addr(&self) -> Result<std::net::SocketAddr, RuntimeError> {
+        Ok("127.0.0.1:0".parse().expect("socket addr should parse"))
+    }
+
+    async fn accept(&self) -> Result<BoxedFramedTransport, RuntimeError> {
+        self.transport
+            .lock()
+            .expect("transport should lock")
+            .take()
+            .ok_or(RuntimeError::UnexpectedMessage(
+                "scripted listener has no transport",
+            ))
     }
 }
 

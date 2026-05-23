@@ -9,8 +9,10 @@
 ## Transport Abstraction
 
 - [x] Define a host-neutral transport trait for framed async read/write, connection close, and backpressure signaling.
+- [x] Define a host-neutral listener trait so server accept is not tied to TCP.
 - [x] Implement TCP transport support for local integration tests.
-- [x] Add QUIC transport hooks without freezing TLS/provider policy in `nnrp-core`.
+- [x] Add QUIC transport slots without freezing TLS/provider policy in `nnrp-core`.
+- [x] Expose custom transport/listener injection APIs for external TCP/QUIC providers.
 - [x] Implement the connection pump that reads/writes `CommonHeader` packets and dispatches metadata/body regions.
 
 ## Client API

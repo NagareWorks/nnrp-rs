@@ -1,3 +1,5 @@
+use std::fmt;
+
 use nnrp_core::{
     validate_result_drop_header, CacheObjectKind, CommonHeader, ConnectionLifecycle,
     FlowUpdateMetadata, FrameSubmitMetadata, InFlightPolicy, MessageType, ResultPushMetadata,
@@ -11,7 +13,10 @@ use nnrp_core::{
     TOKEN_DELTA_SCHEMA_VERSION,
 };
 
-use crate::{FramedTransport, RuntimeError, RuntimePacket, RuntimeTransportKind, TcpTransport};
+use crate::{
+    BoxedFramedTransport, FramedTransport, RuntimeError, RuntimePacket, RuntimeTransportKind,
+    TcpTransport,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NnrpClientConfig {
@@ -66,18 +71,16 @@ impl NnrpClientConfig {
     }
 }
 
-#[derive(Debug)]
 pub struct NnrpClient {
-    transport: TcpTransport,
+    transport: BoxedFramedTransport,
     config: NnrpClientConfig,
     lifecycle: ConnectionLifecycle,
 }
 
-#[derive(Debug)]
 pub struct NnrpClientSession {
     session_id: u32,
     next_frame_id: u32,
-    transport: TcpTransport,
+    transport: BoxedFramedTransport,
     lifecycle: ConnectionLifecycle,
 }
 
@@ -105,11 +108,7 @@ impl NnrpClient {
                 "client config selected a non-TCP transport for connect_tcp",
             ));
         }
-        Ok(Self {
-            transport: TcpTransport::connect(addr).await?,
-            config,
-            lifecycle: ConnectionLifecycle::new(),
-        })
+        Self::from_transport(TcpTransport::connect(addr).await?, config)
     }
 
     pub async fn connect_quic(
@@ -122,8 +121,31 @@ impl NnrpClient {
             ));
         }
         Err(RuntimeError::UnsupportedTransport(
-            "QUIC runtime hook is reserved but not implemented",
+            "QUIC provider is not installed; use from_transport with a QUIC FramedTransport",
         ))
+    }
+
+    pub fn from_transport<T>(transport: T, config: NnrpClientConfig) -> Result<Self, RuntimeError>
+    where
+        T: FramedTransport + 'static,
+    {
+        Self::from_boxed_transport(Box::new(transport), config)
+    }
+
+    pub fn from_boxed_transport(
+        transport: BoxedFramedTransport,
+        config: NnrpClientConfig,
+    ) -> Result<Self, RuntimeError> {
+        if transport.transport_kind() != config.transport {
+            return Err(RuntimeError::UnsupportedTransport(
+                "client config transport does not match the provided transport slot",
+            ));
+        }
+        Ok(Self {
+            transport,
+            config,
+            lifecycle: ConnectionLifecycle::new(),
+        })
     }
 
     pub async fn open_session(mut self) -> Result<NnrpClientSession, RuntimeError> {
@@ -370,7 +392,7 @@ impl NnrpClientSession {
         client_migrate_ts_us: u64,
     ) -> SessionMigrateMetadata {
         SessionMigrateMetadata {
-            old_transport_id: RuntimeTransportKind::Tcp.transport_id(),
+            old_transport_id: self.transport.transport_kind().transport_id(),
             new_transport_id,
             last_result_frame_id,
             client_migrate_ts_us,
@@ -445,5 +467,28 @@ impl NnrpClientSession {
             return Err(RuntimeError::UnexpectedMessage(message));
         }
         Ok(())
+    }
+}
+
+impl fmt::Debug for NnrpClient {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NnrpClient")
+            .field("transport", &self.transport.transport_kind())
+            .field("config", &self.config)
+            .field("lifecycle", &self.lifecycle)
+            .finish()
+    }
+}
+
+impl fmt::Debug for NnrpClientSession {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NnrpClientSession")
+            .field("session_id", &self.session_id)
+            .field("next_frame_id", &self.next_frame_id)
+            .field("transport", &self.transport.transport_kind())
+            .field("lifecycle", &self.lifecycle)
+            .finish()
     }
 }
