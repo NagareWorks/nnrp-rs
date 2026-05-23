@@ -8,4 +8,4 @@ pub use client::{NnrpClient, NnrpClientConfig, NnrpClientEvent, NnrpClientSessio
 pub use error::RuntimeError;
 pub use packet::RuntimePacket;
 pub use server::{NnrpCancel, NnrpServer, NnrpServerConfig, NnrpServerSession, NnrpSubmit};
-pub use transport::{FramedTransport, TcpTransport};
+pub use transport::{FramedTransport, RuntimeTransportKind, TcpTransport};

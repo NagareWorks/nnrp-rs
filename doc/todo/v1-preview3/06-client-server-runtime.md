@@ -16,7 +16,7 @@
 ## Client API
 
 - [x] Implement `NnrpClientConfig` with protocol/schema defaults and flow-control defaults.
-- [ ] Add client cache hints and explicit runtime transport selection.
+- [x] Add client cache hints and explicit runtime transport selection.
 - [x] Implement `NnrpClient::connect_tcp` and `NnrpClient::connect_quic` over the transport abstraction.
 - [x] Implement `NnrpClient::open_session` and `NnrpClientSession` lifecycle ownership.
 - [x] Implement submit, submit-nowait, await-result, and session close APIs.
@@ -26,11 +26,12 @@
 ## Server API
 
 - [x] Implement `NnrpServerConfig` with flow-control defaults and session lease windows.
-- [ ] Add server capability advertisement, cache limits, and schema/profile registry inputs.
+- [x] Add server capability advertisement, cache limits, and schema/profile registry inputs.
 - [x] Implement TCP bind/listen/accept and QUIC bind hooks.
 - [x] Implement `NnrpServerSession` with receive-submit, send-result, and close ack APIs.
 - [x] Implement `NnrpServerSession` send-result-drop, send-flow-update, and patch ack APIs.
-- [ ] Implement server-side session registry, operation registry, cache/schema validation, and recovery token handling.
+- [x] Implement server-side operation registry and cache/schema validation.
+- [ ] Implement server-side session registry and recovery token handling.
 - [ ] Keep authentication and application policy pluggable rather than built into the protocol layer.
 
 ## FFI Runtime Binding

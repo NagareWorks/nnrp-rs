@@ -1,7 +1,8 @@
 use nnrp_core::{
-    BackpressureLevel, CommonHeader, FlowScopeKind, FlowUpdateMetadata, FlowUpdateReason,
-    FrameSubmitMetadata, InFlightPolicy, InputProfile, MessageType, PayloadKindBitmap, ResultClass,
-    ResultPushMetadata, SessionCloseMetadata, SessionCloseReason, SessionOpenAckMetadata,
+    BackpressureLevel, CacheObjectId, CacheObjectKind, CommonHeader, FlowScopeKind,
+    FlowUpdateMetadata, FlowUpdateReason, FrameSubmitMetadata, InFlightPolicy, InputProfile,
+    MessageType, OperationState, PayloadKindBitmap, ResultClass, ResultPushMetadata,
+    SchemaRegistry, SessionCloseMetadata, SessionCloseReason, SessionOpenAckMetadata,
     SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata,
     SessionPatchRejectReason, SessionPriorityClass, SessionStatus, SubmitMode, TileIndexMode,
     FLOW_UPDATE_FLAG_CREDIT_VALID, RESULT_PUSH_METADATA_LEN, SESSION_CLOSE_ACK_METADATA_LEN,
@@ -10,7 +11,7 @@ use nnrp_core::{
 };
 use nnrp_runtime::{
     FramedTransport, NnrpClient, NnrpClientConfig, NnrpClientEvent, NnrpServer, NnrpServerConfig,
-    RuntimeError, RuntimePacket, TcpTransport,
+    RuntimeError, RuntimePacket, RuntimeTransportKind, TcpTransport,
 };
 use tokio::net::TcpListener;
 
@@ -93,9 +94,18 @@ async fn tcp_loopback_handles_cancel_drop_flow_and_patch() -> Result<(), Runtime
         let mut session = server.accept().await?;
         let submit = session.receive_submit().await?;
         assert_eq!(submit.frame_id, 1);
+        assert_eq!(session.operations().operation_count(), 1);
 
         let cancel = session.receive_cancel().await?;
         assert_eq!(cancel.frame_id, submit.frame_id);
+        assert_eq!(
+            session
+                .operations()
+                .operation(submit.frame_id as u64)
+                .expect("operation should be registered")
+                .state,
+            OperationState::Cancelled
+        );
 
         let patch = session.receive_patch().await?;
         assert_eq!(patch.patch_mask, 1);
@@ -133,6 +143,106 @@ async fn tcp_loopback_handles_cancel_drop_flow_and_patch() -> Result<(), Runtime
 
     session.close().await?;
     server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_configs_select_transport_cache_hints_and_server_state() -> Result<(), RuntimeError>
+{
+    let client_config = NnrpClientConfig::default()
+        .with_transport(RuntimeTransportKind::Quic)
+        .with_cache_hints(vec![CacheObjectKind::PromptSegment]);
+    assert_eq!(client_config.transport, RuntimeTransportKind::Quic);
+    assert_eq!(
+        client_config.cache_hints,
+        vec![CacheObjectKind::PromptSegment]
+    );
+    assert!(matches!(
+        NnrpClient::connect_tcp("127.0.0.1:0", client_config).await,
+        Err(RuntimeError::UnsupportedTransport(_))
+    ));
+    assert!(matches!(
+        NnrpClient::connect_quic(
+            "localhost:4433",
+            NnrpClientConfig::default().with_transport(RuntimeTransportKind::Quic),
+        )
+        .await,
+        Err(RuntimeError::UnsupportedTransport(_))
+    ));
+
+    let server_config = NnrpServerConfig::default()
+        .with_transport(RuntimeTransportKind::Quic)
+        .with_supported_profiles(vec![STANDARD_PROFILE_TOKEN])
+        .with_supported_cache_objects(vec![CacheObjectKind::PromptSegment])
+        .with_schema_registry(SchemaRegistry::with_standard_preview3_profiles())
+        .with_cache_limits(1, 1024);
+    assert_eq!(server_config.transport, RuntimeTransportKind::Quic);
+    assert_eq!(
+        server_config.supported_cache_objects,
+        vec![CacheObjectKind::PromptSegment]
+    );
+    assert_eq!(server_config.max_cache_object_bytes, 1024);
+    assert!(matches!(
+        NnrpServer::bind_tcp("127.0.0.1:0", server_config).await,
+        Err(RuntimeError::UnsupportedTransport(_))
+    ));
+    assert!(matches!(
+        NnrpServer::bind_quic(
+            "localhost:4433",
+            NnrpServerConfig::default().with_transport(RuntimeTransportKind::Quic),
+        )
+        .await,
+        Err(RuntimeError::UnsupportedTransport(_))
+    ));
+
+    let server = NnrpServer::bind_tcp(
+        "127.0.0.1:0",
+        NnrpServerConfig::default().with_cache_limits(1, 1024),
+    )
+    .await?;
+    let addr = server.local_addr()?;
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        session.track_cache_object(cache_object_id(1))?;
+        assert_eq!(session.cache_object_count(), 1);
+        session.track_cache_object(cache_object_id(1))?;
+        assert_eq!(session.cache_object_count(), 1);
+        assert!(matches!(
+            session.track_cache_object(cache_object_id(2)),
+            Err(RuntimeError::UnexpectedMessage(_))
+        ));
+        let close = session.receive_close().await?;
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    client.open_session().await?.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn server_rejects_unsupported_profile_before_session_install() -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+    let server_task = tokio::spawn(async move {
+        assert!(matches!(
+            server.accept().await,
+            Err(RuntimeError::UnexpectedMessage(_))
+        ));
+    });
+
+    let config = NnrpClientConfig {
+        profile_id: 0xffff,
+        ..Default::default()
+    };
+    let client = NnrpClient::connect_tcp(addr, config).await?;
+    assert!(matches!(
+        client.open_session().await,
+        Err(RuntimeError::UnexpectedMessage(_))
+    ));
+    server_task.await.expect("server task should join");
     Ok(())
 }
 
@@ -596,6 +706,15 @@ fn close_request() -> SessionCloseMetadata {
         last_operation_id: 1,
         session_error_code: SESSION_ERROR_NONE,
         session_close_tag: 1,
+    }
+}
+
+fn cache_object_id(cache_key_lo: u32) -> CacheObjectId {
+    CacheObjectId {
+        cache_namespace: 7,
+        cache_key_hi: 0,
+        cache_key_lo,
+        object_kind: CacheObjectKind::PromptSegment,
     }
 }
 

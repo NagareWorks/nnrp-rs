@@ -1,18 +1,19 @@
 use nnrp_core::{
-    validate_result_drop_header, CommonHeader, ConnectionLifecycle, FlowUpdateMetadata,
-    FrameSubmitMetadata, InFlightPolicy, MessageType, ResultPushMetadata, SessionCloseAckMetadata,
-    SessionCloseMetadata, SessionCloseReason, SessionOpenAckMetadata, SessionOpenMetadata,
-    SessionPatchAckMetadata, SessionPatchMetadata, SessionPriorityClass, SessionStatus,
-    FRAME_SUBMIT_METADATA_LEN, RESULT_PUSH_METADATA_LEN, SESSION_CLOSE_ACK_METADATA_LEN,
-    SESSION_CLOSE_METADATA_LEN, SESSION_ERROR_NONE, SESSION_OPEN_METADATA_LEN,
-    SESSION_PATCH_ACK_METADATA_LEN, SESSION_PATCH_METADATA_LEN, STANDARD_PROFILE_TOKEN,
-    TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
+    validate_result_drop_header, CacheObjectKind, CommonHeader, ConnectionLifecycle,
+    FlowUpdateMetadata, FrameSubmitMetadata, InFlightPolicy, MessageType, ResultPushMetadata,
+    SessionCloseAckMetadata, SessionCloseMetadata, SessionCloseReason, SessionOpenAckMetadata,
+    SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchMetadata, SessionPriorityClass,
+    SessionStatus, FRAME_SUBMIT_METADATA_LEN, RESULT_PUSH_METADATA_LEN,
+    SESSION_CLOSE_ACK_METADATA_LEN, SESSION_CLOSE_METADATA_LEN, SESSION_ERROR_NONE,
+    SESSION_OPEN_METADATA_LEN, SESSION_PATCH_ACK_METADATA_LEN, SESSION_PATCH_METADATA_LEN,
+    STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
 };
 
-use crate::{FramedTransport, RuntimeError, RuntimePacket, TcpTransport};
+use crate::{FramedTransport, RuntimeError, RuntimePacket, RuntimeTransportKind, TcpTransport};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NnrpClientConfig {
+    pub transport: RuntimeTransportKind,
     pub requested_session_id: u32,
     pub profile_id: u16,
     pub schema_id: u32,
@@ -21,11 +22,13 @@ pub struct NnrpClientConfig {
     pub default_deadline_ms: u32,
     pub max_in_flight_operations: u16,
     pub lease_ttl_hint_ms: u32,
+    pub cache_hints: Vec<CacheObjectKind>,
 }
 
 impl Default for NnrpClientConfig {
     fn default() -> Self {
         Self {
+            transport: RuntimeTransportKind::Tcp,
             requested_session_id: 1,
             profile_id: STANDARD_PROFILE_TOKEN,
             schema_id: TOKEN_DELTA_SCHEMA_ID,
@@ -34,7 +37,20 @@ impl Default for NnrpClientConfig {
             default_deadline_ms: 500,
             max_in_flight_operations: 4,
             lease_ttl_hint_ms: 30_000,
+            cache_hints: Vec::new(),
         }
+    }
+}
+
+impl NnrpClientConfig {
+    pub fn with_transport(mut self, transport: RuntimeTransportKind) -> Self {
+        self.transport = transport;
+        self
+    }
+
+    pub fn with_cache_hints(mut self, cache_hints: impl Into<Vec<CacheObjectKind>>) -> Self {
+        self.cache_hints = cache_hints.into();
+        self
     }
 }
 
@@ -72,6 +88,11 @@ impl NnrpClient {
         addr: impl tokio::net::ToSocketAddrs,
         config: NnrpClientConfig,
     ) -> Result<Self, RuntimeError> {
+        if config.transport != RuntimeTransportKind::Tcp {
+            return Err(RuntimeError::UnsupportedTransport(
+                "client config selected a non-TCP transport for connect_tcp",
+            ));
+        }
         Ok(Self {
             transport: TcpTransport::connect(addr).await?,
             config,
@@ -81,8 +102,13 @@ impl NnrpClient {
 
     pub async fn connect_quic(
         _endpoint: &str,
-        _config: NnrpClientConfig,
+        config: NnrpClientConfig,
     ) -> Result<Self, RuntimeError> {
+        if config.transport != RuntimeTransportKind::Quic {
+            return Err(RuntimeError::UnsupportedTransport(
+                "client config selected a non-QUIC transport for connect_quic",
+            ));
+        }
         Err(RuntimeError::UnsupportedTransport(
             "QUIC runtime hook is reserved but not implemented",
         ))

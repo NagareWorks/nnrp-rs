@@ -7,6 +7,12 @@ use tokio::{
 
 use crate::{RuntimeError, RuntimePacket};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeTransportKind {
+    Tcp,
+    Quic,
+}
+
 #[async_trait]
 pub trait FramedTransport {
     async fn read_packet(&mut self) -> Result<RuntimePacket, RuntimeError>;

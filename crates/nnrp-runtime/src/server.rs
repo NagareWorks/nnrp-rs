@@ -1,18 +1,26 @@
 use nnrp_core::{
-    validate_result_drop_header, CommonHeader, ConnectionLifecycle, FlowUpdateMetadata,
-    FrameSubmitMetadata, MessageType, ResultPushMetadata, SessionCloseAckMetadata,
-    SessionCloseMetadata, SessionCloseStatus, SessionOpenAckMetadata, SessionOpenMetadata,
-    SessionPatchAckMetadata, SessionPatchMetadata, SessionStatus, FLOW_UPDATE_METADATA_LEN,
-    FRAME_SUBMIT_METADATA_LEN, RESULT_PUSH_METADATA_LEN, SESSION_CLOSE_ACK_METADATA_LEN,
-    SESSION_ERROR_NONE, SESSION_OPEN_ACK_METADATA_LEN, SESSION_PATCH_ACK_METADATA_LEN,
-    SESSION_PATCH_METADATA_LEN,
+    validate_profile_assignment, validate_result_drop_header, CacheObjectId, CacheObjectKind,
+    CommonHeader, ConnectionLifecycle, FlowUpdateMetadata, FrameSubmitMetadata, MessageType,
+    OperationCancelRequest, OperationDescriptor, OperationRegistry, ResultPushMetadata,
+    SchemaRegistry, SessionCloseAckMetadata, SessionCloseMetadata, SessionCloseStatus,
+    SessionOpenAckMetadata, SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchMetadata,
+    SessionStatus, FLOW_UPDATE_METADATA_LEN, FRAME_SUBMIT_METADATA_LEN, RESULT_PUSH_METADATA_LEN,
+    SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_LIMIT_REACHED, SESSION_ERROR_NONE,
+    SESSION_ERROR_PROFILE_UNSUPPORTED, SESSION_ERROR_SCHEMA_UNSUPPORTED,
+    SESSION_OPEN_ACK_METADATA_LEN, SESSION_PATCH_ACK_METADATA_LEN, SESSION_PATCH_METADATA_LEN,
 };
 use tokio::net::TcpListener;
 
-use crate::{FramedTransport, RuntimeError, RuntimePacket, TcpTransport};
+use crate::{FramedTransport, RuntimeError, RuntimePacket, RuntimeTransportKind, TcpTransport};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct NnrpServerConfig {
+    pub transport: RuntimeTransportKind,
+    pub supported_profiles: Vec<u16>,
+    pub supported_cache_objects: Vec<CacheObjectKind>,
+    pub max_cache_objects: usize,
+    pub max_cache_object_bytes: u32,
+    pub schema_registry: SchemaRegistry,
     pub max_in_flight_operations: u16,
     pub granted_operation_credit: u16,
     pub lease_ttl_ms: u32,
@@ -22,11 +30,70 @@ pub struct NnrpServerConfig {
 impl Default for NnrpServerConfig {
     fn default() -> Self {
         Self {
+            transport: RuntimeTransportKind::Tcp,
+            supported_profiles: vec![nnrp_core::PROFILE_TOKEN],
+            supported_cache_objects: Vec::new(),
+            max_cache_objects: 0,
+            max_cache_object_bytes: 0,
+            schema_registry: SchemaRegistry::with_standard_preview3_profiles(),
             max_in_flight_operations: 4,
             granted_operation_credit: 2,
             lease_ttl_ms: 30_000,
             resume_window_ms: 120_000,
         }
+    }
+}
+
+impl NnrpServerConfig {
+    pub fn with_transport(mut self, transport: RuntimeTransportKind) -> Self {
+        self.transport = transport;
+        self
+    }
+
+    pub fn with_supported_profiles(mut self, profiles: impl Into<Vec<u16>>) -> Self {
+        self.supported_profiles = profiles.into();
+        self
+    }
+
+    pub fn with_supported_cache_objects(
+        mut self,
+        objects: impl Into<Vec<CacheObjectKind>>,
+    ) -> Self {
+        self.supported_cache_objects = objects.into();
+        self
+    }
+
+    pub fn with_cache_limits(mut self, max_objects: usize, max_object_bytes: u32) -> Self {
+        self.max_cache_objects = max_objects;
+        self.max_cache_object_bytes = max_object_bytes;
+        self
+    }
+
+    pub fn with_schema_registry(mut self, schema_registry: SchemaRegistry) -> Self {
+        self.schema_registry = schema_registry;
+        self
+    }
+
+    fn validate_client_open(&self, open: &SessionOpenMetadata) -> Result<(), u32> {
+        if !self.supported_profiles.contains(&open.profile_id)
+            || validate_profile_assignment(open.profile_id).is_err()
+        {
+            return Err(SESSION_ERROR_PROFILE_UNSUPPORTED);
+        }
+
+        if self
+            .schema_registry
+            .get(open.schema_id, open.schema_version)
+            .is_none()
+        {
+            return Err(SESSION_ERROR_SCHEMA_UNSUPPORTED);
+        }
+
+        if open.max_in_flight_operations > self.max_in_flight_operations {
+            return Err(SESSION_ERROR_LIMIT_REACHED);
+        }
+
+        Ok(())
     }
 }
 
@@ -42,6 +109,9 @@ pub struct NnrpServerSession {
     client_open: SessionOpenMetadata,
     transport: TcpTransport,
     lifecycle: ConnectionLifecycle,
+    operations: OperationRegistry,
+    cache_objects: Vec<CacheObjectId>,
+    max_cache_objects: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +131,11 @@ impl NnrpServer {
         addr: impl tokio::net::ToSocketAddrs,
         config: NnrpServerConfig,
     ) -> Result<Self, RuntimeError> {
+        if config.transport != RuntimeTransportKind::Tcp {
+            return Err(RuntimeError::UnsupportedTransport(
+                "server config selected a non-TCP transport for bind_tcp",
+            ));
+        }
         Ok(Self {
             listener: TcpListener::bind(addr).await?,
             config,
@@ -69,8 +144,13 @@ impl NnrpServer {
 
     pub async fn bind_quic(
         _endpoint: &str,
-        _config: NnrpServerConfig,
+        config: NnrpServerConfig,
     ) -> Result<Self, RuntimeError> {
+        if config.transport != RuntimeTransportKind::Quic {
+            return Err(RuntimeError::UnsupportedTransport(
+                "server config selected a non-QUIC transport for bind_quic",
+            ));
+        }
         Err(RuntimeError::UnsupportedTransport(
             "QUIC runtime hook is reserved but not implemented",
         ))
@@ -105,6 +185,15 @@ impl NnrpServer {
             .write_packet(&RuntimePacket::new(ack_header, ack_bytes, Vec::new())?)
             .await?;
 
+        if !matches!(
+            ack.session_status,
+            SessionStatus::Opened | SessionStatus::Resumed
+        ) {
+            return Err(RuntimeError::UnexpectedMessage(
+                "server rejected SESSION_OPEN",
+            ));
+        }
+
         let mut lifecycle = ConnectionLifecycle::new();
         lifecycle.apply_session_open_ack(&ack)?;
 
@@ -113,16 +202,29 @@ impl NnrpServer {
             client_open: open,
             transport,
             lifecycle,
+            operations: OperationRegistry::new(),
+            cache_objects: Vec::new(),
+            max_cache_objects: self.config.max_cache_objects,
         })
     }
 
     fn accept_ack(&self, open: &SessionOpenMetadata) -> SessionOpenAckMetadata {
-        let session_id = open.requested_session_id.max(1);
+        let validation_error = self.config.validate_client_open(open).err();
+        let accepted = validation_error.is_none();
+        let session_id = if accepted {
+            open.requested_session_id.max(1)
+        } else {
+            0
+        };
         SessionOpenAckMetadata {
             session_id,
             accepted_profile_id: open.profile_id,
             accepted_priority_class: open.priority_class,
-            session_status: SessionStatus::Opened,
+            session_status: if accepted {
+                SessionStatus::Opened
+            } else {
+                SessionStatus::Rejected
+            },
             schema_id: open.schema_id,
             schema_version: open.schema_version,
             granted_operation_credit: self.config.granted_operation_credit,
@@ -133,7 +235,7 @@ impl NnrpServer {
             session_extension_bytes: 0,
             server_session_tag: session_id as u64,
             route_scope_id: 0,
-            session_error_code: SESSION_ERROR_NONE,
+            session_error_code: validation_error.unwrap_or(SESSION_ERROR_NONE),
             session_flags_ack: 0,
         }
     }
@@ -150,6 +252,14 @@ impl NnrpServerSession {
 
     pub fn lifecycle(&self) -> &ConnectionLifecycle {
         &self.lifecycle
+    }
+
+    pub fn operations(&self) -> &OperationRegistry {
+        &self.operations
+    }
+
+    pub fn cache_object_count(&self) -> usize {
+        self.cache_objects.len()
     }
 
     pub async fn receive_submit(&mut self) -> Result<NnrpSubmit, RuntimeError> {
@@ -169,6 +279,11 @@ impl NnrpServerSession {
                 "server received malformed FRAME_SUBMIT metadata length",
             ));
         }
+
+        self.operations.register(OperationDescriptor::new(
+            self.session_id,
+            packet.header.frame_id as u64,
+        ))?;
 
         Ok(NnrpSubmit {
             frame_id: packet.header.frame_id,
@@ -222,9 +337,27 @@ impl NnrpServerSession {
                 "server received malformed FRAME_CANCEL lengths",
             ));
         }
+        self.operations.cancel(OperationCancelRequest {
+            session_id: self.session_id,
+            operation_id: packet.header.frame_id as u64,
+            cancel_scope: nnrp_core::CancelScope::Operation,
+        })?;
         Ok(NnrpCancel {
             frame_id: packet.header.frame_id,
         })
+    }
+
+    pub fn track_cache_object(&mut self, object_id: CacheObjectId) -> Result<(), RuntimeError> {
+        if self.cache_objects.contains(&object_id) {
+            return Ok(());
+        }
+        if self.max_cache_objects != 0 && self.cache_objects.len() >= self.max_cache_objects {
+            return Err(RuntimeError::UnexpectedMessage(
+                "server cache object limit reached",
+            ));
+        }
+        self.cache_objects.push(object_id);
+        Ok(())
     }
 
     pub async fn receive_patch(&mut self) -> Result<SessionPatchMetadata, RuntimeError> {
