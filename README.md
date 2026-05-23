@@ -23,6 +23,9 @@ GitHub README rendering does not support per-avatar dynamic tooltips for an auto
 ## Workspace Layout
 
 - `crates/nnrp-core`: canonical NNRP/1 wire primitives, preview3 extension models, strict validation, state-machine-facing core types, and host-neutral cache/schema semantics.
+- `crates/nnrp-runtime`: transport-neutral client/server session runtime over framed async transport slots.
+- `crates/nnrp-transport-provider`: provider registry, local transport discovery helpers, and transport policy selection.
+- `crates/nnrp-transport-tcp`: TCP provider package for the runtime transport/listener slots.
 - `crates/nnrp-ffi`: stable ABI facade over `nnrp-core`, including handle ownership, buffer views, callbacks, polling, downstream error mapping, and native `cdylib` packaging.
 - `crates/nnrp-conformance`: Rust-owned golden vectors, fixture manifests, adapter wrappers, and cross-language conformance export surface.
 - `doc/todo/`: implementation planning and rollout checklists.

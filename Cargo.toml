@@ -2,6 +2,8 @@
 members = [
     "crates/nnrp-core",
     "crates/nnrp-runtime",
+    "crates/nnrp-transport-provider",
+    "crates/nnrp-transport-tcp",
     "crates/nnrp-ffi",
     "crates/nnrp-conformance",
 ]
