@@ -3,11 +3,11 @@
 ## Validation
 
 - [x] Keep `cargo test` green across the workspace.
-- [ ] Add fixture-driven tests for all frozen preview3 enum/message/error values.
+- [x] Add fixture-driven tests for all frozen preview3 enum/message/error values.
 - [ ] Add integration tests for multi-session orchestration on one connection.
-- [ ] Add validation for cache lease expiry, schema mismatch, cancellation, priority-aware flow updates, and resume behavior.
-- [ ] Add FFI smoke tests that prove Python/C# can bind without redefining protocol semantics.
-- [ ] Add ABI compatibility tests and fixture-driven smoke coverage.
+- [x] Add validation for cache lease expiry, schema mismatch, cancellation, priority-aware flow updates, and resume behavior.
+- [x] Add FFI smoke tests that prove Python/C# can bind without redefining protocol semantics.
+- [x] Add ABI compatibility tests and fixture-driven smoke coverage.
 
 ## Documentation
 

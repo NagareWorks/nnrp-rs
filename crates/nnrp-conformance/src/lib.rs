@@ -1,5 +1,6 @@
 pub mod adapter_conformance;
 mod preview2_baseline;
+pub mod preview3_vectors;
 
 use nnrp_core::ProtocolVersion;
 
@@ -15,6 +16,11 @@ pub fn export_current_version_vector() -> GoldenVersionVector {
         wire_format: ProtocolVersion::CURRENT.wire_format,
     }
 }
+
+pub use preview3_vectors::{
+    execute_preview3_case, export_preview3_fixture_manifest, export_preview3_golden_vectors,
+    preview3_case_ids, PREVIEW3_PROTOCOL_VERSION,
+};
 
 #[cfg(test)]
 mod tests {

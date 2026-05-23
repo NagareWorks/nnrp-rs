@@ -3,6 +3,7 @@ use std::{fs, path::Path};
 use serde_json::{json, Value};
 
 use crate::preview2_baseline::execute_preview2_case;
+use crate::preview3_vectors::execute_preview3_case;
 
 pub const RESULTS_SCHEMA_URL: &str =
     "https://raw.githubusercontent.com/NagareWorks/nnrp-conformance/main/schemas/adapter-case-results.schema.json";
@@ -77,24 +78,26 @@ pub fn build_results_report(plan: &Value) -> Result<Value, String> {
                 "adapter execution plan case field 'id' must be a non-empty string".to_string()
             })?;
 
-        results.push(match execute_preview2_case(case_id) {
-            Some(Ok(())) => json!({
-                "id": case_id,
-                "outcome": "pass",
-            }),
-            Some(Err(message)) => json!({
-                "id": case_id,
-                "outcome": "fail",
-                "failure_kind": "assertion_failed",
-                "message": message,
-            }),
-            None => json!({
-                "id": case_id,
-                "outcome": "error",
-                "failure_kind": "not_implemented",
-                "message": NOT_IMPLEMENTED_MESSAGE,
-            }),
-        });
+        results.push(
+            match execute_preview3_case(case_id).or_else(|| execute_preview2_case(case_id)) {
+                Some(Ok(())) => json!({
+                    "id": case_id,
+                    "outcome": "pass",
+                }),
+                Some(Err(message)) => json!({
+                    "id": case_id,
+                    "outcome": "fail",
+                    "failure_kind": "assertion_failed",
+                    "message": message,
+                }),
+                None => json!({
+                    "id": case_id,
+                    "outcome": "error",
+                    "failure_kind": "not_implemented",
+                    "message": NOT_IMPLEMENTED_MESSAGE,
+                }),
+            },
+        );
     }
 
     Ok(json!({
@@ -222,6 +225,27 @@ mod tests {
 
         let results = report["results"].as_array().expect("results array");
         assert_eq!(results.len(), mandatory_cases.len());
+        for result in results {
+            assert_eq!(result["outcome"], Value::String("pass".to_string()));
+            assert!(result.get("failure_kind").is_none());
+        }
+    }
+
+    #[test]
+    fn build_results_report_passes_preview3_canonical_cases() {
+        let cases: Vec<Value> = crate::preview3_case_ids()
+            .iter()
+            .map(|id| json!({ "id": id }))
+            .collect();
+
+        let report = build_results_report(&json!({
+            "protocol_version": "nnrp-1-preview3",
+            "cases": cases
+        }))
+        .expect("preview3 report should build");
+
+        let results = report["results"].as_array().expect("results array");
+        assert_eq!(results.len(), crate::preview3_case_ids().len());
         for result in results {
             assert_eq!(result["outcome"], Value::String("pass".to_string()));
             assert!(result.get("failure_kind").is_none());
