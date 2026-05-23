@@ -210,6 +210,7 @@ impl NnrpHandle {
 enum NnrpFfiResource {
     Connection {
         transport_id: u32,
+        role: NnrpFfiConnectionRole,
     },
     Session {
         connection: NnrpHandle,
@@ -222,6 +223,12 @@ enum NnrpFfiResource {
         frame_id: u32,
         payload_len: usize,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NnrpFfiConnectionRole {
+    Client,
+    Server,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -315,6 +322,18 @@ impl NnrpFfiHandleStore {
             return Ok(None);
         };
         Ok(self.events.remove(index).map(NnrpQueuedEvent::into_event))
+    }
+
+    fn get_connection_role(
+        &self,
+        connection: NnrpHandle,
+    ) -> Result<NnrpFfiConnectionRole, NnrpFfiStatus> {
+        match self.get(connection, NnrpHandleKind::Connection)? {
+            NnrpFfiResource::Connection { role, .. } => Ok(*role),
+            _ => Err(NnrpFfiStatus::invalid_handle(
+                NnrpHandleKind::Connection as u32,
+            )),
+        }
     }
 }
 
@@ -452,6 +471,14 @@ pub struct NnrpClientConnectRequest {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpServerBindRequest {
+    pub server_id: u64,
+    pub generation: u32,
+    pub transport_id: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NnrpSessionOpenRequest {
     pub connection: NnrpHandle,
     pub requested_session_id: u32,
@@ -473,6 +500,40 @@ pub struct NnrpSubmitRequest {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NnrpClientCancelRequest {
+    pub session: NnrpHandle,
+    pub frame_id: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpServerAcceptRequest {
+    pub server: NnrpHandle,
+    pub session_id: u32,
+    pub generation: u32,
+    pub profile_id: u16,
+    pub schema_id: u32,
+    pub schema_version: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpServerReceiveSubmitRequest {
+    pub session: NnrpHandle,
+    pub operation_id: u64,
+    pub frame_id: u32,
+    pub payload: NnrpBufferView,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpServerSendResultRequest {
+    pub operation: NnrpHandle,
+    pub payload: NnrpBufferView,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpServerFlowUpdateRequest {
     pub session: NnrpHandle,
     pub frame_id: u32,
 }
@@ -527,6 +588,7 @@ pub unsafe extern "C" fn nnrp_client_connect(
         handle,
         NnrpFfiResource::Connection {
             transport_id: request.transport_id,
+            role: NnrpFfiConnectionRole::Client,
         },
     ) {
         return status;
@@ -568,9 +630,13 @@ pub unsafe extern "C" fn nnrp_client_open_session(
         return NnrpFfiStatus::invalid_argument(11);
     }
     let mut store = handle_store();
-    if let Err(status) = store.get(request.connection, NnrpHandleKind::Connection) {
-        return status;
-    };
+    match store.get_connection_role(request.connection) {
+        Ok(NnrpFfiConnectionRole::Client) => {}
+        Ok(NnrpFfiConnectionRole::Server) => {
+            return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Connection as u32);
+        }
+        Err(status) => return status,
+    }
 
     let handle = NnrpHandle::new(
         NnrpHandleKind::Session,
@@ -761,6 +827,239 @@ pub unsafe extern "C" fn nnrp_client_await_event(
         }
         Err(status) => status,
     }
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `out_server` must be either null or a valid writable pointer to one
+/// `NnrpHandle`. When non-null, the pointed memory must be owned by the caller.
+pub unsafe extern "C" fn nnrp_server_bind(
+    request: NnrpServerBindRequest,
+    out_server: *mut NnrpHandle,
+) -> NnrpFfiStatus {
+    if out_server.is_null() || request.server_id == 0 || request.generation == 0 {
+        return NnrpFfiStatus::invalid_argument(18);
+    }
+
+    let handle = NnrpHandle::new(
+        NnrpHandleKind::Connection,
+        request.server_id,
+        request.generation,
+    );
+    let mut store = handle_store();
+    if let Err(status) = store.insert(
+        handle,
+        NnrpFfiResource::Connection {
+            transport_id: request.transport_id,
+            role: NnrpFfiConnectionRole::Server,
+        },
+    ) {
+        return status;
+    }
+    store.push_event(NnrpQueuedEvent {
+        kind: NnrpEventKind::ConnectionOpened as u32,
+        connection: handle,
+        session: NnrpHandle::invalid(),
+        operation: NnrpHandle::invalid(),
+        frame_id: 0,
+    });
+    *out_server = handle;
+    NnrpFfiStatus::ok()
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `out_session` must be either null or a valid writable pointer to one
+/// `NnrpHandle`. The server handle is copied by value and is not retained.
+pub unsafe extern "C" fn nnrp_server_accept(
+    request: NnrpServerAcceptRequest,
+    out_session: *mut NnrpHandle,
+) -> NnrpFfiStatus {
+    if out_session.is_null() || request.session_id == 0 || request.generation == 0 {
+        return NnrpFfiStatus::invalid_argument(19);
+    }
+    let mut store = handle_store();
+    match store.get_connection_role(request.server) {
+        Ok(NnrpFfiConnectionRole::Server) => {}
+        Ok(NnrpFfiConnectionRole::Client) => {
+            return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Connection as u32);
+        }
+        Err(status) => return status,
+    }
+
+    let handle = NnrpHandle::new(
+        NnrpHandleKind::Session,
+        request.session_id as u64,
+        request.generation,
+    );
+    if let Err(status) = store.insert(
+        handle,
+        NnrpFfiResource::Session {
+            connection: request.server,
+            profile_id: request.profile_id,
+            schema_id: request.schema_id,
+            schema_version: request.schema_version,
+        },
+    ) {
+        return status;
+    }
+    store.push_event(NnrpQueuedEvent {
+        kind: NnrpEventKind::SessionOpened as u32,
+        connection: request.server,
+        session: handle,
+        operation: NnrpHandle::invalid(),
+        frame_id: 0,
+    });
+    *out_session = handle;
+    NnrpFfiStatus::ok()
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `out_operation` must be either null or a valid writable pointer to one
+/// `NnrpHandle`. `request.payload` must remain readable for `request.payload.len`
+/// bytes for the duration of the call.
+pub unsafe extern "C" fn nnrp_server_receive_submit(
+    request: NnrpServerReceiveSubmitRequest,
+    out_operation: *mut NnrpHandle,
+) -> NnrpFfiStatus {
+    if out_operation.is_null() || request.operation_id == 0 || request.frame_id == 0 {
+        return NnrpFfiStatus::invalid_argument(20);
+    }
+    if let Err(status) = request.payload.validate() {
+        return status;
+    }
+    let mut store = handle_store();
+    let connection = match store.get(request.session, NnrpHandleKind::Session) {
+        Ok(NnrpFfiResource::Session { connection, .. }) => *connection,
+        Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32),
+        Err(status) => return status,
+    };
+    match store.get_connection_role(connection) {
+        Ok(NnrpFfiConnectionRole::Server) => {}
+        Ok(NnrpFfiConnectionRole::Client) => {
+            return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32);
+        }
+        Err(status) => return status,
+    }
+
+    let handle = NnrpHandle::new(
+        NnrpHandleKind::Operation,
+        request.operation_id,
+        request.session.generation,
+    );
+    if let Err(status) = store.insert(
+        handle,
+        NnrpFfiResource::Operation {
+            session: request.session,
+            frame_id: request.frame_id,
+            payload_len: request.payload.len,
+        },
+    ) {
+        return status;
+    }
+    store.push_event(NnrpQueuedEvent {
+        kind: NnrpEventKind::SubmitAccepted as u32,
+        connection,
+        session: request.session,
+        operation: handle,
+        frame_id: request.frame_id,
+    });
+    *out_operation = handle;
+    NnrpFfiStatus::ok()
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `request.payload` must remain readable for `request.payload.len` bytes for
+/// the duration of the call.
+pub unsafe extern "C" fn nnrp_server_send_result(
+    request: NnrpServerSendResultRequest,
+) -> NnrpFfiStatus {
+    if let Err(status) = request.payload.validate() {
+        return status;
+    }
+    let mut store = handle_store();
+    let (connection, session, frame_id) =
+        match store.get(request.operation, NnrpHandleKind::Operation) {
+            Ok(NnrpFfiResource::Operation {
+                session, frame_id, ..
+            }) => {
+                let session_resource = store.get(*session, NnrpHandleKind::Session);
+                match session_resource {
+                    Ok(NnrpFfiResource::Session { connection, .. }) => {
+                        (*connection, *session, *frame_id)
+                    }
+                    Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32),
+                    Err(status) => return status,
+                }
+            }
+            Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Operation as u32),
+            Err(status) => return status,
+        };
+    store.push_event(NnrpQueuedEvent {
+        kind: NnrpEventKind::ResultPushed as u32,
+        connection,
+        session,
+        operation: request.operation,
+        frame_id,
+    });
+    NnrpFfiStatus::ok()
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// The session handle is copied by value. This function does not dereference
+/// caller-provided pointers.
+pub unsafe extern "C" fn nnrp_server_send_flow_update(
+    request: NnrpServerFlowUpdateRequest,
+) -> NnrpFfiStatus {
+    let mut store = handle_store();
+    let connection = match store.get(request.session, NnrpHandleKind::Session) {
+        Ok(NnrpFfiResource::Session { connection, .. }) => *connection,
+        Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32),
+        Err(status) => return status,
+    };
+    store.push_event(NnrpQueuedEvent {
+        kind: NnrpEventKind::FlowUpdated as u32,
+        connection,
+        session: request.session,
+        operation: NnrpHandle::invalid(),
+        frame_id: request.frame_id,
+    });
+    NnrpFfiStatus::ok()
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// The session handle is copied by value. This function does not dereference
+/// caller-provided pointers.
+pub unsafe extern "C" fn nnrp_server_close(session: NnrpHandle) -> NnrpFfiStatus {
+    let mut store = handle_store();
+    let connection = match store.get(session, NnrpHandleKind::Session) {
+        Ok(NnrpFfiResource::Session { connection, .. }) => *connection,
+        Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32),
+        Err(status) => return status,
+    };
+    store
+        .remove(session, NnrpHandleKind::Session)
+        .map(|_| {
+            store.push_event(NnrpQueuedEvent {
+                kind: NnrpEventKind::SessionClosed as u32,
+                connection,
+                session,
+                operation: NnrpHandle::invalid(),
+                frame_id: 0,
+            });
+            NnrpFfiStatus::ok()
+        })
+        .unwrap_or_else(|status| status)
 }
 
 #[no_mangle]
@@ -1059,6 +1358,176 @@ mod tests {
     }
 
     #[test]
+    fn ffi_server_abi_emits_pollable_runtime_events() {
+        unsafe {
+            let mut server = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_server_bind(
+                    NnrpServerBindRequest {
+                        server_id: 92_001,
+                        generation: 1,
+                        transport_id: 1,
+                    },
+                    &mut server,
+                ),
+                NnrpFfiStatus::ok()
+            );
+
+            let mut result = empty_poll_result();
+            assert_eq!(
+                nnrp_client_await_event(server, &mut result),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(result.event.kind, NnrpEventKind::ConnectionOpened as u32);
+            assert_eq!(result.event.connection, server);
+
+            let mut session = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_server_accept(
+                    NnrpServerAcceptRequest {
+                        server,
+                        session_id: 92_002,
+                        generation: 1,
+                        profile_id: 2,
+                        schema_id: 0x1001,
+                        schema_version: 3,
+                    },
+                    &mut session,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(
+                nnrp_client_await_event(server, &mut result),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(result.event.kind, NnrpEventKind::SessionOpened as u32);
+            assert_eq!(result.event.session, session);
+
+            let payload = [4u8, 5, 6];
+            let mut operation = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_server_receive_submit(
+                    NnrpServerReceiveSubmitRequest {
+                        session,
+                        operation_id: 92_003,
+                        frame_id: 55,
+                        payload: NnrpBufferView {
+                            ptr: payload.as_ptr(),
+                            len: payload.len(),
+                        },
+                    },
+                    &mut operation,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(
+                nnrp_client_await_event(server, &mut result),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(result.event.kind, NnrpEventKind::SubmitAccepted as u32);
+            assert_eq!(result.event.operation, operation);
+            assert_eq!(result.event.frame_id, 55);
+
+            assert_eq!(
+                nnrp_server_send_result(NnrpServerSendResultRequest {
+                    operation,
+                    payload: NnrpBufferView {
+                        ptr: payload.as_ptr(),
+                        len: payload.len(),
+                    },
+                }),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(
+                nnrp_client_await_event(server, &mut result),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(result.event.kind, NnrpEventKind::ResultPushed as u32);
+            assert_eq!(result.event.frame_id, 55);
+
+            assert_eq!(
+                nnrp_server_send_flow_update(NnrpServerFlowUpdateRequest {
+                    session,
+                    frame_id: 55,
+                }),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(
+                nnrp_client_await_event(server, &mut result),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(result.event.kind, NnrpEventKind::FlowUpdated as u32);
+
+            assert_eq!(nnrp_server_close(session), NnrpFfiStatus::ok());
+            assert_eq!(
+                nnrp_client_await_event(server, &mut result),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(result.event.kind, NnrpEventKind::SessionClosed as u32);
+        }
+    }
+
+    #[test]
+    fn ffi_rejects_cross_role_client_and_server_handles() {
+        unsafe {
+            let mut client = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_connect(
+                    NnrpClientConnectRequest {
+                        connection_id: 93_001,
+                        generation: 1,
+                        transport_id: 1,
+                    },
+                    &mut client,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            let mut server = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_server_bind(
+                    NnrpServerBindRequest {
+                        server_id: 93_002,
+                        generation: 1,
+                        transport_id: 1,
+                    },
+                    &mut server,
+                ),
+                NnrpFfiStatus::ok()
+            );
+
+            let mut session = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_open_session(
+                    NnrpSessionOpenRequest {
+                        connection: server,
+                        requested_session_id: 93_003,
+                        generation: 1,
+                        profile_id: 2,
+                        schema_id: 0x1001,
+                        schema_version: 3,
+                    },
+                    &mut session,
+                ),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Connection as u32)
+            );
+            assert_eq!(
+                nnrp_server_accept(
+                    NnrpServerAcceptRequest {
+                        server: client,
+                        session_id: 93_004,
+                        generation: 1,
+                        profile_id: 2,
+                        schema_id: 0x1001,
+                        schema_version: 3,
+                    },
+                    &mut session,
+                ),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Connection as u32)
+            );
+        }
+    }
+
+    #[test]
     fn ffi_entrypoints_reject_invalid_arguments_and_empty_poll_would_block() {
         unsafe {
             assert_eq!(
@@ -1190,7 +1659,10 @@ mod tests {
                 store
                     .get(connection, NnrpHandleKind::Connection)
                     .expect("connection should be registered"),
-                NnrpFfiResource::Connection { transport_id: 1 }
+                NnrpFfiResource::Connection {
+                    transport_id: 1,
+                    role: NnrpFfiConnectionRole::Client
+                }
             ));
             assert!(matches!(
                 store
@@ -1227,14 +1699,20 @@ mod tests {
                     generation: 1,
                     flags: 0,
                 },
-                NnrpFfiResource::Connection { transport_id: 1 },
+                NnrpFfiResource::Connection {
+                    transport_id: 1,
+                    role: NnrpFfiConnectionRole::Client,
+                },
             ),
             Err(NnrpFfiStatus::invalid_handle(99))
         );
         assert_eq!(
             store.insert(
                 NnrpHandle::new(NnrpHandleKind::Connection, 1, 1),
-                NnrpFfiResource::Connection { transport_id: 1 },
+                NnrpFfiResource::Connection {
+                    transport_id: 1,
+                    role: NnrpFfiConnectionRole::Client,
+                },
             ),
             Ok(())
         );

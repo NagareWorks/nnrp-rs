@@ -39,8 +39,8 @@
 
 - [x] Replace preview3 FFI placeholder/bootstrap entrypoints with runtime-backed handles.
 - [x] Expose client connect/open/submit/await/cancel/close through stable C ABI.
-- [ ] Expose server bind/accept/receive-submit/send-result/send-flow-update/close through stable C ABI.
-- [ ] Preserve existing value-handle, buffer-view, callback, polling, and error-family rules.
+- [x] Expose server bind/accept/receive-submit/send-result/send-flow-update/close through stable C ABI.
+- [x] Preserve existing value-handle, buffer-view, callback, polling, and error-family rules.
 
 ## Conformance And Validation
 
