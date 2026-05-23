@@ -57,6 +57,13 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Checkout nnrp-conformance action
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/nnrp-conformance
+          path: nnrp-conformance-action
+          fetch-depth: 1
+
       - name: Resolve version
         id: version
         run: |
@@ -115,6 +122,8 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Test
+        env:
+          NNRP_CONFORMANCE_SUITE_REPO: ${{ github.workspace }}/nnrp-conformance-action
         run: cargo test --workspace
 
       - name: Package native link library
