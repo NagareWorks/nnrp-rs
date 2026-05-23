@@ -22,7 +22,7 @@
 - [x] Implement submit, submit-nowait, await-result, and session close APIs.
 - [x] Implement cancel, session patch, and result/drop/flow event stream APIs.
 - [x] Implement client-side resume consumption using `nnrp-core` recovery semantics.
-- [ ] Implement transport migration consumption using `nnrp-core` recovery semantics.
+- [x] Implement transport migration consumption using `nnrp-core` recovery semantics.
 
 ## Server API
 

@@ -13,6 +13,15 @@ pub enum RuntimeTransportKind {
     Quic,
 }
 
+impl RuntimeTransportKind {
+    pub fn transport_id(self) -> nnrp_core::TransportId {
+        match self {
+            Self::Tcp => nnrp_core::TransportId::Tcp,
+            Self::Quic => nnrp_core::TransportId::Quic,
+        }
+    }
+}
+
 #[async_trait]
 pub trait FramedTransport {
     async fn read_packet(&mut self) -> Result<RuntimePacket, RuntimeError>;

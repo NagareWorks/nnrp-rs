@@ -6,12 +6,14 @@ use nnrp_core::{
     CommonHeader, ConnectionLifecycle, FlowUpdateMetadata, FrameSubmitMetadata, MessageType,
     OperationCancelRequest, OperationDescriptor, OperationRegistry, ResultPushMetadata,
     SchemaRegistry, SessionCloseAckMetadata, SessionCloseMetadata, SessionCloseStatus,
-    SessionOpenAckMetadata, SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchMetadata,
-    SessionStatus, FLOW_UPDATE_METADATA_LEN, FRAME_SUBMIT_METADATA_LEN, RESULT_PUSH_METADATA_LEN,
-    SESSION_ACK_FLAG_RESUME_ENABLED, SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_LIMIT_REACHED,
-    SESSION_ERROR_NONE, SESSION_ERROR_PROFILE_UNSUPPORTED, SESSION_ERROR_RESUME_REJECTED,
-    SESSION_ERROR_SCHEMA_UNSUPPORTED, SESSION_FLAG_ALLOW_RESUME, SESSION_OPEN_ACK_METADATA_LEN,
-    SESSION_PATCH_ACK_METADATA_LEN, SESSION_PATCH_METADATA_LEN,
+    SessionMigrateAckMetadata, SessionMigrateMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
+    SessionPatchAckMetadata, SessionPatchMetadata, SessionStatus, FLOW_UPDATE_METADATA_LEN,
+    FRAME_SUBMIT_METADATA_LEN, RESULT_PUSH_METADATA_LEN, SESSION_ACK_FLAG_RESUME_ENABLED,
+    SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_LIMIT_REACHED, SESSION_ERROR_NONE,
+    SESSION_ERROR_PROFILE_UNSUPPORTED, SESSION_ERROR_RESUME_REJECTED,
+    SESSION_ERROR_SCHEMA_UNSUPPORTED, SESSION_FLAG_ALLOW_RESUME, SESSION_MIGRATE_ACK_METADATA_LEN,
+    SESSION_MIGRATE_METADATA_LEN, SESSION_OPEN_ACK_METADATA_LEN, SESSION_PATCH_ACK_METADATA_LEN,
+    SESSION_PATCH_METADATA_LEN,
 };
 use tokio::net::TcpListener;
 
@@ -150,6 +152,11 @@ pub struct NnrpSubmit {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NnrpCancel {
     pub frame_id: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpMigration {
+    pub metadata: SessionMigrateMetadata,
 }
 
 impl NnrpServer {
@@ -494,6 +501,45 @@ impl NnrpServerSession {
             .write_packet(&RuntimePacket::new(
                 header,
                 metadata.to_bytes()?.to_vec(),
+                Vec::new(),
+            )?)
+            .await
+    }
+
+    pub async fn receive_migrate(&mut self) -> Result<NnrpMigration, RuntimeError> {
+        let packet = self.transport.read_packet().await?;
+        if packet.header.message_type != MessageType::SessionMigrate {
+            return Err(RuntimeError::UnexpectedMessage(
+                "server expected SESSION_MIGRATE",
+            ));
+        }
+        self.require_session_packet(&packet, "server received migrate for another session")?;
+        if packet.metadata.len() != SESSION_MIGRATE_METADATA_LEN {
+            return Err(RuntimeError::UnexpectedMessage(
+                "server received malformed SESSION_MIGRATE metadata length",
+            ));
+        }
+        Ok(NnrpMigration {
+            metadata: SessionMigrateMetadata::parse(&packet.metadata)?,
+        })
+    }
+
+    pub async fn send_migrate_ack(
+        &mut self,
+        request: &SessionMigrateMetadata,
+        ack: SessionMigrateAckMetadata,
+    ) -> Result<(), RuntimeError> {
+        nnrp_core::validate_migration_recovery(request, &ack)?;
+        let mut header = CommonHeader::new(
+            MessageType::SessionMigrateAck,
+            SESSION_MIGRATE_ACK_METADATA_LEN as u32,
+            0,
+        );
+        header.session_id = self.session_id;
+        self.transport
+            .write_packet(&RuntimePacket::new(
+                header,
+                ack.to_bytes()?.to_vec(),
                 Vec::new(),
             )?)
             .await

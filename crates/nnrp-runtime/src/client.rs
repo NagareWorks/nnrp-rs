@@ -1,12 +1,14 @@
 use nnrp_core::{
     validate_result_drop_header, CacheObjectKind, CommonHeader, ConnectionLifecycle,
     FlowUpdateMetadata, FrameSubmitMetadata, InFlightPolicy, MessageType, ResultPushMetadata,
-    SessionCloseAckMetadata, SessionCloseMetadata, SessionCloseReason, SessionOpenAckMetadata,
-    SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchMetadata, SessionPriorityClass,
-    SessionStatus, FRAME_SUBMIT_METADATA_LEN, RESULT_PUSH_METADATA_LEN,
-    SESSION_CLOSE_ACK_METADATA_LEN, SESSION_CLOSE_METADATA_LEN, SESSION_ERROR_NONE,
-    SESSION_OPEN_METADATA_LEN, SESSION_PATCH_ACK_METADATA_LEN, SESSION_PATCH_METADATA_LEN,
-    STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
+    SessionCloseAckMetadata, SessionCloseMetadata, SessionCloseReason, SessionMigrateAckMetadata,
+    SessionMigrateMetadata, SessionOpenAckMetadata, SessionOpenMetadata, SessionPatchAckMetadata,
+    SessionPatchMetadata, SessionPriorityClass, SessionStatus, TransportId,
+    FRAME_SUBMIT_METADATA_LEN, RESULT_PUSH_METADATA_LEN, SESSION_CLOSE_ACK_METADATA_LEN,
+    SESSION_CLOSE_METADATA_LEN, SESSION_ERROR_NONE, SESSION_MIGRATE_ACK_METADATA_LEN,
+    SESSION_MIGRATE_METADATA_LEN, SESSION_OPEN_METADATA_LEN, SESSION_PATCH_ACK_METADATA_LEN,
+    SESSION_PATCH_METADATA_LEN, STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID,
+    TOKEN_DELTA_SCHEMA_VERSION,
 };
 
 use crate::{FramedTransport, RuntimeError, RuntimePacket, RuntimeTransportKind, TcpTransport};
@@ -321,6 +323,58 @@ impl NnrpClientSession {
             ));
         }
         Ok(SessionPatchAckMetadata::parse(&ack_packet.metadata)?)
+    }
+
+    pub async fn migrate_transport(
+        &mut self,
+        request: SessionMigrateMetadata,
+    ) -> Result<SessionMigrateAckMetadata, RuntimeError> {
+        let mut header = CommonHeader::new(
+            MessageType::SessionMigrate,
+            SESSION_MIGRATE_METADATA_LEN as u32,
+            0,
+        );
+        header.session_id = self.session_id;
+        self.transport
+            .write_packet(&RuntimePacket::new(
+                header,
+                request.to_bytes()?.to_vec(),
+                Vec::new(),
+            )?)
+            .await?;
+
+        let ack_packet = self.transport.read_packet().await?;
+        if ack_packet.header.message_type != MessageType::SessionMigrateAck {
+            return Err(RuntimeError::UnexpectedMessage(
+                "client expected SESSION_MIGRATE_ACK",
+            ));
+        }
+        self.require_session_packet(
+            &ack_packet,
+            "client received migrate ack for another session",
+        )?;
+        if ack_packet.metadata.len() != SESSION_MIGRATE_ACK_METADATA_LEN {
+            return Err(RuntimeError::UnexpectedMessage(
+                "client received malformed SESSION_MIGRATE_ACK metadata length",
+            ));
+        }
+        let ack = SessionMigrateAckMetadata::parse(&ack_packet.metadata)?;
+        nnrp_core::validate_migration_recovery(&request, &ack)?;
+        Ok(ack)
+    }
+
+    pub fn build_migration_request(
+        &self,
+        new_transport_id: TransportId,
+        last_result_frame_id: u64,
+        client_migrate_ts_us: u64,
+    ) -> SessionMigrateMetadata {
+        SessionMigrateMetadata {
+            old_transport_id: RuntimeTransportKind::Tcp.transport_id(),
+            new_transport_id,
+            last_result_frame_id,
+            client_migrate_ts_us,
+        }
     }
 
     pub async fn close(mut self) -> Result<(), RuntimeError> {

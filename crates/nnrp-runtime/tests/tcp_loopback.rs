@@ -2,12 +2,13 @@ use nnrp_core::{
     BackpressureLevel, CacheObjectId, CacheObjectKind, CommonHeader, FlowScopeKind,
     FlowUpdateMetadata, FlowUpdateReason, FrameSubmitMetadata, InFlightPolicy, InputProfile,
     MessageType, OperationState, PayloadKindBitmap, ResultClass, ResultPushMetadata,
-    SchemaRegistry, SessionCloseMetadata, SessionCloseReason, SessionOpenAckMetadata,
-    SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata,
-    SessionPatchRejectReason, SessionPriorityClass, SessionStatus, SubmitMode, TileIndexMode,
-    FLOW_UPDATE_FLAG_CREDIT_VALID, RESULT_PUSH_METADATA_LEN, SESSION_CLOSE_ACK_METADATA_LEN,
-    SESSION_ERROR_NONE, SESSION_OPEN_ACK_METADATA_LEN, SESSION_OPEN_METADATA_LEN,
-    STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
+    SchemaRegistry, SessionCloseMetadata, SessionCloseReason, SessionMigrateAckMetadata,
+    SessionOpenAckMetadata, SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchAckStatus,
+    SessionPatchMetadata, SessionPatchRejectReason, SessionPriorityClass, SessionStatus,
+    SubmitMode, TileIndexMode, TransportId, FLOW_UPDATE_FLAG_CREDIT_VALID,
+    RESULT_PUSH_METADATA_LEN, SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE,
+    SESSION_OPEN_ACK_METADATA_LEN, SESSION_OPEN_METADATA_LEN, STANDARD_PROFILE_TOKEN,
+    TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
 };
 use nnrp_runtime::{
     FramedTransport, NnrpClient, NnrpClientConfig, NnrpClientEvent, NnrpServer, NnrpServerConfig,
@@ -303,6 +304,44 @@ async fn server_registry_tracks_resume_enabled_sessions() -> Result<(), RuntimeE
 }
 
 #[tokio::test]
+async fn tcp_loopback_consumes_transport_migration_recovery() -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        let migrate = session.receive_migrate().await?;
+        assert_eq!(migrate.metadata.old_transport_id, TransportId::Tcp);
+        assert_eq!(migrate.metadata.new_transport_id, TransportId::Quic);
+        assert_eq!(migrate.metadata.last_result_frame_id, 10);
+
+        let ack = SessionMigrateAckMetadata {
+            accept_code: 0,
+            resume_from_frame_id: 11,
+            grace_window_ms: 500,
+            server_migrate_ts_us: 200,
+        };
+        session.send_migrate_ack(&migrate.metadata, ack).await?;
+
+        let close = session.receive_close().await?;
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let mut session = client.open_session().await?;
+    let request = session.build_migration_request(TransportId::Quic, 10, 100);
+    let ack = session.migrate_transport(request).await?;
+    assert_eq!(ack.resume_from_frame_id, 11);
+    assert!(!nnrp_core::should_replay_frame_after_migration(&ack, 10));
+    assert!(nnrp_core::should_replay_frame_after_migration(&ack, 11));
+
+    session.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn client_result_reader_rejects_wrong_session_and_metadata_shape() -> Result<(), RuntimeError>
 {
     let wrong_message = {
@@ -437,6 +476,58 @@ async fn client_result_and_patch_helpers_reject_control_mismatches() -> Result<(
 }
 
 #[tokio::test]
+async fn client_migration_rejects_wrong_ack_session_shape_and_cursor() -> Result<(), RuntimeError> {
+    let wrong_message = {
+        let mut header = CommonHeader::new(MessageType::ResultDrop, 0, 0);
+        header.session_id = 1;
+        RuntimePacket::new(header, Vec::new(), Vec::new())?
+    };
+    assert!(matches!(
+        client_migrate_error(wrong_message).await,
+        RuntimeError::UnexpectedMessage(_)
+    ));
+
+    let wrong_session = {
+        let mut header = CommonHeader::new(
+            MessageType::SessionMigrateAck,
+            nnrp_core::SESSION_MIGRATE_ACK_METADATA_LEN as u32,
+            0,
+        );
+        header.session_id = 2;
+        RuntimePacket::new(header, migrate_ack(11).to_bytes()?.to_vec(), Vec::new())?
+    };
+    assert!(matches!(
+        client_migrate_error(wrong_session).await,
+        RuntimeError::UnexpectedMessage(_)
+    ));
+
+    let malformed = {
+        let mut header = CommonHeader::new(MessageType::SessionMigrateAck, 1, 0);
+        header.session_id = 1;
+        RuntimePacket::new(header, vec![0], Vec::new())?
+    };
+    assert!(matches!(
+        client_migrate_error(malformed).await,
+        RuntimeError::UnexpectedMessage(_)
+    ));
+
+    let stale_cursor = {
+        let mut header = CommonHeader::new(
+            MessageType::SessionMigrateAck,
+            nnrp_core::SESSION_MIGRATE_ACK_METADATA_LEN as u32,
+            0,
+        );
+        header.session_id = 1;
+        RuntimePacket::new(header, migrate_ack(9).to_bytes()?.to_vec(), Vec::new())?
+    };
+    assert!(matches!(
+        client_migrate_error(stale_cursor).await,
+        RuntimeError::Protocol(_)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn server_submit_reader_rejects_wrong_message_and_session() -> Result<(), RuntimeError> {
     let wrong_message = {
         let mut header =
@@ -566,6 +657,60 @@ async fn server_cancel_and_patch_readers_reject_malformed_packets() -> Result<()
 }
 
 #[tokio::test]
+async fn server_migration_reader_rejects_wrong_session_and_shape() -> Result<(), RuntimeError> {
+    let wrong_message = {
+        let mut header = CommonHeader::new(MessageType::FrameCancel, 0, 0);
+        header.session_id = 1;
+        RuntimePacket::new(header, Vec::new(), Vec::new())?
+    };
+    assert!(matches!(
+        server_receive_migrate_error(wrong_message).await,
+        RuntimeError::UnexpectedMessage(_)
+    ));
+
+    let wrong_session = {
+        let mut header = CommonHeader::new(
+            MessageType::SessionMigrate,
+            nnrp_core::SESSION_MIGRATE_METADATA_LEN as u32,
+            0,
+        );
+        header.session_id = 2;
+        RuntimePacket::new(header, migration_request().to_bytes()?.to_vec(), Vec::new())?
+    };
+    assert!(matches!(
+        server_receive_migrate_error(wrong_session).await,
+        RuntimeError::UnexpectedMessage(_)
+    ));
+
+    let malformed = {
+        let mut header = CommonHeader::new(MessageType::SessionMigrate, 1, 0);
+        header.session_id = 1;
+        RuntimePacket::new(header, vec![0], Vec::new())?
+    };
+    assert!(matches!(
+        server_receive_migrate_error(malformed).await,
+        RuntimeError::UnexpectedMessage(_)
+    ));
+
+    let same_transport = {
+        let mut request = migration_request();
+        request.new_transport_id = request.old_transport_id;
+        let mut header = CommonHeader::new(
+            MessageType::SessionMigrate,
+            nnrp_core::SESSION_MIGRATE_METADATA_LEN as u32,
+            0,
+        );
+        header.session_id = 1;
+        RuntimePacket::new(header, request.to_bytes()?.to_vec(), Vec::new())?
+    };
+    assert!(matches!(
+        server_send_migrate_ack_error(same_transport).await,
+        RuntimeError::Protocol(_)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn quic_hooks_are_reserved_but_not_runtime_backed() {
     assert!(matches!(
         NnrpClient::connect_quic("localhost:4433", NnrpClientConfig::default()).await,
@@ -683,6 +828,52 @@ async fn client_patch_error(packet: RuntimePacket) -> RuntimeError {
     err
 }
 
+async fn client_migrate_error(packet: RuntimePacket) -> RuntimeError {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener should bind");
+    let addr = listener
+        .local_addr()
+        .expect("listener should expose address");
+    let server_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await?;
+        let mut transport = TcpTransport::new(stream);
+        let open_packet = transport.read_packet().await?;
+        let open = SessionOpenMetadata::parse(&open_packet.metadata)?;
+        let ack = open_ack(&open);
+        let mut header = CommonHeader::new(
+            MessageType::SessionOpenAck,
+            SESSION_OPEN_ACK_METADATA_LEN as u32,
+            0,
+        );
+        header.session_id = ack.session_id;
+        transport
+            .write_packet(&RuntimePacket::new(
+                header,
+                ack.to_bytes()?.to_vec(),
+                Vec::new(),
+            )?)
+            .await?;
+        let _migrate = transport.read_packet().await?;
+        transport.write_packet(&packet).await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default())
+        .await
+        .expect("client should connect");
+    let mut session = client.open_session().await.expect("session should open");
+    let err = session
+        .migrate_transport(migration_request())
+        .await
+        .expect_err("migration should reject scripted response");
+    session
+        .close_transport()
+        .await
+        .expect("transport should close");
+    server_task.await.expect("scripted server should join").ok();
+    err
+}
+
 async fn server_receive_submit_error(packet: RuntimePacket) -> RuntimeError {
     server_receive_error(packet, |mut session| async move {
         session.receive_submit().await.map(|_| ())
@@ -707,6 +898,23 @@ async fn server_receive_cancel_error(packet: RuntimePacket) -> RuntimeError {
 async fn server_receive_patch_error(packet: RuntimePacket) -> RuntimeError {
     server_receive_error(packet, |mut session| async move {
         session.receive_patch().await.map(|_| ())
+    })
+    .await
+}
+
+async fn server_receive_migrate_error(packet: RuntimePacket) -> RuntimeError {
+    server_receive_error(packet, |mut session| async move {
+        session.receive_migrate().await.map(|_| ())
+    })
+    .await
+}
+
+async fn server_send_migrate_ack_error(packet: RuntimePacket) -> RuntimeError {
+    server_receive_error(packet, |mut session| async move {
+        let migrate = session.receive_migrate().await?;
+        session
+            .send_migrate_ack(&migrate.metadata, migrate_ack(11))
+            .await
     })
     .await
 }
@@ -818,6 +1026,24 @@ fn session_flow_update() -> FlowUpdateMetadata {
         retry_after_ms: 0,
         credit_epoch: 1,
         flow_flags: FLOW_UPDATE_FLAG_CREDIT_VALID,
+    }
+}
+
+fn migration_request() -> nnrp_core::SessionMigrateMetadata {
+    nnrp_core::SessionMigrateMetadata {
+        old_transport_id: TransportId::Tcp,
+        new_transport_id: TransportId::Quic,
+        last_result_frame_id: 10,
+        client_migrate_ts_us: 100,
+    }
+}
+
+fn migrate_ack(resume_from_frame_id: u64) -> SessionMigrateAckMetadata {
+    SessionMigrateAckMetadata {
+        accept_code: 0,
+        resume_from_frame_id,
+        grace_window_ms: 500,
+        server_migrate_ts_us: 200,
     }
 }
 
