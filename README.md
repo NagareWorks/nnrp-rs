@@ -6,7 +6,7 @@
   <a href="https://github.com/NagareWorks/nnrp-rs/actions"><img alt="CI" src="https://img.shields.io/badge/CI-preview3-22c55e"></a>
   <a href="https://www.rust-lang.org"><img alt="Rust 1.82+" src="https://img.shields.io/badge/Rust-1.82%2B-f97316?logo=rust&logoColor=white"></a>
   <a href="https://nagareworks.github.io/nnrp-doc/"><img alt="Docs" src="https://img.shields.io/badge/docs-nnrp--doc-38bdf8"></a>
-  <a href="https://github.com/NagareWorks/nnrp-rs/blob/master/LICENSE"><img alt="Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-64748b"></a>
+  <a href="https://github.com/NagareWorks/nnrp-rs/blob/main/LICENSE"><img alt="Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-64748b"></a>
   <img alt="Native FFI" src="https://img.shields.io/badge/native-FFI-0f766e">
   <img alt="WASM primitives" src="https://img.shields.io/badge/WASM-primitives-b45309">
 </p>
@@ -25,7 +25,7 @@ This repository is intended to be the implementation source for Rust users and f
 | `nnrp-runtime` | Transport-neutral async client/server session runtime over framed transport slots. |
 | `nnrp-transport-provider` | Provider registry, local/remote capability intersection, native library discovery, policy resolution, and probe-score selection. |
 | `nnrp-transport-tcp` | TCP provider package for runtime transport/listener slots. |
-| `nnrp-transport-quic` | QUIC provider slot and injection helpers without freezing a concrete TLS/QUIC backend. |
+| `nnrp-transport-quic` | Default Quinn/Rustls QUIC provider, certificate config helpers, and injection hooks for custom backends. |
 | `nnrp-ffi` | C-compatible ABI facade, handle/event model, header surface, and native link-library packaging. |
 | `nnrp-wasm` | Low-level WASM primitives and TypeScript declarations for future `nnrp-js` wrappers. |
 | `nnrp-conformance` | Rust-owned golden vectors, fixture manifests, adapter wrappers, and conformance export helpers. |
@@ -69,7 +69,7 @@ let session = client.open_session().await?;
 # }
 ```
 
-TCP is available as a provider package today. QUIC is exposed as a slot so deployments can inject a concrete backend without `nnrp-core` freezing one TLS/QUIC stack for everyone.
+TCP is available as a provider package. QUIC is also available out of the box through `nnrp-transport-quic` using Quinn/Rustls, while the runtime still exposes framed transport/listener slots for deployments that need native, WASM-facing, or platform-specific QUIC backends.
 
 ## Native And WASM Artifacts
 
@@ -121,4 +121,3 @@ Apache-2.0. See [LICENSE](LICENSE).
 <a href="https://github.com/NagareWorks/nnrp-rs/graphs/contributors" title="Open the contributors graph for individual GitHub profiles and IDs.">
   <img src="https://contrib.rocks/image?repo=NagareWorks/nnrp-rs" alt="Contributors" />
 </a>
-

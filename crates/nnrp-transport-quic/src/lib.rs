@@ -1,27 +1,276 @@
-use nnrp_core::TransportId;
+use std::{
+    io,
+    net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs},
+    sync::Arc,
+};
+
+use async_trait::async_trait;
+use nnrp_core::{CommonHeader, TransportId, COMMON_HEADER_LEN};
 use nnrp_runtime::{
     BoxedFramedListener, BoxedFramedTransport, FramedListener, FramedTransport, NnrpClient,
-    NnrpClientConfig, NnrpServer, NnrpServerConfig, RuntimeError, RuntimeTransportKind,
+    NnrpClientConfig, NnrpServer, NnrpServerConfig, RuntimeError, RuntimePacket,
+    RuntimeTransportKind,
 };
 use nnrp_transport_provider::{
     TransportProviderDescriptor, TransportProviderKind, TransportProviderRegistry,
 };
+use quinn::{ClientConfig, Connection, Endpoint, RecvStream, SendStream, ServerConfig};
+use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
+
+#[derive(Debug, Clone)]
+pub struct QuicClientEndpointConfig {
+    pub bind_addr: SocketAddr,
+    pub server_name: String,
+    pub root_certificates_der: Vec<Vec<u8>>,
+}
+
+impl QuicClientEndpointConfig {
+    pub fn localhost_with_root_certificate(certificate_der: impl Into<Vec<u8>>) -> Self {
+        Self::with_root_certificate(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+            "localhost",
+            certificate_der,
+        )
+    }
+
+    pub fn with_root_certificate(
+        bind_addr: SocketAddr,
+        server_name: impl Into<String>,
+        certificate_der: impl Into<Vec<u8>>,
+    ) -> Self {
+        Self {
+            bind_addr,
+            server_name: server_name.into(),
+            root_certificates_der: vec![certificate_der.into()],
+        }
+    }
+
+    pub fn with_root_certificates(
+        bind_addr: SocketAddr,
+        server_name: impl Into<String>,
+        root_certificates_der: impl IntoIterator<Item = Vec<u8>>,
+    ) -> Self {
+        Self {
+            bind_addr,
+            server_name: server_name.into(),
+            root_certificates_der: root_certificates_der.into_iter().collect(),
+        }
+    }
+
+    pub fn client_config(&self) -> Result<ClientConfig, RuntimeError> {
+        let mut roots = rustls::RootCertStore::empty();
+        for certificate in &self.root_certificates_der {
+            roots
+                .add(CertificateDer::from(certificate.clone()))
+                .map_err(runtime_io)?;
+        }
+        ClientConfig::with_root_certificates(Arc::new(roots)).map_err(runtime_io)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuicSelfSignedCertificate {
+    pub certificate_der: Vec<u8>,
+    pub private_key_pkcs8_der: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct QuicServerEndpointConfig {
+    pub bind_addr: SocketAddr,
+    pub certificate_chain_der: Vec<Vec<u8>>,
+    pub private_key_pkcs8_der: Vec<u8>,
+}
+
+impl QuicServerEndpointConfig {
+    pub fn with_single_certificate(
+        bind_addr: SocketAddr,
+        certificate_der: impl Into<Vec<u8>>,
+        private_key_pkcs8_der: impl Into<Vec<u8>>,
+    ) -> Self {
+        Self {
+            bind_addr,
+            certificate_chain_der: vec![certificate_der.into()],
+            private_key_pkcs8_der: private_key_pkcs8_der.into(),
+        }
+    }
+
+    pub fn self_signed_localhost(
+        bind_addr: SocketAddr,
+    ) -> Result<(Self, QuicSelfSignedCertificate), RuntimeError> {
+        let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .map_err(runtime_io)?;
+        let certificate_der = certified.cert.der().to_vec();
+        let private_key_pkcs8_der = certified.signing_key.serialize_der();
+        let config = Self::with_single_certificate(
+            bind_addr,
+            certificate_der.clone(),
+            private_key_pkcs8_der.clone(),
+        );
+
+        Ok((
+            config,
+            QuicSelfSignedCertificate {
+                certificate_der,
+                private_key_pkcs8_der,
+            },
+        ))
+    }
+
+    pub fn server_config(&self) -> Result<ServerConfig, RuntimeError> {
+        let certificate_chain = self
+            .certificate_chain_der
+            .iter()
+            .cloned()
+            .map(CertificateDer::from)
+            .collect();
+        let private_key = PrivatePkcs8KeyDer::from(self.private_key_pkcs8_der.clone());
+        let mut server_config =
+            ServerConfig::with_single_cert(certificate_chain, private_key.into())
+                .map_err(runtime_io)?;
+        if let Some(transport_config) = Arc::get_mut(&mut server_config.transport) {
+            transport_config.max_concurrent_uni_streams(0_u8.into());
+        }
+        Ok(server_config)
+    }
+}
+
+#[derive(Debug)]
+pub struct QuicTransport {
+    _endpoint: Endpoint,
+    _connection: Connection,
+    send: SendStream,
+    recv: RecvStream,
+}
+
+impl QuicTransport {
+    pub async fn connect(
+        addr: SocketAddr,
+        config: &QuicClientEndpointConfig,
+    ) -> Result<Self, RuntimeError> {
+        let mut endpoint = Endpoint::client(config.bind_addr)?;
+        endpoint.set_default_client_config(config.client_config()?);
+        let connection = endpoint
+            .connect(addr, &config.server_name)
+            .map_err(runtime_io)?
+            .await
+            .map_err(runtime_io)?;
+        let (send, recv) = connection.open_bi().await.map_err(runtime_io)?;
+
+        Ok(Self {
+            _endpoint: endpoint,
+            _connection: connection,
+            send,
+            recv,
+        })
+    }
+
+    fn new(endpoint: Endpoint, connection: Connection, send: SendStream, recv: RecvStream) -> Self {
+        Self {
+            _endpoint: endpoint,
+            _connection: connection,
+            send,
+            recv,
+        }
+    }
+}
+
+#[async_trait]
+impl FramedTransport for QuicTransport {
+    fn transport_kind(&self) -> RuntimeTransportKind {
+        RuntimeTransportKind::Quic
+    }
+
+    async fn read_packet(&mut self) -> Result<RuntimePacket, RuntimeError> {
+        let mut header_bytes = [0u8; COMMON_HEADER_LEN];
+        self.recv
+            .read_exact(&mut header_bytes)
+            .await
+            .map_err(runtime_io)?;
+        let header = CommonHeader::parse(&header_bytes)?;
+
+        let mut metadata = vec![0u8; header.meta_len as usize];
+        if !metadata.is_empty() {
+            self.recv
+                .read_exact(&mut metadata)
+                .await
+                .map_err(runtime_io)?;
+        }
+
+        let mut body = vec![0u8; header.body_len as usize];
+        if !body.is_empty() {
+            self.recv.read_exact(&mut body).await.map_err(runtime_io)?;
+        }
+
+        Ok(RuntimePacket::from_parts(header, metadata, body)?)
+    }
+
+    async fn write_packet(&mut self, packet: &RuntimePacket) -> Result<(), RuntimeError> {
+        self.send
+            .write_all(&packet.to_bytes()?)
+            .await
+            .map_err(runtime_io)?;
+        Ok(())
+    }
+
+    async fn close(&mut self) -> Result<(), RuntimeError> {
+        let _ = self.send.finish();
+        let _ = self.send.stopped().await;
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct QuicFramedListener {
+    endpoint: Endpoint,
+}
+
+impl QuicFramedListener {
+    pub fn bind(config: &QuicServerEndpointConfig) -> Result<Self, RuntimeError> {
+        Ok(Self {
+            endpoint: Endpoint::server(config.server_config()?, config.bind_addr)?,
+        })
+    }
+}
+
+#[async_trait]
+impl FramedListener for QuicFramedListener {
+    fn transport_kind(&self) -> RuntimeTransportKind {
+        RuntimeTransportKind::Quic
+    }
+
+    fn local_addr(&self) -> Result<SocketAddr, RuntimeError> {
+        Ok(self.endpoint.local_addr()?)
+    }
+
+    async fn accept(&self) -> Result<BoxedFramedTransport, RuntimeError> {
+        let incoming = self
+            .endpoint
+            .accept()
+            .await
+            .ok_or(RuntimeError::Internal("QUIC endpoint closed"))?;
+        let connection = incoming.await.map_err(runtime_io)?;
+        let (send, recv) = connection.accept_bi().await.map_err(runtime_io)?;
+        Ok(Box::new(QuicTransport::new(
+            self.endpoint.clone(),
+            connection,
+            send,
+            recv,
+        )))
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct QuicProvider;
 
 impl QuicProvider {
     pub const NAME: &'static str = "nnrp-transport-quic";
-    pub const MISSING_BACKEND_DIAGNOSTIC: &'static str =
-        "QUIC transport backend is not selected; inject a FramedTransport/FramedListener or register a native/WASM provider";
 
     pub fn descriptor() -> TransportProviderDescriptor {
-        TransportProviderDescriptor::missing(
+        TransportProviderDescriptor::available(
             Self::NAME,
             env!("CARGO_PKG_VERSION"),
             TransportId::Quic,
             TransportProviderKind::PureRust,
-            Self::MISSING_BACKEND_DIAGNOSTIC,
         )
     }
 
@@ -39,9 +288,22 @@ impl QuicProvider {
 
     pub async fn connect(
         endpoint: &str,
+        endpoint_config: QuicClientEndpointConfig,
         config: NnrpClientConfig,
     ) -> Result<NnrpClient, RuntimeError> {
-        NnrpClient::connect_quic(endpoint, config).await
+        let addr = resolve_endpoint(endpoint)?;
+        Self::connect_addr(addr, endpoint_config, config).await
+    }
+
+    pub async fn connect_addr(
+        addr: SocketAddr,
+        endpoint_config: QuicClientEndpointConfig,
+        config: NnrpClientConfig,
+    ) -> Result<NnrpClient, RuntimeError> {
+        NnrpClient::from_transport(
+            QuicTransport::connect(addr, &endpoint_config).await?,
+            config,
+        )
     }
 
     pub fn from_transport<T>(
@@ -62,10 +324,10 @@ impl QuicProvider {
     }
 
     pub async fn bind(
-        endpoint: &str,
+        endpoint_config: QuicServerEndpointConfig,
         config: NnrpServerConfig,
     ) -> Result<NnrpServer, RuntimeError> {
-        NnrpServer::bind_quic(endpoint, config).await
+        NnrpServer::from_listener(QuicFramedListener::bind(&endpoint_config)?, config)
     }
 
     pub fn from_listener<L>(
@@ -98,17 +360,33 @@ pub fn quic_server_config(config: NnrpServerConfig) -> NnrpServerConfig {
     config.with_transport(RuntimeTransportKind::Quic)
 }
 
+fn resolve_endpoint(endpoint: &str) -> Result<SocketAddr, RuntimeError> {
+    endpoint
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "endpoint did not resolve"))
+        .map_err(RuntimeError::Io)
+}
+
+fn runtime_io(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> RuntimeError {
+    RuntimeError::Io(io::Error::other(error))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use async_trait::async_trait;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
+    use nnrp_core::{
+        CommonHeader, FrameSubmitMetadata, InputProfile, MessageType, PayloadKindBitmap,
+        ResultClass, ResultPushMetadata, SessionCloseReason, SubmitMode, TileIndexMode,
+    };
     use nnrp_runtime::{RuntimePacket, RuntimeTransportKind};
     use nnrp_transport_provider::{RemoteTransportSupport, TransportPolicy};
 
     #[test]
-    fn quic_provider_registers_missing_backend_descriptor() {
+    fn quic_provider_registers_available_backend_descriptor() {
         let mut registry = TransportProviderRegistry::new();
         register_quic_provider(&mut registry);
 
@@ -119,11 +397,8 @@ mod tests {
             registry.providers()[0].kind,
             TransportProviderKind::PureRust
         );
-        assert!(!registry.providers()[0].available);
-        assert_eq!(
-            registry.providers()[0].diagnostic.as_deref(),
-            Some(QuicProvider::MISSING_BACKEND_DIAGNOSTIC)
-        );
+        assert!(registry.providers()[0].available);
+        assert_eq!(registry.providers()[0].diagnostic, None);
     }
 
     #[test]
@@ -144,30 +419,66 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn quic_connect_and_bind_report_missing_backend() {
-        let client_error =
-            QuicProvider::connect("localhost:4433", quic_client_config(Default::default()))
-                .await
-                .expect_err("default quic package has no concrete backend");
-        assert!(matches!(
-            client_error,
-            RuntimeError::UnsupportedTransport(
-                "QUIC provider is not installed; use from_transport with a QUIC FramedTransport"
-            )
-        ));
-
-        let server_error = QuicProvider::bind(
-            "localhost:4433",
+    async fn quic_provider_runs_loopback_session_with_self_signed_certificate(
+    ) -> Result<(), RuntimeError> {
+        let (endpoint_config, certificate) =
+            QuicServerEndpointConfig::self_signed_localhost(stub_addr())?;
+        let server = QuicProvider::bind(
+            endpoint_config,
             quic_server_config(NnrpServerConfig::default()),
         )
-        .await
-        .expect_err("default quic package has no concrete backend");
-        assert!(matches!(
-            server_error,
-            RuntimeError::UnsupportedTransport(
-                "QUIC provider is not installed; use from_listener with a QUIC FramedListener"
-            )
-        ));
+        .await?;
+        let addr = server.local_addr()?;
+
+        let server_task = tokio::spawn(async move {
+            let mut session = server.accept().await?;
+            let submit = session.receive_submit().await?;
+            assert_eq!(submit.frame_id, 1);
+            assert_eq!(submit.body, b"prompt".to_vec());
+            session
+                .send_result(submit.frame_id, token_result(), b"delta".to_vec())
+                .await?;
+            let close = session.receive_close().await?;
+            assert_eq!(close.close_reason, SessionCloseReason::ClientShutdown);
+            session.ack_close(&close).await?;
+            session.close().await
+        });
+
+        let endpoint_config =
+            QuicClientEndpointConfig::localhost_with_root_certificate(certificate.certificate_der);
+        let client = QuicProvider::connect_addr(
+            addr,
+            endpoint_config,
+            quic_client_config(NnrpClientConfig::default()),
+        )
+        .await?;
+        let mut session = client.open_session().await?;
+        let frame_id = session.submit(token_submit(), b"prompt".to_vec()).await?;
+        let result = session.await_result().await?;
+        assert_eq!(result.frame_id, frame_id);
+        assert_eq!(result.body, b"delta".to_vec());
+        session.close().await?;
+        server_task.await.expect("server task should join")?;
+        Ok(())
+    }
+
+    #[test]
+    fn quic_self_signed_config_exposes_client_material() -> Result<(), RuntimeError> {
+        let (config, certificate) = QuicServerEndpointConfig::self_signed_localhost(stub_addr())?;
+
+        assert_eq!(config.bind_addr, stub_addr());
+        assert_eq!(
+            config.certificate_chain_der,
+            vec![certificate.certificate_der]
+        );
+        assert!(!certificate.private_key_pkcs8_der.is_empty());
+
+        let client_config = QuicClientEndpointConfig::localhost_with_root_certificate(
+            config.certificate_chain_der[0].clone(),
+        );
+        assert_eq!(client_config.server_name, "localhost");
+        assert_eq!(client_config.root_certificates_der.len(), 1);
+        Ok(())
     }
 
     #[test]
@@ -232,7 +543,7 @@ mod tests {
     async fn stub_quic_transport_reports_scripted_errors_and_closes() {
         let mut transport = StubQuicTransport;
         let write_packet = RuntimePacket::new(
-            nnrp_core::CommonHeader::new(nnrp_core::MessageType::Ping, 0, 0),
+            CommonHeader::new(MessageType::Ping, 0, 0),
             Vec::new(),
             Vec::new(),
         )
@@ -250,7 +561,56 @@ mod tests {
     }
 
     fn stub_addr() -> SocketAddr {
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4433)
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
+    }
+
+    fn token_submit() -> FrameSubmitMetadata {
+        FrameSubmitMetadata {
+            src_width: 0,
+            src_height: 0,
+            tile_width: 0,
+            tile_height: 0,
+            tile_count: 0,
+            section_count: 0,
+            frame_class: 0,
+            input_profile: InputProfile::Unspecified,
+            tile_index_mode: TileIndexMode::DenseRange,
+            latency_budget_ms: 25,
+            target_fps_x100: 0,
+            retry_of_frame: 0,
+            tile_base_id: 0,
+            camera_bytes: 0,
+            tile_index_bytes: 0,
+            submit_mode: SubmitMode::Inline,
+            budget_policy: 0,
+            loss_tolerance_policy: 0,
+            object_ref_mask: 0,
+            dependency_frame_id: 0,
+            payload_kind_bitmap: PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),
+            payload_frame_count: 1,
+        }
+    }
+
+    fn token_result() -> ResultPushMetadata {
+        ResultPushMetadata {
+            status_code: 200,
+            result_flags: 0,
+            section_count: 0,
+            tile_count: 0,
+            active_profile_id: nnrp_core::STANDARD_PROFILE_TOKEN,
+            inference_ms: 3,
+            queue_ms: 1,
+            server_total_ms: 4,
+            tile_base_id: 0,
+            tile_index_bytes: 0,
+            result_class: ResultClass::Complete,
+            applied_budget_policy: 0,
+            reused_frame_id: 0,
+            covered_tile_count: 0,
+            dropped_tile_count: 0,
+            payload_kind_bitmap: PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),
+            payload_frame_count: 1,
+        }
     }
 
     struct StubQuicTransport;

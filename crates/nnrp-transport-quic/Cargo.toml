@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
-description = "QUIC transport provider slot and injection helpers for NNRP without freezing a concrete QUIC backend."
+description = "Default Quinn/Rustls QUIC transport provider plus injection helpers for NNRP."
 repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/nnrp-transport-quic"
@@ -23,4 +23,7 @@ nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.3" }
 nnrp-runtime = { path = "../nnrp-runtime", version = "1.0.0-preview.3" }
 nnrp-transport-provider = { path = "../nnrp-transport-provider", version = "1.0.0-preview.3", default-features = false, features = ["quic"] }
 async-trait.workspace = true
+quinn = "0.11.9"
+rcgen = "0.14"
+rustls = "0.23"
 tokio.workspace = true

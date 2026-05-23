@@ -9,7 +9,7 @@
 ## Provider Crates
 
 - [x] Add `nnrp-transport-tcp` as the built-in TCP provider package over `FramedTransport` / `FramedListener`.
-- [x] Add `nnrp-transport-quic` as the QUIC provider package without freezing a single TLS/QUIC backend into `nnrp-core`.
+- [x] Add `nnrp-transport-quic` as the default Quinn/Rustls QUIC provider package while keeping TLS/QUIC backend selection outside `nnrp-core`.
 - [x] Add provider feature flags so applications can choose `tcp`, `quic`, `native-loader`, and future provider families explicitly.
 - [x] Keep provider crate public APIs aligned with the runtime slot contract rather than duplicating session semantics.
 
