@@ -1,9 +1,20 @@
-use crate::NnrpError;
+use std::collections::BTreeMap;
+
+use crate::{
+    NnrpError, SCHEMA_ERROR_HASH_CONFLICT, SCHEMA_ERROR_INCOMPATIBLE, SCHEMA_ERROR_UNKNOWN,
+    SCHEMA_ERROR_UPDATE_REJECTED, SCHEMA_ERROR_VERSION_UNKNOWN,
+};
 
 pub const SCHEMA_DESCRIPTOR_HEADER_LEN: usize = 32;
 pub const TYPED_PAYLOAD_DESCRIPTOR_LEN: usize = 24;
 pub const SCHEMA_FLAGS_KNOWN_MASK: u16 = 0x000f;
 pub const DESCRIPTOR_FLAGS_KNOWN_MASK: u16 = 0x000f;
+pub const PROFILE_UNSPECIFIED: u16 = 0;
+pub const PROFILE_TENSOR: u16 = 1;
+pub const PROFILE_TOKEN: u16 = 2;
+pub const TOKEN_DELTA_SCHEMA_ID: u32 = 0x0000_1001;
+pub const TOKEN_DELTA_SCHEMA_VERSION: u32 = 3;
+pub const STREAM_SEMANTICS_TOKEN_DELTA: u16 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SchemaDescriptorHeader {
@@ -116,6 +127,157 @@ impl TypedPayloadDescriptor {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchemaRegistryAction {
+    Installed,
+    AlreadyInstalled,
+    Updated,
+    Invalidated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchemaRegistryFailure {
+    Unknown,
+    VersionUnknown,
+    HashConflict,
+    Incompatible,
+    UpdateRejected,
+}
+
+impl SchemaRegistryFailure {
+    pub fn error_code(self) -> u32 {
+        match self {
+            Self::Unknown => SCHEMA_ERROR_UNKNOWN,
+            Self::VersionUnknown => SCHEMA_ERROR_VERSION_UNKNOWN,
+            Self::HashConflict => SCHEMA_ERROR_HASH_CONFLICT,
+            Self::Incompatible => SCHEMA_ERROR_INCOMPATIBLE,
+            Self::UpdateRejected => SCHEMA_ERROR_UPDATE_REJECTED,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SchemaRegistry {
+    entries: BTreeMap<(u32, u32), SchemaDescriptorHeader>,
+}
+
+impl SchemaRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_standard_preview3_profiles() -> Self {
+        let mut registry = Self::new();
+        registry
+            .install(token_delta_schema_descriptor())
+            .expect("standard token delta schema is valid");
+        registry
+    }
+
+    pub fn install(
+        &mut self,
+        descriptor: SchemaDescriptorHeader,
+    ) -> Result<SchemaRegistryAction, SchemaRegistryFailure> {
+        validate_profile_assignment(descriptor.profile_id)?;
+
+        let key = (descriptor.schema_id, descriptor.schema_version);
+        if let Some(existing) = self.entries.get(&key) {
+            if existing.schema_hash == descriptor.schema_hash
+                && existing.profile_id == descriptor.profile_id
+            {
+                return Ok(SchemaRegistryAction::AlreadyInstalled);
+            }
+
+            return Err(SchemaRegistryFailure::HashConflict);
+        }
+
+        let has_older_version = self.entries.keys().any(|(schema_id, version)| {
+            *schema_id == descriptor.schema_id && *version < descriptor.schema_version
+        });
+        self.entries.insert(key, descriptor);
+
+        if has_older_version {
+            Ok(SchemaRegistryAction::Updated)
+        } else {
+            Ok(SchemaRegistryAction::Installed)
+        }
+    }
+
+    pub fn get(&self, schema_id: u32, schema_version: u32) -> Option<&SchemaDescriptorHeader> {
+        self.entries.get(&(schema_id, schema_version))
+    }
+
+    pub fn invalidate(
+        &mut self,
+        schema_id: u32,
+        schema_version: u32,
+    ) -> Result<SchemaRegistryAction, SchemaRegistryFailure> {
+        self.entries
+            .remove(&(schema_id, schema_version))
+            .map(|_| SchemaRegistryAction::Invalidated)
+            .ok_or(SchemaRegistryFailure::VersionUnknown)
+    }
+
+    pub fn validate_descriptor_binding(
+        &self,
+        descriptor: &TypedPayloadDescriptor,
+    ) -> Result<(), SchemaRegistryFailure> {
+        validate_profile_assignment(descriptor.profile_id)?;
+
+        if descriptor.profile_id == PROFILE_UNSPECIFIED {
+            if descriptor.schema_id == 0 && descriptor.schema_version == 0 {
+                return Ok(());
+            }
+
+            return Err(SchemaRegistryFailure::Incompatible);
+        }
+
+        if descriptor.schema_id == 0 {
+            return Err(SchemaRegistryFailure::Unknown);
+        }
+
+        let Some(schema) = self.get(descriptor.schema_id, descriptor.schema_version) else {
+            if self
+                .entries
+                .keys()
+                .any(|(schema_id, _)| *schema_id == descriptor.schema_id)
+            {
+                return Err(SchemaRegistryFailure::VersionUnknown);
+            }
+
+            return Err(SchemaRegistryFailure::Unknown);
+        };
+
+        if schema.profile_id != descriptor.profile_id {
+            return Err(SchemaRegistryFailure::Incompatible);
+        }
+
+        Ok(())
+    }
+}
+
+pub fn token_delta_schema_descriptor() -> SchemaDescriptorHeader {
+    SchemaDescriptorHeader {
+        schema_id: TOKEN_DELTA_SCHEMA_ID,
+        schema_version: TOKEN_DELTA_SCHEMA_VERSION,
+        profile_id: PROFILE_TOKEN,
+        schema_flags: 0,
+        min_version_major: 1,
+        max_version_major: 1,
+        body_bytes: 0,
+        dependency_count: 0,
+        default_stream_semantics: STREAM_SEMANTICS_TOKEN_DELTA,
+        schema_hash: 0x6e6e_7270_746f_6b33,
+    }
+}
+
+pub fn validate_profile_assignment(profile_id: u16) -> Result<(), SchemaRegistryFailure> {
+    match profile_id {
+        PROFILE_UNSPECIFIED | PROFILE_TENSOR | PROFILE_TOKEN => Ok(()),
+        _ => Err(SchemaRegistryFailure::UpdateRejected),
+    }
+}
+
 fn require_len(source: &[u8], expected: usize) -> Result<(), NnrpError> {
     if source.len() < expected {
         return Err(NnrpError::SourceTooShort {
@@ -183,8 +345,16 @@ fn write_u64(destination: &mut [u8], offset: usize, value: u64) {
 
 #[cfg(test)]
 mod tests {
-    use super::{SchemaDescriptorHeader, TypedPayloadDescriptor};
-    use crate::{NnrpError, DESCRIPTOR_FLAGS_KNOWN_MASK, SCHEMA_FLAGS_KNOWN_MASK};
+    use super::{
+        token_delta_schema_descriptor, SchemaDescriptorHeader, SchemaRegistry,
+        SchemaRegistryAction, SchemaRegistryFailure, TypedPayloadDescriptor, PROFILE_TENSOR,
+        PROFILE_TOKEN, PROFILE_UNSPECIFIED, STREAM_SEMANTICS_TOKEN_DELTA, TOKEN_DELTA_SCHEMA_ID,
+        TOKEN_DELTA_SCHEMA_VERSION,
+    };
+    use crate::{
+        NnrpError, DESCRIPTOR_FLAGS_KNOWN_MASK, SCHEMA_ERROR_HASH_CONFLICT,
+        SCHEMA_ERROR_INCOMPATIBLE, SCHEMA_ERROR_UPDATE_REJECTED, SCHEMA_FLAGS_KNOWN_MASK,
+    };
 
     #[test]
     fn schema_descriptor_header_round_trips_golden_vector() {
@@ -249,6 +419,162 @@ mod tests {
                 allowed: DESCRIPTOR_FLAGS_KNOWN_MASK as u64
             })
         );
+    }
+
+    #[test]
+    fn schema_registry_installs_updates_and_rejects_hash_conflicts() {
+        let mut registry = SchemaRegistry::new();
+        let descriptor = schema_descriptor(0x20, 1, PROFILE_TENSOR, 0x11);
+
+        assert_eq!(
+            registry.install(descriptor),
+            Ok(SchemaRegistryAction::Installed)
+        );
+        assert_eq!(
+            registry.install(descriptor),
+            Ok(SchemaRegistryAction::AlreadyInstalled)
+        );
+
+        let conflict = SchemaDescriptorHeader {
+            schema_hash: 0x12,
+            ..descriptor
+        };
+        assert_eq!(
+            registry.install(conflict),
+            Err(SchemaRegistryFailure::HashConflict)
+        );
+        assert_eq!(
+            SchemaRegistryFailure::HashConflict.error_code(),
+            SCHEMA_ERROR_HASH_CONFLICT
+        );
+
+        let newer = schema_descriptor(0x20, 2, PROFILE_TENSOR, 0x22);
+        assert_eq!(registry.install(newer), Ok(SchemaRegistryAction::Updated));
+        assert_eq!(registry.get(0x20, 2), Some(&newer));
+        assert_eq!(
+            registry.invalidate(0x20, 2),
+            Ok(SchemaRegistryAction::Invalidated)
+        );
+        assert_eq!(
+            registry.invalidate(0x20, 2),
+            Err(SchemaRegistryFailure::VersionUnknown)
+        );
+    }
+
+    #[test]
+    fn schema_registry_validates_descriptor_bindings_without_implicit_tensor_default() {
+        let mut registry = SchemaRegistry::new();
+        registry
+            .install(schema_descriptor(0x30, 1, PROFILE_TENSOR, 0x33))
+            .unwrap();
+
+        assert_eq!(
+            registry.validate_descriptor_binding(&typed_descriptor(PROFILE_UNSPECIFIED, 0, 0, 0)),
+            Ok(())
+        );
+        assert_eq!(
+            registry.validate_descriptor_binding(&typed_descriptor(
+                PROFILE_UNSPECIFIED,
+                0x30,
+                1,
+                0
+            )),
+            Err(SchemaRegistryFailure::Incompatible)
+        );
+        assert_eq!(
+            SchemaRegistryFailure::Incompatible.error_code(),
+            SCHEMA_ERROR_INCOMPATIBLE
+        );
+
+        assert_eq!(
+            registry.validate_descriptor_binding(&typed_descriptor(PROFILE_TENSOR, 0x30, 1, 0)),
+            Ok(())
+        );
+        assert_eq!(
+            registry.validate_descriptor_binding(&typed_descriptor(PROFILE_TOKEN, 0x30, 1, 0)),
+            Err(SchemaRegistryFailure::Incompatible)
+        );
+        assert_eq!(
+            registry.validate_descriptor_binding(&typed_descriptor(PROFILE_TENSOR, 0x30, 2, 0)),
+            Err(SchemaRegistryFailure::VersionUnknown)
+        );
+        assert_eq!(
+            registry.validate_descriptor_binding(&typed_descriptor(PROFILE_TENSOR, 0x31, 1, 0)),
+            Err(SchemaRegistryFailure::Unknown)
+        );
+    }
+
+    #[test]
+    fn schema_registry_exposes_standard_preview3_token_profile() {
+        let registry = SchemaRegistry::with_standard_preview3_profiles();
+        let descriptor = token_delta_schema_descriptor();
+
+        assert_eq!(descriptor.schema_id, TOKEN_DELTA_SCHEMA_ID);
+        assert_eq!(descriptor.schema_version, TOKEN_DELTA_SCHEMA_VERSION);
+        assert_eq!(descriptor.profile_id, PROFILE_TOKEN);
+        assert_eq!(
+            descriptor.default_stream_semantics,
+            STREAM_SEMANTICS_TOKEN_DELTA
+        );
+        assert_eq!(
+            registry.validate_descriptor_binding(&typed_descriptor(
+                PROFILE_TOKEN,
+                TOKEN_DELTA_SCHEMA_ID,
+                TOKEN_DELTA_SCHEMA_VERSION,
+                STREAM_SEMANTICS_TOKEN_DELTA
+            )),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn schema_registry_rejects_unknown_public_profile_assignments() {
+        let mut registry = SchemaRegistry::new();
+        assert_eq!(
+            registry.install(schema_descriptor(0x40, 1, 0xffff, 0x44)),
+            Err(SchemaRegistryFailure::UpdateRejected)
+        );
+        assert_eq!(
+            SchemaRegistryFailure::UpdateRejected.error_code(),
+            SCHEMA_ERROR_UPDATE_REJECTED
+        );
+    }
+
+    fn schema_descriptor(
+        schema_id: u32,
+        schema_version: u32,
+        profile_id: u16,
+        schema_hash: u64,
+    ) -> SchemaDescriptorHeader {
+        SchemaDescriptorHeader {
+            schema_id,
+            schema_version,
+            profile_id,
+            schema_flags: 0,
+            min_version_major: 1,
+            max_version_major: 1,
+            body_bytes: 0,
+            dependency_count: 0,
+            default_stream_semantics: 0,
+            schema_hash,
+        }
+    }
+
+    fn typed_descriptor(
+        profile_id: u16,
+        schema_id: u32,
+        schema_version: u32,
+        stream_semantics: u16,
+    ) -> TypedPayloadDescriptor {
+        TypedPayloadDescriptor {
+            profile_id,
+            descriptor_flags: 0,
+            schema_id,
+            schema_version,
+            stream_semantics,
+            offset: 0,
+            length: 0,
+        }
     }
 
     fn hex_to_bytes(hex: &str) -> Vec<u8> {

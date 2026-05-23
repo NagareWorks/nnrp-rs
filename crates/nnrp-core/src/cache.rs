@@ -1,11 +1,14 @@
-use crate::NnrpError;
+use crate::{
+    NnrpError, CACHE_ERROR_DEPENDENCY_INVALID, CACHE_ERROR_LEASE_EXPIRED, CACHE_ERROR_MISS,
+    CACHE_ERROR_SCHEMA_MISMATCH, CACHE_ERROR_VERSION_MISMATCH,
+};
 
 pub const CACHE_PUT_METADATA_LEN: usize = 32;
 pub const CACHE_ACK_METADATA_LEN: usize = 28;
 pub const CACHE_INVALIDATE_METADATA_LEN: usize = 20;
 pub const CACHE_PUT_FLAGS_KNOWN_MASK: u32 = 0x0000_0003;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum CacheObjectKind {
     CameraBlock = 0x0001,
@@ -68,6 +71,138 @@ pub enum CacheInvalidateScope {
     Namespace = 1,
     ObjectKind = 2,
     ObjectKey = 3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CacheObjectId {
+    pub cache_namespace: u32,
+    pub cache_key_hi: u32,
+    pub cache_key_lo: u32,
+    pub object_kind: CacheObjectKind,
+}
+
+impl CacheObjectId {
+    pub fn from_put(metadata: &CachePutMetadata) -> Self {
+        Self {
+            cache_namespace: metadata.cache_namespace,
+            cache_key_hi: metadata.cache_key_hi,
+            cache_key_lo: metadata.cache_key_lo,
+            object_kind: metadata.object_kind,
+        }
+    }
+
+    pub fn matches_invalidate(&self, metadata: &CacheInvalidateMetadata) -> bool {
+        match metadata.invalidate_scope {
+            CacheInvalidateScope::WholeSession => true,
+            CacheInvalidateScope::Namespace => self.cache_namespace == metadata.cache_namespace,
+            CacheInvalidateScope::ObjectKind => {
+                self.cache_namespace == metadata.cache_namespace
+                    && self.object_kind as u32 == metadata.cache_key_hi
+            }
+            CacheInvalidateScope::ObjectKey => {
+                self.cache_namespace == metadata.cache_namespace
+                    && self.cache_key_hi == metadata.cache_key_hi
+                    && self.cache_key_lo == metadata.cache_key_lo
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CacheLeaseOwnerScope {
+    Connection = 0,
+    Session = 1,
+    Operation = 2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheLease {
+    pub object_id: CacheObjectId,
+    pub object_version: u64,
+    pub lease_id: u64,
+    pub owner_scope: CacheLeaseOwnerScope,
+    pub owner_id: u64,
+    pub granted_at_ms: u64,
+    pub ttl_ms: u32,
+}
+
+impl CacheLease {
+    pub fn expires_at_ms(&self) -> u64 {
+        self.granted_at_ms.saturating_add(self.ttl_ms as u64)
+    }
+
+    pub fn is_expired_at(&self, now_ms: u64) -> bool {
+        now_ms >= self.expires_at_ms()
+    }
+
+    pub fn validate_live_at(&self, now_ms: u64) -> Result<(), CacheValidationFailure> {
+        if self.is_expired_at(now_ms) {
+            return Err(CacheValidationFailure::LeaseExpired);
+        }
+
+        Ok(())
+    }
+
+    pub fn validate_version(&self, expected_version: u64) -> Result<(), CacheValidationFailure> {
+        if self.object_version != expected_version {
+            return Err(CacheValidationFailure::VersionMismatch);
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheDependency {
+    pub object_id: CacheObjectId,
+    pub required_version: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheDependencyState {
+    pub object_id: CacheObjectId,
+    pub current_version: u64,
+    pub invalidated: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheValidationFailure {
+    Miss,
+    LeaseExpired,
+    VersionMismatch,
+    DependencyInvalid,
+    SchemaMismatch,
+}
+
+impl CacheValidationFailure {
+    pub fn error_code(self) -> u32 {
+        match self {
+            Self::Miss => CACHE_ERROR_MISS,
+            Self::LeaseExpired => CACHE_ERROR_LEASE_EXPIRED,
+            Self::VersionMismatch => CACHE_ERROR_VERSION_MISMATCH,
+            Self::DependencyInvalid => CACHE_ERROR_DEPENDENCY_INVALID,
+            Self::SchemaMismatch => CACHE_ERROR_SCHEMA_MISMATCH,
+        }
+    }
+}
+
+pub fn validate_cache_dependencies(
+    dependencies: &[CacheDependency],
+    states: &[CacheDependencyState],
+) -> Result<(), CacheValidationFailure> {
+    for dependency in dependencies {
+        let state = states
+            .iter()
+            .find(|state| state.object_id == dependency.object_id)
+            .ok_or(CacheValidationFailure::DependencyInvalid)?;
+
+        if state.invalidated || state.current_version != dependency.required_version {
+            return Err(CacheValidationFailure::DependencyInvalid);
+        }
+    }
+
+    Ok(())
 }
 
 impl CacheInvalidateScope {
@@ -364,6 +499,139 @@ mod tests {
                 actual: CACHE_PUT_METADATA_LEN - 1
             })
         );
+    }
+
+    #[test]
+    fn cache_lease_exports_stable_validation_failures() {
+        let object_id = CacheObjectId {
+            cache_namespace: 1,
+            cache_key_hi: 2,
+            cache_key_lo: 3,
+            object_kind: CacheObjectKind::PromptSegment,
+        };
+        let lease = CacheLease {
+            object_id,
+            object_version: 7,
+            lease_id: 99,
+            owner_scope: CacheLeaseOwnerScope::Session,
+            owner_id: 42,
+            granted_at_ms: 1_000,
+            ttl_ms: 500,
+        };
+
+        assert_eq!(lease.expires_at_ms(), 1_500);
+        assert_eq!(lease.validate_live_at(1_499), Ok(()));
+        assert_eq!(
+            lease.validate_live_at(1_500),
+            Err(CacheValidationFailure::LeaseExpired)
+        );
+        assert_eq!(lease.validate_version(7), Ok(()));
+        assert_eq!(
+            lease.validate_version(8),
+            Err(CacheValidationFailure::VersionMismatch)
+        );
+        assert_eq!(
+            CacheValidationFailure::LeaseExpired.error_code(),
+            CACHE_ERROR_LEASE_EXPIRED
+        );
+        assert_eq!(
+            CacheValidationFailure::SchemaMismatch.error_code(),
+            CACHE_ERROR_SCHEMA_MISMATCH
+        );
+    }
+
+    #[test]
+    fn cache_dependencies_validate_versions_and_invalidations() {
+        let object_id = CacheObjectId {
+            cache_namespace: 1,
+            cache_key_hi: 2,
+            cache_key_lo: 3,
+            object_kind: CacheObjectKind::PromptSegment,
+        };
+        let dependencies = [CacheDependency {
+            object_id,
+            required_version: 7,
+        }];
+        let states = [CacheDependencyState {
+            object_id,
+            current_version: 7,
+            invalidated: false,
+        }];
+
+        assert_eq!(validate_cache_dependencies(&dependencies, &states), Ok(()));
+
+        let wrong_version = [CacheDependencyState {
+            current_version: 8,
+            ..states[0]
+        }];
+        assert_eq!(
+            validate_cache_dependencies(&dependencies, &wrong_version),
+            Err(CacheValidationFailure::DependencyInvalid)
+        );
+
+        let invalidated = [CacheDependencyState {
+            invalidated: true,
+            ..states[0]
+        }];
+        assert_eq!(
+            validate_cache_dependencies(&dependencies, &invalidated),
+            Err(CacheValidationFailure::DependencyInvalid)
+        );
+        assert_eq!(
+            validate_cache_dependencies(&dependencies, &[]),
+            Err(CacheValidationFailure::DependencyInvalid)
+        );
+    }
+
+    #[test]
+    fn cache_object_id_consumes_invalidate_scopes() {
+        let put = CachePutMetadata {
+            cache_namespace: 7,
+            cache_key_hi: 8,
+            cache_key_lo: 9,
+            object_kind: CacheObjectKind::ToolSchema,
+            ttl_ms: 100,
+            object_bytes: 64,
+            codec_bitmap: 0,
+            flags: 0,
+        };
+        let object_id = CacheObjectId::from_put(&put);
+
+        assert!(object_id.matches_invalidate(&CacheInvalidateMetadata {
+            invalidate_scope: CacheInvalidateScope::WholeSession,
+            cache_namespace: 0,
+            cache_key_hi: 0,
+            cache_key_lo: 0,
+            reason_code: 0,
+        }));
+        assert!(object_id.matches_invalidate(&CacheInvalidateMetadata {
+            invalidate_scope: CacheInvalidateScope::Namespace,
+            cache_namespace: 7,
+            cache_key_hi: 0,
+            cache_key_lo: 0,
+            reason_code: 0,
+        }));
+        assert!(object_id.matches_invalidate(&CacheInvalidateMetadata {
+            invalidate_scope: CacheInvalidateScope::ObjectKind,
+            cache_namespace: 7,
+            cache_key_hi: CacheObjectKind::ToolSchema as u32,
+            cache_key_lo: 0,
+            reason_code: 0,
+        }));
+        assert!(object_id.matches_invalidate(&CacheInvalidateMetadata {
+            invalidate_scope: CacheInvalidateScope::ObjectKey,
+            cache_namespace: 7,
+            cache_key_hi: 8,
+            cache_key_lo: 9,
+            reason_code: 0,
+        }));
+        assert!(!object_id.matches_invalidate(&CacheInvalidateMetadata {
+            invalidate_scope: CacheInvalidateScope::ObjectKey,
+            cache_namespace: 7,
+            cache_key_hi: 8,
+            cache_key_lo: 10,
+            reason_code: 0,
+        }));
     }
 
     fn hex_to_bytes(hex: &str) -> Vec<u8> {

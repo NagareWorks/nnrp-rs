@@ -8,14 +8,17 @@ pub mod flow;
 pub mod header;
 pub mod lifecycle;
 pub mod operation;
+pub mod recovery;
 pub mod schema;
 pub mod session;
 pub mod version;
 
 pub use cache::{
-    CacheAckMetadata, CacheAckStatus, CacheInvalidateMetadata, CacheInvalidateScope,
-    CacheObjectKind, CachePutMetadata, CACHE_ACK_METADATA_LEN, CACHE_INVALIDATE_METADATA_LEN,
-    CACHE_PUT_FLAGS_KNOWN_MASK, CACHE_PUT_METADATA_LEN,
+    validate_cache_dependencies, CacheAckMetadata, CacheAckStatus, CacheDependency,
+    CacheDependencyState, CacheInvalidateMetadata, CacheInvalidateScope, CacheLease,
+    CacheLeaseOwnerScope, CacheObjectId, CacheObjectKind, CachePutMetadata, CacheValidationFailure,
+    CACHE_ACK_METADATA_LEN, CACHE_INVALIDATE_METADATA_LEN, CACHE_PUT_FLAGS_KNOWN_MASK,
+    CACHE_PUT_METADATA_LEN,
 };
 pub use codes::{
     CACHE_ERROR_DEPENDENCY_INVALID, CACHE_ERROR_LEASE_EXPIRED, CACHE_ERROR_MISS, CACHE_ERROR_NONE,
@@ -64,9 +67,17 @@ pub use lifecycle::{
 pub use operation::{
     OperationCancelRequest, OperationDescriptor, OperationRecord, OperationRegistry,
 };
+pub use recovery::{
+    should_replay_frame_after_migration, validate_migration_recovery,
+    validate_session_recovery_ack, validate_session_recovery_request, SessionRecoveryIntent,
+    SessionRecoveryOutcome, SESSION_ACK_FLAG_RESUME_ENABLED, SESSION_FLAG_ALLOW_RESUME,
+};
 pub use schema::{
-    SchemaDescriptorHeader, TypedPayloadDescriptor, DESCRIPTOR_FLAGS_KNOWN_MASK,
-    SCHEMA_DESCRIPTOR_HEADER_LEN, SCHEMA_FLAGS_KNOWN_MASK, TYPED_PAYLOAD_DESCRIPTOR_LEN,
+    token_delta_schema_descriptor, validate_profile_assignment, SchemaDescriptorHeader,
+    SchemaRegistry, SchemaRegistryAction, SchemaRegistryFailure, TypedPayloadDescriptor,
+    DESCRIPTOR_FLAGS_KNOWN_MASK, PROFILE_TENSOR, PROFILE_TOKEN, PROFILE_UNSPECIFIED,
+    SCHEMA_DESCRIPTOR_HEADER_LEN, SCHEMA_FLAGS_KNOWN_MASK, STREAM_SEMANTICS_TOKEN_DELTA,
+    TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION, TYPED_PAYLOAD_DESCRIPTOR_LEN,
 };
 pub use session::{
     SessionCloseAckMetadata, SessionCloseMetadata, SessionOpenAckMetadata, SessionOpenMetadata,

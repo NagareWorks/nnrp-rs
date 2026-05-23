@@ -10,7 +10,7 @@
 
 - [x] Land the frozen connection/session lifecycle and explicit session-close contract in `nnrp-core`; recovery contract remains tracked in `02c`.
 - [x] Land inherited `FLOW_UPDATE` metadata plus preview3 priority, operation-state, cancel-scope, and multi-scope scheduling contract in `nnrp-core`.
-- [ ] Land inherited cache/typed-payload pieces plus preview3 cache lease, schema registry, and descriptor-binding contract in `nnrp-core`.
+- [x] Land inherited cache/typed-payload pieces plus preview3 cache lease, schema registry, and descriptor-binding contract in `nnrp-core`.
 - [ ] Land the frozen payload-family and public lifecycle boundary in `nnrp-core`.
 
 ## FFI And Downstream Consumption
