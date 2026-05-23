@@ -1,4 +1,16 @@
-use nnrp_runtime::{NnrpClient, NnrpClientConfig, NnrpServer, NnrpServerConfig, RuntimeError};
+use nnrp_core::{
+    CommonHeader, FrameSubmitMetadata, InFlightPolicy, InputProfile, MessageType,
+    PayloadKindBitmap, ResultClass, ResultPushMetadata, SessionCloseMetadata, SessionCloseReason,
+    SessionOpenAckMetadata, SessionOpenMetadata, SessionPriorityClass, SessionStatus, SubmitMode,
+    TileIndexMode, RESULT_PUSH_METADATA_LEN, SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE,
+    SESSION_OPEN_ACK_METADATA_LEN, SESSION_OPEN_METADATA_LEN, STANDARD_PROFILE_TOKEN,
+    TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
+};
+use nnrp_runtime::{
+    FramedTransport, NnrpClient, NnrpClientConfig, NnrpServer, NnrpServerConfig, RuntimeError,
+    RuntimePacket, TcpTransport,
+};
+use tokio::net::TcpListener;
 
 #[tokio::test]
 async fn tcp_loopback_opens_matching_client_and_server_sessions() -> Result<(), RuntimeError> {
@@ -6,9 +18,11 @@ async fn tcp_loopback_opens_matching_client_and_server_sessions() -> Result<(), 
     let addr = server.local_addr()?;
 
     let server_task = tokio::spawn(async move {
-        let session = server.accept().await?;
+        let mut session = server.accept().await?;
         let session_id = session.session_id();
         let profile_id = session.client_open().profile_id;
+        let close = session.receive_close().await?;
+        session.ack_close(&close).await?;
         session.close().await?;
         Ok::<_, RuntimeError>((session_id, profile_id))
     });
@@ -31,6 +45,182 @@ async fn tcp_loopback_opens_matching_client_and_server_sessions() -> Result<(), 
 }
 
 #[tokio::test]
+async fn tcp_loopback_submits_frame_receives_result_and_closes() -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        let submit = session.receive_submit().await?;
+        assert_eq!(submit.frame_id, 1);
+        assert_eq!(
+            submit.metadata.payload_kind_bitmap.0,
+            PayloadKindBitmap::TOKEN_CHUNK
+        );
+        assert_eq!(submit.body, b"prompt".to_vec());
+
+        session
+            .send_result(submit.frame_id, token_result(), b"delta".to_vec())
+            .await?;
+        let close = session.receive_close().await?;
+        assert_eq!(close.last_operation_id, 1);
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let mut session = client.open_session().await?;
+    let frame_id = session.submit(token_submit(), b"prompt".to_vec()).await?;
+    assert_eq!(frame_id, 1);
+
+    let result = session.await_result().await?;
+    assert_eq!(result.frame_id, frame_id);
+    assert_eq!(result.metadata.status_code, 200);
+    assert_eq!(result.body, b"delta".to_vec());
+    session.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn client_result_reader_rejects_wrong_session_and_metadata_shape() -> Result<(), RuntimeError>
+{
+    let wrong_message = {
+        let mut header = CommonHeader::new(
+            MessageType::SessionCloseAck,
+            SESSION_CLOSE_ACK_METADATA_LEN as u32,
+            0,
+        );
+        header.session_id = 1;
+        RuntimePacket::new(header, vec![0; SESSION_CLOSE_ACK_METADATA_LEN], Vec::new())?
+    };
+    let mut session = scripted_client_session(wrong_message).await?;
+    assert!(matches!(
+        session.await_result().await,
+        Err(RuntimeError::UnexpectedMessage(_))
+    ));
+    session.close_transport().await?;
+
+    let wrong_session = {
+        let mut header =
+            CommonHeader::new(MessageType::ResultPush, RESULT_PUSH_METADATA_LEN as u32, 0);
+        header.session_id = 2;
+        header.frame_id = 1;
+        RuntimePacket::new(header, token_result().to_bytes()?.to_vec(), Vec::new())?
+    };
+    let mut session = scripted_client_session(wrong_session).await?;
+    assert!(matches!(
+        session.await_result().await,
+        Err(RuntimeError::UnexpectedMessage(_))
+    ));
+    session.close_transport().await?;
+
+    let malformed = {
+        let mut header = CommonHeader::new(MessageType::ResultPush, 1, 0);
+        header.session_id = 1;
+        header.frame_id = 1;
+        RuntimePacket::new(header, vec![0], Vec::new())?
+    };
+    let mut session = scripted_client_session(malformed).await?;
+    assert!(matches!(
+        session.await_result().await,
+        Err(RuntimeError::UnexpectedMessage(_))
+    ));
+    session.close_transport().await
+}
+
+#[tokio::test]
+async fn client_close_rejects_wrong_ack_session_and_shape() -> Result<(), RuntimeError> {
+    let wrong_session = {
+        let mut header = CommonHeader::new(
+            MessageType::SessionCloseAck,
+            SESSION_CLOSE_ACK_METADATA_LEN as u32,
+            0,
+        );
+        header.session_id = 2;
+        RuntimePacket::new(header, vec![0; SESSION_CLOSE_ACK_METADATA_LEN], Vec::new())?
+    };
+    let mut session = scripted_client_session(wrong_session).await?;
+    let result = session.close_with(close_request()).await;
+    assert!(result.is_err(), "close should reject wrong ack session");
+    session.close_transport().await?;
+
+    let malformed = {
+        let mut header = CommonHeader::new(MessageType::SessionCloseAck, 1, 0);
+        header.session_id = 1;
+        RuntimePacket::new(header, vec![0], Vec::new())?
+    };
+    let mut session = scripted_client_session(malformed).await?;
+    let result = session.close_with(close_request()).await;
+    assert!(
+        result.is_err(),
+        "close should reject malformed ack metadata"
+    );
+    session.close_transport().await
+}
+
+#[tokio::test]
+async fn server_submit_reader_rejects_wrong_message_and_session() -> Result<(), RuntimeError> {
+    let wrong_message = {
+        let mut header =
+            CommonHeader::new(MessageType::ResultPush, RESULT_PUSH_METADATA_LEN as u32, 0);
+        header.session_id = 1;
+        RuntimePacket::new(header, token_result().to_bytes()?.to_vec(), Vec::new())?
+    };
+    let err = server_receive_submit_error(wrong_message).await;
+    assert!(matches!(err, RuntimeError::UnexpectedMessage(_)));
+
+    let wrong_session = {
+        let mut header = CommonHeader::new(
+            MessageType::FrameSubmit,
+            SESSION_OPEN_METADATA_LEN as u32,
+            0,
+        );
+        header.session_id = 2;
+        RuntimePacket::new(header, vec![0; SESSION_OPEN_METADATA_LEN], Vec::new())?
+    };
+    let err = server_receive_submit_error(wrong_session).await;
+    assert!(matches!(err, RuntimeError::UnexpectedMessage(_)));
+
+    let malformed = {
+        let mut header = CommonHeader::new(MessageType::FrameSubmit, 1, 0);
+        header.session_id = 1;
+        RuntimePacket::new(header, vec![0], Vec::new())?
+    };
+    let err = server_receive_submit_error(malformed).await;
+    assert!(matches!(err, RuntimeError::UnexpectedMessage(_)));
+    Ok(())
+}
+
+#[tokio::test]
+async fn server_close_reader_rejects_wrong_message_and_session() -> Result<(), RuntimeError> {
+    let wrong_message = {
+        let mut header = CommonHeader::new(
+            MessageType::FrameSubmit,
+            SESSION_OPEN_METADATA_LEN as u32,
+            0,
+        );
+        header.session_id = 1;
+        RuntimePacket::new(header, vec![0; SESSION_OPEN_METADATA_LEN], Vec::new())?
+    };
+    let err = server_receive_close_error(wrong_message).await;
+    assert!(matches!(err, RuntimeError::UnexpectedMessage(_)));
+
+    let wrong_session = {
+        let mut header = CommonHeader::new(
+            MessageType::SessionClose,
+            nnrp_core::SESSION_CLOSE_METADATA_LEN as u32,
+            0,
+        );
+        header.session_id = 2;
+        RuntimePacket::new(header, close_request().to_bytes()?.to_vec(), Vec::new())?
+    };
+    let err = server_receive_close_error(wrong_session).await;
+    assert!(matches!(err, RuntimeError::UnexpectedMessage(_)));
+    Ok(())
+}
+
+#[tokio::test]
 async fn quic_hooks_are_reserved_but_not_runtime_backed() {
     assert!(matches!(
         NnrpClient::connect_quic("localhost:4433", NnrpClientConfig::default()).await,
@@ -40,4 +230,193 @@ async fn quic_hooks_are_reserved_but_not_runtime_backed() {
         NnrpServer::bind_quic("localhost:4433", NnrpServerConfig::default()).await,
         Err(RuntimeError::UnsupportedTransport(_))
     ));
+}
+
+fn token_submit() -> FrameSubmitMetadata {
+    FrameSubmitMetadata {
+        src_width: 0,
+        src_height: 0,
+        tile_width: 0,
+        tile_height: 0,
+        tile_count: 0,
+        section_count: 0,
+        frame_class: 0,
+        input_profile: InputProfile::Unspecified,
+        tile_index_mode: TileIndexMode::DenseRange,
+        latency_budget_ms: 25,
+        target_fps_x100: 0,
+        retry_of_frame: 0,
+        tile_base_id: 0,
+        camera_bytes: 0,
+        tile_index_bytes: 0,
+        submit_mode: SubmitMode::Inline,
+        budget_policy: 0,
+        loss_tolerance_policy: 0,
+        object_ref_mask: 0,
+        dependency_frame_id: 0,
+        payload_kind_bitmap: PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),
+        payload_frame_count: 1,
+    }
+}
+
+async fn scripted_client_session(
+    packet: RuntimePacket,
+) -> Result<nnrp_runtime::NnrpClientSession, RuntimeError> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let server_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await?;
+        let mut transport = TcpTransport::new(stream);
+        let open_packet = transport.read_packet().await?;
+        let open = SessionOpenMetadata::parse(&open_packet.metadata)?;
+        let ack = open_ack(&open);
+        let mut header = CommonHeader::new(
+            MessageType::SessionOpenAck,
+            SESSION_OPEN_ACK_METADATA_LEN as u32,
+            0,
+        );
+        header.session_id = ack.session_id;
+        transport
+            .write_packet(&RuntimePacket::new(
+                header,
+                ack.to_bytes()?.to_vec(),
+                Vec::new(),
+            )?)
+            .await?;
+        transport.write_packet(&packet).await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let session = client.open_session().await?;
+    server_task.await.expect("scripted server should join")?;
+    Ok(session)
+}
+
+async fn server_receive_submit_error(packet: RuntimePacket) -> RuntimeError {
+    server_receive_error(packet, |mut session| async move {
+        session.receive_submit().await.map(|_| ())
+    })
+    .await
+}
+
+async fn server_receive_close_error(packet: RuntimePacket) -> RuntimeError {
+    server_receive_error(packet, |mut session| async move {
+        session.receive_close().await.map(|_| ())
+    })
+    .await
+}
+
+async fn server_receive_error<F, Fut>(packet: RuntimePacket, receive: F) -> RuntimeError
+where
+    F: FnOnce(nnrp_runtime::NnrpServerSession) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<(), RuntimeError>> + Send + 'static,
+{
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default())
+        .await
+        .expect("server should bind");
+    let addr = server.local_addr().expect("server should expose address");
+    let server_task = tokio::spawn(async move {
+        let session = server.accept().await?;
+        receive(session).await
+    });
+
+    let mut transport = TcpTransport::connect(addr)
+        .await
+        .expect("client should connect");
+    let open = session_open();
+    let mut open_header = CommonHeader::new(
+        MessageType::SessionOpen,
+        SESSION_OPEN_METADATA_LEN as u32,
+        0,
+    );
+    open_header.session_id = 0;
+    transport
+        .write_packet(
+            &RuntimePacket::new(open_header, open.to_bytes().unwrap().to_vec(), Vec::new())
+                .expect("open packet should build"),
+        )
+        .await
+        .expect("open should write");
+    let _ack = transport.read_packet().await.expect("ack should read");
+    transport
+        .write_packet(&packet)
+        .await
+        .expect("packet should write");
+
+    server_task
+        .await
+        .expect("server task should join")
+        .expect_err("server should reject scripted packet")
+}
+
+fn close_request() -> SessionCloseMetadata {
+    SessionCloseMetadata {
+        close_reason: SessionCloseReason::ClientShutdown,
+        in_flight_policy: InFlightPolicy::Drain,
+        drain_timeout_ms: 0,
+        last_operation_id: 1,
+        session_error_code: SESSION_ERROR_NONE,
+        session_close_tag: 1,
+    }
+}
+
+fn session_open() -> SessionOpenMetadata {
+    SessionOpenMetadata {
+        requested_session_id: 1,
+        profile_id: STANDARD_PROFILE_TOKEN,
+        priority_class: SessionPriorityClass::Balanced,
+        session_flags: 0,
+        schema_id: TOKEN_DELTA_SCHEMA_ID,
+        schema_version: TOKEN_DELTA_SCHEMA_VERSION,
+        default_deadline_ms: 500,
+        max_in_flight_operations: 4,
+        lease_ttl_hint_ms: 30_000,
+        resume_token_bytes: 0,
+        auth_bytes: 0,
+        session_extension_bytes: 0,
+        client_session_tag: 1,
+    }
+}
+
+fn open_ack(open: &SessionOpenMetadata) -> SessionOpenAckMetadata {
+    SessionOpenAckMetadata {
+        session_id: open.requested_session_id,
+        accepted_profile_id: open.profile_id,
+        accepted_priority_class: open.priority_class,
+        session_status: SessionStatus::Opened,
+        schema_id: open.schema_id,
+        schema_version: open.schema_version,
+        granted_operation_credit: 2,
+        max_in_flight_operations: open.max_in_flight_operations,
+        lease_ttl_ms: open.lease_ttl_hint_ms,
+        resume_window_ms: 120_000,
+        resume_token_bytes: 0,
+        session_extension_bytes: 0,
+        server_session_tag: open.client_session_tag,
+        route_scope_id: 0,
+        session_error_code: SESSION_ERROR_NONE,
+        session_flags_ack: 0,
+    }
+}
+
+fn token_result() -> ResultPushMetadata {
+    ResultPushMetadata {
+        status_code: 200,
+        result_flags: 0,
+        section_count: 0,
+        tile_count: 0,
+        active_profile_id: STANDARD_PROFILE_TOKEN,
+        inference_ms: 3,
+        queue_ms: 1,
+        server_total_ms: 4,
+        tile_base_id: 0,
+        tile_index_bytes: 0,
+        result_class: ResultClass::Complete,
+        applied_budget_policy: 0,
+        reused_frame_id: 0,
+        covered_tile_count: 0,
+        dropped_tile_count: 0,
+        payload_kind_bitmap: PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),
+        payload_frame_count: 1,
+    }
 }

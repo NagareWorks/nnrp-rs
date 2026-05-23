@@ -1,6 +1,8 @@
 use nnrp_core::{
-    CommonHeader, ConnectionLifecycle, MessageType, SessionOpenAckMetadata, SessionOpenMetadata,
-    SessionStatus, SESSION_ERROR_NONE, SESSION_OPEN_ACK_METADATA_LEN,
+    CommonHeader, ConnectionLifecycle, FrameSubmitMetadata, MessageType, ResultPushMetadata,
+    SessionCloseAckMetadata, SessionCloseMetadata, SessionCloseStatus, SessionOpenAckMetadata,
+    SessionOpenMetadata, SessionStatus, FRAME_SUBMIT_METADATA_LEN, RESULT_PUSH_METADATA_LEN,
+    SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE, SESSION_OPEN_ACK_METADATA_LEN,
 };
 use tokio::net::TcpListener;
 
@@ -37,6 +39,13 @@ pub struct NnrpServerSession {
     client_open: SessionOpenMetadata,
     transport: TcpTransport,
     lifecycle: ConnectionLifecycle,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NnrpSubmit {
+    pub frame_id: u32,
+    pub metadata: FrameSubmitMetadata,
+    pub body: Vec<u8>,
 }
 
 impl NnrpServer {
@@ -133,6 +142,92 @@ impl NnrpServerSession {
 
     pub fn lifecycle(&self) -> &ConnectionLifecycle {
         &self.lifecycle
+    }
+
+    pub async fn receive_submit(&mut self) -> Result<NnrpSubmit, RuntimeError> {
+        let packet = self.transport.read_packet().await?;
+        if packet.header.message_type != MessageType::FrameSubmit {
+            return Err(RuntimeError::UnexpectedMessage(
+                "server expected FRAME_SUBMIT",
+            ));
+        }
+        if packet.header.session_id != self.session_id {
+            return Err(RuntimeError::UnexpectedMessage(
+                "server received submit for another session",
+            ));
+        }
+        if packet.metadata.len() != FRAME_SUBMIT_METADATA_LEN {
+            return Err(RuntimeError::UnexpectedMessage(
+                "server received malformed FRAME_SUBMIT metadata length",
+            ));
+        }
+
+        Ok(NnrpSubmit {
+            frame_id: packet.header.frame_id,
+            metadata: FrameSubmitMetadata::parse(&packet.metadata)?,
+            body: packet.body,
+        })
+    }
+
+    pub async fn send_result(
+        &mut self,
+        frame_id: u32,
+        metadata: ResultPushMetadata,
+        body: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        let mut header = CommonHeader::new(
+            MessageType::ResultPush,
+            RESULT_PUSH_METADATA_LEN as u32,
+            body.len() as u32,
+        );
+        header.session_id = self.session_id;
+        header.frame_id = frame_id;
+        self.transport
+            .write_packet(&RuntimePacket::new(
+                header,
+                metadata.to_bytes()?.to_vec(),
+                body,
+            )?)
+            .await
+    }
+
+    pub async fn receive_close(&mut self) -> Result<SessionCloseMetadata, RuntimeError> {
+        let packet = self.transport.read_packet().await?;
+        if packet.header.message_type != MessageType::SessionClose {
+            return Err(RuntimeError::UnexpectedMessage(
+                "server expected SESSION_CLOSE",
+            ));
+        }
+        if packet.header.session_id != self.session_id {
+            return Err(RuntimeError::UnexpectedMessage(
+                "server received close for another session",
+            ));
+        }
+        let close = SessionCloseMetadata::parse(&packet.metadata)?;
+        self.lifecycle.begin_session_close(&packet.header, &close)?;
+        Ok(close)
+    }
+
+    pub async fn ack_close(&mut self, close: &SessionCloseMetadata) -> Result<(), RuntimeError> {
+        let ack = SessionCloseAckMetadata {
+            close_status: SessionCloseStatus::Closed,
+            last_operation_id: close.last_operation_id,
+            session_error_code: SESSION_ERROR_NONE,
+        };
+        let mut header = CommonHeader::new(
+            MessageType::SessionCloseAck,
+            SESSION_CLOSE_ACK_METADATA_LEN as u32,
+            0,
+        );
+        header.session_id = self.session_id;
+        self.lifecycle.apply_session_close_ack(&header, &ack)?;
+        self.transport
+            .write_packet(&RuntimePacket::new(
+                header,
+                ack.to_bytes()?.to_vec(),
+                Vec::new(),
+            )?)
+            .await
     }
 
     pub async fn close(mut self) -> Result<(), RuntimeError> {

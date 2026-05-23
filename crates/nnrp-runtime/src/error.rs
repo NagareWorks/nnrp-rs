@@ -11,6 +11,9 @@ pub enum RuntimeError {
     #[error("unsupported transport: {0}")]
     UnsupportedTransport(&'static str),
 
+    #[error("frame id overflowed")]
+    FrameIdOverflow,
+
     #[error("unexpected runtime message: {0}")]
     UnexpectedMessage(&'static str),
 }
