@@ -138,14 +138,21 @@ jobs:
       - name: Bundle release artifacts
         run: |
           python - <<'PY'
+          import hashlib
           import pathlib
+          import shutil
           import zipfile
 
           version = '${{ steps.version.outputs.package_version }}'
           dist_dir = pathlib.Path('artifacts')
           dist_dir.mkdir(exist_ok=True)
-          artifact = dist_dir / f'nnrp-rs-source-{version}.zip'
-          with zipfile.ZipFile(artifact, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+          release_dir = dist_dir / 'release-assets'
+          if release_dir.exists():
+            shutil.rmtree(release_dir)
+          release_dir.mkdir(exist_ok=True)
+
+          source_artifact = dist_dir / f'nnrp-rs-source-{version}.zip'
+          with zipfile.ZipFile(source_artifact, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
             include_paths = [
               pathlib.Path('Cargo.toml'),
               pathlib.Path('Cargo.lock'),
@@ -171,6 +178,27 @@ jobs:
               for item in sorted(base.rglob('*')):
                 if item.is_file():
                   archive.write(item, item.as_posix())
+
+          def zip_dir(source: pathlib.Path, artifact: pathlib.Path) -> None:
+            with zipfile.ZipFile(artifact, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+              for item in sorted(source.rglob('*')):
+                if item.is_file():
+                  archive.write(item, item.relative_to(source).as_posix())
+
+          for package_dir in sorted((dist_dir / 'native').glob('*')):
+            if package_dir.is_dir():
+              zip_dir(package_dir, release_dir / f'nnrp-ffi-native-{package_dir.name}-{version}.zip')
+
+          wasm_dir = dist_dir / 'wasm' / 'nnrp-wasm-primitives'
+          if wasm_dir.is_dir():
+            zip_dir(wasm_dir, release_dir / f'nnrp-wasm-primitives-{version}.zip')
+
+          checksums = []
+          for artifact in sorted(release_dir.glob('*')):
+            if artifact.is_file():
+              digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+              checksums.append(f'{digest}  {artifact.name}')
+          (release_dir / 'SHA256SUMS').write_text('\n'.join(checksums) + '\n')
           PY
 
       - name: Upload workflow artifacts
@@ -179,8 +207,7 @@ jobs:
           name: nnrp-rs-release-${{ steps.version.outputs.package_version }}
           path: |
             artifacts/nnrp-rs-source-${{ steps.version.outputs.package_version }}.zip
-            artifacts/native/**
-            artifacts/wasm/**
+            artifacts/release-assets/**
           if-no-files-found: error
           retention-days: 14
 
@@ -190,7 +217,7 @@ jobs:
         with:
           tag_name: ${{ steps.version.outputs.tag_name }}
           name: nnrp-rs v${{ steps.version.outputs.package_version }}
-          files: artifacts/nnrp-rs-source-${{ steps.version.outputs.package_version }}.zip
+          files: artifacts/release-assets/*
 
       - name: Publish crates to crates.io
         if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.create_tag && inputs.publish_to_crates)) && env.CARGO_REGISTRY_TOKEN != ''
