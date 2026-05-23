@@ -2,15 +2,15 @@
 
 ## Scope
 
-- [ ] Keep `nnrp-runtime` as the transport-neutral session runtime and keep concrete TCP/QUIC providers outside the core runtime crate.
+- [x] Keep `nnrp-runtime` as the transport-neutral session runtime and keep concrete TCP/QUIC providers outside the core runtime crate.
 - [x] Split provider crates so downstream users can opt into TCP, QUIC, native dynamic loading, or WASM without pulling unused dependencies.
 - [ ] Treat JavaScript/TypeScript as a first-class downstream target: Node may use native libraries or WASM, while browsers must use WASM plus WebSocket/WebTransport bindings.
 
 ## Provider Crates
 
 - [x] Add `nnrp-transport-tcp` as the built-in TCP provider package over `FramedTransport` / `FramedListener`.
-- [ ] Add `nnrp-transport-quic` as the QUIC provider package without freezing a single TLS/QUIC backend into `nnrp-core`.
-- [ ] Add provider feature flags so applications can choose `tcp`, `quic`, `native-loader`, and future provider families explicitly.
+- [x] Add `nnrp-transport-quic` as the QUIC provider package without freezing a single TLS/QUIC backend into `nnrp-core`.
+- [x] Add provider feature flags so applications can choose `tcp`, `quic`, `native-loader`, and future provider families explicitly.
 - [x] Keep provider crate public APIs aligned with the runtime slot contract rather than duplicating session semantics.
 
 ## Local Provider Discovery

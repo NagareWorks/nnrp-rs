@@ -1,0 +1,19 @@
+[package]
+name = "nnrp-transport-quic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[features]
+default = []
+native-loader = ["nnrp-transport-provider/native-loader"]
+wasm = ["nnrp-transport-provider/wasm"]
+
+[dependencies]
+nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.2" }
+nnrp-runtime = { path = "../nnrp-runtime", version = "1.0.0-preview.2" }
+nnrp-transport-provider = { path = "../nnrp-transport-provider", version = "1.0.0-preview.2", default-features = false, features = ["quic"] }
+async-trait.workspace = true
+tokio.workspace = true

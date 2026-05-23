@@ -43,6 +43,23 @@ pub enum TransportProviderKind {
     Wasm,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProviderFeatureSet {
+    pub tcp: bool,
+    pub quic: bool,
+    pub native_loader: bool,
+    pub wasm: bool,
+}
+
+pub const fn compile_time_provider_features() -> ProviderFeatureSet {
+    ProviderFeatureSet {
+        tcp: cfg!(feature = "tcp"),
+        quic: cfg!(feature = "quic"),
+        native_loader: cfg!(feature = "native-loader"),
+        wasm: cfg!(feature = "wasm"),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransportProviderDescriptor {
     pub name: String,
@@ -651,6 +668,19 @@ mod tests {
         );
 
         fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn compile_time_provider_features_report_enabled_cargo_features() {
+        assert_eq!(
+            compile_time_provider_features(),
+            ProviderFeatureSet {
+                tcp: cfg!(feature = "tcp"),
+                quic: cfg!(feature = "quic"),
+                native_loader: cfg!(feature = "native-loader"),
+                wasm: cfg!(feature = "wasm"),
+            }
+        );
     }
 
     #[test]

@@ -4,6 +4,7 @@ members = [
     "crates/nnrp-runtime",
     "crates/nnrp-transport-provider",
     "crates/nnrp-transport-tcp",
+    "crates/nnrp-transport-quic",
     "crates/nnrp-ffi",
     "crates/nnrp-conformance",
 ]
