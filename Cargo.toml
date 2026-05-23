@@ -6,6 +6,7 @@ members = [
     "crates/nnrp-transport-tcp",
     "crates/nnrp-transport-quic",
     "crates/nnrp-ffi",
+    "crates/nnrp-wasm",
     "crates/nnrp-conformance",
 ]
 resolver = "2"
@@ -19,5 +20,8 @@ authors = ["NagareWorks"]
 
 [workspace.dependencies]
 async-trait = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 thiserror = "2.0"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+wasm-bindgen = "0.2"

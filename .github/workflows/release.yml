@@ -122,6 +122,11 @@ jobs:
         run: |
           python scripts/package_native_artifacts.py --out artifacts/native
 
+      - name: Package WASM primitives
+        run: |
+          rustup target add wasm32-unknown-unknown
+          python scripts/package_wasm_primitives.py --out artifacts/wasm
+
       - name: Bundle release artifacts
         run: |
           python - <<'PY'
@@ -151,7 +156,7 @@ jobs:
                 if item.is_file():
                   archive.write(item, item.as_posix())
 
-            for root in ('include', 'artifacts/native'):
+            for root in ('include', 'artifacts/native', 'artifacts/wasm'):
               base = pathlib.Path(root)
               if not base.exists():
                 continue
@@ -167,6 +172,7 @@ jobs:
           path: |
             artifacts/nnrp-rs-source-${{ steps.version.outputs.package_version }}.zip
             artifacts/native/**
+            artifacts/wasm/**
           if-no-files-found: error
           retention-days: 14
 

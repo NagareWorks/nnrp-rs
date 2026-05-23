@@ -27,9 +27,11 @@ GitHub README rendering does not support per-avatar dynamic tooltips for an auto
 - `crates/nnrp-transport-provider`: provider registry, local transport discovery helpers, and transport policy selection.
 - `crates/nnrp-transport-tcp`: TCP provider package for the runtime transport/listener slots.
 - `crates/nnrp-ffi`: stable ABI facade over `nnrp-core`, including handle ownership, buffer views, callbacks, polling, downstream error mapping, and native `cdylib` packaging.
+- `crates/nnrp-wasm`: low-level WASM primitives and TypeScript declarations consumed by the future `nnrp-js` wrapper.
 - `crates/nnrp-conformance`: Rust-owned golden vectors, fixture manifests, adapter wrappers, and cross-language conformance export surface.
 - `include/nnrp/`: C ABI headers and native link-library packaging surface for downstream loaders.
 - `scripts/package_native_artifacts.py`: builds, verifies, and packages `nnrp-ffi` native artifacts for Windows, Linux, and macOS hosts.
+- `scripts/package_wasm_primitives.py`: builds and packages `nnrp-wasm` plus the minimal `.d.ts` surface for downstream JS/TS wrappers.
 - `doc/todo/`: implementation planning and rollout checklists.
 
 ## Current Status

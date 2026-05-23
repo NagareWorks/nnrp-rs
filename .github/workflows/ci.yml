@@ -72,6 +72,28 @@ jobs:
           path: artifacts/native
           if-no-files-found: error
 
+  wasm-artifact:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Build and package WASM primitives
+        run: python scripts/package_wasm_primitives.py --out artifacts/wasm
+
+      - name: Upload WASM primitives
+        uses: actions/upload-artifact@v4
+        with:
+          name: nnrp-wasm-primitives
+          path: artifacts/wasm
+          if-no-files-found: error
+
   conformance:
     runs-on: ubuntu-latest
 
@@ -105,6 +127,7 @@ jobs:
       - commit-policy
       - test
       - native-artifact
+      - wasm-artifact
       - conformance
     if: always()
     runs-on: ubuntu-latest
@@ -125,6 +148,11 @@ jobs:
 
           if [ "${{ needs.native-artifact.result }}" != "success" ]; then
             echo "Native artifact validation failed."
+            exit 1
+          fi
+
+          if [ "${{ needs.wasm-artifact.result }}" != "success" ]; then
+            echo "WASM artifact validation failed."
             exit 1
           fi
 
