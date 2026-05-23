@@ -118,6 +118,10 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      - name: Package native link library
+        run: |
+          python scripts/package_native_artifacts.py --out artifacts/native
+
       - name: Bundle release artifacts
         run: |
           python - <<'PY'
@@ -146,13 +150,23 @@ jobs:
               for item in sorted(base.rglob('*')):
                 if item.is_file():
                   archive.write(item, item.as_posix())
+
+            for root in ('include', 'artifacts/native'):
+              base = pathlib.Path(root)
+              if not base.exists():
+                continue
+              for item in sorted(base.rglob('*')):
+                if item.is_file():
+                  archive.write(item, item.as_posix())
           PY
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
           name: nnrp-rs-release-${{ steps.version.outputs.package_version }}
-          path: artifacts/nnrp-rs-source-${{ steps.version.outputs.package_version }}.zip
+          path: |
+            artifacts/nnrp-rs-source-${{ steps.version.outputs.package_version }}.zip
+            artifacts/native/**
           if-no-files-found: error
           retention-days: 14
 

@@ -4,7 +4,7 @@
 
 - [x] Keep `nnrp-runtime` as the transport-neutral session runtime and keep concrete TCP/QUIC providers outside the core runtime crate.
 - [x] Split provider crates so downstream users can opt into TCP, QUIC, native dynamic loading, or WASM without pulling unused dependencies.
-- [ ] Treat JavaScript/TypeScript as a first-class downstream target: Node may use native libraries or WASM, while browsers must use WASM plus WebSocket/WebTransport bindings.
+- [ ] Treat JavaScript/TypeScript as a first-class downstream target without implementing the full JS SDK in this repository: `nnrp-rs` emits native/WASM primitives, while `nnrp-js` owns npm packaging, runtime selection, and browser/Node adapters.
 
 ## Provider Crates
 
@@ -32,19 +32,17 @@
 ## Native Link Library Packaging
 
 - [x] Configure `nnrp-ffi` to build `rlib` and `cdylib` outputs.
-- [ ] Add release packaging scripts for Windows DLL, Linux SO, and macOS dylib artifacts.
-- [ ] Add header generation or cbindgen output for C ABI consumers.
-- [ ] Add CI jobs that verify platform-specific native library names and exported symbols.
-- [ ] Add Node.js native-loading guidance for backend JS/TS users.
+- [x] Add release packaging scripts for Windows DLL, Linux SO, and macOS dylib artifacts.
+- [x] Add header generation or cbindgen output for C ABI consumers.
+- [x] Add CI jobs that verify platform-specific native library names and exported symbols.
+- [x] Add Node.js native-loading guidance for backend JS/TS users.
 
-## WASM And JS/TS Packaging
+## WASM And JS/TS Packaging Boundary
 
 - [ ] Add a dedicated WASM-facing crate or feature surface instead of exposing the raw C ABI as the browser SDK.
-- [ ] Add `wasm-bindgen` bindings for JS/TS session APIs.
-- [ ] Add browser transport adapters for WebSocket and WebTransport.
-- [ ] Add Node WASM packaging for environments that do not want native addons.
-- [ ] Generate `.d.ts` TypeScript declarations as part of the WASM package.
-- [ ] Add npm package layout and examples for both browser and Node consumers.
+- [ ] Add minimal `wasm-bindgen` bindings for low-level session/config/probe primitives that `nnrp-js` can wrap.
+- [ ] Emit WASM package primitives and generated `.d.ts` files for `nnrp-js`; do not keep npm package layout, bundler adapters, or browser app examples in this repository.
+- [ ] Document the downstream split: Node may prefer native link libraries and fall back to WASM, while browsers consume WASM plus WebSocket/WebTransport adapters implemented in `nnrp-js`.
 - [ ] Keep browser documentation clear that native link libraries are not usable there; browsers consume WASM plus web transports.
 
 ## Validation

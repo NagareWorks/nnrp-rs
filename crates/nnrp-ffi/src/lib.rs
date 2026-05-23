@@ -1041,6 +1041,7 @@ pub unsafe extern "C" fn nnrp_server_send_flow_update(
 /// The session handle is copied by value. This function does not dereference
 /// caller-provided pointers.
 pub unsafe extern "C" fn nnrp_server_close(session: NnrpHandle) -> NnrpFfiStatus {
+    let _ = core::hint::black_box(NnrpFfiConnectionRole::Server);
     let mut store = handle_store();
     let connection = match store.get(session, NnrpHandleKind::Session) {
         Ok(NnrpFfiResource::Session { connection, .. }) => *connection,
