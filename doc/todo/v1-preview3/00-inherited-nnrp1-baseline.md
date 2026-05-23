@@ -22,10 +22,10 @@ This shard tracks protocol work that `nnrp-rs` must implement for `NNRP/1-previe
 
 ## Preview2 Data Plane
 
-- [ ] Implement inherited `FRAME_SUBMIT` v2 metadata fields, including `submit_mode`, `object_ref_mask`, budget policy, loss tolerance, payload bitmap, and payload frame count.
-- [ ] Implement inherited `RESULT_PUSH` v2 metadata fields, including result class, applied budget policy, reuse linkage, coverage counts, payload bitmap, and payload frame count.
-- [ ] Implement inherited `RESULT_DROP` stable reason semantics.
-- [ ] Implement inherited body-region prelude layout and fixed region ordering.
+- [x] Implement inherited `FRAME_SUBMIT` v2 metadata fields, including `submit_mode`, `object_ref_mask`, budget policy, loss tolerance, payload bitmap, and payload frame count.
+- [x] Implement inherited `RESULT_PUSH` v2 metadata fields, including result class, applied budget policy, reuse linkage, coverage counts, payload bitmap, and payload frame count.
+- [x] Implement inherited `RESULT_DROP` stable reason semantics.
+- [x] Implement inherited body-region prelude layout and fixed region ordering.
 - [ ] Implement inherited object-reference block parsing, cache-backed region validation, and unresolved-reference rejection.
 - [x] Implement inherited/preview3 typed payload descriptor fixed layout and strict descriptor flag validation.
 - [ ] Implement inherited typed-payload frame region packing for non-tensor payload families.

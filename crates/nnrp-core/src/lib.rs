@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod codes;
 pub mod control;
+pub mod data;
 pub mod enums;
 pub mod error;
 pub mod flow;
@@ -35,6 +36,13 @@ pub use control::{
     SERVER_HELLO_ACK_METADATA_LEN, SESSION_MIGRATE_ACK_METADATA_LEN, SESSION_MIGRATE_METADATA_LEN,
     SESSION_PATCH_ACK_METADATA_LEN, SESSION_PATCH_FIELD_KNOWN_MASK, SESSION_PATCH_METADATA_LEN,
     TRANSPORT_PROBE_ACK_METADATA_LEN, TRANSPORT_PROBE_METADATA_LEN,
+};
+pub use data::{
+    validate_result_drop_header, BodyRegionPrelude, FrameSubmitMetadata, InputProfile,
+    ObjectReferenceBlock, PayloadKindBitmap, ResultClass, ResultPushMetadata, SubmitMode,
+    TileIndexMode, BODY_REGION_PRELUDE_LEN, BUDGET_POLICY_KNOWN_MASK, FRAME_SUBMIT_METADATA_LEN,
+    OBJECT_REFERENCE_BLOCK_LEN, PAYLOAD_KIND_KNOWN_MASK, RESULT_FLAGS_KNOWN_MASK,
+    RESULT_PUSH_METADATA_LEN,
 };
 pub use enums::{
     BackpressureLevel, CancelScope, FlowScopeKind, FlowUpdateReason, HeaderFlags, InFlightPolicy,
