@@ -168,8 +168,8 @@ mod tests {
         let report = build_results_report(&json!({
             "protocol_version": "nnrp-1-preview3",
             "cases": [
-                { "id": "l1.handshake.basic" },
-                { "id": "l1.session.open_close" }
+                { "id": "l9.unknown.public.case" },
+                { "id": "l9.unknown.public.case.two" }
             ]
         }))
         .expect("report should build");
@@ -184,7 +184,7 @@ mod tests {
         );
         assert_eq!(
             report["results"][0]["id"],
-            Value::String("l1.handshake.basic".to_string())
+            Value::String("l9.unknown.public.case".to_string())
         );
         assert_eq!(
             report["results"][0]["failure_kind"],
@@ -246,6 +246,27 @@ mod tests {
 
         let results = report["results"].as_array().expect("results array");
         assert_eq!(results.len(), crate::preview3_case_ids().len());
+        for result in results {
+            assert_eq!(result["outcome"], Value::String("pass".to_string()));
+            assert!(result.get("failure_kind").is_none());
+        }
+    }
+
+    #[test]
+    fn build_results_report_passes_preview3_public_suite_cases() {
+        let cases: Vec<Value> = crate::public_preview3_case_ids()
+            .iter()
+            .map(|id| json!({ "id": id }))
+            .collect();
+
+        let report = build_results_report(&json!({
+            "protocol_version": "nnrp-1-preview3",
+            "cases": cases
+        }))
+        .expect("preview3 public report should build");
+
+        let results = report["results"].as_array().expect("results array");
+        assert_eq!(results.len(), crate::public_preview3_case_ids().len());
         for result in results {
             assert_eq!(result["outcome"], Value::String("pass".to_string()));
             assert!(result.get("failure_kind").is_none());
@@ -404,7 +425,7 @@ mod tests {
             &plan_path,
             json!({
                 "protocol_version": "nnrp-1-preview3",
-                "cases": [{ "id": "l1.handshake.basic" }]
+                "cases": [{ "id": "l9.unknown.public.case" }]
             })
             .to_string(),
         )

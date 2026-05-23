@@ -2,10 +2,20 @@
   "implementation_name": "nnrp-rs",
   "protocol_version": "nnrp-1-preview3",
   "supports": [
-    "handshake.basic",
-    "session.open_close",
+    "cache.lifecycle",
+    "flow_update",
     "frame_submit.tensor.inline",
+    "handshake.basic",
+    "operation.cancel_scope",
+    "operation.lifecycle",
+    "payload.typed",
+    "profile.token",
     "result_push.basic",
-    "transport.quic"
+    "schema.registry",
+    "session.multi_session",
+    "session.open_close",
+    "session.resume",
+    "transport.quic",
+    "transport.tcp"
   ]
 }

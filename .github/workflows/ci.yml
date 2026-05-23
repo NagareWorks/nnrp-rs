@@ -36,17 +36,59 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy, llvm-tools
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Checkout nnrp-conformance action
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/nnrp-conformance
+          path: nnrp-conformance-action
+          fetch-depth: 1
 
       - name: Format check
         run: cargo fmt --all --check
 
       - name: Test
+        env:
+          NNRP_CONFORMANCE_SUITE_REPO: ${{ github.workspace }}/nnrp-conformance-action
         run: cargo test --workspace
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Coverage
+        env:
+          NNRP_CONFORMANCE_SUITE_REPO: ${{ github.workspace }}/nnrp-conformance-action
+        run: cargo llvm-cov --workspace --lcov --output-path target/llvm-cov/lcov.info
+
+      - name: Coverage gates
+        shell: bash
+        run: |
+          base_sha=""
+          head_sha=""
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base_sha="${{ github.event.pull_request.base.sha }}"
+            head_sha="${{ github.event.pull_request.head.sha }}"
+          else
+            base_sha="${{ github.event.before }}"
+            head_sha="${{ github.sha }}"
+          fi
+
+          python scripts/check_lcov_coverage.py \
+            --lcov target/llvm-cov/lcov.info \
+            --threshold 90 \
+            --base-sha "$base_sha" \
+            --head-sha "$head_sha"
 
   native-artifact:
     strategy:

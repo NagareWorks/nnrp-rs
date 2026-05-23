@@ -19,7 +19,7 @@ pub fn export_current_version_vector() -> GoldenVersionVector {
 
 pub use preview3_vectors::{
     execute_preview3_case, export_preview3_fixture_manifest, export_preview3_golden_vectors,
-    preview3_case_ids, PREVIEW3_PROTOCOL_VERSION,
+    preview3_case_ids, public_preview3_case_ids, PREVIEW3_PROTOCOL_VERSION,
 };
 
 #[cfg(test)]
