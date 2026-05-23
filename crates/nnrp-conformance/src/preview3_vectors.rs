@@ -6,9 +6,9 @@ use nnrp_core::{
     CacheLeaseOwnerScope, CacheObjectId, CacheObjectKind, CacheValidationFailure, PayloadFamily,
     PayloadKindBitmap, SchemaRegistry, SchemaRegistryFailure, SessionOpenAckMetadata,
     SessionOpenMetadata, SessionPriorityClass, SessionRecoveryOutcome, SessionStatus,
-    TypedPayloadDescriptor, PROFILE_TOKEN, SESSION_ACK_FLAG_RESUME_ENABLED, SESSION_ERROR_NONE,
-    SESSION_ERROR_RESUME_REJECTED, SESSION_FLAG_ALLOW_RESUME, STREAM_SEMANTICS_TOKEN_DELTA,
-    TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
+    TypedPayloadDescriptor, PROFILE_TENSOR, PROFILE_TOKEN, SESSION_ACK_FLAG_RESUME_ENABLED,
+    SESSION_ERROR_NONE, SESSION_ERROR_RESUME_REJECTED, SESSION_FLAG_ALLOW_RESUME,
+    STREAM_SEMANTICS_TOKEN_DELTA, TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
 };
 use nnrp_ffi::{
     nnrp_client_await_event, nnrp_client_cancel, nnrp_client_close, nnrp_client_connect,
@@ -82,6 +82,11 @@ pub fn preview3_case_ids() -> &'static [&'static str] {
         "l1.preview3.schema.binding.validation",
         "l1.preview3.cache.lease.validation",
         "l1.preview3.recovery.session_resume.validation",
+        "l2.preview3.runtime.fixture.flow_update",
+        "l2.preview3.runtime.fixture.cancellation",
+        "l2.preview3.runtime.fixture.cache_miss",
+        "l2.preview3.runtime.fixture.schema_mismatch",
+        "l2.preview3.runtime.fixture.resume",
         "l2.preview3.runtime.ffi.client_event_flow",
         "l2.preview3.runtime.ffi.server_event_flow",
     ]
@@ -99,6 +104,11 @@ pub fn execute_preview3_case(case_id: &str) -> Option<Result<(), String>> {
         "l1.preview3.schema.binding.validation" => l1_schema_binding_validation(),
         "l1.preview3.cache.lease.validation" => l1_cache_lease_validation(),
         "l1.preview3.recovery.session_resume.validation" => l1_session_resume_validation(),
+        "l2.preview3.runtime.fixture.flow_update" => l2_fixture_flow_update(),
+        "l2.preview3.runtime.fixture.cancellation" => l2_fixture_cancellation(),
+        "l2.preview3.runtime.fixture.cache_miss" => l2_fixture_cache_miss(),
+        "l2.preview3.runtime.fixture.schema_mismatch" => l2_fixture_schema_mismatch(),
+        "l2.preview3.runtime.fixture.resume" => l2_fixture_resume(),
         "l2.preview3.runtime.ffi.client_event_flow" => l2_runtime_ffi_client_event_flow(),
         "l2.preview3.runtime.ffi.server_event_flow" => l2_runtime_ffi_server_event_flow(),
         _ => return None,
@@ -313,6 +323,100 @@ fn l2_runtime_ffi_client_event_flow() -> Result<(), String> {
     }
 }
 
+fn l2_fixture_flow_update() -> Result<(), String> {
+    unsafe {
+        let id_base = next_runtime_case_id_base();
+        let mut server = NnrpHandle::invalid();
+        require_status(nnrp_server_bind(
+            NnrpServerBindRequest {
+                server_id: id_base + 1,
+                generation: 1,
+                transport_id: 1,
+            },
+            &mut server,
+        ))?;
+        require_event(server, NnrpEventKind::ConnectionOpened, 0)?;
+        let session = accept_runtime_fixture_session(server, id_base + 2)?;
+        require_event(server, NnrpEventKind::SessionOpened, 0)?;
+        require_status(nnrp_server_send_flow_update(NnrpServerFlowUpdateRequest {
+            session,
+            frame_id: 22,
+        }))?;
+        require_event(server, NnrpEventKind::FlowUpdated, 22)
+    }
+}
+
+fn l2_fixture_cancellation() -> Result<(), String> {
+    unsafe {
+        let id_base = next_runtime_case_id_base();
+        let mut connection = NnrpHandle::invalid();
+        require_status(nnrp_client_connect(
+            NnrpClientConnectRequest {
+                connection_id: id_base + 1,
+                generation: 1,
+                transport_id: 1,
+            },
+            &mut connection,
+        ))?;
+        require_event(connection, NnrpEventKind::ConnectionOpened, 0)?;
+        let session = open_runtime_fixture_session(connection, id_base + 2)?;
+        require_event(connection, NnrpEventKind::SessionOpened, 0)?;
+        require_status(nnrp_client_cancel(NnrpClientCancelRequest {
+            session,
+            frame_id: 33,
+        }))?;
+        require_event(connection, NnrpEventKind::Control, 33)
+    }
+}
+
+fn l2_fixture_cache_miss() -> Result<(), String> {
+    let object_id = CacheObjectId {
+        cache_namespace: 9,
+        cache_key_hi: 1,
+        cache_key_lo: 2,
+        object_kind: CacheObjectKind::PromptSegment,
+    };
+    let dependencies = [CacheDependency {
+        object_id,
+        required_version: 1,
+    }];
+    if validate_cache_dependencies(&dependencies, &[])
+        != Err(CacheValidationFailure::DependencyInvalid)
+    {
+        return Err("cache miss fixture no longer reports dependency invalid".to_string());
+    }
+    if CacheValidationFailure::Miss.error_code() == 0 {
+        return Err("cache miss fixture lost its protocol error code".to_string());
+    }
+    Ok(())
+}
+
+fn l2_fixture_schema_mismatch() -> Result<(), String> {
+    let registry = SchemaRegistry::with_standard_preview3_profiles();
+    let mismatched = TypedPayloadDescriptor {
+        profile_id: PROFILE_TENSOR,
+        ..token_delta_descriptor()
+    };
+    if registry.validate_descriptor_binding(&mismatched) != Err(SchemaRegistryFailure::Incompatible)
+    {
+        return Err("schema mismatch fixture no longer reports incompatible binding".to_string());
+    }
+    Ok(())
+}
+
+fn l2_fixture_resume() -> Result<(), String> {
+    let outcome =
+        validate_session_recovery_ack(&resume_open(), &resume_ack()).map_err(to_string)?;
+    if outcome
+        != (SessionRecoveryOutcome::Resumed {
+            resume_window_ms: 120_000,
+        })
+    {
+        return Err("resume fixture no longer reports resumed outcome".to_string());
+    }
+    Ok(())
+}
+
 fn l2_runtime_ffi_server_event_flow() -> Result<(), String> {
     unsafe {
         let id_base = next_runtime_case_id_base();
@@ -468,6 +572,44 @@ fn buffer_view(payload: &[u8]) -> NnrpBufferView {
         ptr: payload.as_ptr(),
         len: payload.len(),
     }
+}
+
+unsafe fn open_runtime_fixture_session(
+    connection: NnrpHandle,
+    session_id: u64,
+) -> Result<NnrpHandle, String> {
+    let mut session = NnrpHandle::invalid();
+    require_status(nnrp_client_open_session(
+        NnrpSessionOpenRequest {
+            connection,
+            requested_session_id: session_id as u32,
+            generation: 1,
+            profile_id: PROFILE_TOKEN,
+            schema_id: TOKEN_DELTA_SCHEMA_ID,
+            schema_version: TOKEN_DELTA_SCHEMA_VERSION,
+        },
+        &mut session,
+    ))?;
+    Ok(session)
+}
+
+unsafe fn accept_runtime_fixture_session(
+    server: NnrpHandle,
+    session_id: u64,
+) -> Result<NnrpHandle, String> {
+    let mut session = NnrpHandle::invalid();
+    require_status(nnrp_server_accept(
+        NnrpServerAcceptRequest {
+            server,
+            session_id: session_id as u32,
+            generation: 1,
+            profile_id: PROFILE_TOKEN,
+            schema_id: TOKEN_DELTA_SCHEMA_ID,
+            schema_version: TOKEN_DELTA_SCHEMA_VERSION,
+        },
+        &mut session,
+    ))?;
+    Ok(session)
 }
 
 fn to_hex(bytes: &[u8]) -> String {

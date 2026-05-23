@@ -46,6 +46,6 @@
 
 - [x] Add loopback client/server integration tests over TCP.
 - [x] Add loopback tests for submit/result and session close.
-- [ ] Add fixture-driven tests for flow update, cancellation, cache miss, schema mismatch, and resume.
+- [x] Add fixture-driven tests for flow update, cancellation, cache miss, schema mismatch, and resume.
 - [x] Add FFI smoke tests that drive the real runtime rather than only validating ABI shape.
 - [x] Export runtime-backed conformance cases from `nnrp-conformance`.
