@@ -165,6 +165,82 @@ pub struct TransportSelection {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeSample {
+    pub transport_id: TransportId,
+    pub provider_name: String,
+    pub elapsed_us: u64,
+    pub rtt_us: Option<u64>,
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
+    pub timed_out: bool,
+    pub failed: bool,
+}
+
+impl ProbeSample {
+    pub fn success(
+        transport_id: TransportId,
+        provider_name: impl Into<String>,
+        elapsed_us: u64,
+        rtt_us: u64,
+        bytes_sent: u64,
+        bytes_received: u64,
+    ) -> Self {
+        Self {
+            transport_id,
+            provider_name: provider_name.into(),
+            elapsed_us,
+            rtt_us: Some(rtt_us),
+            bytes_sent,
+            bytes_received,
+            timed_out: false,
+            failed: false,
+        }
+    }
+
+    pub fn failure(
+        transport_id: TransportId,
+        provider_name: impl Into<String>,
+        elapsed_us: u64,
+        timed_out: bool,
+    ) -> Self {
+        Self {
+            transport_id,
+            provider_name: provider_name.into(),
+            elapsed_us,
+            rtt_us: None,
+            bytes_sent: 0,
+            bytes_received: 0,
+            timed_out,
+            failed: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProbeScore {
+    pub sample_count: usize,
+    pub failure_count: usize,
+    pub failure_rate: f64,
+    pub median_rtt_us: u64,
+    pub throughput_bytes_per_sec: u64,
+    pub score: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProbeCandidateScore {
+    pub provider: TransportProviderDescriptor,
+    pub probe_score: ProbeScore,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProbeSelection {
+    pub selected: TransportProviderDescriptor,
+    pub selected_score: ProbeScore,
+    pub candidates: Vec<ProbeCandidateScore>,
+    pub rejected: Vec<RejectedTransportCandidate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RejectedTransportCandidate {
     pub transport_id: TransportId,
     pub provider_name: Option<String>,
@@ -176,6 +252,8 @@ pub enum TransportRejectionReason {
     PolicyDisallowed,
     LocalProviderUnavailable,
     RemoteUnsupported,
+    ProbeMissing,
+    ProbeFailed,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -193,6 +271,133 @@ pub fn select_transport(
     remote: &RemoteTransportSupport,
     policy: TransportPolicy,
 ) -> Result<TransportSelection, TransportSelectionError> {
+    let candidates = select_transport_candidates(providers, remote, policy);
+    let mut viable = candidates.viable;
+    viable.sort_by_key(|provider| {
+        (
+            policy.preference_rank(provider.transport_id),
+            provider.name.clone(),
+        )
+    });
+
+    match viable.into_iter().next() {
+        Some(selected) => Ok(TransportSelection {
+            selected,
+            rejected: candidates.rejected,
+        }),
+        None => transport_selection_error(policy, candidates.rejected),
+    }
+}
+
+pub fn select_transport_with_probe(
+    providers: &[TransportProviderDescriptor],
+    remote: &RemoteTransportSupport,
+    policy: TransportPolicy,
+    samples: &[ProbeSample],
+) -> Result<ProbeSelection, TransportSelectionError> {
+    let mut candidates = select_transport_candidates(providers, remote, policy);
+    let mut scored = Vec::new();
+
+    for provider in candidates.viable {
+        let provider_samples = matching_probe_samples(&provider, samples).collect::<Vec<_>>();
+        if provider_samples.is_empty() {
+            candidates
+                .rejected
+                .push(rejection(&provider, TransportRejectionReason::ProbeMissing));
+            continue;
+        }
+
+        match score_provider_probe(&provider, samples, policy) {
+            Some(probe_score) if probe_score.failure_rate < 1.0 => {
+                scored.push(ProbeCandidateScore {
+                    provider,
+                    probe_score,
+                });
+            }
+            _ => candidates
+                .rejected
+                .push(rejection(&provider, TransportRejectionReason::ProbeFailed)),
+        }
+    }
+
+    scored.sort_by(|left, right| {
+        left.probe_score
+            .score
+            .total_cmp(&right.probe_score.score)
+            .then_with(|| {
+                policy
+                    .preference_rank(left.provider.transport_id)
+                    .cmp(&policy.preference_rank(right.provider.transport_id))
+            })
+            .then_with(|| left.provider.name.cmp(&right.provider.name))
+    });
+
+    match scored.first().cloned() {
+        Some(selected) => Ok(ProbeSelection {
+            selected: selected.provider,
+            selected_score: selected.probe_score,
+            candidates: scored,
+            rejected: candidates.rejected,
+        }),
+        None => transport_selection_error(policy, candidates.rejected),
+    }
+}
+
+pub fn score_provider_probe(
+    provider: &TransportProviderDescriptor,
+    samples: &[ProbeSample],
+    policy: TransportPolicy,
+) -> Option<ProbeScore> {
+    let provider_samples = matching_probe_samples(provider, samples).collect::<Vec<_>>();
+    if provider_samples.is_empty() {
+        return None;
+    }
+
+    let failure_count = provider_samples
+        .iter()
+        .filter(|sample| sample.failed || sample.timed_out || sample.rtt_us.is_none())
+        .count();
+    let sample_count = provider_samples.len();
+    let failure_rate = failure_count as f64 / sample_count as f64;
+    let median_rtt_us = median_rtt_or_penalty(
+        provider_samples
+            .iter()
+            .filter_map(|sample| sample.rtt_us)
+            .collect(),
+    );
+    let elapsed_us = provider_samples
+        .iter()
+        .map(|sample| sample.elapsed_us)
+        .sum::<u64>();
+    let transferred = provider_samples
+        .iter()
+        .map(|sample| sample.bytes_sent.saturating_add(sample.bytes_received))
+        .sum::<u64>();
+    let throughput_bytes_per_sec = if elapsed_us == 0 {
+        0
+    } else {
+        transferred.saturating_mul(1_000_000) / elapsed_us
+    };
+    let throughput_bonus = (throughput_bytes_per_sec / 1_000).min(500) as f64;
+    let policy_penalty = policy.preference_rank(provider.transport_id) as f64 * 1_000.0;
+    let score =
+        median_rtt_us as f64 + failure_rate * 10_000_000.0 + policy_penalty - throughput_bonus;
+
+    Some(ProbeScore {
+        sample_count,
+        failure_count,
+        failure_rate,
+        median_rtt_us,
+        throughput_bytes_per_sec,
+        score,
+    })
+}
+
+fn select_transport_candidates(
+    providers: &[TransportProviderDescriptor],
+    remote: &RemoteTransportSupport,
+    policy: TransportPolicy,
+) -> TransportCandidates {
     let mut viable = Vec::new();
     let mut rejections = Vec::new();
 
@@ -221,30 +426,9 @@ pub fn select_transport(
         }
     }
 
-    viable.sort_by_key(|provider| {
-        (
-            policy.preference_rank(provider.transport_id),
-            provider.name.clone(),
-        )
-    });
-
-    match viable.into_iter().next() {
-        Some(selected) => Ok(TransportSelection {
-            selected,
-            rejected: rejections,
-        }),
-        None if matches!(
-            policy,
-            TransportPolicy::ForceQuic | TransportPolicy::ForceTcp
-        ) =>
-        {
-            Err(TransportSelectionError::ForcedTransportUnavailable {
-                transport_id: forced_transport(policy),
-            })
-        }
-        None => Err(TransportSelectionError::NoViableTransport {
-            rejected: rejections,
-        }),
+    TransportCandidates {
+        viable,
+        rejected: rejections,
     }
 }
 
@@ -301,6 +485,48 @@ pub fn candidate_library_paths(
         paths.push(package_dir.join("native").join(library_name));
     }
     paths
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TransportCandidates {
+    viable: Vec<TransportProviderDescriptor>,
+    rejected: Vec<RejectedTransportCandidate>,
+}
+
+fn matching_probe_samples<'a>(
+    provider: &'a TransportProviderDescriptor,
+    samples: &'a [ProbeSample],
+) -> impl Iterator<Item = &'a ProbeSample> {
+    samples.iter().filter(|sample| {
+        sample.transport_id == provider.transport_id && sample.provider_name == provider.name
+    })
+}
+
+fn median_rtt_or_penalty(mut rtts: Vec<u64>) -> u64 {
+    const MISSING_RTT_PENALTY_US: u64 = 10_000_000;
+
+    if rtts.is_empty() {
+        return MISSING_RTT_PENALTY_US;
+    }
+
+    rtts.sort_unstable();
+    rtts[rtts.len() / 2]
+}
+
+fn transport_selection_error<T>(
+    policy: TransportPolicy,
+    rejected: Vec<RejectedTransportCandidate>,
+) -> Result<T, TransportSelectionError> {
+    if matches!(
+        policy,
+        TransportPolicy::ForceQuic | TransportPolicy::ForceTcp
+    ) {
+        Err(TransportSelectionError::ForcedTransportUnavailable {
+            transport_id: forced_transport(policy),
+        })
+    } else {
+        Err(TransportSelectionError::NoViableTransport { rejected })
+    }
 }
 
 fn rejection(
@@ -425,6 +651,131 @@ mod tests {
         );
 
         fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn probe_selection_prefers_lower_latency_viable_candidate() {
+        let providers = [
+            available("tcp", TransportId::Tcp),
+            available("quic", TransportId::Quic),
+        ];
+        let remote = RemoteTransportSupport::new([TransportId::Tcp, TransportId::Quic]);
+        let samples = [
+            ProbeSample::success(TransportId::Tcp, "tcp", 10_000, 900, 256, 256),
+            ProbeSample::success(TransportId::Tcp, "tcp", 10_000, 1_100, 256, 256),
+            ProbeSample::success(TransportId::Quic, "quic", 10_000, 4_000, 256, 256),
+            ProbeSample::success(TransportId::Quic, "quic", 10_000, 5_000, 256, 256),
+        ];
+
+        let selection =
+            select_transport_with_probe(&providers, &remote, TransportPolicy::Auto, &samples)
+                .expect("probe selection should pick a viable candidate");
+
+        assert_eq!(selection.selected.transport_id, TransportId::Tcp);
+        assert_eq!(selection.candidates.len(), 2);
+        assert!(selection.selected_score.score < selection.candidates[1].probe_score.score);
+    }
+
+    #[test]
+    fn probe_selection_downgrades_flaky_preferred_quic() {
+        let providers = [
+            available("tcp", TransportId::Tcp),
+            available("quic", TransportId::Quic),
+        ];
+        let remote = RemoteTransportSupport::new([TransportId::Tcp, TransportId::Quic]);
+        let samples = [
+            ProbeSample::success(TransportId::Tcp, "tcp", 20_000, 5_000, 512, 512),
+            ProbeSample::success(TransportId::Tcp, "tcp", 20_000, 5_200, 512, 512),
+            ProbeSample::success(TransportId::Quic, "quic", 20_000, 800, 512, 512),
+            ProbeSample::failure(TransportId::Quic, "quic", 20_000, true),
+        ];
+
+        let selection =
+            select_transport_with_probe(&providers, &remote, TransportPolicy::PreferQuic, &samples)
+                .expect("tcp should win when preferred quic is flaky");
+
+        assert_eq!(selection.selected.transport_id, TransportId::Tcp);
+        let quic = selection
+            .candidates
+            .iter()
+            .find(|candidate| candidate.provider.transport_id == TransportId::Quic)
+            .expect("quic should still be scored");
+        assert_eq!(quic.probe_score.failure_count, 1);
+    }
+
+    #[test]
+    fn probe_selection_reports_missing_and_failed_probe_candidates() {
+        let providers = [
+            available("tcp", TransportId::Tcp),
+            available("quic", TransportId::Quic),
+        ];
+        let remote = RemoteTransportSupport::new([TransportId::Tcp, TransportId::Quic]);
+        let samples = [ProbeSample::failure(
+            TransportId::Quic,
+            "quic",
+            30_000,
+            true,
+        )];
+
+        let error =
+            select_transport_with_probe(&providers, &remote, TransportPolicy::Auto, &samples)
+                .expect_err("no probe candidate is viable");
+
+        match error {
+            TransportSelectionError::NoViableTransport { rejected } => {
+                assert_eq!(rejected.len(), 2);
+                assert!(rejected
+                    .iter()
+                    .any(|entry| entry.transport_id == TransportId::Tcp
+                        && entry.reason == TransportRejectionReason::ProbeMissing));
+                assert!(rejected
+                    .iter()
+                    .any(|entry| entry.transport_id == TransportId::Quic
+                        && entry.reason == TransportRejectionReason::ProbeFailed));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forced_probe_selection_fails_when_forced_transport_probe_fails() {
+        let providers = [available("quic", TransportId::Quic)];
+        let remote = RemoteTransportSupport::new([TransportId::Quic]);
+        let samples = [ProbeSample::failure(
+            TransportId::Quic,
+            "quic",
+            30_000,
+            true,
+        )];
+
+        let error =
+            select_transport_with_probe(&providers, &remote, TransportPolicy::ForceQuic, &samples)
+                .expect_err("forced quic should fail on failed probe");
+
+        assert!(matches!(
+            error,
+            TransportSelectionError::ForcedTransportUnavailable {
+                transport_id: TransportId::Quic
+            }
+        ));
+    }
+
+    #[test]
+    fn score_provider_probe_returns_none_without_matching_samples() {
+        let provider = available("tcp", TransportId::Tcp);
+        let samples = [ProbeSample::success(
+            TransportId::Quic,
+            "quic",
+            10_000,
+            1_000,
+            128,
+            128,
+        )];
+
+        assert_eq!(
+            score_provider_probe(&provider, &samples, TransportPolicy::Auto),
+            None
+        );
     }
 
     fn available(name: &str, transport_id: TransportId) -> TransportProviderDescriptor {
