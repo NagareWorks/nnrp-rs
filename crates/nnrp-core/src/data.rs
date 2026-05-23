@@ -6,7 +6,7 @@ use crate::{
 pub const FRAME_SUBMIT_METADATA_LEN: usize = 72;
 pub const RESULT_PUSH_METADATA_LEN: usize = 64;
 pub const BODY_REGION_PRELUDE_LEN: usize = 32;
-pub const OBJECT_REFERENCE_BLOCK_LEN: usize = 20;
+pub const OBJECT_REFERENCE_BLOCK_LEN: usize = 16;
 
 pub const BUDGET_POLICY_KNOWN_MASK: u8 = 0x0f;
 pub const RESULT_FLAGS_KNOWN_MASK: u16 = 0x0007;
@@ -161,12 +161,13 @@ impl FrameSubmitMetadata {
         validate_zero_u8("frame_submit.reserved0", source[15])?;
         validate_zero_u64("frame_submit.reserved1", read_u64(source, 32))?;
         validate_zero_u64("frame_submit.reserved2", read_u64(source, 40))?;
-        validate_zero_u8("frame_submit.reserved3", source[51])?;
-        validate_zero_u16("frame_submit.reserved4", read_u16(source, 70))?;
+        validate_zero_u32("frame_submit.reserved3", read_u32(source, 48))?;
+        validate_zero_u8("frame_submit.reserved4", source[55])?;
+        validate_zero_u16("frame_submit.reserved5", read_u16(source, 70))?;
 
-        let budget_policy = source[49];
+        let budget_policy = source[53];
         validate_mask_u8(budget_policy, BUDGET_POLICY_KNOWN_MASK)?;
-        let payload_kind_bitmap = PayloadKindBitmap(read_u32(source, 60));
+        let payload_kind_bitmap = PayloadKindBitmap(read_u32(source, 64));
         payload_kind_bitmap.validate()?;
 
         let metadata = Self {
@@ -185,13 +186,13 @@ impl FrameSubmitMetadata {
             tile_base_id: read_u32(source, 24),
             camera_bytes: read_u32(source, 28),
             tile_index_bytes: read_u32(source, 36),
-            submit_mode: SubmitMode::try_from_u8(source[48])?,
+            submit_mode: SubmitMode::try_from_u8(source[52])?,
             budget_policy,
-            loss_tolerance_policy: source[50],
-            object_ref_mask: read_u32(source, 52),
-            dependency_frame_id: read_u32(source, 56),
+            loss_tolerance_policy: source[54],
+            object_ref_mask: read_u32(source, 56),
+            dependency_frame_id: read_u32(source, 60),
             payload_kind_bitmap,
-            payload_frame_count: read_u16(source, 64),
+            payload_frame_count: read_u16(source, 68),
         };
         metadata.validate_payload_shape()?;
         Ok(metadata)
@@ -219,13 +220,13 @@ impl FrameSubmitMetadata {
         write_u32(destination, 24, self.tile_base_id);
         write_u32(destination, 28, self.camera_bytes);
         write_u32(destination, 36, self.tile_index_bytes);
-        destination[48] = self.submit_mode as u8;
-        destination[49] = self.budget_policy;
-        destination[50] = self.loss_tolerance_policy;
-        write_u32(destination, 52, self.object_ref_mask);
-        write_u32(destination, 56, self.dependency_frame_id);
-        write_u32(destination, 60, self.payload_kind_bitmap.0);
-        write_u16(destination, 64, self.payload_frame_count);
+        destination[52] = self.submit_mode as u8;
+        destination[53] = self.budget_policy;
+        destination[54] = self.loss_tolerance_policy;
+        write_u32(destination, 56, self.object_ref_mask);
+        write_u32(destination, 60, self.dependency_frame_id);
+        write_u32(destination, 64, self.payload_kind_bitmap.0);
+        write_u16(destination, 68, self.payload_frame_count);
         Ok(())
     }
 
@@ -992,8 +993,8 @@ mod tests {
     #[test]
     fn frame_submit_rejects_unknown_budget_and_non_tensor_shape() {
         let mut bytes = [0u8; FRAME_SUBMIT_METADATA_LEN];
-        bytes[49] = 0x80;
-        write_u32(&mut bytes, 60, PayloadKindBitmap::TENSOR);
+        bytes[53] = 0x80;
+        write_u32(&mut bytes, 64, PayloadKindBitmap::TENSOR);
         assert_eq!(
             FrameSubmitMetadata::parse(&bytes),
             Err(NnrpError::ReservedBitsSet {
@@ -1115,7 +1116,7 @@ mod tests {
         let prelude_bytes = prelude.to_bytes().unwrap();
 
         assert_eq!(BodyRegionPrelude::parse(&prelude_bytes).unwrap(), prelude);
-        assert_eq!(prelude.total_region_bytes().unwrap(), 124);
+        assert_eq!(prelude.total_region_bytes().unwrap(), 120);
 
         let object_ref = ObjectReferenceBlock {
             object_kind: CacheObjectKind::TileIndexBlock,

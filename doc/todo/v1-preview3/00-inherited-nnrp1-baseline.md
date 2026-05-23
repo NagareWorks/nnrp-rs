@@ -39,7 +39,7 @@ This shard tracks protocol work that `nnrp-rs` must implement for `NNRP/1-previe
 
 ## Conformance Baseline
 
-- [ ] Consume preview2 mandatory L0 wire vectors as inherited `NNRP/1` baseline fixtures.
-- [ ] Consume preview2 mandatory L1 control-plane cases as inherited `NNRP/1` baseline fixtures.
-- [ ] Consume preview2 mandatory L1 data-plane cases as inherited `NNRP/1` baseline fixtures.
-- [ ] Keep preview3 conformance additions layered on top of the inherited preview2 baseline instead of replacing it.
+- [x] Consume preview2 mandatory L0 wire vectors as inherited `NNRP/1` baseline fixtures.
+- [x] Consume preview2 mandatory L1 control-plane cases as inherited `NNRP/1` baseline fixtures.
+- [x] Consume preview2 mandatory L1 data-plane cases as inherited `NNRP/1` baseline fixtures.
+- [x] Keep preview3 conformance additions layered on top of the inherited preview2 baseline instead of replacing it.

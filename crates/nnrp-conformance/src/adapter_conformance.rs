@@ -2,6 +2,8 @@ use std::{fs, path::Path};
 
 use serde_json::{json, Value};
 
+use crate::preview2_baseline::execute_preview2_case;
+
 pub const RESULTS_SCHEMA_URL: &str =
     "https://raw.githubusercontent.com/NagareWorks/nnrp-conformance/main/schemas/adapter-case-results.schema.json";
 pub const DEFAULT_IMPLEMENTATION_NAME: &str = "nnrp-rs";
@@ -75,12 +77,24 @@ pub fn build_results_report(plan: &Value) -> Result<Value, String> {
                 "adapter execution plan case field 'id' must be a non-empty string".to_string()
             })?;
 
-        results.push(json!({
-            "id": case_id,
-            "outcome": "error",
-            "failure_kind": "not_implemented",
-            "message": NOT_IMPLEMENTED_MESSAGE,
-        }));
+        results.push(match execute_preview2_case(case_id) {
+            Some(Ok(())) => json!({
+                "id": case_id,
+                "outcome": "pass",
+            }),
+            Some(Err(message)) => json!({
+                "id": case_id,
+                "outcome": "fail",
+                "failure_kind": "assertion_failed",
+                "message": message,
+            }),
+            None => json!({
+                "id": case_id,
+                "outcome": "error",
+                "failure_kind": "not_implemented",
+                "message": NOT_IMPLEMENTED_MESSAGE,
+            }),
+        });
     }
 
     Ok(json!({
@@ -173,6 +187,45 @@ mod tests {
             report["results"][0]["failure_kind"],
             Value::String("not_implemented".to_string())
         );
+    }
+
+    #[test]
+    fn build_results_report_passes_preview2_mandatory_baseline_cases() {
+        let mandatory_cases = [
+            "l0.header.fixed_shape.golden",
+            "l0.control.client_hello.golden",
+            "l0.control.session_patch_ack.golden",
+            "l0.flow_update.packet.golden",
+            "l0.result_hint.packet.golden",
+            "l0.frame_submit.metadata.golden",
+            "l0.result_push.metadata.golden",
+            "l0.body_region.prelude.golden",
+            "l0.object_reference.block.golden",
+            "l0.typed_payload.descriptor.golden",
+            "l0.typed_payload.frame_regions.golden",
+            "l1.flow_update.metadata.validation",
+            "l1.result_hint.metadata.validation",
+            "l1.cache.lifecycle.roundtrip",
+            "l1.frame_submit.message.parse_emit",
+            "l1.result_push.message.parse_emit",
+        ];
+        let cases: Vec<Value> = mandatory_cases
+            .iter()
+            .map(|id| json!({ "id": id }))
+            .collect();
+
+        let report = build_results_report(&json!({
+            "protocol_version": "nnrp-1-preview2",
+            "cases": cases
+        }))
+        .expect("preview2 report should build");
+
+        let results = report["results"].as_array().expect("results array");
+        assert_eq!(results.len(), mandatory_cases.len());
+        for result in results {
+            assert_eq!(result["outcome"], Value::String("pass".to_string()));
+            assert!(result.get("failure_kind").is_none());
+        }
     }
 
     #[test]
