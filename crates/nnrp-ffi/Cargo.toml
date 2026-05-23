@@ -6,5 +6,8 @@ license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.2" }

@@ -21,6 +21,7 @@
 11. `04c-conformance-and-binding-rollout.md`: `nnrp-conformance` exports and downstream binding-consumption contract.
 12. `05-validation-and-docs.md`: workspace validation, conformance exports, and rollout documentation.
 13. `06-client-server-runtime.md`: usable Rust client/server SDK surface, transport pump, and runtime-backed FFI entrypoints.
+14. `06a-transport-provider-packaging.md`: split transport providers, native link library packaging, and JS/TS WASM packaging.
 
 ## 2. PR Rules
 
@@ -40,3 +41,4 @@
 6. `tensor` / `token` first-round standard profiles plus `structured_event` / `tool_delta` ownership boundaries are tracked in `01` and `03`.
 7. Rust conformance-first enum/message/error baselines and downstream binding-consumption rules are tracked in `00`, `01`, `04`, and `05`.
 8. Usable Rust client/server APIs, transport runtime, loopback integration, and runtime-backed FFI entrypoints are tracked in `06`.
+9. Transport provider packaging, provider discovery, native link libraries, and JS/TS WASM outputs are tracked in `06a`.

@@ -23,7 +23,7 @@ GitHub README rendering does not support per-avatar dynamic tooltips for an auto
 ## Workspace Layout
 
 - `crates/nnrp-core`: canonical NNRP/1 wire primitives, preview3 extension models, strict validation, state-machine-facing core types, and host-neutral cache/schema semantics.
-- `crates/nnrp-ffi`: stable ABI facade over `nnrp-core`, including handle ownership, buffer views, callbacks, polling, and downstream error mapping.
+- `crates/nnrp-ffi`: stable ABI facade over `nnrp-core`, including handle ownership, buffer views, callbacks, polling, downstream error mapping, and native `cdylib` packaging.
 - `crates/nnrp-conformance`: Rust-owned golden vectors, fixture manifests, adapter wrappers, and cross-language conformance export surface.
 - `doc/todo/`: implementation planning and rollout checklists.
 
