@@ -1,5 +1,5 @@
 use core::ffi::c_void;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use nnrp_core::{
@@ -233,6 +233,29 @@ struct NnrpFfiResourceEntry {
 #[derive(Debug, Default)]
 struct NnrpFfiHandleStore {
     entries: BTreeMap<(u32, u64), NnrpFfiResourceEntry>,
+    events: VecDeque<NnrpQueuedEvent>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NnrpQueuedEvent {
+    kind: u32,
+    connection: NnrpHandle,
+    session: NnrpHandle,
+    operation: NnrpHandle,
+    frame_id: u32,
+}
+
+impl NnrpQueuedEvent {
+    fn into_event(self) -> NnrpEvent {
+        NnrpEvent {
+            kind: self.kind,
+            connection: self.connection,
+            session: self.session,
+            operation: self.operation,
+            frame_id: self.frame_id,
+            ..NnrpEvent::none()
+        }
+    }
 }
 
 impl NnrpFfiHandleStore {
@@ -276,6 +299,22 @@ impl NnrpFfiHandleStore {
         self.get(handle, kind)?;
         self.entries.remove(&(handle.kind, handle.id));
         Ok(())
+    }
+
+    fn push_event(&mut self, event: NnrpQueuedEvent) {
+        self.events.push_back(event);
+    }
+
+    fn poll_event(&mut self, connection: NnrpHandle) -> Result<Option<NnrpEvent>, NnrpFfiStatus> {
+        self.get(connection, NnrpHandleKind::Connection)?;
+        let Some(index) = self
+            .events
+            .iter()
+            .position(|event| event.connection == connection)
+        else {
+            return Ok(None);
+        };
+        Ok(self.events.remove(index).map(NnrpQueuedEvent::into_event))
     }
 }
 
@@ -405,6 +444,14 @@ pub struct NnrpConnectionBootstrap {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpClientConnectRequest {
+    pub connection_id: u64,
+    pub generation: u32,
+    pub transport_id: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NnrpSessionOpenRequest {
     pub connection: NnrpHandle,
     pub requested_session_id: u32,
@@ -425,6 +472,13 @@ pub struct NnrpSubmitRequest {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpClientCancelRequest {
+    pub session: NnrpHandle,
+    pub frame_id: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NnrpControlRequest {
     pub handle: NnrpHandle,
     pub control_code: u32,
@@ -438,6 +492,25 @@ pub struct NnrpControlRequest {
 /// `NnrpHandle`. When non-null, the pointed memory must be owned by the caller.
 pub unsafe extern "C" fn nnrp_connection_bootstrap(
     request: NnrpConnectionBootstrap,
+    out_connection: *mut NnrpHandle,
+) -> NnrpFfiStatus {
+    nnrp_client_connect(
+        NnrpClientConnectRequest {
+            connection_id: request.connection_id,
+            generation: request.generation,
+            transport_id: request.transport_id,
+        },
+        out_connection,
+    )
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `out_connection` must be either null or a valid writable pointer to one
+/// `NnrpHandle`. When non-null, the pointed memory must be owned by the caller.
+pub unsafe extern "C" fn nnrp_client_connect(
+    request: NnrpClientConnectRequest,
     out_connection: *mut NnrpHandle,
 ) -> NnrpFfiStatus {
     if out_connection.is_null() || request.connection_id == 0 || request.generation == 0 {
@@ -459,6 +532,13 @@ pub unsafe extern "C" fn nnrp_connection_bootstrap(
         return status;
     }
 
+    store.push_event(NnrpQueuedEvent {
+        kind: NnrpEventKind::ConnectionOpened as u32,
+        connection: handle,
+        session: NnrpHandle::invalid(),
+        operation: NnrpHandle::invalid(),
+        frame_id: 0,
+    });
     *out_connection = handle;
     NnrpFfiStatus::ok()
 }
@@ -469,6 +549,18 @@ pub unsafe extern "C" fn nnrp_connection_bootstrap(
 /// `out_session` must be either null or a valid writable pointer to one
 /// `NnrpHandle`. The connection handle is copied by value and is not retained.
 pub unsafe extern "C" fn nnrp_session_open(
+    request: NnrpSessionOpenRequest,
+    out_session: *mut NnrpHandle,
+) -> NnrpFfiStatus {
+    nnrp_client_open_session(request, out_session)
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `out_session` must be either null or a valid writable pointer to one
+/// `NnrpHandle`. The connection handle is copied by value and is not retained.
+pub unsafe extern "C" fn nnrp_client_open_session(
     request: NnrpSessionOpenRequest,
     out_session: *mut NnrpHandle,
 ) -> NnrpFfiStatus {
@@ -497,6 +589,13 @@ pub unsafe extern "C" fn nnrp_session_open(
         return status;
     }
 
+    store.push_event(NnrpQueuedEvent {
+        kind: NnrpEventKind::SessionOpened as u32,
+        connection: request.connection,
+        session: handle,
+        operation: NnrpHandle::invalid(),
+        frame_id: 0,
+    });
     *out_session = handle;
     NnrpFfiStatus::ok()
 }
@@ -511,6 +610,19 @@ pub unsafe extern "C" fn nnrp_submit(
     request: NnrpSubmitRequest,
     out_operation: *mut NnrpHandle,
 ) -> NnrpFfiStatus {
+    nnrp_client_submit(request, out_operation)
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `out_operation` must be either null or a valid writable pointer to one
+/// `NnrpHandle`. `request.payload` must remain readable for `request.payload.len`
+/// bytes for the duration of the call.
+pub unsafe extern "C" fn nnrp_client_submit(
+    request: NnrpSubmitRequest,
+    out_operation: *mut NnrpHandle,
+) -> NnrpFfiStatus {
     if out_operation.is_null() || request.operation_id == 0 {
         return NnrpFfiStatus::invalid_argument(12);
     }
@@ -518,9 +630,11 @@ pub unsafe extern "C" fn nnrp_submit(
         return status;
     }
     let mut store = handle_store();
-    if let Err(status) = store.get(request.session, NnrpHandleKind::Session) {
-        return status;
-    }
+    let session_resource = match store.get(request.session, NnrpHandleKind::Session) {
+        Ok(NnrpFfiResource::Session { connection, .. }) => *connection,
+        Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32),
+        Err(status) => return status,
+    };
 
     let handle = NnrpHandle::new(
         NnrpHandleKind::Operation,
@@ -538,6 +652,13 @@ pub unsafe extern "C" fn nnrp_submit(
         return status;
     }
 
+    store.push_event(NnrpQueuedEvent {
+        kind: NnrpEventKind::SubmitAccepted as u32,
+        connection: session_resource,
+        session: request.session,
+        operation: handle,
+        frame_id: request.frame_id,
+    });
     *out_operation = handle;
     NnrpFfiStatus::ok()
 }
@@ -548,11 +669,98 @@ pub unsafe extern "C" fn nnrp_submit(
 /// The session handle is copied by value. This function does not dereference
 /// caller-provided pointers.
 pub unsafe extern "C" fn nnrp_session_close(session: NnrpHandle) -> NnrpFfiStatus {
+    nnrp_client_close(session)
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// The session handle is copied by value. This function does not dereference
+/// caller-provided pointers.
+pub unsafe extern "C" fn nnrp_client_close(session: NnrpHandle) -> NnrpFfiStatus {
     let mut store = handle_store();
+    let connection = match store.get(session, NnrpHandleKind::Session) {
+        Ok(NnrpFfiResource::Session { connection, .. }) => *connection,
+        Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32),
+        Err(status) => return status,
+    };
     store
         .remove(session, NnrpHandleKind::Session)
-        .map(|_| NnrpFfiStatus::ok())
+        .map(|_| {
+            store.push_event(NnrpQueuedEvent {
+                kind: NnrpEventKind::SessionClosed as u32,
+                connection,
+                session,
+                operation: NnrpHandle::invalid(),
+                frame_id: 0,
+            });
+            NnrpFfiStatus::ok()
+        })
         .unwrap_or_else(|status| status)
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// The session handle is copied by value. This function does not dereference
+/// caller-provided pointers.
+pub unsafe extern "C" fn nnrp_client_cancel(request: NnrpClientCancelRequest) -> NnrpFfiStatus {
+    if request.frame_id == 0 {
+        return NnrpFfiStatus::invalid_argument(16);
+    }
+    let mut store = handle_store();
+    let connection = match store.get(request.session, NnrpHandleKind::Session) {
+        Ok(NnrpFfiResource::Session { connection, .. }) => *connection,
+        Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32),
+        Err(status) => return status,
+    };
+    store.push_event(NnrpQueuedEvent {
+        kind: NnrpEventKind::Control as u32,
+        connection,
+        session: request.session,
+        operation: NnrpHandle::invalid(),
+        frame_id: request.frame_id,
+    });
+    NnrpFfiStatus::ok()
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `out_result` must be either null or a valid writable pointer to one
+/// `NnrpPollResult`. When non-null, the pointed memory must be owned by the caller.
+pub unsafe extern "C" fn nnrp_client_await_event(
+    connection: NnrpHandle,
+    out_result: *mut NnrpPollResult,
+) -> NnrpFfiStatus {
+    if out_result.is_null() {
+        return NnrpFfiStatus::invalid_argument(17);
+    }
+    let mut store = handle_store();
+    match store.poll_event(connection) {
+        Ok(Some(event)) => {
+            *out_result = NnrpPollResult {
+                status: NnrpFfiStatus::ok(),
+                has_event: 1,
+                event,
+            };
+            NnrpFfiStatus::ok()
+        }
+        Ok(None) => {
+            *out_result = NnrpPollResult {
+                status: NnrpFfiStatus {
+                    status_code: NnrpFfiStatusCode::WouldBlock as u32,
+                    error_family: NnrpErrorFamily::None as u32,
+                    protocol_error_code: 0,
+                    detail_code: 0,
+                },
+                has_event: 0,
+                event: NnrpEvent::none(),
+            };
+            (*out_result).status
+        }
+        Err(status) => status,
+    }
 }
 
 #[no_mangle]
@@ -745,6 +953,108 @@ mod tests {
                 nnrp_session_close(session),
                 NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32)
             );
+        }
+    }
+
+    #[test]
+    fn ffi_client_abi_emits_pollable_runtime_events() {
+        unsafe {
+            let mut connection = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_connect(
+                    NnrpClientConnectRequest {
+                        connection_id: 91_001,
+                        generation: 1,
+                        transport_id: 1,
+                    },
+                    &mut connection
+                ),
+                NnrpFfiStatus::ok()
+            );
+            let mut result = empty_poll_result();
+            assert_eq!(
+                nnrp_client_await_event(connection, &mut result),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(result.has_event, 1);
+            assert_eq!(result.event.kind, NnrpEventKind::ConnectionOpened as u32);
+            assert_eq!(result.event.connection, connection);
+
+            let mut session = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_open_session(
+                    NnrpSessionOpenRequest {
+                        connection,
+                        requested_session_id: 91_002,
+                        generation: 1,
+                        profile_id: 2,
+                        schema_id: 0x1001,
+                        schema_version: 3,
+                    },
+                    &mut session
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(
+                nnrp_client_await_event(connection, &mut result),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(result.event.kind, NnrpEventKind::SessionOpened as u32);
+            assert_eq!(result.event.session, session);
+
+            let payload = [9u8, 8, 7];
+            let mut operation = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_submit(
+                    NnrpSubmitRequest {
+                        session,
+                        operation_id: 91_003,
+                        frame_id: 44,
+                        payload: NnrpBufferView {
+                            ptr: payload.as_ptr(),
+                            len: payload.len(),
+                        },
+                    },
+                    &mut operation
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(
+                nnrp_client_await_event(connection, &mut result),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(result.event.kind, NnrpEventKind::SubmitAccepted as u32);
+            assert_eq!(result.event.operation, operation);
+            assert_eq!(result.event.frame_id, 44);
+            assert_eq!(result.event.payload, NnrpBufferView::empty());
+
+            assert_eq!(
+                nnrp_client_cancel(NnrpClientCancelRequest {
+                    session,
+                    frame_id: 44,
+                }),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(
+                nnrp_client_await_event(connection, &mut result),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(result.event.kind, NnrpEventKind::Control as u32);
+            assert_eq!(result.event.frame_id, 44);
+
+            assert_eq!(nnrp_client_close(session), NnrpFfiStatus::ok());
+            assert_eq!(
+                nnrp_client_await_event(connection, &mut result),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(result.event.kind, NnrpEventKind::SessionClosed as u32);
+
+            let would_block = nnrp_client_await_event(connection, &mut result);
+            assert_eq!(
+                would_block.status_code,
+                NnrpFfiStatusCode::WouldBlock as u32
+            );
+            assert_eq!(result.has_event, 0);
         }
     }
 
@@ -998,5 +1308,13 @@ mod tests {
             .error_family,
             NnrpErrorFamily::Transport as u32
         );
+    }
+
+    fn empty_poll_result() -> NnrpPollResult {
+        NnrpPollResult {
+            status: NnrpFfiStatus::ok(),
+            has_event: 0,
+            event: NnrpEvent::none(),
+        }
     }
 }

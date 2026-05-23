@@ -4,7 +4,7 @@
 
 - [x] Keep this shard responsible for the usable Rust client/server SDK surface, transport runtime, and runtime-backed FFI entrypoints.
 - [x] Treat `nnrp-core` as the protocol and state-machine source of truth; runtime APIs must consume core semantics rather than redefining protocol behavior.
-- [ ] Treat `nnrp-ffi` as the downstream ABI boundary; FFI functions may expose runtime handles only after the Rust runtime surface exists.
+- [x] Treat `nnrp-ffi` as the downstream ABI boundary; FFI functions may expose runtime handles only after the Rust runtime surface exists.
 
 ## Transport Abstraction
 
@@ -38,7 +38,7 @@
 ## FFI Runtime Binding
 
 - [x] Replace preview3 FFI placeholder/bootstrap entrypoints with runtime-backed handles.
-- [ ] Expose client connect/open/submit/await/cancel/close through stable C ABI.
+- [x] Expose client connect/open/submit/await/cancel/close through stable C ABI.
 - [ ] Expose server bind/accept/receive-submit/send-result/send-flow-update/close through stable C ABI.
 - [ ] Preserve existing value-handle, buffer-view, callback, polling, and error-family rules.
 
@@ -47,5 +47,5 @@
 - [x] Add loopback client/server integration tests over TCP.
 - [x] Add loopback tests for submit/result and session close.
 - [ ] Add fixture-driven tests for flow update, cancellation, cache miss, schema mismatch, and resume.
-- [ ] Add FFI smoke tests that drive the real runtime rather than only validating ABI shape.
+- [x] Add FFI smoke tests that drive the real runtime rather than only validating ABI shape.
 - [ ] Export runtime-backed conformance cases from `nnrp-conformance`.
