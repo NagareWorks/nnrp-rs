@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use nnrp_core::{
@@ -19,7 +20,7 @@ use tokio::net::TcpListener;
 
 use crate::{FramedTransport, RuntimeError, RuntimePacket, RuntimeTransportKind, TcpTransport};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct NnrpServerConfig {
     pub transport: RuntimeTransportKind,
     pub supported_profiles: Vec<u16>,
@@ -32,6 +33,40 @@ pub struct NnrpServerConfig {
     pub granted_operation_credit: u16,
     pub lease_ttl_ms: u32,
     pub resume_window_ms: u32,
+    pub application_policy: Arc<dyn NnrpServerPolicy>,
+}
+
+impl fmt::Debug for NnrpServerConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NnrpServerConfig")
+            .field("transport", &self.transport)
+            .field("supported_profiles", &self.supported_profiles)
+            .field("supported_cache_objects", &self.supported_cache_objects)
+            .field("max_cache_objects", &self.max_cache_objects)
+            .field("max_cache_object_bytes", &self.max_cache_object_bytes)
+            .field("schema_registry", &self.schema_registry)
+            .field("resume_token_bytes", &self.resume_token_bytes)
+            .field("max_in_flight_operations", &self.max_in_flight_operations)
+            .field("granted_operation_credit", &self.granted_operation_credit)
+            .field("lease_ttl_ms", &self.lease_ttl_ms)
+            .field("resume_window_ms", &self.resume_window_ms)
+            .field("application_policy", &"<dyn NnrpServerPolicy>")
+            .finish()
+    }
+}
+
+pub trait NnrpServerPolicy: Send + Sync {
+    fn validate_session_open(&self, open: &SessionOpenMetadata) -> Result<(), u32>;
+}
+
+#[derive(Debug, Default)]
+pub struct AllowAllServerPolicy;
+
+impl NnrpServerPolicy for AllowAllServerPolicy {
+    fn validate_session_open(&self, _open: &SessionOpenMetadata) -> Result<(), u32> {
+        Ok(())
+    }
 }
 
 impl Default for NnrpServerConfig {
@@ -48,6 +83,7 @@ impl Default for NnrpServerConfig {
             granted_operation_credit: 2,
             lease_ttl_ms: 30_000,
             resume_window_ms: 120_000,
+            application_policy: Arc::new(AllowAllServerPolicy),
         }
     }
 }
@@ -87,6 +123,14 @@ impl NnrpServerConfig {
         self
     }
 
+    pub fn with_application_policy<P>(mut self, policy: P) -> Self
+    where
+        P: NnrpServerPolicy + 'static,
+    {
+        self.application_policy = Arc::new(policy);
+        self
+    }
+
     fn validate_client_open(&self, open: &SessionOpenMetadata) -> Result<(), u32> {
         if !self.supported_profiles.contains(&open.profile_id)
             || validate_profile_assignment(open.profile_id).is_err()
@@ -105,6 +149,8 @@ impl NnrpServerConfig {
         if open.max_in_flight_operations > self.max_in_flight_operations {
             return Err(SESSION_ERROR_LIMIT_REACHED);
         }
+
+        self.application_policy.validate_session_open(open)?;
 
         Ok(())
     }

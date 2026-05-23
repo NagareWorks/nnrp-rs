@@ -33,7 +33,7 @@
 - [x] Implement `NnrpServerSession` send-result-drop, send-flow-update, and patch ack APIs.
 - [x] Implement server-side operation registry and cache/schema validation.
 - [x] Implement server-side session registry and recovery token handling.
-- [ ] Keep authentication and application policy pluggable rather than built into the protocol layer.
+- [x] Keep authentication and application policy pluggable rather than built into the protocol layer.
 
 ## FFI Runtime Binding
 

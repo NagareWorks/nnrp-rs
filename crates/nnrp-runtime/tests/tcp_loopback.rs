@@ -12,7 +12,7 @@ use nnrp_core::{
 };
 use nnrp_runtime::{
     FramedTransport, NnrpClient, NnrpClientConfig, NnrpClientEvent, NnrpServer, NnrpServerConfig,
-    RuntimeError, RuntimePacket, RuntimeTransportKind, TcpTransport,
+    NnrpServerPolicy, RuntimeError, RuntimePacket, RuntimeTransportKind, TcpTransport,
 };
 use tokio::net::TcpListener;
 
@@ -177,6 +177,9 @@ async fn runtime_configs_select_transport_cache_hints_and_server_state() -> Resu
         .with_supported_cache_objects(vec![CacheObjectKind::PromptSegment])
         .with_schema_registry(SchemaRegistry::with_standard_preview3_profiles())
         .with_cache_limits(1, 1024);
+    let debug_text = format!("{server_config:?}");
+    assert!(debug_text.contains("NnrpServerConfig"));
+    assert!(debug_text.contains("application_policy"));
     assert_eq!(server_config.transport, RuntimeTransportKind::Quic);
     assert_eq!(
         server_config.supported_cache_objects,
@@ -244,6 +247,55 @@ async fn server_rejects_unsupported_profile_before_session_install() -> Result<(
         Err(RuntimeError::UnexpectedMessage(_))
     ));
     server_task.await.expect("server task should join");
+    Ok(())
+}
+
+#[tokio::test]
+async fn server_policy_hook_accepts_and_rejects_session_open() -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp(
+        "127.0.0.1:0",
+        NnrpServerConfig::default().with_application_policy(RequireSessionTag(7)),
+    )
+    .await?;
+    let addr = server.local_addr()?;
+    let server_task = tokio::spawn(async move {
+        assert!(matches!(
+            server.accept().await,
+            Err(RuntimeError::UnexpectedMessage(_))
+        ));
+    });
+
+    let rejected_client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    assert!(matches!(
+        rejected_client.open_session().await,
+        Err(RuntimeError::UnexpectedMessage(_))
+    ));
+    server_task.await.expect("reject server task should join");
+
+    let server = NnrpServer::bind_tcp(
+        "127.0.0.1:0",
+        NnrpServerConfig::default().with_application_policy(RequireSessionTag(7)),
+    )
+    .await?;
+    let addr = server.local_addr()?;
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        assert_eq!(session.client_open().client_session_tag, 7);
+        let close = session.receive_close().await?;
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let accepted_client = NnrpClient::connect_tcp(
+        addr,
+        NnrpClientConfig {
+            requested_session_id: 7,
+            ..Default::default()
+        },
+    )
+    .await?;
+    accepted_client.open_session().await?.close().await?;
+    server_task.await.expect("accept server task should join")?;
     Ok(())
 }
 
@@ -746,6 +798,18 @@ fn token_submit() -> FrameSubmitMetadata {
         dependency_frame_id: 0,
         payload_kind_bitmap: PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),
         payload_frame_count: 1,
+    }
+}
+
+struct RequireSessionTag(u64);
+
+impl NnrpServerPolicy for RequireSessionTag {
+    fn validate_session_open(&self, open: &SessionOpenMetadata) -> Result<(), u32> {
+        if open.client_session_tag == self.0 {
+            Ok(())
+        } else {
+            Err(nnrp_core::SESSION_ERROR_LIMIT_REACHED)
+        }
     }
 }
 
