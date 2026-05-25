@@ -3,9 +3,26 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use nnrp_core::{
-    NnrpError, ProtocolVersion, SESSION_ERROR_NONE, SESSION_ERROR_PROFILE_UNSUPPORTED,
+    NnrpError, ProtocolVersion, TransportId, SESSION_ERROR_NONE, SESSION_ERROR_PROFILE_UNSUPPORTED,
     SESSION_ERROR_RESUME_REJECTED, SESSION_ERROR_SCHEMA_UNSUPPORTED,
 };
+
+pub const NNRP_FFI_ABI_MAJOR: u16 = 1;
+pub const NNRP_FFI_ABI_MINOR: u16 = 0;
+pub const NNRP_FFI_ABI_PATCH: u16 = 0;
+
+pub const NNRP_TRANSPORT_SLOT_QUIC: u32 = 0x0000_0001;
+pub const NNRP_TRANSPORT_SLOT_TCP: u32 = 0x0000_0002;
+
+pub const NNRP_RUNTIME_FEATURE_PROTOCOL_CORE: u64 = 0x0000_0000_0000_0001;
+pub const NNRP_RUNTIME_FEATURE_CLIENT_API: u64 = 0x0000_0000_0000_0002;
+pub const NNRP_RUNTIME_FEATURE_SERVER_API: u64 = 0x0000_0000_0000_0004;
+pub const NNRP_RUNTIME_FEATURE_EVENT_POLLING: u64 = 0x0000_0000_0000_0008;
+pub const NNRP_RUNTIME_FEATURE_CALLBACK_DISPATCH: u64 = 0x0000_0000_0000_0010;
+pub const NNRP_RUNTIME_FEATURE_CACHE_SCHEMA: u64 = 0x0000_0000_0000_0020;
+pub const NNRP_RUNTIME_FEATURE_RECOVERY: u64 = 0x0000_0000_0000_0040;
+pub const NNRP_RUNTIME_FEATURE_TYPED_PAYLOAD: u64 = 0x0000_0000_0000_0080;
+pub const NNRP_RUNTIME_FEATURE_TRANSPORT_SLOTS: u64 = 0x0000_0000_0000_0100;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +47,64 @@ pub fn current_protocol_version() -> NnrpProtocolVersion {
 #[no_mangle]
 pub extern "C" fn nnrp_current_protocol_version() -> NnrpProtocolVersion {
     current_protocol_version()
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpRuntimeCapabilities {
+    pub abi_major: u16,
+    pub abi_minor: u16,
+    pub abi_patch: u16,
+    pub reserved0: u16,
+    pub protocol_version: NnrpProtocolVersion,
+    pub sdk_major: u16,
+    pub sdk_minor: u16,
+    pub sdk_patch: u16,
+    pub sdk_preview: u16,
+    pub sdk_revision: u16,
+    pub reserved1: u16,
+    pub transport_slots: u32,
+    pub feature_flags: u64,
+}
+
+pub fn runtime_capabilities() -> NnrpRuntimeCapabilities {
+    NnrpRuntimeCapabilities {
+        abi_major: NNRP_FFI_ABI_MAJOR,
+        abi_minor: NNRP_FFI_ABI_MINOR,
+        abi_patch: NNRP_FFI_ABI_PATCH,
+        reserved0: 0,
+        protocol_version: current_protocol_version(),
+        sdk_major: 1,
+        sdk_minor: 0,
+        sdk_patch: 0,
+        sdk_preview: 3,
+        sdk_revision: 1,
+        reserved1: 0,
+        transport_slots: transport_slot_bit(TransportId::Quic)
+            | transport_slot_bit(TransportId::Tcp),
+        feature_flags: NNRP_RUNTIME_FEATURE_PROTOCOL_CORE
+            | NNRP_RUNTIME_FEATURE_CLIENT_API
+            | NNRP_RUNTIME_FEATURE_SERVER_API
+            | NNRP_RUNTIME_FEATURE_EVENT_POLLING
+            | NNRP_RUNTIME_FEATURE_CALLBACK_DISPATCH
+            | NNRP_RUNTIME_FEATURE_CACHE_SCHEMA
+            | NNRP_RUNTIME_FEATURE_RECOVERY
+            | NNRP_RUNTIME_FEATURE_TYPED_PAYLOAD
+            | NNRP_RUNTIME_FEATURE_TRANSPORT_SLOTS,
+    }
+}
+
+const fn transport_slot_bit(transport_id: TransportId) -> u32 {
+    match transport_id {
+        TransportId::Quic => NNRP_TRANSPORT_SLOT_QUIC,
+        TransportId::Tcp => NNRP_TRANSPORT_SLOT_TCP,
+        TransportId::Unspecified => 0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nnrp_runtime_capabilities() -> NnrpRuntimeCapabilities {
+    runtime_capabilities()
 }
 
 #[repr(u32)]
@@ -1154,6 +1229,72 @@ mod tests {
         assert_eq!(version.major, 1);
         assert_eq!(version.wire_format, 0);
         assert_eq!(nnrp_current_protocol_version(), version);
+    }
+
+    #[test]
+    fn ffi_runtime_capabilities_report_stable_probe_contract() {
+        let capabilities = runtime_capabilities();
+        assert_eq!(nnrp_runtime_capabilities(), capabilities);
+        assert_eq!(capabilities.abi_major, NNRP_FFI_ABI_MAJOR);
+        assert_eq!(capabilities.abi_minor, NNRP_FFI_ABI_MINOR);
+        assert_eq!(capabilities.abi_patch, NNRP_FFI_ABI_PATCH);
+        assert_eq!(capabilities.reserved0, 0);
+        assert_eq!(capabilities.protocol_version, current_protocol_version());
+        assert_eq!(capabilities.sdk_major, 1);
+        assert_eq!(capabilities.sdk_minor, 0);
+        assert_eq!(capabilities.sdk_patch, 0);
+        assert_eq!(capabilities.sdk_preview, 3);
+        assert_eq!(capabilities.sdk_revision, 1);
+        assert_eq!(capabilities.reserved1, 0);
+        assert_eq!(
+            capabilities.transport_slots,
+            NNRP_TRANSPORT_SLOT_QUIC | NNRP_TRANSPORT_SLOT_TCP
+        );
+        assert_eq!(transport_slot_bit(TransportId::Unspecified), 0);
+        assert_eq!(
+            transport_slot_bit(TransportId::Quic),
+            NNRP_TRANSPORT_SLOT_QUIC
+        );
+        assert_eq!(
+            transport_slot_bit(TransportId::Tcp),
+            NNRP_TRANSPORT_SLOT_TCP
+        );
+        assert_ne!(
+            capabilities.feature_flags & NNRP_RUNTIME_FEATURE_PROTOCOL_CORE,
+            0
+        );
+        assert_ne!(
+            capabilities.feature_flags & NNRP_RUNTIME_FEATURE_CLIENT_API,
+            0
+        );
+        assert_ne!(
+            capabilities.feature_flags & NNRP_RUNTIME_FEATURE_SERVER_API,
+            0
+        );
+        assert_ne!(
+            capabilities.feature_flags & NNRP_RUNTIME_FEATURE_EVENT_POLLING,
+            0
+        );
+        assert_ne!(
+            capabilities.feature_flags & NNRP_RUNTIME_FEATURE_CALLBACK_DISPATCH,
+            0
+        );
+        assert_ne!(
+            capabilities.feature_flags & NNRP_RUNTIME_FEATURE_CACHE_SCHEMA,
+            0
+        );
+        assert_ne!(
+            capabilities.feature_flags & NNRP_RUNTIME_FEATURE_RECOVERY,
+            0
+        );
+        assert_ne!(
+            capabilities.feature_flags & NNRP_RUNTIME_FEATURE_TYPED_PAYLOAD,
+            0
+        );
+        assert_ne!(
+            capabilities.feature_flags & NNRP_RUNTIME_FEATURE_TRANSPORT_SLOTS,
+            0
+        );
     }
 
     #[test]

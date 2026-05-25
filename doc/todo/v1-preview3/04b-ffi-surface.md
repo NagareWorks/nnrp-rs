@@ -6,4 +6,5 @@
 - [x] Expose zero-copy or bounded-copy buffer-view APIs suitable for Python and C# bindings.
 - [x] Expose callback-driven and polling-driven event delivery surfaces.
 - [x] Expose stable preview3 error codes and diagnostics to binding layers.
+- [x] Expose a stable runtime capability probe for ABI version, protocol version, transport slots, and feature flags.
 - [ ] Wire FFI entrypoints to the real client/server runtime once `06` lands.

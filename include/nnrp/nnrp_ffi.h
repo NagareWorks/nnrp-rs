@@ -13,6 +13,39 @@ typedef struct NnrpProtocolVersion {
   uint8_t wire_format;
 } NnrpProtocolVersion;
 
+#define NNRP_FFI_ABI_MAJOR 1
+#define NNRP_FFI_ABI_MINOR 0
+#define NNRP_FFI_ABI_PATCH 0
+
+#define NNRP_TRANSPORT_SLOT_QUIC 0x00000001u
+#define NNRP_TRANSPORT_SLOT_TCP 0x00000002u
+
+#define NNRP_RUNTIME_FEATURE_PROTOCOL_CORE 0x0000000000000001ull
+#define NNRP_RUNTIME_FEATURE_CLIENT_API 0x0000000000000002ull
+#define NNRP_RUNTIME_FEATURE_SERVER_API 0x0000000000000004ull
+#define NNRP_RUNTIME_FEATURE_EVENT_POLLING 0x0000000000000008ull
+#define NNRP_RUNTIME_FEATURE_CALLBACK_DISPATCH 0x0000000000000010ull
+#define NNRP_RUNTIME_FEATURE_CACHE_SCHEMA 0x0000000000000020ull
+#define NNRP_RUNTIME_FEATURE_RECOVERY 0x0000000000000040ull
+#define NNRP_RUNTIME_FEATURE_TYPED_PAYLOAD 0x0000000000000080ull
+#define NNRP_RUNTIME_FEATURE_TRANSPORT_SLOTS 0x0000000000000100ull
+
+typedef struct NnrpRuntimeCapabilities {
+  uint16_t abi_major;
+  uint16_t abi_minor;
+  uint16_t abi_patch;
+  uint16_t reserved0;
+  NnrpProtocolVersion protocol_version;
+  uint16_t sdk_major;
+  uint16_t sdk_minor;
+  uint16_t sdk_patch;
+  uint16_t sdk_preview;
+  uint16_t sdk_revision;
+  uint16_t reserved1;
+  uint32_t transport_slots;
+  uint64_t feature_flags;
+} NnrpRuntimeCapabilities;
+
 typedef enum NnrpFfiStatusCode {
   NNRP_FFI_STATUS_OK = 0,
   NNRP_FFI_STATUS_INVALID_ARGUMENT = 1,
@@ -185,6 +218,7 @@ typedef struct NnrpControlRequest {
 } NnrpControlRequest;
 
 NnrpProtocolVersion nnrp_current_protocol_version(void);
+NnrpRuntimeCapabilities nnrp_runtime_capabilities(void);
 NnrpFfiStatus nnrp_connection_bootstrap(NnrpConnectionBootstrap request, NnrpHandle *out_connection);
 NnrpFfiStatus nnrp_client_connect(NnrpClientConnectRequest request, NnrpHandle *out_connection);
 NnrpFfiStatus nnrp_session_open(NnrpSessionOpenRequest request, NnrpHandle *out_session);
