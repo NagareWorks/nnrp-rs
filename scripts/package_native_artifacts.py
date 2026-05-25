@@ -10,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_EXPORTS = [
     "nnrp_current_protocol_version",
+    "nnrp_runtime_capabilities",
     "nnrp_connection_bootstrap",
     "nnrp_client_connect",
     "nnrp_session_open",
