@@ -766,7 +766,7 @@ async fn server_migration_reader_rejects_wrong_session_and_shape() -> Result<(),
 }
 
 #[tokio::test]
-async fn quic_hooks_are_reserved_but_not_runtime_backed() {
+async fn quic_convenience_hooks_require_provider_crate() {
     assert!(matches!(
         NnrpClient::connect_quic("localhost:4433", NnrpClientConfig::default()).await,
         Err(RuntimeError::UnsupportedTransport(_))

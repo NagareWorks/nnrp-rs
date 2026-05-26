@@ -41,6 +41,8 @@ contracts rather than re-declaring protocol behavior.
 - Schema descriptor and typed payload descriptor helpers expose the frozen 32B
   and 24B layouts through C-compatible value structs, plus binding validation
   against the Rust-owned schema registry semantics.
+- Recovery and migration helpers consume canonical wire metadata bytes and
+  return Rust-owned resume outcome/replay decisions for downstream SDKs.
 
 The current FFI surface is backed by the Rust runtime handles for connection,
 session, submit/result, control, polling, and close paths. Transport-provider

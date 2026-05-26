@@ -3,9 +3,12 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use nnrp_core::{
-    token_delta_schema_descriptor, NnrpError, ProtocolVersion, SchemaDescriptorHeader,
-    SchemaRegistry, SchemaRegistryFailure, TransportId, TypedPayloadDescriptor, SESSION_ERROR_NONE,
-    SESSION_ERROR_PROFILE_UNSUPPORTED, SESSION_ERROR_RESUME_REJECTED,
+    should_replay_frame_after_migration, token_delta_schema_descriptor,
+    validate_migration_recovery, validate_session_recovery_ack, validate_session_recovery_request,
+    NnrpError, ProtocolVersion, SchemaDescriptorHeader, SchemaRegistry, SchemaRegistryFailure,
+    SessionMigrateAckMetadata, SessionMigrateMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
+    SessionRecoveryOutcome as CoreSessionRecoveryOutcome, TransportId, TypedPayloadDescriptor,
+    SESSION_ERROR_NONE, SESSION_ERROR_PROFILE_UNSUPPORTED, SESSION_ERROR_RESUME_REJECTED,
     SESSION_ERROR_SCHEMA_UNSUPPORTED,
 };
 
@@ -26,6 +29,11 @@ pub const NNRP_RUNTIME_FEATURE_RECOVERY: u64 = 0x0000_0000_0000_0040;
 pub const NNRP_RUNTIME_FEATURE_TYPED_PAYLOAD: u64 = 0x0000_0000_0000_0080;
 pub const NNRP_RUNTIME_FEATURE_TRANSPORT_SLOTS: u64 = 0x0000_0000_0000_0100;
 pub const NNRP_RUNTIME_FEATURE_BATCH_POLLING: u64 = 0x0000_0000_0000_0200;
+
+pub const NNRP_SESSION_RECOVERY_OUTCOME_FRESH: u32 = 0;
+pub const NNRP_SESSION_RECOVERY_OUTCOME_RESUME_ENABLED: u32 = 1;
+pub const NNRP_SESSION_RECOVERY_OUTCOME_RESUMED: u32 = 2;
+pub const NNRP_SESSION_RECOVERY_OUTCOME_RESUME_REJECTED: u32 = 3;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -631,6 +639,36 @@ impl NnrpTypedPayloadDescriptor {
         }
 
         Ok(self.into())
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpSessionRecoveryOutcome {
+    pub outcome_code: u32,
+    pub resume_window_ms: u32,
+}
+
+impl NnrpSessionRecoveryOutcome {
+    fn from_core(value: CoreSessionRecoveryOutcome) -> Self {
+        match value {
+            CoreSessionRecoveryOutcome::Fresh => Self {
+                outcome_code: NNRP_SESSION_RECOVERY_OUTCOME_FRESH,
+                resume_window_ms: 0,
+            },
+            CoreSessionRecoveryOutcome::ResumeEnabled { resume_window_ms } => Self {
+                outcome_code: NNRP_SESSION_RECOVERY_OUTCOME_RESUME_ENABLED,
+                resume_window_ms,
+            },
+            CoreSessionRecoveryOutcome::Resumed { resume_window_ms } => Self {
+                outcome_code: NNRP_SESSION_RECOVERY_OUTCOME_RESUMED,
+                resume_window_ms,
+            },
+            CoreSessionRecoveryOutcome::ResumeRejected => Self {
+                outcome_code: NNRP_SESSION_RECOVERY_OUTCOME_RESUME_REJECTED,
+                resume_window_ms: 0,
+            },
+        }
     }
 }
 
@@ -1273,6 +1311,148 @@ pub unsafe extern "C" fn nnrp_typed_payload_validate_binding(
     descriptor: NnrpTypedPayloadDescriptor,
 ) -> NnrpFfiStatus {
     typed_payload_validate_binding_impl(schema_descriptors, schema_count, descriptor)
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `session_open_metadata` must remain readable for `len` bytes for the
+/// duration of this call.
+pub unsafe extern "C" fn nnrp_session_recovery_request_validate(
+    session_open_metadata: NnrpBufferView,
+) -> NnrpFfiStatus {
+    session_recovery_request_validate_impl(session_open_metadata)
+}
+
+unsafe fn session_recovery_request_validate_impl(
+    session_open_metadata: NnrpBufferView,
+) -> NnrpFfiStatus {
+    if let Err(status) = session_open_metadata.validate() {
+        return status;
+    }
+    let request = match SessionOpenMetadata::parse(ffi_read_slice(session_open_metadata)) {
+        Ok(metadata) => metadata,
+        Err(error) => return NnrpFfiStatus::from_core_error(&error),
+    };
+    validate_session_recovery_request(&request)
+        .map(|_| NnrpFfiStatus::ok())
+        .unwrap_or_else(|error| NnrpFfiStatus::from_core_error(&error))
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `session_open_metadata` and `session_open_ack_metadata` must remain readable
+/// for their declared lengths. `out_outcome` must be either null or a valid
+/// writable pointer to one `NnrpSessionRecoveryOutcome`.
+pub unsafe extern "C" fn nnrp_session_recovery_ack_validate(
+    session_open_metadata: NnrpBufferView,
+    session_open_ack_metadata: NnrpBufferView,
+    out_outcome: *mut NnrpSessionRecoveryOutcome,
+) -> NnrpFfiStatus {
+    session_recovery_ack_validate_impl(
+        session_open_metadata,
+        session_open_ack_metadata,
+        out_outcome,
+    )
+}
+
+unsafe fn session_recovery_ack_validate_impl(
+    session_open_metadata: NnrpBufferView,
+    session_open_ack_metadata: NnrpBufferView,
+    out_outcome: *mut NnrpSessionRecoveryOutcome,
+) -> NnrpFfiStatus {
+    if out_outcome.is_null() {
+        return NnrpFfiStatus::invalid_argument(37);
+    }
+    if let Err(status) = session_open_metadata.validate() {
+        return status;
+    }
+    if let Err(status) = session_open_ack_metadata.validate() {
+        return status;
+    }
+    let request = match SessionOpenMetadata::parse(ffi_read_slice(session_open_metadata)) {
+        Ok(metadata) => metadata,
+        Err(error) => return NnrpFfiStatus::from_core_error(&error),
+    };
+    let ack = match SessionOpenAckMetadata::parse(ffi_read_slice(session_open_ack_metadata)) {
+        Ok(metadata) => metadata,
+        Err(error) => return NnrpFfiStatus::from_core_error(&error),
+    };
+    match validate_session_recovery_ack(&request, &ack) {
+        Ok(outcome) => {
+            *out_outcome = NnrpSessionRecoveryOutcome::from_core(outcome);
+            NnrpFfiStatus::ok()
+        }
+        Err(error) => NnrpFfiStatus::from_core_error(&error),
+    }
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `session_migrate_metadata` and `session_migrate_ack_metadata` must remain
+/// readable for their declared lengths for the duration of this call.
+pub unsafe extern "C" fn nnrp_migration_recovery_validate(
+    session_migrate_metadata: NnrpBufferView,
+    session_migrate_ack_metadata: NnrpBufferView,
+) -> NnrpFfiStatus {
+    migration_recovery_validate_impl(session_migrate_metadata, session_migrate_ack_metadata)
+}
+
+unsafe fn migration_recovery_validate_impl(
+    session_migrate_metadata: NnrpBufferView,
+    session_migrate_ack_metadata: NnrpBufferView,
+) -> NnrpFfiStatus {
+    if let Err(status) = session_migrate_metadata.validate() {
+        return status;
+    }
+    if let Err(status) = session_migrate_ack_metadata.validate() {
+        return status;
+    }
+    let request = match SessionMigrateMetadata::parse(ffi_read_slice(session_migrate_metadata)) {
+        Ok(metadata) => metadata,
+        Err(error) => return NnrpFfiStatus::from_core_error(&error),
+    };
+    let ack = match SessionMigrateAckMetadata::parse(ffi_read_slice(session_migrate_ack_metadata)) {
+        Ok(metadata) => metadata,
+        Err(error) => return NnrpFfiStatus::from_core_error(&error),
+    };
+    validate_migration_recovery(&request, &ack)
+        .map(|_| NnrpFfiStatus::ok())
+        .unwrap_or_else(|error| NnrpFfiStatus::from_core_error(&error))
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `session_migrate_ack_metadata` must remain readable for `len` bytes.
+/// `out_should_replay` must be a valid writable pointer to one byte.
+pub unsafe extern "C" fn nnrp_migration_should_replay_frame(
+    session_migrate_ack_metadata: NnrpBufferView,
+    frame_id: u64,
+    out_should_replay: *mut u8,
+) -> NnrpFfiStatus {
+    migration_should_replay_frame_impl(session_migrate_ack_metadata, frame_id, out_should_replay)
+}
+
+unsafe fn migration_should_replay_frame_impl(
+    session_migrate_ack_metadata: NnrpBufferView,
+    frame_id: u64,
+    out_should_replay: *mut u8,
+) -> NnrpFfiStatus {
+    if out_should_replay.is_null() {
+        return NnrpFfiStatus::invalid_argument(38);
+    }
+    if let Err(status) = session_migrate_ack_metadata.validate() {
+        return status;
+    }
+    let ack = match SessionMigrateAckMetadata::parse(ffi_read_slice(session_migrate_ack_metadata)) {
+        Ok(metadata) => metadata,
+        Err(error) => return NnrpFfiStatus::from_core_error(&error),
+    };
+    *out_should_replay = u8::from(should_replay_frame_after_migration(&ack, frame_id));
+    NnrpFfiStatus::ok()
 }
 
 unsafe fn typed_payload_validate_binding_impl(
@@ -2433,6 +2613,396 @@ mod tests {
     }
 
     #[test]
+    fn ffi_recovery_helpers_validate_resume_and_migration_bytes() {
+        unsafe {
+            let request = recovery_session_open(42, 16, nnrp_core::SESSION_FLAG_ALLOW_RESUME);
+            let request_bytes = request.to_bytes().unwrap();
+            assert_eq!(
+                nnrp_session_recovery_request_validate(NnrpBufferView {
+                    ptr: request_bytes.as_ptr(),
+                    len: request_bytes.len(),
+                }),
+                NnrpFfiStatus::ok()
+            );
+
+            let ack = recovery_session_ack(
+                nnrp_core::SessionStatus::Resumed,
+                nnrp_core::SESSION_ACK_FLAG_RESUME_ENABLED,
+                10_000,
+                24,
+                nnrp_core::SESSION_ERROR_NONE,
+            );
+            let ack_bytes = ack.to_bytes().unwrap();
+            let mut outcome = NnrpSessionRecoveryOutcome {
+                outcome_code: 0,
+                resume_window_ms: 0,
+            };
+            assert_eq!(
+                nnrp_session_recovery_ack_validate(
+                    NnrpBufferView {
+                        ptr: request_bytes.as_ptr(),
+                        len: request_bytes.len(),
+                    },
+                    NnrpBufferView {
+                        ptr: ack_bytes.as_ptr(),
+                        len: ack_bytes.len(),
+                    },
+                    &mut outcome,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(
+                outcome,
+                NnrpSessionRecoveryOutcome {
+                    outcome_code: NNRP_SESSION_RECOVERY_OUTCOME_RESUMED,
+                    resume_window_ms: 10_000,
+                }
+            );
+
+            let rejected = recovery_session_ack(
+                nnrp_core::SessionStatus::Rejected,
+                0,
+                0,
+                0,
+                nnrp_core::SESSION_ERROR_RESUME_REJECTED,
+            );
+            let rejected_bytes = rejected.to_bytes().unwrap();
+            assert_eq!(
+                nnrp_session_recovery_ack_validate(
+                    NnrpBufferView {
+                        ptr: request_bytes.as_ptr(),
+                        len: request_bytes.len(),
+                    },
+                    NnrpBufferView {
+                        ptr: rejected_bytes.as_ptr(),
+                        len: rejected_bytes.len(),
+                    },
+                    &mut outcome,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(
+                outcome.outcome_code,
+                NNRP_SESSION_RECOVERY_OUTCOME_RESUME_REJECTED
+            );
+
+            let migrate = nnrp_core::SessionMigrateMetadata {
+                old_transport_id: nnrp_core::TransportId::Tcp,
+                new_transport_id: nnrp_core::TransportId::Quic,
+                last_result_frame_id: 10,
+                client_migrate_ts_us: 100,
+            };
+            let migrate_ack = nnrp_core::SessionMigrateAckMetadata {
+                accept_code: 0,
+                resume_from_frame_id: 12,
+                grace_window_ms: 250,
+                server_migrate_ts_us: 200,
+            };
+            let migrate_bytes = migrate.to_bytes().unwrap();
+            let migrate_ack_bytes = migrate_ack.to_bytes().unwrap();
+            assert_eq!(
+                nnrp_migration_recovery_validate(
+                    NnrpBufferView {
+                        ptr: migrate_bytes.as_ptr(),
+                        len: migrate_bytes.len(),
+                    },
+                    NnrpBufferView {
+                        ptr: migrate_ack_bytes.as_ptr(),
+                        len: migrate_ack_bytes.len(),
+                    },
+                ),
+                NnrpFfiStatus::ok()
+            );
+
+            let mut should_replay = 0u8;
+            assert_eq!(
+                nnrp_migration_should_replay_frame(
+                    NnrpBufferView {
+                        ptr: migrate_ack_bytes.as_ptr(),
+                        len: migrate_ack_bytes.len(),
+                    },
+                    11,
+                    &mut should_replay,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(should_replay, 0);
+            assert_eq!(
+                nnrp_migration_should_replay_frame(
+                    NnrpBufferView {
+                        ptr: migrate_ack_bytes.as_ptr(),
+                        len: migrate_ack_bytes.len(),
+                    },
+                    12,
+                    &mut should_replay,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(should_replay, 1);
+        }
+    }
+
+    #[test]
+    fn ffi_recovery_helpers_reject_invalid_protocol_inputs() {
+        unsafe {
+            let missing_flag = recovery_session_open(42, 16, 0).to_bytes().unwrap();
+            assert_eq!(
+                nnrp_session_recovery_request_validate(NnrpBufferView {
+                    ptr: missing_flag.as_ptr(),
+                    len: missing_flag.len(),
+                })
+                .status_code,
+                NnrpFfiStatusCode::ProtocolError as u32
+            );
+
+            let request = recovery_session_open(42, 16, nnrp_core::SESSION_FLAG_ALLOW_RESUME)
+                .to_bytes()
+                .unwrap();
+            let bad_ack = recovery_session_ack(
+                nnrp_core::SessionStatus::Resumed,
+                0,
+                0,
+                0,
+                nnrp_core::SESSION_ERROR_NONE,
+            )
+            .to_bytes()
+            .unwrap();
+            let mut outcome = NnrpSessionRecoveryOutcome {
+                outcome_code: 0,
+                resume_window_ms: 0,
+            };
+            assert_eq!(
+                nnrp_session_recovery_ack_validate(
+                    NnrpBufferView {
+                        ptr: request.as_ptr(),
+                        len: request.len(),
+                    },
+                    NnrpBufferView {
+                        ptr: bad_ack.as_ptr(),
+                        len: bad_ack.len(),
+                    },
+                    &mut outcome,
+                )
+                .status_code,
+                NnrpFfiStatusCode::ProtocolError as u32
+            );
+            assert_eq!(
+                nnrp_session_recovery_ack_validate(
+                    NnrpBufferView {
+                        ptr: request.as_ptr(),
+                        len: request.len(),
+                    },
+                    NnrpBufferView {
+                        ptr: bad_ack.as_ptr(),
+                        len: bad_ack.len(),
+                    },
+                    core::ptr::null_mut(),
+                ),
+                NnrpFfiStatus::invalid_argument(37)
+            );
+
+            let migrate = nnrp_core::SessionMigrateMetadata {
+                old_transport_id: nnrp_core::TransportId::Quic,
+                new_transport_id: nnrp_core::TransportId::Quic,
+                last_result_frame_id: 10,
+                client_migrate_ts_us: 100,
+            }
+            .to_bytes()
+            .unwrap();
+            let migrate_ack = nnrp_core::SessionMigrateAckMetadata {
+                accept_code: 0,
+                resume_from_frame_id: 9,
+                grace_window_ms: 250,
+                server_migrate_ts_us: 200,
+            }
+            .to_bytes()
+            .unwrap();
+            assert_eq!(
+                nnrp_migration_recovery_validate(
+                    NnrpBufferView {
+                        ptr: migrate.as_ptr(),
+                        len: migrate.len(),
+                    },
+                    NnrpBufferView {
+                        ptr: migrate_ack.as_ptr(),
+                        len: migrate_ack.len(),
+                    },
+                )
+                .status_code,
+                NnrpFfiStatusCode::ProtocolError as u32
+            );
+            assert_eq!(
+                nnrp_migration_should_replay_frame(
+                    NnrpBufferView {
+                        ptr: migrate_ack.as_ptr(),
+                        len: migrate_ack.len(),
+                    },
+                    12,
+                    core::ptr::null_mut(),
+                ),
+                NnrpFfiStatus::invalid_argument(38)
+            );
+        }
+    }
+
+    #[test]
+    fn ffi_recovery_helpers_cover_fresh_enabled_and_bad_buffers() {
+        unsafe {
+            let fresh_request = recovery_session_open(0, 0, 0).to_bytes().unwrap();
+            let fresh_ack = recovery_session_ack(
+                nnrp_core::SessionStatus::Opened,
+                0,
+                0,
+                0,
+                nnrp_core::SESSION_ERROR_NONE,
+            )
+            .to_bytes()
+            .unwrap();
+            let mut outcome = NnrpSessionRecoveryOutcome {
+                outcome_code: 99,
+                resume_window_ms: 99,
+            };
+            assert_eq!(
+                session_recovery_ack_validate_impl(
+                    NnrpBufferView {
+                        ptr: fresh_request.as_ptr(),
+                        len: fresh_request.len(),
+                    },
+                    NnrpBufferView {
+                        ptr: fresh_ack.as_ptr(),
+                        len: fresh_ack.len(),
+                    },
+                    &mut outcome,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(
+                outcome,
+                NnrpSessionRecoveryOutcome {
+                    outcome_code: NNRP_SESSION_RECOVERY_OUTCOME_FRESH,
+                    resume_window_ms: 0,
+                }
+            );
+
+            let enabled_request =
+                recovery_session_open(42, 0, nnrp_core::SESSION_FLAG_ALLOW_RESUME)
+                    .to_bytes()
+                    .unwrap();
+            let enabled_ack = recovery_session_ack(
+                nnrp_core::SessionStatus::Opened,
+                nnrp_core::SESSION_ACK_FLAG_RESUME_ENABLED,
+                15_000,
+                32,
+                nnrp_core::SESSION_ERROR_NONE,
+            )
+            .to_bytes()
+            .unwrap();
+            assert_eq!(
+                session_recovery_ack_validate_impl(
+                    NnrpBufferView {
+                        ptr: enabled_request.as_ptr(),
+                        len: enabled_request.len(),
+                    },
+                    NnrpBufferView {
+                        ptr: enabled_ack.as_ptr(),
+                        len: enabled_ack.len(),
+                    },
+                    &mut outcome,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(
+                outcome,
+                NnrpSessionRecoveryOutcome {
+                    outcome_code: NNRP_SESSION_RECOVERY_OUTCOME_RESUME_ENABLED,
+                    resume_window_ms: 15_000,
+                }
+            );
+
+            let null_non_empty = NnrpBufferView {
+                ptr: core::ptr::null(),
+                len: 1,
+            };
+            assert_eq!(
+                session_recovery_request_validate_impl(null_non_empty),
+                NnrpFfiStatus::invalid_argument(1)
+            );
+            assert_eq!(
+                session_recovery_request_validate_impl(NnrpBufferView::empty()),
+                NnrpFfiStatus::invalid_argument(0)
+            );
+            assert_eq!(
+                session_recovery_ack_validate_impl(
+                    null_non_empty,
+                    NnrpBufferView {
+                        ptr: fresh_ack.as_ptr(),
+                        len: fresh_ack.len(),
+                    },
+                    &mut outcome,
+                ),
+                NnrpFfiStatus::invalid_argument(1)
+            );
+            assert_eq!(
+                session_recovery_ack_validate_impl(
+                    NnrpBufferView {
+                        ptr: fresh_request.as_ptr(),
+                        len: fresh_request.len(),
+                    },
+                    NnrpBufferView::empty(),
+                    &mut outcome,
+                ),
+                NnrpFfiStatus::invalid_argument(0)
+            );
+
+            let migrate = nnrp_core::SessionMigrateMetadata {
+                old_transport_id: nnrp_core::TransportId::Tcp,
+                new_transport_id: nnrp_core::TransportId::Quic,
+                last_result_frame_id: 10,
+                client_migrate_ts_us: 100,
+            }
+            .to_bytes()
+            .unwrap();
+            let migrate_ack = nnrp_core::SessionMigrateAckMetadata {
+                accept_code: 0,
+                resume_from_frame_id: 10,
+                grace_window_ms: 250,
+                server_migrate_ts_us: 200,
+            }
+            .to_bytes()
+            .unwrap();
+            assert_eq!(
+                migration_recovery_validate_impl(
+                    null_non_empty,
+                    NnrpBufferView {
+                        ptr: migrate_ack.as_ptr(),
+                        len: migrate_ack.len(),
+                    },
+                ),
+                NnrpFfiStatus::invalid_argument(1)
+            );
+            assert_eq!(
+                migration_recovery_validate_impl(
+                    NnrpBufferView {
+                        ptr: migrate.as_ptr(),
+                        len: migrate.len(),
+                    },
+                    NnrpBufferView::empty(),
+                ),
+                NnrpFfiStatus::invalid_argument(0)
+            );
+            let mut should_replay = 0u8;
+            assert_eq!(
+                migration_should_replay_frame_impl(null_non_empty, 10, &mut should_replay),
+                NnrpFfiStatus::invalid_argument(1)
+            );
+            assert_eq!(
+                migration_should_replay_frame_impl(NnrpBufferView::empty(), 10, &mut should_replay,),
+                NnrpFfiStatus::invalid_argument(0)
+            );
+        }
+    }
+
+    #[test]
     fn ffi_connection_close_cascades_owned_client_handles() {
         unsafe {
             let mut connection = NnrpHandle::invalid();
@@ -2969,6 +3539,55 @@ mod tests {
             status: NnrpFfiStatus::ok(),
             has_event: 0,
             event: NnrpEvent::none(),
+        }
+    }
+
+    fn recovery_session_open(
+        requested_session_id: u32,
+        resume_token_bytes: u32,
+        session_flags: u8,
+    ) -> nnrp_core::SessionOpenMetadata {
+        nnrp_core::SessionOpenMetadata {
+            requested_session_id,
+            profile_id: 2,
+            priority_class: nnrp_core::SessionPriorityClass::Balanced,
+            session_flags,
+            schema_id: 0x1001,
+            schema_version: 3,
+            default_deadline_ms: 500,
+            max_in_flight_operations: 8,
+            lease_ttl_hint_ms: 30_000,
+            resume_token_bytes,
+            auth_bytes: 0,
+            session_extension_bytes: 0,
+            client_session_tag: 1,
+        }
+    }
+
+    fn recovery_session_ack(
+        session_status: nnrp_core::SessionStatus,
+        session_flags_ack: u32,
+        resume_window_ms: u32,
+        resume_token_bytes: u32,
+        session_error_code: u32,
+    ) -> nnrp_core::SessionOpenAckMetadata {
+        nnrp_core::SessionOpenAckMetadata {
+            session_id: 42,
+            accepted_profile_id: 2,
+            accepted_priority_class: nnrp_core::SessionPriorityClass::Balanced,
+            session_status,
+            schema_id: 0x1001,
+            schema_version: 3,
+            granted_operation_credit: 4,
+            max_in_flight_operations: 8,
+            lease_ttl_ms: 30_000,
+            resume_window_ms,
+            resume_token_bytes,
+            session_extension_bytes: 0,
+            server_session_tag: 7,
+            route_scope_id: 0,
+            session_error_code,
+            session_flags_ack,
         }
     }
 

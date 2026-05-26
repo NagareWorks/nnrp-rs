@@ -20,7 +20,7 @@
 
 - [x] Implement `NnrpClientConfig` with protocol/schema defaults and flow-control defaults.
 - [x] Add client cache hints and explicit runtime transport selection.
-- [x] Implement `NnrpClient::connect_tcp` and `NnrpClient::connect_quic` over the transport abstraction.
+- [x] Implement `NnrpClient::connect_tcp` in `nnrp-runtime` and keep QUIC client convenience construction in `nnrp-transport-quic` over the same abstraction.
 - [x] Implement `NnrpClient::open_session` and `NnrpClientSession` lifecycle ownership.
 - [x] Implement submit, submit-nowait, await-result, and session close APIs.
 - [x] Implement cancel, session patch, and result/drop/flow event stream APIs.
@@ -31,7 +31,7 @@
 
 - [x] Implement `NnrpServerConfig` with flow-control defaults and session lease windows.
 - [x] Add server capability advertisement, cache limits, and schema/profile registry inputs.
-- [x] Implement TCP bind/listen/accept and QUIC bind hooks.
+- [x] Implement TCP bind/listen/accept in `nnrp-runtime` and QUIC bind construction in `nnrp-transport-quic`.
 - [x] Implement `NnrpServerSession` with receive-submit, send-result, and close ack APIs.
 - [x] Implement `NnrpServerSession` send-result-drop, send-flow-update, and patch ack APIs.
 - [x] Implement server-side operation registry and cache/schema validation.

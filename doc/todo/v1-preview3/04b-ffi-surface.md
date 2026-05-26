@@ -9,4 +9,5 @@
 - [x] Expose stable preview3 error codes and diagnostics to binding layers.
 - [x] Expose a stable runtime capability probe for ABI version, protocol version, transport slots, and feature flags.
 - [x] Expose schema descriptor and typed payload descriptor helpers for downstream SDK bindings.
-- [ ] Wire FFI entrypoints to the real client/server runtime once `06` lands.
+- [x] Expose recovery and migration validation helpers so downstream SDKs can reuse Rust's canonical resume/replay rules.
+- [x] Wire FFI entrypoints to the real client/server runtime once `06` lands.
