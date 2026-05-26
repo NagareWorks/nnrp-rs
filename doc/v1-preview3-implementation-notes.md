@@ -38,6 +38,9 @@ contracts rather than re-declaring protocol behavior.
 - Status values carry an FFI status code, a protocol error family, and an
   optional protocol error code so Python/C# can map errors without inventing new
   protocol categories.
+- Schema descriptor and typed payload descriptor helpers expose the frozen 32B
+  and 24B layouts through C-compatible value structs, plus binding validation
+  against the Rust-owned schema registry semantics.
 
 The current FFI surface is backed by the Rust runtime handles for connection,
 session, submit/result, control, polling, and close paths. Transport-provider

@@ -124,6 +124,31 @@ typedef struct NnrpBufferViewMut {
   uintptr_t len;
 } NnrpBufferViewMut;
 
+typedef struct NnrpSchemaDescriptorHeader {
+  uint32_t schema_id;
+  uint32_t schema_version;
+  uint16_t profile_id;
+  uint16_t schema_flags;
+  uint8_t min_version_major;
+  uint8_t max_version_major;
+  uint16_t reserved0;
+  uint32_t body_bytes;
+  uint16_t dependency_count;
+  uint16_t default_stream_semantics;
+  uint64_t schema_hash;
+} NnrpSchemaDescriptorHeader;
+
+typedef struct NnrpTypedPayloadDescriptor {
+  uint16_t profile_id;
+  uint16_t descriptor_flags;
+  uint32_t schema_id;
+  uint32_t schema_version;
+  uint16_t stream_semantics;
+  uint16_t reserved0;
+  uint32_t offset;
+  uint32_t length;
+} NnrpTypedPayloadDescriptor;
+
 typedef struct NnrpEvent {
   uint32_t kind;
   NnrpHandle connection;
@@ -233,6 +258,12 @@ NnrpFfiStatus nnrp_client_close_connection(NnrpHandle connection);
 NnrpFfiStatus nnrp_client_cancel(NnrpClientCancelRequest request);
 NnrpFfiStatus nnrp_client_await_event(NnrpHandle connection, NnrpPollResult *out_result);
 NnrpFfiStatus nnrp_client_await_events(NnrpHandle connection, NnrpEvent *out_events, uintptr_t event_capacity, uintptr_t *out_event_count);
+NnrpFfiStatus nnrp_schema_descriptor_parse(NnrpBufferView source, NnrpSchemaDescriptorHeader *out_descriptor);
+NnrpFfiStatus nnrp_schema_descriptor_write(NnrpSchemaDescriptorHeader descriptor, NnrpBufferViewMut destination);
+NnrpFfiStatus nnrp_token_delta_schema_descriptor(NnrpSchemaDescriptorHeader *out_descriptor);
+NnrpFfiStatus nnrp_typed_payload_descriptor_parse(NnrpBufferView source, NnrpTypedPayloadDescriptor *out_descriptor);
+NnrpFfiStatus nnrp_typed_payload_descriptor_write(NnrpTypedPayloadDescriptor descriptor, NnrpBufferViewMut destination);
+NnrpFfiStatus nnrp_typed_payload_validate_binding(const NnrpSchemaDescriptorHeader *schema_descriptors, uintptr_t schema_count, NnrpTypedPayloadDescriptor descriptor);
 NnrpFfiStatus nnrp_server_bind(NnrpServerBindRequest request, NnrpHandle *out_server);
 NnrpFfiStatus nnrp_server_accept(NnrpServerAcceptRequest request, NnrpHandle *out_session);
 NnrpFfiStatus nnrp_server_receive_submit(NnrpServerReceiveSubmitRequest request, NnrpHandle *out_operation);

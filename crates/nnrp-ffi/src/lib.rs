@@ -3,8 +3,10 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use nnrp_core::{
-    NnrpError, ProtocolVersion, TransportId, SESSION_ERROR_NONE, SESSION_ERROR_PROFILE_UNSUPPORTED,
-    SESSION_ERROR_RESUME_REJECTED, SESSION_ERROR_SCHEMA_UNSUPPORTED,
+    token_delta_schema_descriptor, NnrpError, ProtocolVersion, SchemaDescriptorHeader,
+    SchemaRegistry, SchemaRegistryFailure, TransportId, TypedPayloadDescriptor, SESSION_ERROR_NONE,
+    SESSION_ERROR_PROFILE_UNSUPPORTED, SESSION_ERROR_RESUME_REJECTED,
+    SESSION_ERROR_SCHEMA_UNSUPPORTED,
 };
 
 pub const NNRP_FFI_ABI_MAJOR: u16 = 1;
@@ -511,6 +513,127 @@ impl NnrpBufferViewMut {
     }
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpSchemaDescriptorHeader {
+    pub schema_id: u32,
+    pub schema_version: u32,
+    pub profile_id: u16,
+    pub schema_flags: u16,
+    pub min_version_major: u8,
+    pub max_version_major: u8,
+    pub reserved0: u16,
+    pub body_bytes: u32,
+    pub dependency_count: u16,
+    pub default_stream_semantics: u16,
+    pub schema_hash: u64,
+}
+
+impl From<SchemaDescriptorHeader> for NnrpSchemaDescriptorHeader {
+    fn from(value: SchemaDescriptorHeader) -> Self {
+        Self {
+            schema_id: value.schema_id,
+            schema_version: value.schema_version,
+            profile_id: value.profile_id,
+            schema_flags: value.schema_flags,
+            min_version_major: value.min_version_major,
+            max_version_major: value.max_version_major,
+            reserved0: 0,
+            body_bytes: value.body_bytes,
+            dependency_count: value.dependency_count,
+            default_stream_semantics: value.default_stream_semantics,
+            schema_hash: value.schema_hash,
+        }
+    }
+}
+
+impl From<NnrpSchemaDescriptorHeader> for SchemaDescriptorHeader {
+    fn from(value: NnrpSchemaDescriptorHeader) -> Self {
+        Self {
+            schema_id: value.schema_id,
+            schema_version: value.schema_version,
+            profile_id: value.profile_id,
+            schema_flags: value.schema_flags,
+            min_version_major: value.min_version_major,
+            max_version_major: value.max_version_major,
+            body_bytes: value.body_bytes,
+            dependency_count: value.dependency_count,
+            default_stream_semantics: value.default_stream_semantics,
+            schema_hash: value.schema_hash,
+        }
+    }
+}
+
+impl NnrpSchemaDescriptorHeader {
+    fn to_core(self) -> Result<SchemaDescriptorHeader, NnrpFfiStatus> {
+        if self.reserved0 != 0 {
+            return Err(NnrpFfiStatus::from_core_error(
+                &NnrpError::NonZeroReservedField {
+                    field: "schema_descriptor.reserved0",
+                },
+            ));
+        }
+
+        Ok(self.into())
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpTypedPayloadDescriptor {
+    pub profile_id: u16,
+    pub descriptor_flags: u16,
+    pub schema_id: u32,
+    pub schema_version: u32,
+    pub stream_semantics: u16,
+    pub reserved0: u16,
+    pub offset: u32,
+    pub length: u32,
+}
+
+impl From<TypedPayloadDescriptor> for NnrpTypedPayloadDescriptor {
+    fn from(value: TypedPayloadDescriptor) -> Self {
+        Self {
+            profile_id: value.profile_id,
+            descriptor_flags: value.descriptor_flags,
+            schema_id: value.schema_id,
+            schema_version: value.schema_version,
+            stream_semantics: value.stream_semantics,
+            reserved0: 0,
+            offset: value.offset,
+            length: value.length,
+        }
+    }
+}
+
+impl From<NnrpTypedPayloadDescriptor> for TypedPayloadDescriptor {
+    fn from(value: NnrpTypedPayloadDescriptor) -> Self {
+        Self {
+            profile_id: value.profile_id,
+            descriptor_flags: value.descriptor_flags,
+            schema_id: value.schema_id,
+            schema_version: value.schema_version,
+            stream_semantics: value.stream_semantics,
+            offset: value.offset,
+            length: value.length,
+        }
+    }
+}
+
+impl NnrpTypedPayloadDescriptor {
+    fn to_core(self) -> Result<TypedPayloadDescriptor, NnrpFfiStatus> {
+        if self.reserved0 != 0 {
+            return Err(NnrpFfiStatus::from_core_error(
+                &NnrpError::NonZeroReservedField {
+                    field: "typed_payload_descriptor.reserved0",
+                },
+            ));
+        }
+
+        Ok(self.into())
+    }
+}
+
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NnrpEventKind {
@@ -992,6 +1115,201 @@ pub unsafe extern "C" fn nnrp_client_await_events(
     client_await_events_impl(connection, out_events, event_capacity, out_event_count)
 }
 
+#[no_mangle]
+/// # Safety
+///
+/// `source` must remain readable for `source.len` bytes for the duration of
+/// this call. `out_descriptor` must be either null or a valid writable pointer
+/// to one `NnrpSchemaDescriptorHeader`.
+pub unsafe extern "C" fn nnrp_schema_descriptor_parse(
+    source: NnrpBufferView,
+    out_descriptor: *mut NnrpSchemaDescriptorHeader,
+) -> NnrpFfiStatus {
+    schema_descriptor_parse_impl(source, out_descriptor)
+}
+
+unsafe fn schema_descriptor_parse_impl(
+    source: NnrpBufferView,
+    out_descriptor: *mut NnrpSchemaDescriptorHeader,
+) -> NnrpFfiStatus {
+    if out_descriptor.is_null() {
+        return NnrpFfiStatus::invalid_argument(33);
+    }
+    if let Err(status) = source.validate() {
+        return status;
+    }
+    let bytes = ffi_read_slice(source);
+    match SchemaDescriptorHeader::parse(bytes) {
+        Ok(descriptor) => {
+            *out_descriptor = descriptor.into();
+            NnrpFfiStatus::ok()
+        }
+        Err(error) => NnrpFfiStatus::from_core_error(&error),
+    }
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `destination` must remain writable for `destination.len` bytes for the
+/// duration of this call.
+pub unsafe extern "C" fn nnrp_schema_descriptor_write(
+    descriptor: NnrpSchemaDescriptorHeader,
+    destination: NnrpBufferViewMut,
+) -> NnrpFfiStatus {
+    schema_descriptor_write_impl(descriptor, destination)
+}
+
+unsafe fn schema_descriptor_write_impl(
+    descriptor: NnrpSchemaDescriptorHeader,
+    destination: NnrpBufferViewMut,
+) -> NnrpFfiStatus {
+    if let Err(status) = destination.validate() {
+        return status;
+    }
+    let bytes = ffi_write_slice(destination);
+    let core_descriptor = match descriptor.to_core() {
+        Ok(descriptor) => descriptor,
+        Err(status) => return status,
+    };
+    core_descriptor
+        .write(bytes)
+        .map(|_| NnrpFfiStatus::ok())
+        .unwrap_or_else(|error| NnrpFfiStatus::from_core_error(&error))
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `out_descriptor` must be either null or a valid writable pointer to one
+/// `NnrpSchemaDescriptorHeader`.
+pub unsafe extern "C" fn nnrp_token_delta_schema_descriptor(
+    out_descriptor: *mut NnrpSchemaDescriptorHeader,
+) -> NnrpFfiStatus {
+    token_delta_schema_descriptor_impl(out_descriptor)
+}
+
+unsafe fn token_delta_schema_descriptor_impl(
+    out_descriptor: *mut NnrpSchemaDescriptorHeader,
+) -> NnrpFfiStatus {
+    if out_descriptor.is_null() {
+        return NnrpFfiStatus::invalid_argument(34);
+    }
+    *out_descriptor = token_delta_schema_descriptor().into();
+    NnrpFfiStatus::ok()
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `source` must remain readable for `source.len` bytes for the duration of
+/// this call. `out_descriptor` must be either null or a valid writable pointer
+/// to one `NnrpTypedPayloadDescriptor`.
+pub unsafe extern "C" fn nnrp_typed_payload_descriptor_parse(
+    source: NnrpBufferView,
+    out_descriptor: *mut NnrpTypedPayloadDescriptor,
+) -> NnrpFfiStatus {
+    typed_payload_descriptor_parse_impl(source, out_descriptor)
+}
+
+unsafe fn typed_payload_descriptor_parse_impl(
+    source: NnrpBufferView,
+    out_descriptor: *mut NnrpTypedPayloadDescriptor,
+) -> NnrpFfiStatus {
+    if out_descriptor.is_null() {
+        return NnrpFfiStatus::invalid_argument(35);
+    }
+    if let Err(status) = source.validate() {
+        return status;
+    }
+    let bytes = ffi_read_slice(source);
+    match TypedPayloadDescriptor::parse(bytes) {
+        Ok(descriptor) => {
+            *out_descriptor = descriptor.into();
+            NnrpFfiStatus::ok()
+        }
+        Err(error) => NnrpFfiStatus::from_core_error(&error),
+    }
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `destination` must remain writable for `destination.len` bytes for the
+/// duration of this call.
+pub unsafe extern "C" fn nnrp_typed_payload_descriptor_write(
+    descriptor: NnrpTypedPayloadDescriptor,
+    destination: NnrpBufferViewMut,
+) -> NnrpFfiStatus {
+    typed_payload_descriptor_write_impl(descriptor, destination)
+}
+
+unsafe fn typed_payload_descriptor_write_impl(
+    descriptor: NnrpTypedPayloadDescriptor,
+    destination: NnrpBufferViewMut,
+) -> NnrpFfiStatus {
+    if let Err(status) = destination.validate() {
+        return status;
+    }
+    let bytes = ffi_write_slice(destination);
+    let core_descriptor = match descriptor.to_core() {
+        Ok(descriptor) => descriptor,
+        Err(status) => return status,
+    };
+    core_descriptor
+        .write(bytes)
+        .map(|_| NnrpFfiStatus::ok())
+        .unwrap_or_else(|error| NnrpFfiStatus::from_core_error(&error))
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `schema_descriptors` must point to `schema_count` readable
+/// `NnrpSchemaDescriptorHeader` entries when `schema_count` is non-zero.
+pub unsafe extern "C" fn nnrp_typed_payload_validate_binding(
+    schema_descriptors: *const NnrpSchemaDescriptorHeader,
+    schema_count: usize,
+    descriptor: NnrpTypedPayloadDescriptor,
+) -> NnrpFfiStatus {
+    typed_payload_validate_binding_impl(schema_descriptors, schema_count, descriptor)
+}
+
+unsafe fn typed_payload_validate_binding_impl(
+    schema_descriptors: *const NnrpSchemaDescriptorHeader,
+    schema_count: usize,
+    descriptor: NnrpTypedPayloadDescriptor,
+) -> NnrpFfiStatus {
+    if schema_count > 0 && schema_descriptors.is_null() {
+        return NnrpFfiStatus::invalid_argument(36);
+    }
+
+    let schemas = if schema_count == 0 {
+        &[][..]
+    } else {
+        core::slice::from_raw_parts(schema_descriptors, schema_count)
+    };
+    let mut registry = SchemaRegistry::new();
+    for schema in schemas {
+        let core_schema = match schema.to_core() {
+            Ok(schema) => schema,
+            Err(status) => return status,
+        };
+        if let Err(failure) = registry.install(core_schema) {
+            return schema_registry_failure_status(failure);
+        }
+    }
+
+    let core_descriptor = match descriptor.to_core() {
+        Ok(descriptor) => descriptor,
+        Err(status) => return status,
+    };
+    registry
+        .validate_descriptor_binding(&core_descriptor)
+        .map(|_| NnrpFfiStatus::ok())
+        .unwrap_or_else(schema_registry_failure_status)
+}
+
 unsafe fn client_await_events_impl(
     connection: NnrpHandle,
     out_events: *mut NnrpEvent,
@@ -1031,6 +1349,22 @@ unsafe fn client_await_events_impl(
     }
 
     NnrpFfiStatus::ok()
+}
+
+unsafe fn ffi_read_slice<'a>(view: NnrpBufferView) -> &'a [u8] {
+    if view.len == 0 {
+        &[]
+    } else {
+        core::slice::from_raw_parts(view.ptr, view.len)
+    }
+}
+
+unsafe fn ffi_write_slice<'a>(view: NnrpBufferViewMut) -> &'a mut [u8] {
+    if view.len == 0 {
+        &mut []
+    } else {
+        core::slice::from_raw_parts_mut(view.ptr, view.len)
+    }
 }
 
 #[no_mangle]
@@ -1345,6 +1679,10 @@ pub fn session_error_status(error_code: u32) -> NnrpFfiStatus {
         }
         _ => NnrpFfiStatus::protocol(NnrpErrorFamily::Session, error_code),
     }
+}
+
+pub fn schema_registry_failure_status(failure: SchemaRegistryFailure) -> NnrpFfiStatus {
+    NnrpFfiStatus::protocol(NnrpErrorFamily::Schema, failure.error_code())
 }
 
 #[cfg(test)]
@@ -1791,6 +2129,305 @@ mod tests {
                     &mut event_count
                 ),
                 NnrpFfiStatus::invalid_handle(NnrpHandleKind::Connection as u32)
+            );
+        }
+    }
+
+    #[test]
+    fn ffi_schema_descriptor_helpers_round_trip_frozen_layouts() {
+        unsafe {
+            let schema_bytes =
+                hex_to_bytes("011000000300000002000f000101000040000000020002008877665544332211");
+            let mut schema = NnrpSchemaDescriptorHeader {
+                schema_id: 0,
+                schema_version: 0,
+                profile_id: 0,
+                schema_flags: 0,
+                min_version_major: 0,
+                max_version_major: 0,
+                reserved0: 0,
+                body_bytes: 0,
+                dependency_count: 0,
+                default_stream_semantics: 0,
+                schema_hash: 0,
+            };
+            assert_eq!(
+                nnrp_schema_descriptor_parse(
+                    NnrpBufferView {
+                        ptr: schema_bytes.as_ptr(),
+                        len: schema_bytes.len(),
+                    },
+                    &mut schema,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(schema.schema_id, 0x0000_1001);
+            assert_eq!(schema.schema_version, 3);
+            assert_eq!(schema.profile_id, 2);
+            assert_eq!(schema.reserved0, 0);
+            assert_eq!(schema.schema_hash, 0x1122_3344_5566_7788);
+
+            let mut round_trip = [0u8; nnrp_core::SCHEMA_DESCRIPTOR_HEADER_LEN];
+            assert_eq!(
+                nnrp_schema_descriptor_write(
+                    schema,
+                    NnrpBufferViewMut {
+                        ptr: round_trip.as_mut_ptr(),
+                        len: round_trip.len(),
+                    }
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(round_trip.as_slice(), schema_bytes.as_slice());
+
+            let typed_bytes = hex_to_bytes("020002000110000003000000020000000000000018000000");
+            let mut typed = NnrpTypedPayloadDescriptor {
+                profile_id: 0,
+                descriptor_flags: 0,
+                schema_id: 0,
+                schema_version: 0,
+                stream_semantics: 0,
+                reserved0: 0,
+                offset: 0,
+                length: 0,
+            };
+            assert_eq!(
+                nnrp_typed_payload_descriptor_parse(
+                    NnrpBufferView {
+                        ptr: typed_bytes.as_ptr(),
+                        len: typed_bytes.len(),
+                    },
+                    &mut typed,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(typed.profile_id, 2);
+            assert_eq!(typed.descriptor_flags, 2);
+            assert_eq!(typed.schema_id, 0x0000_1001);
+            assert_eq!(typed.reserved0, 0);
+
+            let mut typed_round_trip = [0u8; nnrp_core::TYPED_PAYLOAD_DESCRIPTOR_LEN];
+            assert_eq!(
+                nnrp_typed_payload_descriptor_write(
+                    typed,
+                    NnrpBufferViewMut {
+                        ptr: typed_round_trip.as_mut_ptr(),
+                        len: typed_round_trip.len(),
+                    }
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(typed_round_trip.as_slice(), typed_bytes.as_slice());
+        }
+    }
+
+    #[test]
+    fn ffi_schema_helpers_expose_standard_token_descriptor_and_binding_validation() {
+        unsafe {
+            let mut schema = NnrpSchemaDescriptorHeader {
+                schema_id: 0,
+                schema_version: 0,
+                profile_id: 0,
+                schema_flags: 0,
+                min_version_major: 0,
+                max_version_major: 0,
+                reserved0: 0,
+                body_bytes: 0,
+                dependency_count: 0,
+                default_stream_semantics: 0,
+                schema_hash: 0,
+            };
+            assert_eq!(
+                nnrp_token_delta_schema_descriptor(&mut schema),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(schema.schema_id, nnrp_core::TOKEN_DELTA_SCHEMA_ID);
+            assert_eq!(schema.schema_version, nnrp_core::TOKEN_DELTA_SCHEMA_VERSION);
+            assert_eq!(schema.profile_id, nnrp_core::PROFILE_TOKEN);
+
+            let descriptor = NnrpTypedPayloadDescriptor {
+                profile_id: nnrp_core::PROFILE_TOKEN,
+                descriptor_flags: 0,
+                schema_id: nnrp_core::TOKEN_DELTA_SCHEMA_ID,
+                schema_version: nnrp_core::TOKEN_DELTA_SCHEMA_VERSION,
+                stream_semantics: nnrp_core::STREAM_SEMANTICS_TOKEN_DELTA,
+                reserved0: 0,
+                offset: 0,
+                length: 128,
+            };
+            assert_eq!(
+                nnrp_typed_payload_validate_binding(&schema, 1, descriptor),
+                NnrpFfiStatus::ok()
+            );
+
+            let incompatible = NnrpTypedPayloadDescriptor {
+                profile_id: nnrp_core::PROFILE_TENSOR,
+                ..descriptor
+            };
+            assert_eq!(
+                nnrp_typed_payload_validate_binding(&schema, 1, incompatible),
+                schema_registry_failure_status(SchemaRegistryFailure::Incompatible)
+            );
+
+            assert_eq!(
+                nnrp_typed_payload_validate_binding(core::ptr::null(), 1, descriptor),
+                NnrpFfiStatus::invalid_argument(36)
+            );
+            assert_eq!(
+                nnrp_token_delta_schema_descriptor(core::ptr::null_mut()),
+                NnrpFfiStatus::invalid_argument(34)
+            );
+        }
+    }
+
+    #[test]
+    fn ffi_schema_helpers_reject_invalid_buffers_and_reserved_bits() {
+        unsafe {
+            let mut schema = NnrpSchemaDescriptorHeader {
+                schema_id: 0,
+                schema_version: 0,
+                profile_id: 0,
+                schema_flags: 0,
+                min_version_major: 0,
+                max_version_major: 0,
+                reserved0: 0,
+                body_bytes: 0,
+                dependency_count: 0,
+                default_stream_semantics: 0,
+                schema_hash: 0,
+            };
+            let mut typed = NnrpTypedPayloadDescriptor {
+                profile_id: 0,
+                descriptor_flags: 0,
+                schema_id: 0,
+                schema_version: 0,
+                stream_semantics: 0,
+                reserved0: 0,
+                offset: 0,
+                length: 0,
+            };
+            assert_eq!(
+                nnrp_schema_descriptor_parse(NnrpBufferView::empty(), &mut schema),
+                NnrpFfiStatus::invalid_argument(0)
+            );
+            assert_eq!(
+                nnrp_schema_descriptor_parse(
+                    NnrpBufferView {
+                        ptr: core::ptr::null(),
+                        len: 1,
+                    },
+                    &mut schema
+                ),
+                NnrpFfiStatus::invalid_argument(1)
+            );
+            assert_eq!(
+                nnrp_schema_descriptor_parse(NnrpBufferView::empty(), core::ptr::null_mut()),
+                NnrpFfiStatus::invalid_argument(33)
+            );
+
+            schema.schema_flags = nnrp_core::SCHEMA_FLAGS_KNOWN_MASK + 1;
+            let mut schema_out = [0u8; nnrp_core::SCHEMA_DESCRIPTOR_HEADER_LEN];
+            assert_eq!(
+                nnrp_schema_descriptor_write(
+                    schema,
+                    NnrpBufferViewMut {
+                        ptr: schema_out.as_mut_ptr(),
+                        len: schema_out.len(),
+                    }
+                ),
+                NnrpFfiStatus {
+                    status_code: NnrpFfiStatusCode::ProtocolError as u32,
+                    error_family: NnrpErrorFamily::Transport as u32,
+                    protocol_error_code: 0,
+                    detail_code: 0,
+                }
+            );
+            schema.schema_flags = 0;
+            schema.reserved0 = 1;
+            assert_eq!(
+                nnrp_schema_descriptor_write(
+                    schema,
+                    NnrpBufferViewMut {
+                        ptr: schema_out.as_mut_ptr(),
+                        len: schema_out.len(),
+                    }
+                ),
+                NnrpFfiStatus {
+                    status_code: NnrpFfiStatusCode::ProtocolError as u32,
+                    error_family: NnrpErrorFamily::Transport as u32,
+                    protocol_error_code: 0,
+                    detail_code: 0,
+                }
+            );
+
+            assert_eq!(
+                nnrp_typed_payload_descriptor_parse(NnrpBufferView::empty(), &mut typed),
+                NnrpFfiStatus::invalid_argument(0)
+            );
+            assert_eq!(
+                nnrp_typed_payload_descriptor_parse(NnrpBufferView::empty(), core::ptr::null_mut()),
+                NnrpFfiStatus::invalid_argument(35)
+            );
+            typed.descriptor_flags = nnrp_core::DESCRIPTOR_FLAGS_KNOWN_MASK + 1;
+            let mut typed_out = [0u8; nnrp_core::TYPED_PAYLOAD_DESCRIPTOR_LEN];
+            assert_eq!(
+                nnrp_typed_payload_descriptor_write(
+                    typed,
+                    NnrpBufferViewMut {
+                        ptr: typed_out.as_mut_ptr(),
+                        len: typed_out.len(),
+                    }
+                ),
+                NnrpFfiStatus {
+                    status_code: NnrpFfiStatusCode::ProtocolError as u32,
+                    error_family: NnrpErrorFamily::Transport as u32,
+                    protocol_error_code: 0,
+                    detail_code: 0,
+                }
+            );
+            typed.descriptor_flags = 0;
+            typed.reserved0 = 1;
+            assert_eq!(
+                nnrp_typed_payload_descriptor_write(
+                    typed,
+                    NnrpBufferViewMut {
+                        ptr: typed_out.as_mut_ptr(),
+                        len: typed_out.len(),
+                    }
+                ),
+                NnrpFfiStatus {
+                    status_code: NnrpFfiStatusCode::ProtocolError as u32,
+                    error_family: NnrpErrorFamily::Transport as u32,
+                    protocol_error_code: 0,
+                    detail_code: 0,
+                }
+            );
+
+            typed.reserved0 = 0;
+            assert_eq!(
+                nnrp_typed_payload_descriptor_write(
+                    typed,
+                    NnrpBufferViewMut {
+                        ptr: core::ptr::null_mut(),
+                        len: 0,
+                    }
+                ),
+                NnrpFfiStatus::invalid_argument(0)
+            );
+
+            let unspecified = NnrpTypedPayloadDescriptor {
+                profile_id: nnrp_core::PROFILE_UNSPECIFIED,
+                descriptor_flags: 0,
+                schema_id: 0,
+                schema_version: 0,
+                stream_semantics: 0,
+                reserved0: 0,
+                offset: 0,
+                length: 0,
+            };
+            assert_eq!(
+                nnrp_typed_payload_validate_binding(core::ptr::null(), 0, unspecified),
+                NnrpFfiStatus::ok()
             );
         }
     }
@@ -2333,5 +2970,13 @@ mod tests {
             has_event: 0,
             event: NnrpEvent::none(),
         }
+    }
+
+    fn hex_to_bytes(hex: &str) -> Vec<u8> {
+        assert_eq!(hex.len() % 2, 0);
+        (0..hex.len())
+            .step_by(2)
+            .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).unwrap())
+            .collect()
     }
 }
