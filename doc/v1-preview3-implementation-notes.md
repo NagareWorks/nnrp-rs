@@ -38,16 +38,18 @@ contracts rather than re-declaring protocol behavior.
   optional protocol error code so Python/C# can map errors without inventing new
   protocol categories.
 
-The current FFI surface is an ABI contract and smoke-testable shell. It does not
-yet contain a real client/server runtime, transport loop, listener, connector, or
-network-backed session pump. Those APIs are tracked separately in
-`doc/todo/v1-preview3/06-client-server-runtime.md`.
+The current FFI surface is backed by the Rust runtime handles for connection,
+session, submit/result, control, polling, and close paths. Transport-provider
+packaging, custom provider injection, and downstream host integration continue
+to be tracked in `doc/todo/v1-preview3/06-client-server-runtime.md` and
+`doc/todo/v1-preview3/06a-transport-provider-packaging.md`.
 
 ## Conformance Workflow
 
-`nnrp-conformance` exports Rust-generated preview3 golden vectors and fixture
-manifests. Downstream SDKs should treat those exports as the canonical preview3
-baseline and run their own adapters against the shared plan/result JSON shape.
+The suite-owned `nnrp-conformance` repository owns preview3 golden vectors,
+fixture manifests, and adapter execution plans. Downstream SDKs should consume
+that baseline and run their own adapters against the shared plan/result JSON
+shape.
 
 Rust reserves this adapter wrapper:
 

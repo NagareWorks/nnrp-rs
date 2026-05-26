@@ -51,4 +51,4 @@
 - [x] Add loopback tests for submit/result and session close.
 - [x] Add fixture-driven tests for flow update, cancellation, cache miss, schema mismatch, and resume.
 - [x] Add FFI smoke tests that drive the real runtime rather than only validating ABI shape.
-- [x] Export runtime-backed conformance cases from `nnrp-conformance`.
+- [x] Execute runtime-backed conformance cases through the suite-owned adapter plan/result flow.

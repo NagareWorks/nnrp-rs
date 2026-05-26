@@ -28,7 +28,7 @@ This repository is intended to be the implementation source for Rust users and f
 | `nnrp-transport-quic` | Default Quinn/Rustls QUIC provider, certificate config helpers, and injection hooks for custom backends. |
 | `nnrp-ffi` | C-compatible ABI facade, handle/event model, header surface, and native link-library packaging. |
 | `nnrp-wasm` | Low-level WASM primitives and TypeScript declarations for future `nnrp-js` wrappers. |
-| `nnrp-conformance` | Rust-owned golden vectors, fixture manifests, adapter wrappers, and conformance export helpers. |
+| `nnrp-conformance` | Suite-facing adapter wrapper, fixture-backed validation, and protocol regression helpers. |
 
 ## Install
 

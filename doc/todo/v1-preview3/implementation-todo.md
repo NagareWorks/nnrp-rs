@@ -13,13 +13,13 @@
 3. `02-connection-session-flow-control.md`: ownership and dependency map for the `02a/02b/02c` connection/session shards.
 4. `02a-connection-session-lifecycle.md`: common-header, connection/session lifecycle metadata, and host-neutral multi-session state machines.
 5. `02b-scheduling-and-operation-model.md`: inherited `FLOW_UPDATE` semantics plus preview3 priority, operation lifecycle, and cancel scope.
-6. `02c-recovery-and-binding-consumption.md`: recovery validation and export rules consumed by Python/C#.
+6. `02c-recovery-and-binding-consumption.md`: recovery validation and binding-consumption rules used by Python/C#.
 7. `03-cache-schema-profile-registry.md`: cache lease contract, schema/profile registry, standard profiles, typed payload descriptors.
 8. `04-implementation-surface.md`: ownership and dependency map for the `04a/04b/04c` implementation-surface shards.
 9. `04a-core-surface.md`: `nnrp-core` wire primitives, descriptors, and validation core.
 10. `04b-ffi-surface.md`: `nnrp-ffi` handle/ABI/event-delivery/buffer-ownership surface.
-11. `04c-conformance-and-binding-rollout.md`: `nnrp-conformance` exports and downstream binding-consumption contract.
-12. `05-validation-and-docs.md`: workspace validation, conformance exports, and rollout documentation.
+11. `04c-conformance-and-binding-rollout.md`: `nnrp-conformance` adapter integration and downstream binding-consumption contract.
+12. `05-validation-and-docs.md`: workspace validation, conformance adapter flow, and rollout documentation.
 13. `06-client-server-runtime.md`: usable Rust client/server SDK surface, transport pump, and runtime-backed FFI entrypoints.
 14. `06a-transport-provider-packaging.md`: split transport providers, native link library packaging, and JS/TS WASM packaging.
 
