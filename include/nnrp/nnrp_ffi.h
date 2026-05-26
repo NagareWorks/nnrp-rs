@@ -227,6 +227,8 @@ NnrpFfiStatus nnrp_submit(NnrpSubmitRequest request, NnrpHandle *out_operation);
 NnrpFfiStatus nnrp_client_submit(NnrpSubmitRequest request, NnrpHandle *out_operation);
 NnrpFfiStatus nnrp_session_close(NnrpHandle session);
 NnrpFfiStatus nnrp_client_close(NnrpHandle session);
+NnrpFfiStatus nnrp_connection_close(NnrpHandle connection);
+NnrpFfiStatus nnrp_client_close_connection(NnrpHandle connection);
 NnrpFfiStatus nnrp_client_cancel(NnrpClientCancelRequest request);
 NnrpFfiStatus nnrp_client_await_event(NnrpHandle connection, NnrpPollResult *out_result);
 NnrpFfiStatus nnrp_server_bind(NnrpServerBindRequest request, NnrpHandle *out_server);

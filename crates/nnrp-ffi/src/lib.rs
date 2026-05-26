@@ -383,6 +383,53 @@ impl NnrpFfiHandleStore {
         Ok(())
     }
 
+    fn close_connection(&mut self, connection: NnrpHandle) -> Result<(), NnrpFfiStatus> {
+        self.get(connection, NnrpHandleKind::Connection)?;
+
+        let sessions: Vec<NnrpHandle> = self
+            .entries
+            .iter()
+            .filter_map(|((kind, id), entry)| match &entry.resource {
+                NnrpFfiResource::Session {
+                    connection: owner, ..
+                } if *owner == connection => Some(NnrpHandle {
+                    kind: *kind,
+                    id: *id,
+                    generation: entry.generation,
+                    flags: 0,
+                }),
+                _ => None,
+            })
+            .collect();
+        let operations: Vec<NnrpHandle> = self
+            .entries
+            .iter()
+            .filter_map(|((kind, id), entry)| match &entry.resource {
+                NnrpFfiResource::Operation { session, .. }
+                    if sessions.iter().any(|owned| owned == session) =>
+                {
+                    Some(NnrpHandle {
+                        kind: *kind,
+                        id: *id,
+                        generation: entry.generation,
+                        flags: 0,
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+
+        for operation in operations {
+            self.entries.remove(&(operation.kind, operation.id));
+        }
+        for session in sessions {
+            self.entries.remove(&(session.kind, session.id));
+        }
+        self.entries.remove(&(connection.kind, connection.id));
+        self.events.retain(|event| event.connection != connection);
+        Ok(())
+    }
+
     fn push_event(&mut self, event: NnrpQueuedEvent) {
         self.events.push_back(event);
     }
@@ -837,6 +884,29 @@ pub unsafe extern "C" fn nnrp_client_close(session: NnrpHandle) -> NnrpFfiStatus
             });
             NnrpFfiStatus::ok()
         })
+        .unwrap_or_else(|status| status)
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// The connection handle is copied by value. This function does not dereference
+/// caller-provided pointers.
+pub unsafe extern "C" fn nnrp_connection_close(connection: NnrpHandle) -> NnrpFfiStatus {
+    nnrp_client_close_connection(connection)
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// The connection handle is copied by value. This function does not dereference
+/// caller-provided pointers. Closing a connection invalidates all owned session
+/// and operation handles.
+pub unsafe extern "C" fn nnrp_client_close_connection(connection: NnrpHandle) -> NnrpFfiStatus {
+    let mut store = handle_store();
+    store
+        .close_connection(connection)
+        .map(|_| NnrpFfiStatus::ok())
         .unwrap_or_else(|status| status)
 }
 
@@ -1496,6 +1566,107 @@ mod tests {
                 NnrpFfiStatusCode::WouldBlock as u32
             );
             assert_eq!(result.has_event, 0);
+        }
+    }
+
+    #[test]
+    fn ffi_connection_close_cascades_owned_client_handles() {
+        unsafe {
+            let mut connection = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_connect(
+                    NnrpClientConnectRequest {
+                        connection_id: 91_101,
+                        generation: 1,
+                        transport_id: 1,
+                    },
+                    &mut connection,
+                ),
+                NnrpFfiStatus::ok()
+            );
+
+            let mut session = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_open_session(
+                    NnrpSessionOpenRequest {
+                        connection,
+                        requested_session_id: 91_102,
+                        generation: 1,
+                        profile_id: 2,
+                        schema_id: 0x1001,
+                        schema_version: 3,
+                    },
+                    &mut session,
+                ),
+                NnrpFfiStatus::ok()
+            );
+
+            let payload = [1u8, 2, 3];
+            let mut operation = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_submit(
+                    NnrpSubmitRequest {
+                        session,
+                        operation_id: 91_103,
+                        frame_id: 7,
+                        payload: NnrpBufferView {
+                            ptr: payload.as_ptr(),
+                            len: payload.len(),
+                        },
+                    },
+                    &mut operation,
+                ),
+                NnrpFfiStatus::ok()
+            );
+
+            assert_eq!(
+                nnrp_client_close_connection(connection),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(
+                nnrp_client_close_connection(connection),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Connection as u32)
+            );
+            assert_eq!(
+                nnrp_client_close(session),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32)
+            );
+            assert_eq!(
+                nnrp_client_cancel(NnrpClientCancelRequest {
+                    session,
+                    frame_id: 7,
+                }),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32)
+            );
+            let mut result = empty_poll_result();
+            assert_eq!(
+                nnrp_client_await_event(connection, &mut result),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Connection as u32)
+            );
+        }
+    }
+
+    #[test]
+    fn ffi_connection_close_alias_matches_client_close_connection() {
+        unsafe {
+            let mut connection = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_connection_bootstrap(
+                    NnrpConnectionBootstrap {
+                        connection_id: 91_201,
+                        generation: 1,
+                        transport_id: 1,
+                    },
+                    &mut connection,
+                ),
+                NnrpFfiStatus::ok()
+            );
+
+            assert_eq!(nnrp_connection_close(connection), NnrpFfiStatus::ok());
+            assert_eq!(
+                nnrp_connection_close(connection),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Connection as u32)
+            );
         }
     }
 
