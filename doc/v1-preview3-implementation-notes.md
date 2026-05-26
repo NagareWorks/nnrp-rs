@@ -32,8 +32,9 @@ contracts rather than re-declaring protocol behavior.
   language-specific object wrappers.
 - Buffer views are borrowed views. Non-empty buffers must provide non-null
   pointers, and the callee does not retain them after the call returns.
-- Event delivery supports both polling and callback shapes. Callback receivers
-  must not retain event pointers after the callback returns.
+- Event delivery supports single-event polling, bounded batch polling, and
+  callback shapes. Callback receivers must not retain event pointers after the
+  callback returns.
 - Status values carry an FFI status code, a protocol error family, and an
   optional protocol error code so Python/C# can map errors without inventing new
   protocol categories.

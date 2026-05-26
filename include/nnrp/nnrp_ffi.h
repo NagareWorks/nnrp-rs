@@ -14,7 +14,7 @@ typedef struct NnrpProtocolVersion {
 } NnrpProtocolVersion;
 
 #define NNRP_FFI_ABI_MAJOR 1
-#define NNRP_FFI_ABI_MINOR 0
+#define NNRP_FFI_ABI_MINOR 1
 #define NNRP_FFI_ABI_PATCH 0
 
 #define NNRP_TRANSPORT_SLOT_QUIC 0x00000001u
@@ -29,6 +29,7 @@ typedef struct NnrpProtocolVersion {
 #define NNRP_RUNTIME_FEATURE_RECOVERY 0x0000000000000040ull
 #define NNRP_RUNTIME_FEATURE_TYPED_PAYLOAD 0x0000000000000080ull
 #define NNRP_RUNTIME_FEATURE_TRANSPORT_SLOTS 0x0000000000000100ull
+#define NNRP_RUNTIME_FEATURE_BATCH_POLLING 0x0000000000000200ull
 
 typedef struct NnrpRuntimeCapabilities {
   uint16_t abi_major;
@@ -231,6 +232,7 @@ NnrpFfiStatus nnrp_connection_close(NnrpHandle connection);
 NnrpFfiStatus nnrp_client_close_connection(NnrpHandle connection);
 NnrpFfiStatus nnrp_client_cancel(NnrpClientCancelRequest request);
 NnrpFfiStatus nnrp_client_await_event(NnrpHandle connection, NnrpPollResult *out_result);
+NnrpFfiStatus nnrp_client_await_events(NnrpHandle connection, NnrpEvent *out_events, uintptr_t event_capacity, uintptr_t *out_event_count);
 NnrpFfiStatus nnrp_server_bind(NnrpServerBindRequest request, NnrpHandle *out_server);
 NnrpFfiStatus nnrp_server_accept(NnrpServerAcceptRequest request, NnrpHandle *out_session);
 NnrpFfiStatus nnrp_server_receive_submit(NnrpServerReceiveSubmitRequest request, NnrpHandle *out_operation);

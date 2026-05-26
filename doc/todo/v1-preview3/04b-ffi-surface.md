@@ -5,6 +5,7 @@
 - [x] Expose connection bootstrap, session open/patch/close, submit, result/event pump, and control operations through FFI.
 - [x] Expose zero-copy or bounded-copy buffer-view APIs suitable for Python and C# bindings.
 - [x] Expose callback-driven and polling-driven event delivery surfaces.
+  - [x] Expose bounded batch polling for downstream SDK hot paths.
 - [x] Expose stable preview3 error codes and diagnostics to binding layers.
 - [x] Expose a stable runtime capability probe for ABI version, protocol version, transport slots, and feature flags.
 - [ ] Wire FFI entrypoints to the real client/server runtime once `06` lands.

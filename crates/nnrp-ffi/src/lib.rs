@@ -8,7 +8,7 @@ use nnrp_core::{
 };
 
 pub const NNRP_FFI_ABI_MAJOR: u16 = 1;
-pub const NNRP_FFI_ABI_MINOR: u16 = 0;
+pub const NNRP_FFI_ABI_MINOR: u16 = 1;
 pub const NNRP_FFI_ABI_PATCH: u16 = 0;
 
 pub const NNRP_TRANSPORT_SLOT_QUIC: u32 = 0x0000_0001;
@@ -23,6 +23,7 @@ pub const NNRP_RUNTIME_FEATURE_CACHE_SCHEMA: u64 = 0x0000_0000_0000_0020;
 pub const NNRP_RUNTIME_FEATURE_RECOVERY: u64 = 0x0000_0000_0000_0040;
 pub const NNRP_RUNTIME_FEATURE_TYPED_PAYLOAD: u64 = 0x0000_0000_0000_0080;
 pub const NNRP_RUNTIME_FEATURE_TRANSPORT_SLOTS: u64 = 0x0000_0000_0000_0100;
+pub const NNRP_RUNTIME_FEATURE_BATCH_POLLING: u64 = 0x0000_0000_0000_0200;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,7 +91,8 @@ pub fn runtime_capabilities() -> NnrpRuntimeCapabilities {
             | NNRP_RUNTIME_FEATURE_CACHE_SCHEMA
             | NNRP_RUNTIME_FEATURE_RECOVERY
             | NNRP_RUNTIME_FEATURE_TYPED_PAYLOAD
-            | NNRP_RUNTIME_FEATURE_TRANSPORT_SLOTS,
+            | NNRP_RUNTIME_FEATURE_TRANSPORT_SLOTS
+            | NNRP_RUNTIME_FEATURE_BATCH_POLLING,
     }
 }
 
@@ -977,6 +979,63 @@ pub unsafe extern "C" fn nnrp_client_await_event(
 #[no_mangle]
 /// # Safety
 ///
+/// `out_events` must point to `event_capacity` writable `NnrpEvent` entries
+/// when `event_capacity` is non-zero. `out_event_count` must point to one
+/// writable `usize`. Both pointed regions must be caller-owned for the duration
+/// of this call.
+pub unsafe extern "C" fn nnrp_client_await_events(
+    connection: NnrpHandle,
+    out_events: *mut NnrpEvent,
+    event_capacity: usize,
+    out_event_count: *mut usize,
+) -> NnrpFfiStatus {
+    client_await_events_impl(connection, out_events, event_capacity, out_event_count)
+}
+
+unsafe fn client_await_events_impl(
+    connection: NnrpHandle,
+    out_events: *mut NnrpEvent,
+    event_capacity: usize,
+    out_event_count: *mut usize,
+) -> NnrpFfiStatus {
+    if out_event_count.is_null() {
+        return NnrpFfiStatus::invalid_argument(31);
+    }
+    *out_event_count = 0;
+
+    if event_capacity == 0 || out_events.is_null() {
+        return NnrpFfiStatus::invalid_argument(32);
+    }
+
+    let mut store = handle_store();
+    for index in 0..event_capacity {
+        match store.poll_event(connection) {
+            Ok(Some(event)) => {
+                *out_events.add(index) = event;
+                *out_event_count += 1;
+            }
+            Ok(None) => {
+                return if *out_event_count == 0 {
+                    NnrpFfiStatus {
+                        status_code: NnrpFfiStatusCode::WouldBlock as u32,
+                        error_family: NnrpErrorFamily::None as u32,
+                        protocol_error_code: 0,
+                        detail_code: 0,
+                    }
+                } else {
+                    NnrpFfiStatus::ok()
+                };
+            }
+            Err(status) => return status,
+        }
+    }
+
+    NnrpFfiStatus::ok()
+}
+
+#[no_mangle]
+/// # Safety
+///
 /// `out_server` must be either null or a valid writable pointer to one
 /// `NnrpHandle`. When non-null, the pointed memory must be owned by the caller.
 pub unsafe extern "C" fn nnrp_server_bind(
@@ -1566,6 +1625,173 @@ mod tests {
                 NnrpFfiStatusCode::WouldBlock as u32
             );
             assert_eq!(result.has_event, 0);
+        }
+    }
+
+    #[test]
+    fn ffi_client_abi_batch_polls_runtime_events() {
+        unsafe {
+            let mut connection = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_connect(
+                    NnrpClientConnectRequest {
+                        connection_id: 91_101,
+                        generation: 1,
+                        transport_id: 1,
+                    },
+                    &mut connection
+                ),
+                NnrpFfiStatus::ok()
+            );
+            let mut session = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_open_session(
+                    NnrpSessionOpenRequest {
+                        connection,
+                        requested_session_id: 91_102,
+                        generation: 1,
+                        profile_id: 2,
+                        schema_id: 0x1001,
+                        schema_version: 3,
+                    },
+                    &mut session
+                ),
+                NnrpFfiStatus::ok()
+            );
+            let mut operation = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_submit(
+                    NnrpSubmitRequest {
+                        session,
+                        operation_id: 91_103,
+                        frame_id: 7,
+                        payload: NnrpBufferView::empty(),
+                    },
+                    &mut operation
+                ),
+                NnrpFfiStatus::ok()
+            );
+
+            let mut events = [NnrpEvent::none(); 4];
+            let mut event_count = 0usize;
+            assert_eq!(
+                nnrp_client_await_events(
+                    connection,
+                    events.as_mut_ptr(),
+                    events.len(),
+                    &mut event_count
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(event_count, 3);
+            assert_eq!(events[0].kind, NnrpEventKind::ConnectionOpened as u32);
+            assert_eq!(events[1].kind, NnrpEventKind::SessionOpened as u32);
+            assert_eq!(events[2].kind, NnrpEventKind::SubmitAccepted as u32);
+            assert_eq!(events[2].operation, operation);
+
+            assert_eq!(
+                nnrp_client_await_events(
+                    connection,
+                    events.as_mut_ptr(),
+                    events.len(),
+                    &mut event_count
+                ),
+                NnrpFfiStatus {
+                    status_code: NnrpFfiStatusCode::WouldBlock as u32,
+                    error_family: NnrpErrorFamily::None as u32,
+                    protocol_error_code: 0,
+                    detail_code: 0,
+                }
+            );
+            assert_eq!(event_count, 0);
+        }
+    }
+
+    #[test]
+    fn ffi_client_abi_batch_poll_rejects_invalid_buffers() {
+        unsafe {
+            let mut connection = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_connect(
+                    NnrpClientConnectRequest {
+                        connection_id: 91_201,
+                        generation: 1,
+                        transport_id: 1,
+                    },
+                    &mut connection
+                ),
+                NnrpFfiStatus::ok()
+            );
+            let mut events = [NnrpEvent::none(); 1];
+            let mut event_count = 99usize;
+
+            assert_eq!(
+                nnrp_client_await_events(
+                    connection,
+                    events.as_mut_ptr(),
+                    events.len(),
+                    core::ptr::null_mut()
+                ),
+                NnrpFfiStatus::invalid_argument(31)
+            );
+            assert_eq!(
+                nnrp_client_await_events(
+                    connection,
+                    core::ptr::null_mut(),
+                    events.len(),
+                    &mut event_count
+                ),
+                NnrpFfiStatus::invalid_argument(32)
+            );
+            assert_eq!(event_count, 0);
+            event_count = 99;
+            assert_eq!(
+                nnrp_client_await_events(connection, events.as_mut_ptr(), 0, &mut event_count),
+                NnrpFfiStatus::invalid_argument(32)
+            );
+            assert_eq!(event_count, 0);
+        }
+    }
+
+    #[test]
+    fn ffi_client_abi_batch_poll_reports_full_capacity_and_invalid_handles() {
+        unsafe {
+            let mut connection = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_connect(
+                    NnrpClientConnectRequest {
+                        connection_id: 91_301,
+                        generation: 1,
+                        transport_id: 1,
+                    },
+                    &mut connection
+                ),
+                NnrpFfiStatus::ok()
+            );
+
+            let mut events = [NnrpEvent::none(); 1];
+            let mut event_count = 0usize;
+            assert_eq!(
+                nnrp_client_await_events(
+                    connection,
+                    events.as_mut_ptr(),
+                    events.len(),
+                    &mut event_count
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(event_count, 1);
+            assert_eq!(events[0].kind, NnrpEventKind::ConnectionOpened as u32);
+
+            assert_eq!(
+                nnrp_client_await_events(
+                    NnrpHandle::invalid(),
+                    events.as_mut_ptr(),
+                    events.len(),
+                    &mut event_count
+                ),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Connection as u32)
+            );
         }
     }
 

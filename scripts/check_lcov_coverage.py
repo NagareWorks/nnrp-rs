@@ -37,7 +37,9 @@ def load_lcov(path: Path) -> dict[str, dict[int, bool]]:
             continue
         if raw_line.startswith("DA:") and current_file is not None:
             number_text, hits_text = raw_line[3:].split(",", 1)
-            coverage[current_file][int(number_text)] = int(hits_text) > 0
+            line_number = int(number_text)
+            covered = int(hits_text) > 0
+            coverage[current_file][line_number] = coverage[current_file].get(line_number, False) or covered
             continue
         if raw_line == "end_of_record":
             current_file = None
