@@ -107,7 +107,7 @@ const PUBLIC_PREVIEW3_CASE_IDS: &[&str] = &[
     "l3.transport.tcp.minimum",
 ];
 
-pub fn export_preview3_golden_vectors() -> Value {
+pub fn preview3_golden_vectors() -> Value {
     json!({
         "protocol_version": PREVIEW3_PROTOCOL_VERSION,
         "vectors": [
@@ -135,7 +135,7 @@ pub fn export_preview3_golden_vectors() -> Value {
     })
 }
 
-pub fn export_preview3_fixture_manifest() -> Value {
+pub fn preview3_fixture_manifest() -> Value {
     let cases: Vec<Value> = preview3_case_ids()
         .iter()
         .map(|id| {
@@ -1196,7 +1196,7 @@ mod tests {
 
     #[test]
     fn preview3_case_manifest_lists_executable_cases() {
-        let manifest = export_preview3_fixture_manifest();
+        let manifest = preview3_fixture_manifest();
         let cases = manifest["cases"].as_array().expect("cases array");
 
         assert_eq!(manifest["protocol_version"], PREVIEW3_PROTOCOL_VERSION);
@@ -1211,7 +1211,7 @@ mod tests {
 
     #[test]
     fn preview3_golden_vectors_are_stable_and_executable() {
-        let vectors = export_preview3_golden_vectors();
+        let vectors = preview3_golden_vectors();
         let vector_array = vectors["vectors"].as_array().expect("vectors array");
 
         assert_eq!(vector_array.len(), 4);
