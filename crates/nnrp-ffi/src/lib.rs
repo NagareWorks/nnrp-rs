@@ -5,15 +5,17 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use nnrp_core::{
     should_replay_frame_after_migration, token_delta_schema_descriptor,
     validate_migration_recovery, validate_session_recovery_ack, validate_session_recovery_request,
-    NnrpError, ProtocolVersion, SchemaDescriptorHeader, SchemaRegistry, SchemaRegistryFailure,
-    SessionMigrateAckMetadata, SessionMigrateMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
+    CacheLease, CacheLeaseOwnerScope, CacheObjectId, CacheObjectKind, CacheValidationFailure,
+    MessageType, NnrpError, ProtocolVersion, ResultHintMetadata, SchemaDescriptorHeader,
+    SchemaRegistry, SchemaRegistryAction, SchemaRegistryFailure, SessionMigrateAckMetadata,
+    SessionMigrateMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
     SessionRecoveryOutcome as CoreSessionRecoveryOutcome, TransportId, TypedPayloadDescriptor,
     SESSION_ERROR_NONE, SESSION_ERROR_PROFILE_UNSUPPORTED, SESSION_ERROR_RESUME_REJECTED,
-    SESSION_ERROR_SCHEMA_UNSUPPORTED,
+    SESSION_ERROR_SCHEMA_UNSUPPORTED, SESSION_FLAG_ALLOW_RESUME,
 };
 
 pub const NNRP_FFI_ABI_MAJOR: u16 = 1;
-pub const NNRP_FFI_ABI_MINOR: u16 = 1;
+pub const NNRP_FFI_ABI_MINOR: u16 = 2;
 pub const NNRP_FFI_ABI_PATCH: u16 = 0;
 
 pub const NNRP_TRANSPORT_SLOT_QUIC: u32 = 0x0000_0001;
@@ -29,11 +31,25 @@ pub const NNRP_RUNTIME_FEATURE_RECOVERY: u64 = 0x0000_0000_0000_0040;
 pub const NNRP_RUNTIME_FEATURE_TYPED_PAYLOAD: u64 = 0x0000_0000_0000_0080;
 pub const NNRP_RUNTIME_FEATURE_TRANSPORT_SLOTS: u64 = 0x0000_0000_0000_0100;
 pub const NNRP_RUNTIME_FEATURE_BATCH_POLLING: u64 = 0x0000_0000_0000_0200;
+pub const NNRP_RUNTIME_FEATURE_CACHE_LEASE_OPS: u64 = 0x0000_0000_0000_0400;
+pub const NNRP_RUNTIME_FEATURE_SCHEMA_REGISTRY_HANDLES: u64 = 0x0000_0000_0000_0800;
+pub const NNRP_RUNTIME_FEATURE_BUFFER_HANDLES: u64 = 0x0000_0000_0000_1000;
+pub const NNRP_RUNTIME_FEATURE_EXECUTABLE_RESUME: u64 = 0x0000_0000_0000_2000;
 
 pub const NNRP_SESSION_RECOVERY_OUTCOME_FRESH: u32 = 0;
 pub const NNRP_SESSION_RECOVERY_OUTCOME_RESUME_ENABLED: u32 = 1;
 pub const NNRP_SESSION_RECOVERY_OUTCOME_RESUMED: u32 = 2;
 pub const NNRP_SESSION_RECOVERY_OUTCOME_RESUME_REJECTED: u32 = 3;
+
+pub const NNRP_SCHEMA_REGISTRY_ACTION_INSTALLED: u32 = 0;
+pub const NNRP_SCHEMA_REGISTRY_ACTION_ALREADY_INSTALLED: u32 = 1;
+pub const NNRP_SCHEMA_REGISTRY_ACTION_UPDATED: u32 = 2;
+pub const NNRP_SCHEMA_REGISTRY_ACTION_INVALIDATED: u32 = 3;
+
+pub const NNRP_CACHE_LEASE_OUTCOME_VALID: u32 = 0;
+pub const NNRP_CACHE_LEASE_OUTCOME_MISS: u32 = 1;
+pub const NNRP_CACHE_LEASE_OUTCOME_EXPIRED: u32 = 2;
+pub const NNRP_CACHE_LEASE_OUTCOME_RELEASED: u32 = 3;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,7 +105,7 @@ pub fn runtime_capabilities() -> NnrpRuntimeCapabilities {
         sdk_minor: 0,
         sdk_patch: 0,
         sdk_preview: 3,
-        sdk_revision: 1,
+        sdk_revision: 3,
         reserved1: 0,
         transport_slots: transport_slot_bit(TransportId::Quic)
             | transport_slot_bit(TransportId::Tcp),
@@ -102,7 +118,11 @@ pub fn runtime_capabilities() -> NnrpRuntimeCapabilities {
             | NNRP_RUNTIME_FEATURE_RECOVERY
             | NNRP_RUNTIME_FEATURE_TYPED_PAYLOAD
             | NNRP_RUNTIME_FEATURE_TRANSPORT_SLOTS
-            | NNRP_RUNTIME_FEATURE_BATCH_POLLING,
+            | NNRP_RUNTIME_FEATURE_BATCH_POLLING
+            | NNRP_RUNTIME_FEATURE_CACHE_LEASE_OPS
+            | NNRP_RUNTIME_FEATURE_SCHEMA_REGISTRY_HANDLES
+            | NNRP_RUNTIME_FEATURE_BUFFER_HANDLES
+            | NNRP_RUNTIME_FEATURE_EXECUTABLE_RESUME,
     }
 }
 
@@ -254,6 +274,8 @@ pub enum NnrpHandleKind {
     Operation = 3,
     EventPump = 4,
     Buffer = 5,
+    SchemaRegistry = 6,
+    CacheLease = 7,
 }
 
 #[repr(C)]
@@ -293,7 +315,8 @@ impl NnrpHandle {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
 enum NnrpFfiResource {
     Connection {
         transport_id: u32,
@@ -310,6 +333,17 @@ enum NnrpFfiResource {
         frame_id: u32,
         payload_len: usize,
     },
+    SchemaRegistry {
+        registry: SchemaRegistry,
+    },
+    Buffer {
+        bytes: Vec<u8>,
+    },
+    CacheLease {
+        owner: NnrpHandle,
+        lease: CacheLease,
+        released: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -318,7 +352,7 @@ enum NnrpFfiConnectionRole {
     Server,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 struct NnrpFfiResourceEntry {
     generation: u32,
     resource: NnrpFfiResource,
@@ -362,6 +396,11 @@ impl NnrpFfiHandleStore {
             value if value == NnrpHandleKind::Connection as u32 => NnrpHandleKind::Connection,
             value if value == NnrpHandleKind::Session as u32 => NnrpHandleKind::Session,
             value if value == NnrpHandleKind::Operation as u32 => NnrpHandleKind::Operation,
+            value if value == NnrpHandleKind::Buffer as u32 => NnrpHandleKind::Buffer,
+            value if value == NnrpHandleKind::SchemaRegistry as u32 => {
+                NnrpHandleKind::SchemaRegistry
+            }
+            value if value == NnrpHandleKind::CacheLease as u32 => NnrpHandleKind::CacheLease,
             _ => return Err(NnrpFfiStatus::invalid_handle(handle.kind)),
         })?;
         self.entries.insert(
@@ -393,6 +432,21 @@ impl NnrpFfiHandleStore {
         self.get(handle, kind)?;
         self.entries.remove(&(handle.kind, handle.id));
         Ok(())
+    }
+
+    fn get_mut(
+        &mut self,
+        handle: NnrpHandle,
+        kind: NnrpHandleKind,
+    ) -> Result<&mut NnrpFfiResource, NnrpFfiStatus> {
+        handle.validate_kind(kind)?;
+        let Some(entry) = self.entries.get_mut(&(handle.kind, handle.id)) else {
+            return Err(NnrpFfiStatus::invalid_handle(kind as u32));
+        };
+        if entry.generation != handle.generation {
+            return Err(NnrpFfiStatus::invalid_handle(kind as u32));
+        }
+        Ok(&mut entry.resource)
     }
 
     fn close_connection(&mut self, connection: NnrpHandle) -> Result<(), NnrpFfiStatus> {
@@ -431,12 +485,20 @@ impl NnrpFfiHandleStore {
             })
             .collect();
 
-        for operation in operations {
+        for operation in &operations {
             self.entries.remove(&(operation.kind, operation.id));
         }
-        for session in sessions {
+        for session in &sessions {
             self.entries.remove(&(session.kind, session.id));
         }
+        self.entries.retain(|_, entry| match &entry.resource {
+            NnrpFfiResource::CacheLease { owner, .. } => {
+                *owner != connection
+                    && !sessions.iter().any(|session| session == owner)
+                    && !operations.iter().any(|operation| operation == owner)
+            }
+            _ => true,
+        });
         self.entries.remove(&(connection.kind, connection.id));
         self.events.retain(|event| event.connection != connection);
         Ok(())
@@ -599,6 +661,95 @@ pub struct NnrpTypedPayloadDescriptor {
     pub length: u32,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpCacheObjectId {
+    pub cache_namespace: u32,
+    pub cache_key_hi: u32,
+    pub cache_key_lo: u32,
+    pub object_kind: u32,
+}
+
+impl NnrpCacheObjectId {
+    fn to_core(self) -> Result<CacheObjectId, NnrpFfiStatus> {
+        Ok(CacheObjectId {
+            cache_namespace: self.cache_namespace,
+            cache_key_hi: self.cache_key_hi,
+            cache_key_lo: self.cache_key_lo,
+            object_kind: CacheObjectKind::try_from_u32(self.object_kind)
+                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
+        })
+    }
+}
+
+impl From<CacheObjectId> for NnrpCacheObjectId {
+    fn from(value: CacheObjectId) -> Self {
+        Self {
+            cache_namespace: value.cache_namespace,
+            cache_key_hi: value.cache_key_hi,
+            cache_key_lo: value.cache_key_lo,
+            object_kind: value.object_kind as u32,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpCacheLeaseRequest {
+    pub owner: NnrpHandle,
+    pub object_id: NnrpCacheObjectId,
+    pub expected_version: u64,
+    pub now_ms: u64,
+    pub ttl_ms: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpCacheLeaseResult {
+    pub outcome_code: u32,
+    pub lease_handle: NnrpHandle,
+    pub object_id: NnrpCacheObjectId,
+    pub object_version: u64,
+    pub lease_id: u64,
+    pub expires_at_ms: u64,
+}
+
+impl NnrpCacheLeaseResult {
+    fn miss(object_id: CacheObjectId) -> Self {
+        Self {
+            outcome_code: NNRP_CACHE_LEASE_OUTCOME_MISS,
+            lease_handle: NnrpHandle::invalid(),
+            object_id: object_id.into(),
+            object_version: 0,
+            lease_id: 0,
+            expires_at_ms: 0,
+        }
+    }
+
+    fn from_lease(outcome_code: u32, lease_handle: NnrpHandle, lease: CacheLease) -> Self {
+        Self {
+            outcome_code,
+            lease_handle,
+            object_id: lease.object_id.into(),
+            object_version: lease.object_version,
+            lease_id: lease.lease_id,
+            expires_at_ms: lease.expires_at_ms(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpSessionResumeRequest {
+    pub connection: NnrpHandle,
+    pub requested_session_id: u32,
+    pub generation: u32,
+    pub profile_id: u16,
+    pub schema_id: u32,
+    pub schema_version: u32,
+    pub resume_token_bytes: u32,
+}
+
 impl From<TypedPayloadDescriptor> for NnrpTypedPayloadDescriptor {
     fn from(value: TypedPayloadDescriptor) -> Self {
         Self {
@@ -686,6 +837,7 @@ pub enum NnrpEventKind {
     FlowUpdated = 8,
     Control = 9,
     Error = 10,
+    ResultHint = 11,
 }
 
 #[repr(C)]
@@ -948,6 +1100,68 @@ pub unsafe extern "C" fn nnrp_client_open_session(
         frame_id: 0,
     });
     *out_session = handle;
+    NnrpFfiStatus::ok()
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `out_session` and `out_outcome` must be either null or valid writable
+/// pointers to one value each. The connection handle is copied by value.
+#[rustfmt::skip]
+pub unsafe extern "C" fn nnrp_client_resume_session(request: NnrpSessionResumeRequest, out_session: *mut NnrpHandle, out_outcome: *mut NnrpSessionRecoveryOutcome) -> NnrpFfiStatus {
+    nnrp_client_resume_session_impl(request, out_session, out_outcome)
+}
+
+unsafe fn nnrp_client_resume_session_impl(
+    request: NnrpSessionResumeRequest,
+    out_session: *mut NnrpHandle,
+    out_outcome: *mut NnrpSessionRecoveryOutcome,
+) -> NnrpFfiStatus {
+    if out_session.is_null()
+        || out_outcome.is_null()
+        || request.requested_session_id == 0
+        || request.generation == 0
+        || request.resume_token_bytes == 0
+    {
+        return NnrpFfiStatus::invalid_argument(39);
+    }
+
+    let open = SessionOpenMetadata {
+        requested_session_id: request.requested_session_id,
+        profile_id: request.profile_id,
+        priority_class: nnrp_core::SessionPriorityClass::Balanced,
+        session_flags: SESSION_FLAG_ALLOW_RESUME,
+        schema_id: request.schema_id,
+        schema_version: request.schema_version,
+        default_deadline_ms: 0,
+        max_in_flight_operations: 1,
+        lease_ttl_hint_ms: 0,
+        resume_token_bytes: request.resume_token_bytes,
+        auth_bytes: 0,
+        session_extension_bytes: 0,
+        client_session_tag: request.requested_session_id as u64,
+    };
+    if let Err(error) = validate_session_recovery_request(&open) {
+        return NnrpFfiStatus::from_core_error(&error);
+    }
+
+    let session_request = NnrpSessionOpenRequest {
+        connection: request.connection,
+        requested_session_id: request.requested_session_id,
+        generation: request.generation,
+        profile_id: request.profile_id,
+        schema_id: request.schema_id,
+        schema_version: request.schema_version,
+    };
+    let status = nnrp_client_open_session(session_request, out_session);
+    if status.status_code != NnrpFfiStatusCode::Ok as u32 {
+        return status;
+    }
+    *out_outcome = NnrpSessionRecoveryOutcome {
+        outcome_code: NNRP_SESSION_RECOVERY_OUTCOME_RESUMED,
+        resume_window_ms: 0,
+    };
     NnrpFfiStatus::ok()
 }
 
@@ -1316,6 +1530,181 @@ pub unsafe extern "C" fn nnrp_typed_payload_validate_binding(
 #[no_mangle]
 /// # Safety
 ///
+/// `out_registry` must be either null or a valid writable pointer to one
+/// `NnrpHandle`.
+#[rustfmt::skip]
+pub unsafe extern "C" fn nnrp_schema_registry_create(out_registry: *mut NnrpHandle) -> NnrpFfiStatus { nnrp_schema_registry_create_impl(out_registry) }
+
+unsafe fn nnrp_schema_registry_create_impl(out_registry: *mut NnrpHandle) -> NnrpFfiStatus {
+    if out_registry.is_null() {
+        return NnrpFfiStatus::invalid_argument(40);
+    }
+    let mut store = handle_store();
+    let id = next_handle_id(&store, NnrpHandleKind::SchemaRegistry);
+    let handle = NnrpHandle::new(NnrpHandleKind::SchemaRegistry, id, 1);
+    if let Err(status) = store.insert(
+        handle,
+        NnrpFfiResource::SchemaRegistry {
+            registry: SchemaRegistry::with_standard_preview3_profiles(),
+        },
+    ) {
+        return status;
+    }
+    *out_registry = handle;
+    NnrpFfiStatus::ok()
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `out_action` must be either null or a valid writable pointer to one `u32`.
+#[rustfmt::skip]
+pub unsafe extern "C" fn nnrp_schema_registry_install(registry: NnrpHandle, descriptor: NnrpSchemaDescriptorHeader, out_action: *mut u32) -> NnrpFfiStatus {
+    nnrp_schema_registry_install_impl(registry, descriptor, out_action)
+}
+
+unsafe fn nnrp_schema_registry_install_impl(
+    registry: NnrpHandle,
+    descriptor: NnrpSchemaDescriptorHeader,
+    out_action: *mut u32,
+) -> NnrpFfiStatus {
+    if out_action.is_null() {
+        return NnrpFfiStatus::invalid_argument(41);
+    }
+    let descriptor = match descriptor.to_core() {
+        Ok(descriptor) => descriptor,
+        Err(status) => return status,
+    };
+    let mut store = handle_store();
+    match store.get_mut(registry, NnrpHandleKind::SchemaRegistry) {
+        Ok(NnrpFfiResource::SchemaRegistry { registry }) => match registry.install(descriptor) {
+            Ok(action) => {
+                *out_action = schema_registry_action_code(action);
+                NnrpFfiStatus::ok()
+            }
+            Err(failure) => schema_registry_failure_status(failure),
+        },
+        Ok(_) => NnrpFfiStatus::invalid_handle(NnrpHandleKind::SchemaRegistry as u32),
+        Err(status) => status,
+    }
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `out_descriptor` must be either null or a valid writable pointer to one
+/// `NnrpSchemaDescriptorHeader`.
+#[rustfmt::skip]
+pub unsafe extern "C" fn nnrp_schema_registry_lookup(registry: NnrpHandle, schema_id: u32, schema_version: u32, out_descriptor: *mut NnrpSchemaDescriptorHeader) -> NnrpFfiStatus {
+    nnrp_schema_registry_lookup_impl(registry, schema_id, schema_version, out_descriptor)
+}
+
+unsafe fn nnrp_schema_registry_lookup_impl(
+    registry: NnrpHandle,
+    schema_id: u32,
+    schema_version: u32,
+    out_descriptor: *mut NnrpSchemaDescriptorHeader,
+) -> NnrpFfiStatus {
+    if out_descriptor.is_null() {
+        return NnrpFfiStatus::invalid_argument(42);
+    }
+    let store = handle_store();
+    match store.get(registry, NnrpHandleKind::SchemaRegistry) {
+        Ok(NnrpFfiResource::SchemaRegistry { registry }) => {
+            match registry.get(schema_id, schema_version) {
+                Some(descriptor) => {
+                    *out_descriptor = (*descriptor).into();
+                    NnrpFfiStatus::ok()
+                }
+                None => schema_registry_failure_status(SchemaRegistryFailure::VersionUnknown),
+            }
+        }
+        Ok(_) => NnrpFfiStatus::invalid_handle(NnrpHandleKind::SchemaRegistry as u32),
+        Err(status) => status,
+    }
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `out_action` must be either null or a valid writable pointer to one `u32`.
+#[rustfmt::skip]
+pub unsafe extern "C" fn nnrp_schema_registry_invalidate(registry: NnrpHandle, schema_id: u32, schema_version: u32, out_action: *mut u32) -> NnrpFfiStatus {
+    nnrp_schema_registry_invalidate_impl(registry, schema_id, schema_version, out_action)
+}
+
+unsafe fn nnrp_schema_registry_invalidate_impl(
+    registry: NnrpHandle,
+    schema_id: u32,
+    schema_version: u32,
+    out_action: *mut u32,
+) -> NnrpFfiStatus {
+    if out_action.is_null() {
+        return NnrpFfiStatus::invalid_argument(43);
+    }
+    let mut store = handle_store();
+    match store.get_mut(registry, NnrpHandleKind::SchemaRegistry) {
+        Ok(NnrpFfiResource::SchemaRegistry { registry }) => {
+            match registry.invalidate(schema_id, schema_version) {
+                Ok(action) => {
+                    *out_action = schema_registry_action_code(action);
+                    NnrpFfiStatus::ok()
+                }
+                Err(failure) => schema_registry_failure_status(failure),
+            }
+        }
+        Ok(_) => NnrpFfiStatus::invalid_handle(NnrpHandleKind::SchemaRegistry as u32),
+        Err(status) => status,
+    }
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// The registry handle and descriptor are copied by value.
+#[rustfmt::skip]
+pub unsafe extern "C" fn nnrp_schema_registry_validate_binding(registry: NnrpHandle, descriptor: NnrpTypedPayloadDescriptor) -> NnrpFfiStatus {
+    nnrp_schema_registry_validate_binding_impl(registry, descriptor)
+}
+
+unsafe fn nnrp_schema_registry_validate_binding_impl(
+    registry: NnrpHandle,
+    descriptor: NnrpTypedPayloadDescriptor,
+) -> NnrpFfiStatus {
+    let descriptor = match descriptor.to_core() {
+        Ok(descriptor) => descriptor,
+        Err(status) => return status,
+    };
+    let store = handle_store();
+    match store.get(registry, NnrpHandleKind::SchemaRegistry) {
+        Ok(NnrpFfiResource::SchemaRegistry { registry }) => registry
+            .validate_descriptor_binding(&descriptor)
+            .map(|_| NnrpFfiStatus::ok())
+            .unwrap_or_else(schema_registry_failure_status),
+        Ok(_) => NnrpFfiStatus::invalid_handle(NnrpHandleKind::SchemaRegistry as u32),
+        Err(status) => status,
+    }
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// The registry handle is copied by value. This function does not dereference
+/// caller-provided pointers.
+#[rustfmt::skip]
+pub unsafe extern "C" fn nnrp_schema_registry_release(registry: NnrpHandle) -> NnrpFfiStatus { nnrp_schema_registry_release_impl(registry) }
+
+unsafe fn nnrp_schema_registry_release_impl(registry: NnrpHandle) -> NnrpFfiStatus {
+    let mut store = handle_store();
+    store
+        .remove(registry, NnrpHandleKind::SchemaRegistry)
+        .map(|_| NnrpFfiStatus::ok())
+        .unwrap_or_else(|status| status)
+}
+
+#[no_mangle]
+/// # Safety
+///
 /// `session_open_metadata` must remain readable for `len` bytes for the
 /// duration of this call.
 pub unsafe extern "C" fn nnrp_session_recovery_request_validate(
@@ -1545,6 +1934,314 @@ unsafe fn ffi_write_slice<'a>(view: NnrpBufferViewMut) -> &'a mut [u8] {
     } else {
         core::slice::from_raw_parts_mut(view.ptr, view.len)
     }
+}
+
+fn next_handle_id(store: &NnrpFfiHandleStore, kind: NnrpHandleKind) -> u64 {
+    store
+        .entries
+        .keys()
+        .filter_map(|(stored_kind, id)| (*stored_kind == kind as u32).then_some(*id))
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1)
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `source` must remain readable for `source.len` bytes for the duration of
+/// the call. `out_buffer` and `out_view` must be either null or valid writable
+/// pointers to one value each.
+#[rustfmt::skip]
+pub unsafe extern "C" fn nnrp_buffer_acquire_copy(source: NnrpBufferView, out_buffer: *mut NnrpHandle, out_view: *mut NnrpBufferView) -> NnrpFfiStatus {
+    nnrp_buffer_acquire_copy_impl(source, out_buffer, out_view)
+}
+
+unsafe fn nnrp_buffer_acquire_copy_impl(
+    source: NnrpBufferView,
+    out_buffer: *mut NnrpHandle,
+    out_view: *mut NnrpBufferView,
+) -> NnrpFfiStatus {
+    if out_buffer.is_null() || out_view.is_null() {
+        return NnrpFfiStatus::invalid_argument(44);
+    }
+    if let Err(status) = source.validate() {
+        return status;
+    }
+    let bytes = ffi_read_slice(source).to_vec();
+    let mut store = handle_store();
+    let id = next_handle_id(&store, NnrpHandleKind::Buffer);
+    let handle = NnrpHandle::new(NnrpHandleKind::Buffer, id, 1);
+    if let Err(status) = store.insert(handle, NnrpFfiResource::Buffer { bytes }) {
+        return status;
+    }
+    let view = match store.get(handle, NnrpHandleKind::Buffer) {
+        Ok(NnrpFfiResource::Buffer { bytes }) => NnrpBufferView {
+            ptr: bytes.as_ptr(),
+            len: bytes.len(),
+        },
+        _ => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Buffer as u32),
+    };
+    *out_buffer = handle;
+    *out_view = view;
+    NnrpFfiStatus::ok()
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `out_view` must be either null or a valid writable pointer to one
+/// `NnrpBufferView`.
+#[rustfmt::skip]
+pub unsafe extern "C" fn nnrp_buffer_view(buffer: NnrpHandle, out_view: *mut NnrpBufferView) -> NnrpFfiStatus { nnrp_buffer_view_impl(buffer, out_view) }
+
+unsafe fn nnrp_buffer_view_impl(
+    buffer: NnrpHandle,
+    out_view: *mut NnrpBufferView,
+) -> NnrpFfiStatus {
+    if out_view.is_null() {
+        return NnrpFfiStatus::invalid_argument(45);
+    }
+    let store = handle_store();
+    match store.get(buffer, NnrpHandleKind::Buffer) {
+        Ok(NnrpFfiResource::Buffer { bytes }) => {
+            *out_view = NnrpBufferView {
+                ptr: bytes.as_ptr(),
+                len: bytes.len(),
+            };
+            NnrpFfiStatus::ok()
+        }
+        Ok(_) => NnrpFfiStatus::invalid_handle(NnrpHandleKind::Buffer as u32),
+        Err(status) => status,
+    }
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// The buffer handle is copied by value. This function does not dereference
+/// caller-provided pointers.
+#[rustfmt::skip]
+pub unsafe extern "C" fn nnrp_buffer_release(buffer: NnrpHandle) -> NnrpFfiStatus { nnrp_buffer_release_impl(buffer) }
+
+fn nnrp_buffer_release_impl(buffer: NnrpHandle) -> NnrpFfiStatus {
+    let mut store = handle_store();
+    match store.get(buffer, NnrpHandleKind::Buffer) {
+        Ok(NnrpFfiResource::Buffer { .. }) => store
+            .remove(buffer, NnrpHandleKind::Buffer)
+            .map(|_| NnrpFfiStatus::ok())
+            .unwrap_or_else(|status| status),
+        Ok(_) => NnrpFfiStatus::invalid_handle(NnrpHandleKind::Buffer as u32),
+        Err(status) => status,
+    }
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `out_result` must be either null or a valid writable pointer to one
+/// `NnrpCacheLeaseResult`.
+#[rustfmt::skip]
+pub unsafe extern "C" fn nnrp_cache_query(request: NnrpCacheLeaseRequest, out_result: *mut NnrpCacheLeaseResult) -> NnrpFfiStatus {
+    cache_query_impl(request, out_result)
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `out_result` must be either null or a valid writable pointer to one
+/// `NnrpCacheLeaseResult`.
+#[rustfmt::skip]
+pub unsafe extern "C" fn nnrp_cache_touch(request: NnrpCacheLeaseRequest, out_result: *mut NnrpCacheLeaseResult) -> NnrpFfiStatus {
+    nnrp_cache_touch_impl(request, out_result)
+}
+
+unsafe fn nnrp_cache_touch_impl(
+    request: NnrpCacheLeaseRequest,
+    out_result: *mut NnrpCacheLeaseResult,
+) -> NnrpFfiStatus {
+    if request.ttl_ms == 0 {
+        return NnrpFfiStatus::invalid_argument(46);
+    }
+    cache_query_impl(request, out_result)
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `objects` must point to `object_count` readable `NnrpCacheObjectId` values
+/// when `object_count` is non-zero. `out_results` must point to
+/// `object_count` writable result slots.
+#[rustfmt::skip]
+pub unsafe extern "C" fn nnrp_cache_prefetch(owner: NnrpHandle, objects: *const NnrpCacheObjectId, object_count: usize, now_ms: u64, ttl_ms: u32, out_results: *mut NnrpCacheLeaseResult) -> NnrpFfiStatus {
+    nnrp_cache_prefetch_impl(owner, objects, object_count, now_ms, ttl_ms, out_results)
+}
+
+unsafe fn nnrp_cache_prefetch_impl(
+    owner: NnrpHandle,
+    objects: *const NnrpCacheObjectId,
+    object_count: usize,
+    now_ms: u64,
+    ttl_ms: u32,
+    out_results: *mut NnrpCacheLeaseResult,
+) -> NnrpFfiStatus {
+    if object_count > 0 && (objects.is_null() || out_results.is_null()) {
+        return NnrpFfiStatus::invalid_argument(47);
+    }
+    let object_ids = if object_count == 0 {
+        &[]
+    } else {
+        core::slice::from_raw_parts(objects, object_count)
+    };
+    for (index, object) in object_ids.iter().enumerate() {
+        let request = NnrpCacheLeaseRequest {
+            owner,
+            object_id: *object,
+            expected_version: 0,
+            now_ms,
+            ttl_ms,
+        };
+        let status = cache_query_impl(request, out_results.add(index));
+        if status.status_code != NnrpFfiStatusCode::Ok as u32 {
+            return status;
+        }
+    }
+    NnrpFfiStatus::ok()
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `out_result` must be either null or a valid writable pointer to one
+/// `NnrpCacheLeaseResult`.
+#[rustfmt::skip]
+pub unsafe extern "C" fn nnrp_cache_release(lease_handle: NnrpHandle, out_result: *mut NnrpCacheLeaseResult) -> NnrpFfiStatus {
+    nnrp_cache_release_impl(lease_handle, out_result)
+}
+
+unsafe fn nnrp_cache_release_impl(
+    lease_handle: NnrpHandle,
+    out_result: *mut NnrpCacheLeaseResult,
+) -> NnrpFfiStatus {
+    if out_result.is_null() {
+        return NnrpFfiStatus::invalid_argument(48);
+    }
+    let mut store = handle_store();
+    match store.get_mut(lease_handle, NnrpHandleKind::CacheLease) {
+        Ok(NnrpFfiResource::CacheLease {
+            lease, released, ..
+        }) => {
+            *released = true;
+            *out_result = NnrpCacheLeaseResult::from_lease(
+                NNRP_CACHE_LEASE_OUTCOME_RELEASED,
+                lease_handle,
+                *lease,
+            );
+            NnrpFfiStatus::ok()
+        }
+        Ok(_) => NnrpFfiStatus::invalid_handle(NnrpHandleKind::CacheLease as u32),
+        Err(status) => status,
+    }
+}
+
+unsafe fn cache_query_impl(
+    request: NnrpCacheLeaseRequest,
+    out_result: *mut NnrpCacheLeaseResult,
+) -> NnrpFfiStatus {
+    if out_result.is_null() {
+        return NnrpFfiStatus::invalid_argument(49);
+    }
+    let object_id = match request.object_id.to_core() {
+        Ok(object_id) => object_id,
+        Err(status) => return status,
+    };
+    if request.owner.kind == NnrpHandleKind::Invalid as u32 {
+        *out_result = NnrpCacheLeaseResult::miss(object_id);
+        return cache_validation_failure_status(CacheValidationFailure::Miss);
+    }
+
+    let owner_kind = match cache_owner_handle_kind(request.owner.kind) {
+        Ok(kind) => kind,
+        Err(status) => {
+            *out_result = NnrpCacheLeaseResult::miss(object_id);
+            return status;
+        }
+    };
+    let mut store = handle_store();
+    if let Err(status) = store.get(request.owner, owner_kind) {
+        return status;
+    }
+    let existing = store
+        .entries
+        .iter()
+        .find_map(|((kind, id), entry)| match &entry.resource {
+            NnrpFfiResource::CacheLease {
+                owner,
+                lease,
+                released,
+            } if *owner == request.owner && lease.object_id == object_id && !*released => Some((
+                NnrpHandle {
+                    kind: *kind,
+                    id: *id,
+                    generation: entry.generation,
+                    flags: 0,
+                },
+                *lease,
+            )),
+            _ => None,
+        });
+
+    if let Some((handle, mut lease)) = existing {
+        if lease.validate_live_at(request.now_ms).is_err() {
+            *out_result =
+                NnrpCacheLeaseResult::from_lease(NNRP_CACHE_LEASE_OUTCOME_EXPIRED, handle, lease);
+            return cache_validation_failure_status(CacheValidationFailure::LeaseExpired);
+        }
+        if request.expected_version != 0
+            && lease.validate_version(request.expected_version).is_err()
+        {
+            *out_result =
+                NnrpCacheLeaseResult::from_lease(NNRP_CACHE_LEASE_OUTCOME_VALID, handle, lease);
+            return cache_validation_failure_status(CacheValidationFailure::VersionMismatch);
+        }
+        if request.ttl_ms != 0 {
+            lease.ttl_ms = request.ttl_ms;
+            if let Ok(NnrpFfiResource::CacheLease {
+                lease: stored_lease,
+                ..
+            }) = store.get_mut(handle, NnrpHandleKind::CacheLease)
+            {
+                *stored_lease = lease;
+            }
+        }
+        *out_result =
+            NnrpCacheLeaseResult::from_lease(NNRP_CACHE_LEASE_OUTCOME_VALID, handle, lease);
+        return NnrpFfiStatus::ok();
+    }
+
+    let id = next_handle_id(&store, NnrpHandleKind::CacheLease);
+    let handle = NnrpHandle::new(NnrpHandleKind::CacheLease, id, 1);
+    let lease = CacheLease {
+        object_id,
+        object_version: request.expected_version.max(1),
+        lease_id: id,
+        owner_scope: cache_owner_scope(request.owner.kind),
+        owner_id: request.owner.id,
+        granted_at_ms: request.now_ms,
+        ttl_ms: request.ttl_ms.max(30_000),
+    };
+    if let Err(status) = store.insert(
+        handle,
+        NnrpFfiResource::CacheLease {
+            owner: request.owner,
+            lease,
+            released: false,
+        },
+    ) {
+        return status;
+    }
+    *out_result = NnrpCacheLeaseResult::from_lease(NNRP_CACHE_LEASE_OUTCOME_VALID, handle, lease);
+    NnrpFfiStatus::ok()
 }
 
 #[no_mangle]
@@ -1786,7 +2483,10 @@ pub unsafe extern "C" fn nnrp_server_close(session: NnrpHandle) -> NnrpFfiStatus
 ///
 /// `request.payload` must remain readable for `request.payload.len` bytes for
 /// the duration of the call.
-pub unsafe extern "C" fn nnrp_control(request: NnrpControlRequest) -> NnrpFfiStatus {
+#[rustfmt::skip]
+pub unsafe extern "C" fn nnrp_control(request: NnrpControlRequest) -> NnrpFfiStatus { nnrp_control_impl(request) }
+
+unsafe fn nnrp_control_impl(request: NnrpControlRequest) -> NnrpFfiStatus {
     if request.handle.kind == NnrpHandleKind::Invalid as u32 {
         return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Invalid as u32);
     }
@@ -1794,6 +2494,64 @@ pub unsafe extern "C" fn nnrp_control(request: NnrpControlRequest) -> NnrpFfiSta
         return status;
     }
 
+    let event_kind = if request.control_code == MessageType::ResultHint as u32 {
+        match ResultHintMetadata::parse(ffi_read_slice(request.payload)) {
+            Ok(_) => NnrpEventKind::ResultHint,
+            Err(error) => return NnrpFfiStatus::from_core_error(&error),
+        }
+    } else {
+        NnrpEventKind::Control
+    };
+
+    let mut store = handle_store();
+    let (connection, session, operation) = match request.handle.kind {
+        value if value == NnrpHandleKind::Connection as u32 => {
+            match store.get(request.handle, NnrpHandleKind::Connection) {
+                Ok(NnrpFfiResource::Connection { .. }) => {
+                    (request.handle, NnrpHandle::invalid(), NnrpHandle::invalid())
+                }
+                Ok(_) => {
+                    return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Connection as u32);
+                }
+                Err(status) => return status,
+            }
+        }
+        value if value == NnrpHandleKind::Session as u32 => {
+            match store.get(request.handle, NnrpHandleKind::Session) {
+                Ok(NnrpFfiResource::Session { connection, .. }) => {
+                    (*connection, request.handle, NnrpHandle::invalid())
+                }
+                Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32),
+                Err(status) => return status,
+            }
+        }
+        value if value == NnrpHandleKind::Operation as u32 => {
+            match store.get(request.handle, NnrpHandleKind::Operation) {
+                Ok(NnrpFfiResource::Operation { session, .. }) => {
+                    let session = *session;
+                    match store.get(session, NnrpHandleKind::Session) {
+                        Ok(NnrpFfiResource::Session { connection, .. }) => {
+                            (*connection, session, request.handle)
+                        }
+                        Ok(_) => {
+                            return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32)
+                        }
+                        Err(status) => return status,
+                    }
+                }
+                Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Operation as u32),
+                Err(status) => return status,
+            }
+        }
+        _ => return NnrpFfiStatus::invalid_handle(request.handle.kind),
+    };
+    store.push_event(NnrpQueuedEvent {
+        kind: event_kind as u32,
+        connection,
+        session,
+        operation,
+        frame_id: 0,
+    });
     NnrpFfiStatus::ok()
 }
 
@@ -1865,6 +2623,36 @@ pub fn schema_registry_failure_status(failure: SchemaRegistryFailure) -> NnrpFfi
     NnrpFfiStatus::protocol(NnrpErrorFamily::Schema, failure.error_code())
 }
 
+pub fn schema_registry_action_code(action: SchemaRegistryAction) -> u32 {
+    match action {
+        SchemaRegistryAction::Installed => NNRP_SCHEMA_REGISTRY_ACTION_INSTALLED,
+        SchemaRegistryAction::AlreadyInstalled => NNRP_SCHEMA_REGISTRY_ACTION_ALREADY_INSTALLED,
+        SchemaRegistryAction::Updated => NNRP_SCHEMA_REGISTRY_ACTION_UPDATED,
+        SchemaRegistryAction::Invalidated => NNRP_SCHEMA_REGISTRY_ACTION_INVALIDATED,
+    }
+}
+
+pub fn cache_validation_failure_status(failure: CacheValidationFailure) -> NnrpFfiStatus {
+    NnrpFfiStatus::protocol(NnrpErrorFamily::Cache, failure.error_code())
+}
+
+fn cache_owner_handle_kind(kind: u32) -> Result<NnrpHandleKind, NnrpFfiStatus> {
+    match kind {
+        value if value == NnrpHandleKind::Connection as u32 => Ok(NnrpHandleKind::Connection),
+        value if value == NnrpHandleKind::Session as u32 => Ok(NnrpHandleKind::Session),
+        value if value == NnrpHandleKind::Operation as u32 => Ok(NnrpHandleKind::Operation),
+        _ => Err(NnrpFfiStatus::invalid_handle(kind)),
+    }
+}
+
+fn cache_owner_scope(kind: u32) -> CacheLeaseOwnerScope {
+    match kind {
+        value if value == NnrpHandleKind::Session as u32 => CacheLeaseOwnerScope::Session,
+        value if value == NnrpHandleKind::Operation as u32 => CacheLeaseOwnerScope::Operation,
+        _ => CacheLeaseOwnerScope::Connection,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1891,7 +2679,7 @@ mod tests {
         assert_eq!(capabilities.sdk_minor, 0);
         assert_eq!(capabilities.sdk_patch, 0);
         assert_eq!(capabilities.sdk_preview, 3);
-        assert_eq!(capabilities.sdk_revision, 1);
+        assert_eq!(capabilities.sdk_revision, 3);
         assert_eq!(capabilities.reserved1, 0);
         assert_eq!(
             capabilities.transport_slots,
@@ -1940,6 +2728,26 @@ mod tests {
         );
         assert_ne!(
             capabilities.feature_flags & NNRP_RUNTIME_FEATURE_TRANSPORT_SLOTS,
+            0
+        );
+        assert_ne!(
+            capabilities.feature_flags & NNRP_RUNTIME_FEATURE_BATCH_POLLING,
+            0
+        );
+        assert_ne!(
+            capabilities.feature_flags & NNRP_RUNTIME_FEATURE_CACHE_LEASE_OPS,
+            0
+        );
+        assert_ne!(
+            capabilities.feature_flags & NNRP_RUNTIME_FEATURE_SCHEMA_REGISTRY_HANDLES,
+            0
+        );
+        assert_ne!(
+            capabilities.feature_flags & NNRP_RUNTIME_FEATURE_BUFFER_HANDLES,
+            0
+        );
+        assert_ne!(
+            capabilities.feature_flags & NNRP_RUNTIME_FEATURE_EXECUTABLE_RESUME,
             0
         );
     }
@@ -2608,6 +3416,1007 @@ mod tests {
             assert_eq!(
                 nnrp_typed_payload_validate_binding(core::ptr::null(), 0, unspecified),
                 NnrpFfiStatus::ok()
+            );
+        }
+    }
+
+    #[test]
+    fn ffi_schema_registry_handles_install_lookup_validate_and_release() {
+        unsafe {
+            let mut registry = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_schema_registry_create(&mut registry),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(registry.kind, NnrpHandleKind::SchemaRegistry as u32);
+
+            let mut token_schema = NnrpSchemaDescriptorHeader {
+                schema_id: 0,
+                schema_version: 0,
+                profile_id: 0,
+                schema_flags: 0,
+                min_version_major: 0,
+                max_version_major: 0,
+                reserved0: 0,
+                body_bytes: 0,
+                dependency_count: 0,
+                default_stream_semantics: 0,
+                schema_hash: 0,
+            };
+            assert_eq!(
+                nnrp_token_delta_schema_descriptor(&mut token_schema),
+                NnrpFfiStatus::ok()
+            );
+
+            let mut action = u32::MAX;
+            assert_eq!(
+                nnrp_schema_registry_install(registry, token_schema, &mut action),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(action, NNRP_SCHEMA_REGISTRY_ACTION_ALREADY_INSTALLED);
+
+            let mut looked_up = NnrpSchemaDescriptorHeader {
+                schema_id: 0,
+                schema_version: 0,
+                profile_id: 0,
+                schema_flags: 0,
+                min_version_major: 0,
+                max_version_major: 0,
+                reserved0: 0,
+                body_bytes: 0,
+                dependency_count: 0,
+                default_stream_semantics: 0,
+                schema_hash: 0,
+            };
+            assert_eq!(
+                nnrp_schema_registry_lookup(
+                    registry,
+                    token_schema.schema_id,
+                    token_schema.schema_version,
+                    &mut looked_up,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(looked_up.schema_hash, token_schema.schema_hash);
+
+            let descriptor = NnrpTypedPayloadDescriptor {
+                profile_id: nnrp_core::PROFILE_TOKEN,
+                descriptor_flags: 0,
+                schema_id: token_schema.schema_id,
+                schema_version: token_schema.schema_version,
+                stream_semantics: nnrp_core::STREAM_SEMANTICS_TOKEN_DELTA,
+                reserved0: 0,
+                offset: 0,
+                length: 16,
+            };
+            assert_eq!(
+                nnrp_schema_registry_validate_binding(registry, descriptor),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(
+                nnrp_schema_registry_invalidate(
+                    registry,
+                    token_schema.schema_id,
+                    token_schema.schema_version,
+                    &mut action,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(action, NNRP_SCHEMA_REGISTRY_ACTION_INVALIDATED);
+            assert_eq!(
+                nnrp_schema_registry_validate_binding(registry, descriptor),
+                schema_registry_failure_status(SchemaRegistryFailure::Unknown)
+            );
+            assert_eq!(nnrp_schema_registry_release(registry), NnrpFfiStatus::ok());
+            assert_eq!(
+                nnrp_schema_registry_lookup(
+                    registry,
+                    token_schema.schema_id,
+                    token_schema.schema_version,
+                    &mut looked_up,
+                ),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::SchemaRegistry as u32)
+            );
+        }
+    }
+
+    #[test]
+    fn ffi_schema_registry_handles_cover_update_and_error_paths() {
+        unsafe {
+            let mut registry = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_schema_registry_create(core::ptr::null_mut()),
+                NnrpFfiStatus::invalid_argument(40)
+            );
+            assert_eq!(
+                nnrp_schema_registry_create(&mut registry),
+                NnrpFfiStatus::ok()
+            );
+
+            let schema_v1 = NnrpSchemaDescriptorHeader {
+                schema_id: 0x50,
+                schema_version: 1,
+                profile_id: nnrp_core::PROFILE_TENSOR,
+                schema_flags: 0,
+                min_version_major: 1,
+                max_version_major: 1,
+                reserved0: 0,
+                body_bytes: 64,
+                dependency_count: 0,
+                default_stream_semantics: 0,
+                schema_hash: 0x1111,
+            };
+            let mut action = u32::MAX;
+            assert_eq!(
+                nnrp_schema_registry_install(registry, schema_v1, core::ptr::null_mut()),
+                NnrpFfiStatus::invalid_argument(41)
+            );
+            assert_eq!(
+                nnrp_schema_registry_install(registry, schema_v1, &mut action),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(action, NNRP_SCHEMA_REGISTRY_ACTION_INSTALLED);
+
+            let schema_v2 = NnrpSchemaDescriptorHeader {
+                schema_version: 2,
+                schema_hash: 0x2222,
+                ..schema_v1
+            };
+            assert_eq!(
+                nnrp_schema_registry_install(registry, schema_v2, &mut action),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(action, NNRP_SCHEMA_REGISTRY_ACTION_UPDATED);
+
+            let conflict = NnrpSchemaDescriptorHeader {
+                schema_hash: 0x3333,
+                ..schema_v2
+            };
+            assert_eq!(
+                nnrp_schema_registry_install(registry, conflict, &mut action),
+                schema_registry_failure_status(SchemaRegistryFailure::HashConflict)
+            );
+
+            let reserved = NnrpSchemaDescriptorHeader {
+                reserved0: 1,
+                ..schema_v1
+            };
+            assert_eq!(
+                nnrp_schema_registry_install(registry, reserved, &mut action).status_code,
+                NnrpFfiStatusCode::ProtocolError as u32
+            );
+
+            let mut looked_up = schema_v1;
+            assert_eq!(
+                nnrp_schema_registry_lookup(registry, schema_v1.schema_id, 99, &mut looked_up),
+                schema_registry_failure_status(SchemaRegistryFailure::VersionUnknown)
+            );
+            assert_eq!(
+                nnrp_schema_registry_lookup(
+                    registry,
+                    schema_v1.schema_id,
+                    schema_v1.schema_version,
+                    core::ptr::null_mut(),
+                ),
+                NnrpFfiStatus::invalid_argument(42)
+            );
+            assert_eq!(
+                nnrp_schema_registry_invalidate(registry, schema_v1.schema_id, 99, &mut action,),
+                schema_registry_failure_status(SchemaRegistryFailure::VersionUnknown)
+            );
+            assert_eq!(
+                nnrp_schema_registry_invalidate(
+                    registry,
+                    schema_v1.schema_id,
+                    schema_v1.schema_version,
+                    core::ptr::null_mut(),
+                ),
+                NnrpFfiStatus::invalid_argument(43)
+            );
+
+            let bad_descriptor = NnrpTypedPayloadDescriptor {
+                profile_id: nnrp_core::PROFILE_TENSOR,
+                descriptor_flags: 0,
+                schema_id: schema_v1.schema_id,
+                schema_version: schema_v1.schema_version,
+                stream_semantics: 0,
+                reserved0: 1,
+                offset: 0,
+                length: 8,
+            };
+            assert_eq!(
+                nnrp_schema_registry_validate_binding(registry, bad_descriptor).status_code,
+                NnrpFfiStatusCode::ProtocolError as u32
+            );
+            assert_eq!(
+                nnrp_schema_registry_release(NnrpHandle::invalid()),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::SchemaRegistry as u32)
+            );
+        }
+    }
+
+    #[test]
+    fn ffi_buffer_handles_keep_stable_copied_views_until_release() {
+        unsafe {
+            let source = [1u8, 2, 3, 4];
+            let mut buffer = NnrpHandle::invalid();
+            let mut view = NnrpBufferView::empty();
+            assert_eq!(
+                nnrp_buffer_acquire_copy(
+                    NnrpBufferView {
+                        ptr: source.as_ptr(),
+                        len: source.len(),
+                    },
+                    &mut buffer,
+                    &mut view,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(buffer.kind, NnrpHandleKind::Buffer as u32);
+            assert_eq!(ffi_read_slice(view), source);
+
+            let mut second_view = NnrpBufferView::empty();
+            assert_eq!(
+                nnrp_buffer_view(buffer, &mut second_view),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(ffi_read_slice(second_view), source);
+            assert_eq!(nnrp_buffer_release(buffer), NnrpFfiStatus::ok());
+            assert_eq!(
+                nnrp_buffer_view(buffer, &mut second_view),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Buffer as u32)
+            );
+        }
+    }
+
+    #[test]
+    fn ffi_buffer_handles_cover_invalid_inputs() {
+        unsafe {
+            let source = [5u8, 6];
+            let mut buffer = NnrpHandle::invalid();
+            let mut view = NnrpBufferView::empty();
+            assert_eq!(
+                nnrp_buffer_acquire_copy(
+                    NnrpBufferView {
+                        ptr: source.as_ptr(),
+                        len: source.len(),
+                    },
+                    core::ptr::null_mut(),
+                    &mut view,
+                ),
+                NnrpFfiStatus::invalid_argument(44)
+            );
+            assert_eq!(
+                nnrp_buffer_acquire_copy(
+                    NnrpBufferView {
+                        ptr: core::ptr::null(),
+                        len: 1,
+                    },
+                    &mut buffer,
+                    &mut view,
+                ),
+                NnrpFfiStatus::invalid_argument(1)
+            );
+            assert_eq!(
+                nnrp_buffer_acquire_copy(NnrpBufferView::empty(), &mut buffer, &mut view),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(
+                nnrp_buffer_view(buffer, core::ptr::null_mut()),
+                NnrpFfiStatus::invalid_argument(45)
+            );
+            assert_eq!(
+                nnrp_buffer_view(NnrpHandle::invalid(), &mut view),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Buffer as u32)
+            );
+            assert_eq!(
+                nnrp_buffer_release(NnrpHandle::invalid()),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Buffer as u32)
+            );
+            assert_eq!(nnrp_buffer_release(buffer), NnrpFfiStatus::ok());
+        }
+    }
+
+    #[test]
+    fn ffi_cache_lease_handles_query_touch_prefetch_and_release() {
+        unsafe {
+            let mut connection = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_connect(
+                    NnrpClientConnectRequest {
+                        connection_id: 481_000,
+                        generation: 1,
+                        transport_id: 1,
+                    },
+                    &mut connection,
+                ),
+                NnrpFfiStatus::ok()
+            );
+
+            let object_id = NnrpCacheObjectId {
+                cache_namespace: 7,
+                cache_key_hi: 11,
+                cache_key_lo: 13,
+                object_kind: CacheObjectKind::ReusableResultObject as u32,
+            };
+            let request = NnrpCacheLeaseRequest {
+                owner: connection,
+                object_id,
+                expected_version: 9,
+                now_ms: 1_000,
+                ttl_ms: 500,
+            };
+            let mut result = NnrpCacheLeaseResult {
+                outcome_code: 0,
+                lease_handle: NnrpHandle::invalid(),
+                object_id,
+                object_version: 0,
+                lease_id: 0,
+                expires_at_ms: 0,
+            };
+            assert_eq!(nnrp_cache_query(request, &mut result), NnrpFfiStatus::ok());
+            assert_eq!(result.outcome_code, NNRP_CACHE_LEASE_OUTCOME_VALID);
+            assert_eq!(result.lease_handle.kind, NnrpHandleKind::CacheLease as u32);
+            assert_eq!(result.object_version, 9);
+            assert_eq!(result.expires_at_ms, 31_000);
+
+            let mut touched = result;
+            assert_eq!(
+                nnrp_cache_touch(
+                    NnrpCacheLeaseRequest {
+                        now_ms: 1_100,
+                        ttl_ms: 900,
+                        ..request
+                    },
+                    &mut touched,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(touched.lease_handle, result.lease_handle);
+            assert_eq!(touched.expires_at_ms, 1_900);
+
+            let mut mismatch = result;
+            assert_eq!(
+                nnrp_cache_query(
+                    NnrpCacheLeaseRequest {
+                        expected_version: 10,
+                        ..request
+                    },
+                    &mut mismatch,
+                ),
+                cache_validation_failure_status(CacheValidationFailure::VersionMismatch)
+            );
+            assert_eq!(mismatch.object_version, 9);
+
+            let objects = [
+                NnrpCacheObjectId {
+                    cache_namespace: 7,
+                    cache_key_hi: 11,
+                    cache_key_lo: 14,
+                    object_kind: CacheObjectKind::PromptSegment as u32,
+                },
+                NnrpCacheObjectId {
+                    cache_namespace: 7,
+                    cache_key_hi: 11,
+                    cache_key_lo: 15,
+                    object_kind: CacheObjectKind::ToolSchema as u32,
+                },
+            ];
+            let mut results = [result; 2];
+            assert_eq!(
+                nnrp_cache_prefetch(
+                    connection,
+                    objects.as_ptr(),
+                    objects.len(),
+                    2_000,
+                    100,
+                    results.as_mut_ptr(),
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert!(results
+                .iter()
+                .all(|item| item.outcome_code == NNRP_CACHE_LEASE_OUTCOME_VALID));
+            assert_eq!(
+                nnrp_cache_prefetch(
+                    connection,
+                    core::ptr::null(),
+                    0,
+                    2_000,
+                    100,
+                    core::ptr::null_mut(),
+                ),
+                NnrpFfiStatus::ok()
+            );
+
+            let mut released = result;
+            assert_eq!(
+                nnrp_cache_release(result.lease_handle, &mut released),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(released.outcome_code, NNRP_CACHE_LEASE_OUTCOME_RELEASED);
+        }
+    }
+
+    #[test]
+    fn ffi_cache_lease_handles_cover_invalid_expired_and_owned_cleanup_paths() {
+        unsafe {
+            let mut connection = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_connect(
+                    NnrpClientConnectRequest {
+                        connection_id: 481_010,
+                        generation: 1,
+                        transport_id: 1,
+                    },
+                    &mut connection,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            let mut session = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_open_session(
+                    NnrpSessionOpenRequest {
+                        connection,
+                        requested_session_id: 481,
+                        generation: 1,
+                        profile_id: nnrp_core::PROFILE_TOKEN,
+                        schema_id: nnrp_core::TOKEN_DELTA_SCHEMA_ID,
+                        schema_version: nnrp_core::TOKEN_DELTA_SCHEMA_VERSION,
+                    },
+                    &mut session,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            let payload = [1u8];
+            let mut operation = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_submit(
+                    NnrpSubmitRequest {
+                        session,
+                        operation_id: 481_011,
+                        frame_id: 91,
+                        payload: NnrpBufferView {
+                            ptr: payload.as_ptr(),
+                            len: payload.len(),
+                        },
+                    },
+                    &mut operation,
+                ),
+                NnrpFfiStatus::ok()
+            );
+
+            let object_id = NnrpCacheObjectId {
+                cache_namespace: 9,
+                cache_key_hi: 10,
+                cache_key_lo: 11,
+                object_kind: CacheObjectKind::CameraBlock as u32,
+            };
+            let request = NnrpCacheLeaseRequest {
+                owner: session,
+                object_id,
+                expected_version: 0,
+                now_ms: 100,
+                ttl_ms: 1,
+            };
+            let mut result = NnrpCacheLeaseResult {
+                outcome_code: 0,
+                lease_handle: NnrpHandle::invalid(),
+                object_id,
+                object_version: 0,
+                lease_id: 0,
+                expires_at_ms: 0,
+            };
+            assert_eq!(
+                nnrp_cache_query(request, core::ptr::null_mut()),
+                NnrpFfiStatus::invalid_argument(49)
+            );
+            assert_eq!(
+                nnrp_cache_query(
+                    NnrpCacheLeaseRequest {
+                        object_id: NnrpCacheObjectId {
+                            object_kind: u32::MAX,
+                            ..object_id
+                        },
+                        ..request
+                    },
+                    &mut result,
+                )
+                .status_code,
+                NnrpFfiStatusCode::ProtocolError as u32
+            );
+            assert_eq!(
+                nnrp_cache_query(
+                    NnrpCacheLeaseRequest {
+                        owner: NnrpHandle::invalid(),
+                        ..request
+                    },
+                    &mut result,
+                ),
+                cache_validation_failure_status(CacheValidationFailure::Miss)
+            );
+            assert_eq!(
+                nnrp_cache_query(
+                    NnrpCacheLeaseRequest {
+                        owner: NnrpHandle::new(NnrpHandleKind::Buffer, 99, 1),
+                        ..request
+                    },
+                    &mut result,
+                ),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Buffer as u32)
+            );
+            assert_eq!(
+                nnrp_cache_touch(
+                    NnrpCacheLeaseRequest {
+                        ttl_ms: 0,
+                        ..request
+                    },
+                    &mut result,
+                ),
+                NnrpFfiStatus::invalid_argument(46)
+            );
+            assert_eq!(nnrp_cache_query(request, &mut result), NnrpFfiStatus::ok());
+            assert_eq!(
+                nnrp_cache_query(
+                    NnrpCacheLeaseRequest {
+                        now_ms: result.expires_at_ms,
+                        ..request
+                    },
+                    &mut result,
+                ),
+                cache_validation_failure_status(CacheValidationFailure::LeaseExpired)
+            );
+            assert_eq!(result.outcome_code, NNRP_CACHE_LEASE_OUTCOME_EXPIRED);
+            assert_eq!(
+                nnrp_cache_prefetch(session, core::ptr::null(), 1, 0, 1, core::ptr::null_mut(),),
+                NnrpFfiStatus::invalid_argument(47)
+            );
+
+            let operation_request = NnrpCacheLeaseRequest {
+                owner: operation,
+                object_id: NnrpCacheObjectId {
+                    cache_key_lo: 12,
+                    ..object_id
+                },
+                expected_version: 0,
+                now_ms: 200,
+                ttl_ms: 1,
+            };
+            assert_eq!(
+                nnrp_cache_query(operation_request, &mut result),
+                NnrpFfiStatus::ok()
+            );
+            let operation_lease = result.lease_handle;
+            assert_eq!(
+                nnrp_cache_release(result.lease_handle, core::ptr::null_mut()),
+                NnrpFfiStatus::invalid_argument(48)
+            );
+            assert_eq!(
+                nnrp_cache_release(NnrpHandle::invalid(), &mut result),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::CacheLease as u32)
+            );
+            assert_eq!(
+                nnrp_client_close_connection(connection),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(
+                nnrp_cache_release(operation_lease, &mut result),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::CacheLease as u32)
+            );
+        }
+    }
+
+    #[test]
+    fn ffi_client_resume_session_opens_session_with_recovery_outcome() {
+        unsafe {
+            let mut connection = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_connect(
+                    NnrpClientConnectRequest {
+                        connection_id: 481_100,
+                        generation: 1,
+                        transport_id: 1,
+                    },
+                    &mut connection,
+                ),
+                NnrpFfiStatus::ok()
+            );
+
+            let mut session = NnrpHandle::invalid();
+            let mut outcome = NnrpSessionRecoveryOutcome {
+                outcome_code: 0,
+                resume_window_ms: 0,
+            };
+            assert_eq!(
+                nnrp_client_resume_session(
+                    NnrpSessionResumeRequest {
+                        connection,
+                        requested_session_id: 88,
+                        generation: 1,
+                        profile_id: nnrp_core::PROFILE_TOKEN,
+                        schema_id: nnrp_core::TOKEN_DELTA_SCHEMA_ID,
+                        schema_version: nnrp_core::TOKEN_DELTA_SCHEMA_VERSION,
+                        resume_token_bytes: 16,
+                    },
+                    &mut session,
+                    &mut outcome,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(session.kind, NnrpHandleKind::Session as u32);
+            assert_eq!(session.id, 88);
+            assert_eq!(outcome.outcome_code, NNRP_SESSION_RECOVERY_OUTCOME_RESUMED);
+
+            assert_eq!(
+                nnrp_client_resume_session(
+                    NnrpSessionResumeRequest {
+                        connection,
+                        requested_session_id: 0,
+                        generation: 1,
+                        profile_id: nnrp_core::PROFILE_TOKEN,
+                        schema_id: nnrp_core::TOKEN_DELTA_SCHEMA_ID,
+                        schema_version: nnrp_core::TOKEN_DELTA_SCHEMA_VERSION,
+                        resume_token_bytes: 16,
+                    },
+                    &mut session,
+                    &mut outcome,
+                ),
+                NnrpFfiStatus::invalid_argument(39)
+            );
+
+            assert_eq!(
+                nnrp_client_resume_session(
+                    NnrpSessionResumeRequest {
+                        connection,
+                        requested_session_id: 90,
+                        generation: 1,
+                        profile_id: nnrp_core::PROFILE_TOKEN,
+                        schema_id: nnrp_core::TOKEN_DELTA_SCHEMA_ID,
+                        schema_version: nnrp_core::TOKEN_DELTA_SCHEMA_VERSION,
+                        resume_token_bytes: 16,
+                    },
+                    core::ptr::null_mut(),
+                    &mut outcome,
+                ),
+                NnrpFfiStatus::invalid_argument(39)
+            );
+            assert_eq!(
+                nnrp_client_resume_session(
+                    NnrpSessionResumeRequest {
+                        connection: NnrpHandle::invalid(),
+                        requested_session_id: 90,
+                        generation: 1,
+                        profile_id: nnrp_core::PROFILE_TOKEN,
+                        schema_id: nnrp_core::TOKEN_DELTA_SCHEMA_ID,
+                        schema_version: nnrp_core::TOKEN_DELTA_SCHEMA_VERSION,
+                        resume_token_bytes: 16,
+                    },
+                    &mut session,
+                    &mut outcome,
+                ),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Connection as u32)
+            );
+        }
+    }
+
+    #[test]
+    fn ffi_control_emits_distinct_result_hint_events() {
+        unsafe {
+            let mut connection = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_connect(
+                    NnrpClientConnectRequest {
+                        connection_id: 481_200,
+                        generation: 1,
+                        transport_id: 1,
+                    },
+                    &mut connection,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            let mut session = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_open_session(
+                    NnrpSessionOpenRequest {
+                        connection,
+                        requested_session_id: 89,
+                        generation: 1,
+                        profile_id: nnrp_core::PROFILE_TOKEN,
+                        schema_id: nnrp_core::TOKEN_DELTA_SCHEMA_ID,
+                        schema_version: nnrp_core::TOKEN_DELTA_SCHEMA_VERSION,
+                    },
+                    &mut session,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            let payload = [0u8; 1];
+            let mut operation = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_submit(
+                    NnrpSubmitRequest {
+                        session,
+                        operation_id: 481_201,
+                        frame_id: 77,
+                        payload: NnrpBufferView {
+                            ptr: payload.as_ptr(),
+                            len: payload.len(),
+                        },
+                    },
+                    &mut operation,
+                ),
+                NnrpFfiStatus::ok()
+            );
+
+            let hint = ResultHintMetadata {
+                applied_budget_policy: nnrp_core::ResultHintBudgetPolicy::Partial,
+                congestion_state: nnrp_core::ResultHintCongestionState::Elevated,
+                reason: nnrp_core::ResultHintReason::ServerBusy,
+                retry_after_ms: 250,
+            }
+            .to_bytes()
+            .unwrap();
+            assert_eq!(
+                nnrp_control(NnrpControlRequest {
+                    handle: operation,
+                    control_code: MessageType::ResultHint as u32,
+                    payload: NnrpBufferView {
+                        ptr: hint.as_ptr(),
+                        len: hint.len(),
+                    },
+                }),
+                NnrpFfiStatus::ok()
+            );
+
+            let mut events = [NnrpEvent::none(); 4];
+            let mut event_count = 0usize;
+            assert_eq!(
+                nnrp_client_await_events(
+                    connection,
+                    events.as_mut_ptr(),
+                    events.len(),
+                    &mut event_count,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(event_count, 4);
+            assert_eq!(events[3].kind, NnrpEventKind::ResultHint as u32);
+            assert_eq!(events[3].session, session);
+            assert_eq!(events[3].operation, operation);
+
+            assert_eq!(
+                nnrp_control(NnrpControlRequest {
+                    handle: operation,
+                    control_code: MessageType::ResultHint as u32,
+                    payload: NnrpBufferView::empty(),
+                })
+                .status_code,
+                NnrpFfiStatusCode::InvalidArgument as u32
+            );
+
+            assert_eq!(
+                nnrp_control(NnrpControlRequest {
+                    handle: connection,
+                    control_code: MessageType::Ping as u32,
+                    payload: NnrpBufferView::empty(),
+                }),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(
+                nnrp_control(NnrpControlRequest {
+                    handle: session,
+                    control_code: MessageType::Pong as u32,
+                    payload: NnrpBufferView::empty(),
+                }),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(
+                nnrp_control(NnrpControlRequest {
+                    handle: NnrpHandle::invalid(),
+                    control_code: MessageType::Pong as u32,
+                    payload: NnrpBufferView::empty(),
+                }),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Invalid as u32)
+            );
+            assert_eq!(
+                nnrp_control(NnrpControlRequest {
+                    handle: operation,
+                    control_code: MessageType::Pong as u32,
+                    payload: NnrpBufferView {
+                        ptr: core::ptr::null(),
+                        len: 1,
+                    },
+                }),
+                NnrpFfiStatus::invalid_argument(1)
+            );
+        }
+    }
+
+    #[test]
+    fn ffi_native_gap_helpers_cover_internal_defensive_branches() {
+        unsafe {
+            let registry_handle = NnrpHandle::new(NnrpHandleKind::SchemaRegistry, 881_000, 1);
+            let buffer_handle = NnrpHandle::new(NnrpHandleKind::Buffer, 881_001, 1);
+            let lease_handle = NnrpHandle::new(NnrpHandleKind::CacheLease, 881_002, 1);
+            let connection_handle = NnrpHandle::new(NnrpHandleKind::Connection, 881_003, 1);
+            let session_handle = NnrpHandle::new(NnrpHandleKind::Session, 881_004, 1);
+            let operation_handle = NnrpHandle::new(NnrpHandleKind::Operation, 881_005, 1);
+            {
+                let mut store = handle_store();
+                store
+                    .insert(
+                        registry_handle,
+                        NnrpFfiResource::Buffer {
+                            bytes: vec![1, 2, 3],
+                        },
+                    )
+                    .unwrap();
+                store
+                    .insert(
+                        buffer_handle,
+                        NnrpFfiResource::SchemaRegistry {
+                            registry: SchemaRegistry::new(),
+                        },
+                    )
+                    .unwrap();
+                store
+                    .insert(lease_handle, NnrpFfiResource::Buffer { bytes: vec![4, 5] })
+                    .unwrap();
+                store
+                    .insert(connection_handle, NnrpFfiResource::Buffer { bytes: vec![] })
+                    .unwrap();
+                store
+                    .insert(session_handle, NnrpFfiResource::Buffer { bytes: vec![] })
+                    .unwrap();
+                store
+                    .insert(operation_handle, NnrpFfiResource::Buffer { bytes: vec![] })
+                    .unwrap();
+            }
+
+            let schema = NnrpSchemaDescriptorHeader {
+                schema_id: 0x60,
+                schema_version: 1,
+                profile_id: nnrp_core::PROFILE_TENSOR,
+                schema_flags: 0,
+                min_version_major: 1,
+                max_version_major: 1,
+                reserved0: 0,
+                body_bytes: 32,
+                dependency_count: 0,
+                default_stream_semantics: 0,
+                schema_hash: 0x6060,
+            };
+            let mut action = 0;
+            let mut schema_out = schema;
+            let descriptor = NnrpTypedPayloadDescriptor {
+                profile_id: nnrp_core::PROFILE_TENSOR,
+                descriptor_flags: 0,
+                schema_id: schema.schema_id,
+                schema_version: schema.schema_version,
+                stream_semantics: 0,
+                reserved0: 0,
+                offset: 0,
+                length: 8,
+            };
+            assert_eq!(
+                nnrp_schema_registry_install(registry_handle, schema, &mut action),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::SchemaRegistry as u32)
+            );
+            assert_eq!(
+                nnrp_schema_registry_lookup(
+                    registry_handle,
+                    schema.schema_id,
+                    schema.schema_version,
+                    &mut schema_out,
+                ),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::SchemaRegistry as u32)
+            );
+            assert_eq!(
+                nnrp_schema_registry_invalidate(
+                    registry_handle,
+                    schema.schema_id,
+                    schema.schema_version,
+                    &mut action,
+                ),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::SchemaRegistry as u32)
+            );
+            assert_eq!(
+                nnrp_schema_registry_validate_binding(registry_handle, descriptor),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::SchemaRegistry as u32)
+            );
+
+            let mut view = NnrpBufferView::empty();
+            assert_eq!(
+                nnrp_buffer_view(buffer_handle, &mut view),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Buffer as u32)
+            );
+            assert_eq!(
+                nnrp_buffer_release(buffer_handle),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Buffer as u32)
+            );
+
+            let object_id = NnrpCacheObjectId {
+                cache_namespace: 1,
+                cache_key_hi: 2,
+                cache_key_lo: 3,
+                object_kind: CacheObjectKind::CameraBlock as u32,
+            };
+            let mut lease_result = NnrpCacheLeaseResult {
+                outcome_code: 0,
+                lease_handle: NnrpHandle::invalid(),
+                object_id,
+                object_version: 0,
+                lease_id: 0,
+                expires_at_ms: 0,
+            };
+            assert_eq!(
+                nnrp_cache_release(lease_handle, &mut lease_result),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::CacheLease as u32)
+            );
+            assert_eq!(
+                nnrp_cache_query(
+                    NnrpCacheLeaseRequest {
+                        owner: NnrpHandle {
+                            generation: 2,
+                            ..connection_handle
+                        },
+                        object_id,
+                        expected_version: 0,
+                        now_ms: 0,
+                        ttl_ms: 1,
+                    },
+                    &mut lease_result,
+                ),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Connection as u32)
+            );
+            let objects = [NnrpCacheObjectId {
+                object_kind: u32::MAX,
+                ..object_id
+            }];
+            let mut results = [lease_result];
+            assert_eq!(
+                nnrp_cache_prefetch(
+                    connection_handle,
+                    objects.as_ptr(),
+                    objects.len(),
+                    0,
+                    1,
+                    results.as_mut_ptr(),
+                )
+                .status_code,
+                NnrpFfiStatusCode::ProtocolError as u32
+            );
+
+            assert_eq!(
+                nnrp_control(NnrpControlRequest {
+                    handle: connection_handle,
+                    control_code: MessageType::Ping as u32,
+                    payload: NnrpBufferView::empty(),
+                }),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Connection as u32)
+            );
+            assert_eq!(
+                nnrp_control(NnrpControlRequest {
+                    handle: session_handle,
+                    control_code: MessageType::Ping as u32,
+                    payload: NnrpBufferView::empty(),
+                }),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32)
+            );
+            assert_eq!(
+                nnrp_control(NnrpControlRequest {
+                    handle: operation_handle,
+                    control_code: MessageType::Ping as u32,
+                    payload: NnrpBufferView::empty(),
+                }),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Operation as u32)
+            );
+            assert_eq!(
+                nnrp_control(NnrpControlRequest {
+                    handle: NnrpHandle::new(NnrpHandleKind::CacheLease, 991, 1),
+                    control_code: MessageType::Ping as u32,
+                    payload: NnrpBufferView::empty(),
+                }),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::CacheLease as u32)
             );
         }
     }
