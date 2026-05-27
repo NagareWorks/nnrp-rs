@@ -14,9 +14,9 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.3.2" }
-nnrp-ffi = { path = "../nnrp-ffi", version = "1.0.0-preview.3.2" }
-nnrp-transport-provider = { path = "../nnrp-transport-provider", version = "1.0.0-preview.3.2" }
-nnrp-transport-quic = { path = "../nnrp-transport-quic", version = "1.0.0-preview.3.2" }
-nnrp-transport-tcp = { path = "../nnrp-transport-tcp", version = "1.0.0-preview.3.2" }
+nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.3.3" }
+nnrp-ffi = { path = "../nnrp-ffi", version = "1.0.0-preview.3.3" }
+nnrp-transport-provider = { path = "../nnrp-transport-provider", version = "1.0.0-preview.3.3" }
+nnrp-transport-quic = { path = "../nnrp-transport-quic", version = "1.0.0-preview.3.3" }
+nnrp-transport-tcp = { path = "../nnrp-transport-tcp", version = "1.0.0-preview.3.3" }
 serde_json.workspace = true

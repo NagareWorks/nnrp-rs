@@ -14,7 +14,7 @@ typedef struct NnrpProtocolVersion {
 } NnrpProtocolVersion;
 
 #define NNRP_FFI_ABI_MAJOR 1
-#define NNRP_FFI_ABI_MINOR 1
+#define NNRP_FFI_ABI_MINOR 2
 #define NNRP_FFI_ABI_PATCH 0
 
 #define NNRP_TRANSPORT_SLOT_QUIC 0x00000001u
@@ -30,11 +30,25 @@ typedef struct NnrpProtocolVersion {
 #define NNRP_RUNTIME_FEATURE_TYPED_PAYLOAD 0x0000000000000080ull
 #define NNRP_RUNTIME_FEATURE_TRANSPORT_SLOTS 0x0000000000000100ull
 #define NNRP_RUNTIME_FEATURE_BATCH_POLLING 0x0000000000000200ull
+#define NNRP_RUNTIME_FEATURE_CACHE_LEASE_OPS 0x0000000000000400ull
+#define NNRP_RUNTIME_FEATURE_SCHEMA_REGISTRY_HANDLES 0x0000000000000800ull
+#define NNRP_RUNTIME_FEATURE_BUFFER_HANDLES 0x0000000000001000ull
+#define NNRP_RUNTIME_FEATURE_EXECUTABLE_RESUME 0x0000000000002000ull
 
 #define NNRP_SESSION_RECOVERY_OUTCOME_FRESH 0u
 #define NNRP_SESSION_RECOVERY_OUTCOME_RESUME_ENABLED 1u
 #define NNRP_SESSION_RECOVERY_OUTCOME_RESUMED 2u
 #define NNRP_SESSION_RECOVERY_OUTCOME_RESUME_REJECTED 3u
+
+#define NNRP_SCHEMA_REGISTRY_ACTION_INSTALLED 0u
+#define NNRP_SCHEMA_REGISTRY_ACTION_ALREADY_INSTALLED 1u
+#define NNRP_SCHEMA_REGISTRY_ACTION_UPDATED 2u
+#define NNRP_SCHEMA_REGISTRY_ACTION_INVALIDATED 3u
+
+#define NNRP_CACHE_LEASE_OUTCOME_VALID 0u
+#define NNRP_CACHE_LEASE_OUTCOME_MISS 1u
+#define NNRP_CACHE_LEASE_OUTCOME_EXPIRED 2u
+#define NNRP_CACHE_LEASE_OUTCOME_RELEASED 3u
 
 typedef struct NnrpRuntimeCapabilities {
   uint16_t abi_major;
@@ -80,7 +94,9 @@ typedef enum NnrpHandleKind {
   NNRP_HANDLE_SESSION = 2,
   NNRP_HANDLE_OPERATION = 3,
   NNRP_HANDLE_EVENT_PUMP = 4,
-  NNRP_HANDLE_BUFFER = 5
+  NNRP_HANDLE_BUFFER = 5,
+  NNRP_HANDLE_SCHEMA_REGISTRY = 6,
+  NNRP_HANDLE_CACHE_LEASE = 7
 } NnrpHandleKind;
 
 typedef enum NnrpEventKind {
@@ -94,7 +110,8 @@ typedef enum NnrpEventKind {
   NNRP_EVENT_RESULT_DROPPED = 7,
   NNRP_EVENT_FLOW_UPDATED = 8,
   NNRP_EVENT_CONTROL = 9,
-  NNRP_EVENT_ERROR = 10
+  NNRP_EVENT_ERROR = 10,
+  NNRP_EVENT_RESULT_HINT = 11
 } NnrpEventKind;
 
 typedef struct NnrpFfiStatus {
@@ -158,6 +175,40 @@ typedef struct NnrpSessionRecoveryOutcome {
   uint32_t outcome_code;
   uint32_t resume_window_ms;
 } NnrpSessionRecoveryOutcome;
+
+typedef struct NnrpCacheObjectId {
+  uint32_t cache_namespace;
+  uint32_t cache_key_hi;
+  uint32_t cache_key_lo;
+  uint32_t object_kind;
+} NnrpCacheObjectId;
+
+typedef struct NnrpCacheLeaseRequest {
+  NnrpHandle owner;
+  NnrpCacheObjectId object_id;
+  uint64_t expected_version;
+  uint64_t now_ms;
+  uint32_t ttl_ms;
+} NnrpCacheLeaseRequest;
+
+typedef struct NnrpCacheLeaseResult {
+  uint32_t outcome_code;
+  NnrpHandle lease_handle;
+  NnrpCacheObjectId object_id;
+  uint64_t object_version;
+  uint64_t lease_id;
+  uint64_t expires_at_ms;
+} NnrpCacheLeaseResult;
+
+typedef struct NnrpSessionResumeRequest {
+  NnrpHandle connection;
+  uint32_t requested_session_id;
+  uint32_t generation;
+  uint16_t profile_id;
+  uint32_t schema_id;
+  uint32_t schema_version;
+  uint32_t resume_token_bytes;
+} NnrpSessionResumeRequest;
 
 typedef struct NnrpEvent {
   uint32_t kind;
@@ -259,6 +310,7 @@ NnrpFfiStatus nnrp_connection_bootstrap(NnrpConnectionBootstrap request, NnrpHan
 NnrpFfiStatus nnrp_client_connect(NnrpClientConnectRequest request, NnrpHandle *out_connection);
 NnrpFfiStatus nnrp_session_open(NnrpSessionOpenRequest request, NnrpHandle *out_session);
 NnrpFfiStatus nnrp_client_open_session(NnrpSessionOpenRequest request, NnrpHandle *out_session);
+NnrpFfiStatus nnrp_client_resume_session(NnrpSessionResumeRequest request, NnrpHandle *out_session, NnrpSessionRecoveryOutcome *out_outcome);
 NnrpFfiStatus nnrp_submit(NnrpSubmitRequest request, NnrpHandle *out_operation);
 NnrpFfiStatus nnrp_client_submit(NnrpSubmitRequest request, NnrpHandle *out_operation);
 NnrpFfiStatus nnrp_session_close(NnrpHandle session);
@@ -274,10 +326,23 @@ NnrpFfiStatus nnrp_token_delta_schema_descriptor(NnrpSchemaDescriptorHeader *out
 NnrpFfiStatus nnrp_typed_payload_descriptor_parse(NnrpBufferView source, NnrpTypedPayloadDescriptor *out_descriptor);
 NnrpFfiStatus nnrp_typed_payload_descriptor_write(NnrpTypedPayloadDescriptor descriptor, NnrpBufferViewMut destination);
 NnrpFfiStatus nnrp_typed_payload_validate_binding(const NnrpSchemaDescriptorHeader *schema_descriptors, uintptr_t schema_count, NnrpTypedPayloadDescriptor descriptor);
+NnrpFfiStatus nnrp_schema_registry_create(NnrpHandle *out_registry);
+NnrpFfiStatus nnrp_schema_registry_install(NnrpHandle registry_handle, NnrpSchemaDescriptorHeader descriptor, uint32_t *out_action);
+NnrpFfiStatus nnrp_schema_registry_lookup(NnrpHandle registry_handle, uint32_t schema_id, uint32_t schema_version, NnrpSchemaDescriptorHeader *out_descriptor);
+NnrpFfiStatus nnrp_schema_registry_invalidate(NnrpHandle registry_handle, uint32_t schema_id, uint32_t schema_version, uint32_t *out_action);
+NnrpFfiStatus nnrp_schema_registry_validate_binding(NnrpHandle registry_handle, NnrpTypedPayloadDescriptor descriptor);
+NnrpFfiStatus nnrp_schema_registry_release(NnrpHandle registry_handle);
 NnrpFfiStatus nnrp_session_recovery_request_validate(NnrpBufferView session_open_metadata);
 NnrpFfiStatus nnrp_session_recovery_ack_validate(NnrpBufferView session_open_metadata, NnrpBufferView session_open_ack_metadata, NnrpSessionRecoveryOutcome *out_outcome);
 NnrpFfiStatus nnrp_migration_recovery_validate(NnrpBufferView session_migrate_metadata, NnrpBufferView session_migrate_ack_metadata);
 NnrpFfiStatus nnrp_migration_should_replay_frame(NnrpBufferView session_migrate_ack_metadata, uint64_t frame_id, uint8_t *out_should_replay);
+NnrpFfiStatus nnrp_buffer_acquire_copy(NnrpBufferView source, NnrpHandle *out_buffer, NnrpBufferView *out_view);
+NnrpFfiStatus nnrp_buffer_view(NnrpHandle buffer, NnrpBufferView *out_view);
+NnrpFfiStatus nnrp_buffer_release(NnrpHandle buffer);
+NnrpFfiStatus nnrp_cache_query(NnrpCacheLeaseRequest request, NnrpCacheLeaseResult *out_result);
+NnrpFfiStatus nnrp_cache_touch(NnrpCacheLeaseRequest request, NnrpCacheLeaseResult *out_result);
+NnrpFfiStatus nnrp_cache_prefetch(NnrpHandle owner, const NnrpCacheObjectId *objects, uintptr_t object_count, uint64_t now_ms, uint32_t ttl_ms, NnrpCacheLeaseResult *out_results);
+NnrpFfiStatus nnrp_cache_release(NnrpHandle lease_handle, NnrpCacheLeaseResult *out_result);
 NnrpFfiStatus nnrp_server_bind(NnrpServerBindRequest request, NnrpHandle *out_server);
 NnrpFfiStatus nnrp_server_accept(NnrpServerAcceptRequest request, NnrpHandle *out_session);
 NnrpFfiStatus nnrp_server_receive_submit(NnrpServerReceiveSubmitRequest request, NnrpHandle *out_operation);
