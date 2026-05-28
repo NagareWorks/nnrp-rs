@@ -14,7 +14,7 @@ typedef struct NnrpProtocolVersion {
 } NnrpProtocolVersion;
 
 #define NNRP_FFI_ABI_MAJOR 1
-#define NNRP_FFI_ABI_MINOR 4
+#define NNRP_FFI_ABI_MINOR 5
 #define NNRP_FFI_ABI_PATCH 0
 
 #define NNRP_TRANSPORT_SLOT_QUIC 0x00000001u
@@ -36,6 +36,15 @@ typedef struct NnrpProtocolVersion {
 #define NNRP_RUNTIME_FEATURE_EXECUTABLE_RESUME 0x0000000000002000ull
 #define NNRP_RUNTIME_FEATURE_CLIENT_COMPLETION_HELPERS 0x0000000000004000ull
 #define NNRP_RUNTIME_FEATURE_CLIENT_COARSE_RESULT_HELPERS 0x0000000000008000ull
+#define NNRP_RUNTIME_FEATURE_CLIENT_COMPACT_RESULT_HELPERS 0x0000000000010000ull
+
+#define NNRP_RESULT_STATE_NONE 0u
+#define NNRP_RESULT_STATE_COMPLETED 1u
+#define NNRP_RESULT_STATE_PARTIAL 2u
+#define NNRP_RESULT_STATE_DEGRADED 3u
+#define NNRP_RESULT_STATE_STALE_REUSE 4u
+#define NNRP_RESULT_STATE_CANCELLED 5u
+#define NNRP_RESULT_STATE_FAILED 6u
 
 #define NNRP_SESSION_RECOVERY_OUTCOME_FRESH 0u
 #define NNRP_SESSION_RECOVERY_OUTCOME_RESUME_ENABLED 1u
@@ -235,6 +244,18 @@ typedef struct NnrpPollResult {
   NnrpEvent event;
 } NnrpPollResult;
 
+typedef struct NnrpCompactResult {
+  NnrpFfiStatus status;
+  uint8_t has_result;
+  uint32_t event_kind;
+  uint32_t result_state;
+  NnrpHandle operation;
+  uint64_t operation_id;
+  uint32_t frame_id;
+  NnrpBufferView payload;
+  NnrpFfiDiagnostic diagnostic;
+} NnrpCompactResult;
+
 typedef struct NnrpConnectionBootstrap {
   uint64_t connection_id;
   uint32_t generation;
@@ -341,6 +362,7 @@ NnrpFfiStatus nnrp_client_cancel(NnrpClientCancelRequest request);
 NnrpFfiStatus nnrp_client_complete_operation(NnrpClientCompleteOperationRequest request);
 NnrpFfiStatus nnrp_client_drop_operation(NnrpClientDropOperationRequest request);
 NnrpFfiStatus nnrp_client_submit_result(NnrpClientSubmitResultRequest request, NnrpHandle *out_operation, NnrpPollResult *out_result);
+NnrpFfiStatus nnrp_client_submit_result_compact(NnrpClientSubmitResultRequest request, NnrpCompactResult *out_result);
 NnrpFfiStatus nnrp_client_send_flow_update(NnrpServerFlowUpdateRequest request);
 NnrpFfiStatus nnrp_client_send_result_hint(NnrpControlRequest request);
 NnrpFfiStatus nnrp_client_await_event(NnrpHandle connection, NnrpPollResult *out_result);
