@@ -14,7 +14,7 @@ typedef struct NnrpProtocolVersion {
 } NnrpProtocolVersion;
 
 #define NNRP_FFI_ABI_MAJOR 1
-#define NNRP_FFI_ABI_MINOR 2
+#define NNRP_FFI_ABI_MINOR 3
 #define NNRP_FFI_ABI_PATCH 0
 
 #define NNRP_TRANSPORT_SLOT_QUIC 0x00000001u
@@ -34,6 +34,7 @@ typedef struct NnrpProtocolVersion {
 #define NNRP_RUNTIME_FEATURE_SCHEMA_REGISTRY_HANDLES 0x0000000000000800ull
 #define NNRP_RUNTIME_FEATURE_BUFFER_HANDLES 0x0000000000001000ull
 #define NNRP_RUNTIME_FEATURE_EXECUTABLE_RESUME 0x0000000000002000ull
+#define NNRP_RUNTIME_FEATURE_CLIENT_COMPLETION_HELPERS 0x0000000000004000ull
 
 #define NNRP_SESSION_RECOVERY_OUTCOME_FRESH 0u
 #define NNRP_SESSION_RECOVERY_OUTCOME_RESUME_ENABLED 1u
@@ -293,6 +294,15 @@ typedef struct NnrpServerSendResultRequest {
   NnrpBufferView payload;
 } NnrpServerSendResultRequest;
 
+typedef struct NnrpClientCompleteOperationRequest {
+  NnrpHandle operation;
+  NnrpBufferView payload;
+} NnrpClientCompleteOperationRequest;
+
+typedef struct NnrpClientDropOperationRequest {
+  NnrpHandle operation;
+} NnrpClientDropOperationRequest;
+
 typedef struct NnrpServerFlowUpdateRequest {
   NnrpHandle session;
   uint32_t frame_id;
@@ -318,6 +328,10 @@ NnrpFfiStatus nnrp_client_close(NnrpHandle session);
 NnrpFfiStatus nnrp_connection_close(NnrpHandle connection);
 NnrpFfiStatus nnrp_client_close_connection(NnrpHandle connection);
 NnrpFfiStatus nnrp_client_cancel(NnrpClientCancelRequest request);
+NnrpFfiStatus nnrp_client_complete_operation(NnrpClientCompleteOperationRequest request);
+NnrpFfiStatus nnrp_client_drop_operation(NnrpClientDropOperationRequest request);
+NnrpFfiStatus nnrp_client_send_flow_update(NnrpServerFlowUpdateRequest request);
+NnrpFfiStatus nnrp_client_send_result_hint(NnrpControlRequest request);
 NnrpFfiStatus nnrp_client_await_event(NnrpHandle connection, NnrpPollResult *out_result);
 NnrpFfiStatus nnrp_client_await_events(NnrpHandle connection, NnrpEvent *out_events, uintptr_t event_capacity, uintptr_t *out_event_count);
 NnrpFfiStatus nnrp_schema_descriptor_parse(NnrpBufferView source, NnrpSchemaDescriptorHeader *out_descriptor);
