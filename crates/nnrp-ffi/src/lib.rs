@@ -15,7 +15,7 @@ use nnrp_core::{
 };
 
 pub const NNRP_FFI_ABI_MAJOR: u16 = 1;
-pub const NNRP_FFI_ABI_MINOR: u16 = 4;
+pub const NNRP_FFI_ABI_MINOR: u16 = 5;
 pub const NNRP_FFI_ABI_PATCH: u16 = 0;
 
 pub const NNRP_TRANSPORT_SLOT_QUIC: u32 = 0x0000_0001;
@@ -37,6 +37,15 @@ pub const NNRP_RUNTIME_FEATURE_BUFFER_HANDLES: u64 = 0x0000_0000_0000_1000;
 pub const NNRP_RUNTIME_FEATURE_EXECUTABLE_RESUME: u64 = 0x0000_0000_0000_2000;
 pub const NNRP_RUNTIME_FEATURE_CLIENT_COMPLETION_HELPERS: u64 = 0x0000_0000_0000_4000;
 pub const NNRP_RUNTIME_FEATURE_CLIENT_COARSE_RESULT_HELPERS: u64 = 0x0000_0000_0000_8000;
+pub const NNRP_RUNTIME_FEATURE_CLIENT_COMPACT_RESULT_HELPERS: u64 = 0x0000_0000_0001_0000;
+
+pub const NNRP_RESULT_STATE_NONE: u32 = 0;
+pub const NNRP_RESULT_STATE_COMPLETED: u32 = 1;
+pub const NNRP_RESULT_STATE_PARTIAL: u32 = 2;
+pub const NNRP_RESULT_STATE_DEGRADED: u32 = 3;
+pub const NNRP_RESULT_STATE_STALE_REUSE: u32 = 4;
+pub const NNRP_RESULT_STATE_CANCELLED: u32 = 5;
+pub const NNRP_RESULT_STATE_FAILED: u32 = 6;
 
 pub const NNRP_SESSION_RECOVERY_OUTCOME_FRESH: u32 = 0;
 pub const NNRP_SESSION_RECOVERY_OUTCOME_RESUME_ENABLED: u32 = 1;
@@ -107,7 +116,7 @@ pub fn runtime_capabilities() -> NnrpRuntimeCapabilities {
         sdk_minor: 0,
         sdk_patch: 0,
         sdk_preview: 3,
-        sdk_revision: 5,
+        sdk_revision: 6,
         reserved1: 0,
         transport_slots: transport_slot_bit(TransportId::Quic)
             | transport_slot_bit(TransportId::Tcp),
@@ -126,7 +135,8 @@ pub fn runtime_capabilities() -> NnrpRuntimeCapabilities {
             | NNRP_RUNTIME_FEATURE_BUFFER_HANDLES
             | NNRP_RUNTIME_FEATURE_EXECUTABLE_RESUME
             | NNRP_RUNTIME_FEATURE_CLIENT_COMPLETION_HELPERS
-            | NNRP_RUNTIME_FEATURE_CLIENT_COARSE_RESULT_HELPERS,
+            | NNRP_RUNTIME_FEATURE_CLIENT_COARSE_RESULT_HELPERS
+            | NNRP_RUNTIME_FEATURE_CLIENT_COMPACT_RESULT_HELPERS,
     }
 }
 
@@ -896,6 +906,56 @@ pub struct NnrpPollResult {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpCompactResult {
+    pub status: NnrpFfiStatus,
+    pub has_result: u8,
+    pub event_kind: u32,
+    pub result_state: u32,
+    pub operation: NnrpHandle,
+    pub operation_id: u64,
+    pub frame_id: u32,
+    pub payload: NnrpBufferView,
+    pub diagnostic: NnrpFfiDiagnostic,
+}
+
+impl NnrpCompactResult {
+    pub const fn none(status: NnrpFfiStatus) -> Self {
+        Self {
+            status,
+            has_result: 0,
+            event_kind: NnrpEventKind::None as u32,
+            result_state: NNRP_RESULT_STATE_NONE,
+            operation: NnrpHandle::invalid(),
+            operation_id: 0,
+            frame_id: 0,
+            payload: NnrpBufferView::empty(),
+            diagnostic: NnrpFfiDiagnostic {
+                status,
+                related_connection_id: 0,
+                related_session_id: 0,
+                related_operation_id: 0,
+                related_frame_id: 0,
+            },
+        }
+    }
+
+    fn from_event(status: NnrpFfiStatus, event: NnrpEvent) -> Self {
+        Self {
+            status,
+            has_result: 1,
+            event_kind: event.kind,
+            result_state: compact_result_state(status, event.kind),
+            operation: event.operation,
+            operation_id: event.operation.id,
+            frame_id: event.frame_id,
+            payload: event.payload,
+            diagnostic: event.diagnostic,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NnrpConnectionBootstrap {
     pub connection_id: u64,
     pub generation: u32,
@@ -1386,6 +1446,21 @@ pub unsafe extern "C" fn nnrp_client_submit_result(
     nnrp_client_submit_result_impl(request, out_operation, out_result)
 }
 
+#[no_mangle]
+/// # Safety
+///
+/// `request.submit_payload` and `request.result_payload` must remain readable
+/// for their declared lengths for the duration of the call. `out_result` must
+/// point to one caller-owned writable `NnrpCompactResult`. This helper submits,
+/// completes, and polls the matching terminal result in one ABI call while
+/// returning only the compact fields needed by hot host-language paths.
+pub unsafe extern "C" fn nnrp_client_submit_result_compact(
+    request: NnrpClientSubmitResultRequest,
+    out_result: *mut NnrpCompactResult,
+) -> NnrpFfiStatus {
+    nnrp_client_submit_result_compact_impl(request, out_result)
+}
+
 unsafe fn nnrp_client_submit_result_impl(
     request: NnrpClientSubmitResultRequest,
     out_operation: *mut NnrpHandle,
@@ -1422,6 +1497,48 @@ unsafe fn nnrp_client_submit_result_impl(
         operation,
         request.operation_id,
         request.frame_id,
+        request.max_events,
+        out_result,
+    )
+}
+
+unsafe fn nnrp_client_submit_result_compact_impl(
+    request: NnrpClientSubmitResultRequest,
+    out_result: *mut NnrpCompactResult,
+) -> NnrpFfiStatus {
+    if out_result.is_null() {
+        return NnrpFfiStatus::invalid_argument(48);
+    }
+    if let Err(status) = request.result_payload.validate() {
+        return status;
+    }
+    let submit_request = NnrpSubmitRequest {
+        session: request.session,
+        operation_id: request.operation_id,
+        frame_id: request.frame_id,
+        payload: request.submit_payload,
+    };
+    let mut operation = NnrpHandle::invalid();
+    let submit_status = nnrp_client_submit(submit_request, &mut operation);
+    if submit_status.status_code != NnrpFfiStatusCode::Ok as u32 {
+        *out_result = NnrpCompactResult::none(submit_status);
+        return submit_status;
+    }
+    let complete_status = nnrp_client_complete_operation_impl(NnrpClientCompleteOperationRequest {
+        operation,
+        payload: request.result_payload,
+    });
+    if complete_status.status_code != NnrpFfiStatusCode::Ok as u32 {
+        *out_result = NnrpCompactResult::none(complete_status);
+        return complete_status;
+    }
+
+    poll_matching_operation_compact_result(
+        request.session,
+        operation,
+        request.operation_id,
+        request.frame_id,
+        request.result_payload,
         request.max_events,
         out_result,
     )
@@ -2118,6 +2235,81 @@ unsafe fn poll_matching_operation_result(
         event: NnrpEvent::none(),
     };
     (*out_result).status
+}
+
+unsafe fn poll_matching_operation_compact_result(
+    session: NnrpHandle,
+    operation: NnrpHandle,
+    operation_id: u64,
+    frame_id: u32,
+    payload: NnrpBufferView,
+    max_events: usize,
+    out_result: *mut NnrpCompactResult,
+) -> NnrpFfiStatus {
+    let mut store = handle_store();
+    let connection = match store.get(session, NnrpHandleKind::Session) {
+        Ok(NnrpFfiResource::Session { connection, .. }) => *connection,
+        Ok(_) => {
+            let status = NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32);
+            *out_result = NnrpCompactResult::none(status);
+            return status;
+        }
+        Err(status) => {
+            *out_result = NnrpCompactResult::none(status);
+            return status;
+        }
+    };
+    let mut seen_events = 0usize;
+    while max_events == 0 || seen_events < max_events {
+        match store.poll_event(connection) {
+            Ok(Some(event)) => {
+                seen_events += 1;
+                if event_is_operation_result(event, session, operation, operation_id, frame_id) {
+                    let mut result = NnrpCompactResult::from_event(NnrpFfiStatus::ok(), event);
+                    result.payload = payload;
+                    *out_result = result;
+                    return NnrpFfiStatus::ok();
+                }
+            }
+            Ok(None) => {
+                let status = NnrpFfiStatus {
+                    status_code: NnrpFfiStatusCode::WouldBlock as u32,
+                    error_family: NnrpErrorFamily::None as u32,
+                    protocol_error_code: 0,
+                    detail_code: 0,
+                };
+                *out_result = NnrpCompactResult::none(status);
+                return status;
+            }
+            Err(status) => {
+                *out_result = NnrpCompactResult::none(status);
+                return status;
+            }
+        }
+    }
+    let status = NnrpFfiStatus {
+        status_code: NnrpFfiStatusCode::WouldBlock as u32,
+        error_family: NnrpErrorFamily::None as u32,
+        protocol_error_code: 0,
+        detail_code: 0,
+    };
+    *out_result = NnrpCompactResult::none(status);
+    status
+}
+
+fn compact_result_state(status: NnrpFfiStatus, event_kind: u32) -> u32 {
+    if status.status_code != NnrpFfiStatusCode::Ok as u32
+        || event_kind == NnrpEventKind::Error as u32
+    {
+        return NNRP_RESULT_STATE_FAILED;
+    }
+    if event_kind == NnrpEventKind::ResultDropped as u32 {
+        return NNRP_RESULT_STATE_CANCELLED;
+    }
+    if event_kind == NnrpEventKind::ResultPushed as u32 {
+        return NNRP_RESULT_STATE_COMPLETED;
+    }
+    NNRP_RESULT_STATE_NONE
 }
 
 fn event_is_operation_result(
@@ -2907,7 +3099,7 @@ mod tests {
         assert_eq!(capabilities.sdk_minor, 0);
         assert_eq!(capabilities.sdk_patch, 0);
         assert_eq!(capabilities.sdk_preview, 3);
-        assert_eq!(capabilities.sdk_revision, 5);
+        assert_eq!(capabilities.sdk_revision, 6);
         assert_eq!(capabilities.reserved1, 0);
         assert_eq!(
             capabilities.transport_slots,
@@ -3452,6 +3644,78 @@ mod tests {
     }
 
     #[test]
+    fn ffi_client_submit_result_compact_coalesces_hot_path() {
+        unsafe {
+            let mut connection = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_connect(
+                    NnrpClientConnectRequest {
+                        connection_id: 91_426,
+                        generation: 1,
+                        transport_id: 1,
+                    },
+                    &mut connection
+                ),
+                NnrpFfiStatus::ok()
+            );
+            let mut session = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_open_session(
+                    NnrpSessionOpenRequest {
+                        connection,
+                        requested_session_id: 91_427,
+                        generation: 1,
+                        profile_id: 2,
+                        schema_id: 0x1001,
+                        schema_version: 3,
+                    },
+                    &mut session
+                ),
+                NnrpFfiStatus::ok()
+            );
+            drain_events(connection);
+
+            let submit_payload = [1u8, 2, 3];
+            let result_payload = [4u8, 5, 6];
+            let mut result = NnrpCompactResult::none(NnrpFfiStatus::ok());
+            assert_eq!(
+                nnrp_client_submit_result_compact(
+                    NnrpClientSubmitResultRequest {
+                        session,
+                        operation_id: 91_428,
+                        frame_id: 60,
+                        submit_payload: NnrpBufferView {
+                            ptr: submit_payload.as_ptr(),
+                            len: submit_payload.len(),
+                        },
+                        result_payload: NnrpBufferView {
+                            ptr: result_payload.as_ptr(),
+                            len: result_payload.len(),
+                        },
+                        max_events: 2,
+                    },
+                    &mut result
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(result.status, NnrpFfiStatus::ok());
+            assert_eq!(result.has_result, 1);
+            assert_eq!(result.event_kind, NnrpEventKind::ResultPushed as u32);
+            assert_eq!(result.result_state, NNRP_RESULT_STATE_COMPLETED);
+            assert_eq!(result.operation.kind, NnrpHandleKind::Operation as u32);
+            assert_eq!(result.operation.id, 91_428);
+            assert_eq!(result.operation_id, 91_428);
+            assert_eq!(result.frame_id, 60);
+            assert_eq!(result.payload.len, result_payload.len());
+            assert_eq!(
+                core::slice::from_raw_parts(result.payload.ptr, result.payload.len),
+                result_payload
+            );
+            assert_eq!(result.diagnostic.status, NnrpFfiStatus::ok());
+        }
+    }
+
+    #[test]
     fn ffi_client_submit_result_reports_argument_and_poll_failures() {
         unsafe {
             let mut connection = NnrpHandle::invalid();
@@ -3527,6 +3791,86 @@ mod tests {
                 NnrpFfiStatus::invalid_argument(1)
             );
             assert_eq!(operation, previous_operation);
+            drain_events(connection);
+            let mut compact_result = NnrpCompactResult::none(NnrpFfiStatus::ok());
+            assert_eq!(
+                nnrp_client_submit_result_compact(request, ptr::null_mut()),
+                NnrpFfiStatus::invalid_argument(48)
+            );
+            assert_eq!(
+                nnrp_client_submit_result_compact(
+                    NnrpClientSubmitResultRequest {
+                        operation_id: 91_435,
+                        result_payload: NnrpBufferView {
+                            ptr: ptr::null(),
+                            len: 1,
+                        },
+                        ..request
+                    },
+                    &mut compact_result
+                ),
+                NnrpFfiStatus::invalid_argument(1)
+            );
+            assert_eq!(
+                nnrp_client_submit_result_compact(
+                    NnrpClientSubmitResultRequest {
+                        operation_id: 0,
+                        ..request
+                    },
+                    &mut compact_result
+                ),
+                NnrpFfiStatus::invalid_argument(12)
+            );
+            assert_eq!(compact_result.status, NnrpFfiStatus::invalid_argument(12));
+            assert_eq!(compact_result.has_result, 0);
+            assert_eq!(
+                nnrp_client_submit_result_compact(
+                    NnrpClientSubmitResultRequest {
+                        session: NnrpHandle::new(NnrpHandleKind::Operation, 91_436, 1),
+                        operation_id: 91_436,
+                        ..request
+                    },
+                    &mut compact_result
+                ),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32)
+            );
+            assert_eq!(
+                compact_result.status,
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32)
+            );
+            assert_eq!(compact_result.has_result, 0);
+            let status = nnrp_client_submit_result_compact(
+                NnrpClientSubmitResultRequest {
+                    operation_id: 91_437,
+                    max_events: 1,
+                    ..request
+                },
+                &mut compact_result,
+            );
+            assert_eq!(status.status_code, NnrpFfiStatusCode::WouldBlock as u32);
+            assert_eq!(
+                compact_result.status.status_code,
+                NnrpFfiStatusCode::WouldBlock as u32
+            );
+            assert_eq!(compact_result.has_result, 0);
+            assert_eq!(compact_result.result_state, NNRP_RESULT_STATE_NONE);
+            let invalid_session = NnrpHandle::new(NnrpHandleKind::Session, 91_438, 1);
+            assert_eq!(
+                poll_matching_operation_compact_result(
+                    invalid_session,
+                    NnrpHandle::new(NnrpHandleKind::Operation, 91_438, 1),
+                    91_438,
+                    62,
+                    NnrpBufferView::empty(),
+                    1,
+                    &mut compact_result
+                ),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32)
+            );
+            assert_eq!(
+                compact_result.status,
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32)
+            );
         }
     }
 
