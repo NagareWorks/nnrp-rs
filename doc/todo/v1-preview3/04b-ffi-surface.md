@@ -11,4 +11,5 @@
 - [x] Expose schema descriptor and typed payload descriptor helpers for downstream SDK bindings.
 - [x] Expose recovery and migration validation helpers so downstream SDKs can reuse Rust's canonical resume/replay rules.
 - [x] Expose client-side completion/drop/control aliases so downstream SDKs can benchmark and validate glued runtime paths without binding server-named helpers.
+- [x] Expose coarse client submit/result helper so downstream SDKs can collapse hot submit-complete-poll loops into one ABI call.
 - [x] Wire FFI entrypoints to the real client/server runtime once `06` lands.
