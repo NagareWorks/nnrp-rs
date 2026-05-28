@@ -15,7 +15,7 @@ use nnrp_core::{
 };
 
 pub const NNRP_FFI_ABI_MAJOR: u16 = 1;
-pub const NNRP_FFI_ABI_MINOR: u16 = 2;
+pub const NNRP_FFI_ABI_MINOR: u16 = 3;
 pub const NNRP_FFI_ABI_PATCH: u16 = 0;
 
 pub const NNRP_TRANSPORT_SLOT_QUIC: u32 = 0x0000_0001;
@@ -35,6 +35,7 @@ pub const NNRP_RUNTIME_FEATURE_CACHE_LEASE_OPS: u64 = 0x0000_0000_0000_0400;
 pub const NNRP_RUNTIME_FEATURE_SCHEMA_REGISTRY_HANDLES: u64 = 0x0000_0000_0000_0800;
 pub const NNRP_RUNTIME_FEATURE_BUFFER_HANDLES: u64 = 0x0000_0000_0000_1000;
 pub const NNRP_RUNTIME_FEATURE_EXECUTABLE_RESUME: u64 = 0x0000_0000_0000_2000;
+pub const NNRP_RUNTIME_FEATURE_CLIENT_COMPLETION_HELPERS: u64 = 0x0000_0000_0000_4000;
 
 pub const NNRP_SESSION_RECOVERY_OUTCOME_FRESH: u32 = 0;
 pub const NNRP_SESSION_RECOVERY_OUTCOME_RESUME_ENABLED: u32 = 1;
@@ -105,7 +106,7 @@ pub fn runtime_capabilities() -> NnrpRuntimeCapabilities {
         sdk_minor: 0,
         sdk_patch: 0,
         sdk_preview: 3,
-        sdk_revision: 3,
+        sdk_revision: 4,
         reserved1: 0,
         transport_slots: transport_slot_bit(TransportId::Quic)
             | transport_slot_bit(TransportId::Tcp),
@@ -122,7 +123,8 @@ pub fn runtime_capabilities() -> NnrpRuntimeCapabilities {
             | NNRP_RUNTIME_FEATURE_CACHE_LEASE_OPS
             | NNRP_RUNTIME_FEATURE_SCHEMA_REGISTRY_HANDLES
             | NNRP_RUNTIME_FEATURE_BUFFER_HANDLES
-            | NNRP_RUNTIME_FEATURE_EXECUTABLE_RESUME,
+            | NNRP_RUNTIME_FEATURE_EXECUTABLE_RESUME
+            | NNRP_RUNTIME_FEATURE_CLIENT_COMPLETION_HELPERS,
     }
 }
 
@@ -970,6 +972,19 @@ pub struct NnrpServerSendResultRequest {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpClientCompleteOperationRequest {
+    pub operation: NnrpHandle,
+    pub payload: NnrpBufferView,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpClientDropOperationRequest {
+    pub operation: NnrpHandle,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NnrpServerFlowUpdateRequest {
     pub session: NnrpHandle,
     pub frame_id: u32,
@@ -1310,6 +1325,64 @@ pub unsafe extern "C" fn nnrp_client_cancel(request: NnrpClientCancelRequest) ->
         frame_id: request.frame_id,
     });
     NnrpFfiStatus::ok()
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `request.payload` must remain readable for `request.payload.len` bytes for
+/// the duration of the call. This helper completes a client-owned operation and
+/// queues a `RESULT_PUSHED` event on the owning client connection.
+#[rustfmt::skip]
+pub unsafe extern "C" fn nnrp_client_complete_operation(request: NnrpClientCompleteOperationRequest) -> NnrpFfiStatus { nnrp_client_complete_operation_impl(request) }
+
+unsafe fn nnrp_client_complete_operation_impl(
+    request: NnrpClientCompleteOperationRequest,
+) -> NnrpFfiStatus {
+    if let Err(status) = request.payload.validate() {
+        return status;
+    }
+    push_operation_event(request.operation, NnrpEventKind::ResultPushed, true)
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// The operation handle is copied by value. This helper drops a client-owned
+/// operation and queues a `RESULT_DROPPED` event on the owning client connection.
+#[rustfmt::skip]
+pub unsafe extern "C" fn nnrp_client_drop_operation(request: NnrpClientDropOperationRequest) -> NnrpFfiStatus { nnrp_client_drop_operation_impl(request) }
+
+fn nnrp_client_drop_operation_impl(request: NnrpClientDropOperationRequest) -> NnrpFfiStatus {
+    push_operation_event(request.operation, NnrpEventKind::ResultDropped, true)
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// The session handle is copied by value. This helper queues a `FLOW_UPDATED`
+/// event on the owning client connection.
+#[rustfmt::skip]
+pub unsafe extern "C" fn nnrp_client_send_flow_update(request: NnrpServerFlowUpdateRequest) -> NnrpFfiStatus { nnrp_client_send_flow_update_impl(request) }
+
+unsafe fn nnrp_client_send_flow_update_impl(request: NnrpServerFlowUpdateRequest) -> NnrpFfiStatus {
+    nnrp_server_send_flow_update(request)
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `request.payload` must remain readable for `request.payload.len` bytes for
+/// the duration of the call and must contain a valid `RESULT_HINT` metadata
+/// payload.
+#[rustfmt::skip]
+pub unsafe extern "C" fn nnrp_client_send_result_hint(request: NnrpControlRequest) -> NnrpFfiStatus { nnrp_client_send_result_hint_impl(request) }
+
+unsafe fn nnrp_client_send_result_hint_impl(request: NnrpControlRequest) -> NnrpFfiStatus {
+    if request.control_code != MessageType::ResultHint as u32 {
+        return NnrpFfiStatus::invalid_argument(34);
+    }
+    nnrp_control_impl(request)
 }
 
 #[no_mangle]
@@ -2398,29 +2471,39 @@ pub unsafe extern "C" fn nnrp_server_send_result(
     if let Err(status) = request.payload.validate() {
         return status;
     }
+    push_operation_event(request.operation, NnrpEventKind::ResultPushed, false)
+}
+
+fn push_operation_event(
+    operation: NnrpHandle,
+    event_kind: NnrpEventKind,
+    remove_operation: bool,
+) -> NnrpFfiStatus {
     let mut store = handle_store();
-    let (connection, session, frame_id) =
-        match store.get(request.operation, NnrpHandleKind::Operation) {
-            Ok(NnrpFfiResource::Operation {
-                session, frame_id, ..
-            }) => {
-                let session_resource = store.get(*session, NnrpHandleKind::Session);
-                match session_resource {
-                    Ok(NnrpFfiResource::Session { connection, .. }) => {
-                        (*connection, *session, *frame_id)
-                    }
-                    Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32),
-                    Err(status) => return status,
+    let (connection, session, frame_id) = match store.get(operation, NnrpHandleKind::Operation) {
+        Ok(NnrpFfiResource::Operation {
+            session, frame_id, ..
+        }) => {
+            let session_resource = store.get(*session, NnrpHandleKind::Session);
+            match session_resource {
+                Ok(NnrpFfiResource::Session { connection, .. }) => {
+                    (*connection, *session, *frame_id)
                 }
+                Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32),
+                Err(status) => return status,
             }
-            Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Operation as u32),
-            Err(status) => return status,
-        };
+        }
+        Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Operation as u32),
+        Err(status) => return status,
+    };
+    if remove_operation {
+        store.entries.remove(&(operation.kind, operation.id));
+    }
     store.push_event(NnrpQueuedEvent {
-        kind: NnrpEventKind::ResultPushed as u32,
+        kind: event_kind as u32,
         connection,
         session,
-        operation: request.operation,
+        operation,
         frame_id,
     });
     NnrpFfiStatus::ok()
@@ -2679,7 +2762,7 @@ mod tests {
         assert_eq!(capabilities.sdk_minor, 0);
         assert_eq!(capabilities.sdk_patch, 0);
         assert_eq!(capabilities.sdk_preview, 3);
-        assert_eq!(capabilities.sdk_revision, 3);
+        assert_eq!(capabilities.sdk_revision, 4);
         assert_eq!(capabilities.reserved1, 0);
         assert_eq!(
             capabilities.transport_slots,
@@ -2748,6 +2831,10 @@ mod tests {
         );
         assert_ne!(
             capabilities.feature_flags & NNRP_RUNTIME_FEATURE_EXECUTABLE_RESUME,
+            0
+        );
+        assert_ne!(
+            capabilities.feature_flags & NNRP_RUNTIME_FEATURE_CLIENT_COMPLETION_HELPERS,
             0
         );
     }
@@ -3030,6 +3117,200 @@ mod tests {
                 }
             );
             assert_eq!(event_count, 0);
+        }
+    }
+
+    #[test]
+    fn ffi_client_completion_helpers_emit_terminal_events() {
+        unsafe {
+            let mut connection = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_connect(
+                    NnrpClientConnectRequest {
+                        connection_id: 91_401,
+                        generation: 1,
+                        transport_id: 1,
+                    },
+                    &mut connection
+                ),
+                NnrpFfiStatus::ok()
+            );
+            let mut session = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_open_session(
+                    NnrpSessionOpenRequest {
+                        connection,
+                        requested_session_id: 91_402,
+                        generation: 1,
+                        profile_id: 2,
+                        schema_id: 0x1001,
+                        schema_version: 3,
+                    },
+                    &mut session
+                ),
+                NnrpFfiStatus::ok()
+            );
+            drain_events(connection);
+
+            let payload = [1u8, 2, 3];
+            let mut completed_operation = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_submit(
+                    NnrpSubmitRequest {
+                        session,
+                        operation_id: 91_403,
+                        frame_id: 55,
+                        payload: NnrpBufferView {
+                            ptr: payload.as_ptr(),
+                            len: payload.len(),
+                        },
+                    },
+                    &mut completed_operation
+                ),
+                NnrpFfiStatus::ok()
+            );
+            drain_events(connection);
+            assert_eq!(
+                nnrp_client_complete_operation(NnrpClientCompleteOperationRequest {
+                    operation: completed_operation,
+                    payload: NnrpBufferView {
+                        ptr: payload.as_ptr(),
+                        len: payload.len(),
+                    },
+                }),
+                NnrpFfiStatus::ok()
+            );
+
+            let mut result = empty_poll_result();
+            assert_eq!(
+                nnrp_client_await_event(connection, &mut result),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(result.has_event, 1);
+            assert_eq!(result.event.kind, NnrpEventKind::ResultPushed as u32);
+            assert_eq!(result.event.operation, completed_operation);
+            assert_eq!(result.event.frame_id, 55);
+            assert_eq!(
+                nnrp_client_complete_operation(NnrpClientCompleteOperationRequest {
+                    operation: completed_operation,
+                    payload: NnrpBufferView::empty(),
+                }),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Operation as u32)
+            );
+
+            let mut dropped_operation = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_submit(
+                    NnrpSubmitRequest {
+                        session,
+                        operation_id: 91_404,
+                        frame_id: 56,
+                        payload: NnrpBufferView::empty(),
+                    },
+                    &mut dropped_operation
+                ),
+                NnrpFfiStatus::ok()
+            );
+            drain_events(connection);
+            assert_eq!(
+                nnrp_client_drop_operation(NnrpClientDropOperationRequest {
+                    operation: dropped_operation,
+                }),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(
+                nnrp_client_await_event(connection, &mut result),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(result.event.kind, NnrpEventKind::ResultDropped as u32);
+            assert_eq!(result.event.operation, dropped_operation);
+            assert_eq!(result.event.frame_id, 56);
+        }
+    }
+
+    #[test]
+    fn ffi_client_control_aliases_emit_flow_update_and_result_hint() {
+        unsafe {
+            let mut connection = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_connect(
+                    NnrpClientConnectRequest {
+                        connection_id: 91_501,
+                        generation: 1,
+                        transport_id: 1,
+                    },
+                    &mut connection
+                ),
+                NnrpFfiStatus::ok()
+            );
+            let mut session = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_open_session(
+                    NnrpSessionOpenRequest {
+                        connection,
+                        requested_session_id: 91_502,
+                        generation: 1,
+                        profile_id: 2,
+                        schema_id: 0x1001,
+                        schema_version: 3,
+                    },
+                    &mut session
+                ),
+                NnrpFfiStatus::ok()
+            );
+            drain_events(connection);
+            assert_eq!(
+                nnrp_client_send_flow_update(NnrpServerFlowUpdateRequest {
+                    session,
+                    frame_id: 57,
+                }),
+                NnrpFfiStatus::ok()
+            );
+
+            let hint = ResultHintMetadata {
+                applied_budget_policy: nnrp_core::ResultHintBudgetPolicy::Partial,
+                congestion_state: nnrp_core::ResultHintCongestionState::Elevated,
+                reason: nnrp_core::ResultHintReason::ServerBusy,
+                retry_after_ms: 8,
+            }
+            .to_bytes()
+            .expect("result hint metadata should encode");
+            assert_eq!(
+                nnrp_client_send_result_hint(NnrpControlRequest {
+                    handle: session,
+                    control_code: MessageType::ResultHint as u32,
+                    payload: NnrpBufferView {
+                        ptr: hint.as_ptr(),
+                        len: hint.len(),
+                    },
+                }),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(
+                nnrp_client_send_result_hint(NnrpControlRequest {
+                    handle: session,
+                    control_code: MessageType::FlowUpdate as u32,
+                    payload: NnrpBufferView::empty(),
+                }),
+                NnrpFfiStatus::invalid_argument(34)
+            );
+
+            let mut events = [NnrpEvent::none(); 2];
+            let mut event_count = 0usize;
+            assert_eq!(
+                nnrp_client_await_events(
+                    connection,
+                    events.as_mut_ptr(),
+                    events.len(),
+                    &mut event_count
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(event_count, 2);
+            assert_eq!(events[0].kind, NnrpEventKind::FlowUpdated as u32);
+            assert_eq!(events[0].frame_id, 57);
+            assert_eq!(events[1].kind, NnrpEventKind::ResultHint as u32);
+            assert_eq!(events[1].session, session);
         }
     }
 
@@ -5348,6 +5629,15 @@ mod tests {
             status: NnrpFfiStatus::ok(),
             has_event: 0,
             event: NnrpEvent::none(),
+        }
+    }
+
+    unsafe fn drain_events(connection: NnrpHandle) {
+        let mut result = empty_poll_result();
+        while nnrp_client_await_event(connection, &mut result).status_code
+            == NnrpFfiStatusCode::Ok as u32
+        {
+            result = empty_poll_result();
         }
     }
 
