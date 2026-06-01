@@ -100,7 +100,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
 
@@ -156,7 +156,7 @@ jobs:
         run: python scripts/package_native_artifacts.py --target ${{ matrix.target }} --package-name ${{ matrix.name }} --out artifacts/native --skip-symbol-check
 
       - name: Upload native artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: nnrp-ffi-native-${{ matrix.name }}
           path: artifacts/native/*
@@ -174,7 +174,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
@@ -185,12 +185,12 @@ jobs:
           components: rustfmt
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
       - name: Checkout nnrp-conformance action
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ github.repository_owner }}/nnrp-conformance
           path: nnrp-conformance-action
@@ -259,7 +259,7 @@ jobs:
         run: cargo test --workspace
 
       - name: Download native link libraries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: nnrp-ffi-native-*
           path: artifacts/native
@@ -337,7 +337,7 @@ jobs:
           PY
 
       - name: Upload workflow artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: nnrp-rs-release-${{ steps.version.outputs.package_version }}
           path: |
