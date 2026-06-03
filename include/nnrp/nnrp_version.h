@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-#define NNRP_SDK_VERSION "1.0.0-preview.3.6"
+#define NNRP_SDK_VERSION "1.0.0-preview.3.7"
 #define NNRP_SDK_VERSION_MAJOR 1
 #define NNRP_SDK_VERSION_MINOR 0
 #define NNRP_SDK_VERSION_PATCH 0

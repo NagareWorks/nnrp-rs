@@ -14,7 +14,7 @@ typedef struct NnrpProtocolVersion {
 } NnrpProtocolVersion;
 
 #define NNRP_FFI_ABI_MAJOR 1
-#define NNRP_FFI_ABI_MINOR 5
+#define NNRP_FFI_ABI_MINOR 6
 #define NNRP_FFI_ABI_PATCH 0
 
 #define NNRP_TRANSPORT_SLOT_QUIC 0x00000001u
@@ -334,6 +334,17 @@ typedef struct NnrpClientSubmitResultRequest {
   uintptr_t max_events;
 } NnrpClientSubmitResultRequest;
 
+typedef struct NnrpClientSubmitResultBatchRequest {
+  NnrpHandle session;
+  uint64_t operation_id_start;
+  uint32_t frame_id_start;
+  uint32_t frame_id_stride;
+  NnrpBufferView submit_payload;
+  NnrpBufferView result_payload;
+  uintptr_t max_events;
+  uintptr_t iterations;
+} NnrpClientSubmitResultBatchRequest;
+
 typedef struct NnrpServerFlowUpdateRequest {
   NnrpHandle session;
   uint32_t frame_id;
@@ -363,6 +374,7 @@ NnrpFfiStatus nnrp_client_complete_operation(NnrpClientCompleteOperationRequest 
 NnrpFfiStatus nnrp_client_drop_operation(NnrpClientDropOperationRequest request);
 NnrpFfiStatus nnrp_client_submit_result(NnrpClientSubmitResultRequest request, NnrpHandle *out_operation, NnrpPollResult *out_result);
 NnrpFfiStatus nnrp_client_submit_result_compact(NnrpClientSubmitResultRequest request, NnrpCompactResult *out_result);
+NnrpFfiStatus nnrp_client_submit_result_compact_batch(NnrpClientSubmitResultBatchRequest request, NnrpCompactResult *out_last_result, uintptr_t *out_completed);
 NnrpFfiStatus nnrp_client_send_flow_update(NnrpServerFlowUpdateRequest request);
 NnrpFfiStatus nnrp_client_send_result_hint(NnrpControlRequest request);
 NnrpFfiStatus nnrp_client_await_event(NnrpHandle connection, NnrpPollResult *out_result);

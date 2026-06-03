@@ -15,7 +15,7 @@ use nnrp_core::{
 };
 
 pub const NNRP_FFI_ABI_MAJOR: u16 = 1;
-pub const NNRP_FFI_ABI_MINOR: u16 = 5;
+pub const NNRP_FFI_ABI_MINOR: u16 = 6;
 pub const NNRP_FFI_ABI_PATCH: u16 = 0;
 
 pub const NNRP_TRANSPORT_SLOT_QUIC: u32 = 0x0000_0001;
@@ -1057,6 +1057,19 @@ pub struct NnrpClientSubmitResultRequest {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct NnrpClientSubmitResultBatchRequest {
+    pub session: NnrpHandle,
+    pub operation_id_start: u64,
+    pub frame_id_start: u32,
+    pub frame_id_stride: u32,
+    pub submit_payload: NnrpBufferView,
+    pub result_payload: NnrpBufferView,
+    pub max_events: usize,
+    pub iterations: usize,
+}
+
+#[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NnrpServerFlowUpdateRequest {
     pub session: NnrpHandle,
@@ -1461,6 +1474,23 @@ pub unsafe extern "C" fn nnrp_client_submit_result_compact(
     nnrp_client_submit_result_compact_impl(request, out_result)
 }
 
+#[no_mangle]
+/// # Safety
+///
+/// `request.submit_payload` and `request.result_payload` must remain readable
+/// for their declared lengths for the duration of the call. `out_last_result`
+/// must point to one caller-owned writable `NnrpCompactResult`; `out_completed`
+/// must point to one caller-owned writable `uintptr_t`. This helper repeats the
+/// compact submit/result operation in one ABI call so host language bindings can
+/// amortize FFI boundary overhead without changing protocol semantics.
+pub unsafe extern "C" fn nnrp_client_submit_result_compact_batch(
+    request: NnrpClientSubmitResultBatchRequest,
+    out_last_result: *mut NnrpCompactResult,
+    out_completed: *mut usize,
+) -> NnrpFfiStatus {
+    nnrp_client_submit_result_compact_batch_impl(request, out_last_result, out_completed)
+}
+
 unsafe fn nnrp_client_submit_result_impl(
     request: NnrpClientSubmitResultRequest,
     out_operation: *mut NnrpHandle,
@@ -1542,6 +1572,55 @@ unsafe fn nnrp_client_submit_result_compact_impl(
         request.max_events,
         out_result,
     )
+}
+
+unsafe fn nnrp_client_submit_result_compact_batch_impl(
+    request: NnrpClientSubmitResultBatchRequest,
+    out_last_result: *mut NnrpCompactResult,
+    out_completed: *mut usize,
+) -> NnrpFfiStatus {
+    if out_last_result.is_null() || out_completed.is_null() {
+        return NnrpFfiStatus::invalid_argument(126);
+    }
+    if request.iterations == 0 {
+        *out_completed = 0;
+        *out_last_result = NnrpCompactResult::none(NnrpFfiStatus::ok());
+        return NnrpFfiStatus::ok();
+    }
+
+    let stride = if request.frame_id_stride == 0 {
+        1
+    } else {
+        request.frame_id_stride
+    };
+    let mut completed = 0usize;
+    let mut last = NnrpCompactResult::none(NnrpFfiStatus::ok());
+    for index in 0..request.iterations {
+        let frame_id = request
+            .frame_id_start
+            .wrapping_add((index as u32).wrapping_mul(stride));
+        let status = nnrp_client_submit_result_compact_impl(
+            NnrpClientSubmitResultRequest {
+                session: request.session,
+                operation_id: request.operation_id_start.wrapping_add(index as u64),
+                frame_id,
+                submit_payload: request.submit_payload,
+                result_payload: request.result_payload,
+                max_events: request.max_events,
+            },
+            &mut last,
+        );
+        if status.status_code != NnrpFfiStatusCode::Ok as u32 {
+            *out_completed = completed;
+            *out_last_result = last;
+            return status;
+        }
+        completed += 1;
+    }
+
+    *out_completed = completed;
+    *out_last_result = last;
+    NnrpFfiStatus::ok()
 }
 
 #[no_mangle]
@@ -3712,6 +3791,156 @@ mod tests {
                 result_payload
             );
             assert_eq!(result.diagnostic.status, NnrpFfiStatus::ok());
+        }
+    }
+
+    #[test]
+    fn ffi_client_submit_result_compact_batch_amortizes_hot_path() {
+        unsafe {
+            let mut connection = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_connect(
+                    NnrpClientConnectRequest {
+                        connection_id: 91_429,
+                        generation: 1,
+                        transport_id: 1,
+                    },
+                    &mut connection
+                ),
+                NnrpFfiStatus::ok()
+            );
+            let mut session = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_open_session(
+                    NnrpSessionOpenRequest {
+                        connection,
+                        requested_session_id: 91_430,
+                        generation: 1,
+                        profile_id: 2,
+                        schema_id: 0x1001,
+                        schema_version: 3,
+                    },
+                    &mut session
+                ),
+                NnrpFfiStatus::ok()
+            );
+            drain_events(connection);
+
+            let submit_payload = [1u8, 2, 3];
+            let result_payload = [4u8, 5, 6];
+            let mut result = NnrpCompactResult::none(NnrpFfiStatus::ok());
+            let mut completed = 0usize;
+            assert_eq!(
+                nnrp_client_submit_result_compact_batch(
+                    NnrpClientSubmitResultBatchRequest {
+                        session,
+                        operation_id_start: 91_431,
+                        frame_id_start: 60,
+                        frame_id_stride: 1,
+                        submit_payload: NnrpBufferView {
+                            ptr: submit_payload.as_ptr(),
+                            len: submit_payload.len(),
+                        },
+                        result_payload: NnrpBufferView {
+                            ptr: result_payload.as_ptr(),
+                            len: result_payload.len(),
+                        },
+                        max_events: 2,
+                        iterations: 4,
+                    },
+                    &mut result,
+                    &mut completed,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(completed, 4);
+            assert_eq!(result.status, NnrpFfiStatus::ok());
+            assert_eq!(result.has_result, 1);
+            assert_eq!(result.event_kind, NnrpEventKind::ResultPushed as u32);
+            assert_eq!(result.operation.id, 91_434);
+            assert_eq!(result.operation_id, 91_434);
+            assert_eq!(result.frame_id, 63);
+            assert_eq!(result.payload.len, result_payload.len());
+
+            completed = usize::MAX;
+            result = NnrpCompactResult::none(NnrpFfiStatus::invalid_argument(1));
+            assert_eq!(
+                nnrp_client_submit_result_compact_batch(
+                    NnrpClientSubmitResultBatchRequest {
+                        session,
+                        operation_id_start: 91_500,
+                        frame_id_start: 80,
+                        frame_id_stride: 1,
+                        submit_payload: NnrpBufferView {
+                            ptr: submit_payload.as_ptr(),
+                            len: submit_payload.len(),
+                        },
+                        result_payload: NnrpBufferView {
+                            ptr: result_payload.as_ptr(),
+                            len: result_payload.len(),
+                        },
+                        max_events: 2,
+                        iterations: 0,
+                    },
+                    &mut result,
+                    &mut completed,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(completed, 0);
+            assert_eq!(result.status, NnrpFfiStatus::ok());
+            assert_eq!(result.has_result, 0);
+
+            completed = usize::MAX;
+            assert_eq!(
+                nnrp_client_submit_result_compact_batch(
+                    NnrpClientSubmitResultBatchRequest {
+                        session,
+                        operation_id_start: 91_600,
+                        frame_id_start: 90,
+                        frame_id_stride: 1,
+                        submit_payload: NnrpBufferView {
+                            ptr: submit_payload.as_ptr(),
+                            len: submit_payload.len(),
+                        },
+                        result_payload: NnrpBufferView {
+                            ptr: result_payload.as_ptr(),
+                            len: result_payload.len(),
+                        },
+                        max_events: 2,
+                        iterations: 1,
+                    },
+                    core::ptr::null_mut(),
+                    &mut completed,
+                ),
+                NnrpFfiStatus::invalid_argument(126)
+            );
+            assert_eq!(completed, usize::MAX);
+
+            let mut null_completed_result = NnrpCompactResult::none(NnrpFfiStatus::ok());
+            assert_eq!(
+                nnrp_client_submit_result_compact_batch(
+                    NnrpClientSubmitResultBatchRequest {
+                        session,
+                        operation_id_start: 91_601,
+                        frame_id_start: 91,
+                        frame_id_stride: 1,
+                        submit_payload: NnrpBufferView {
+                            ptr: submit_payload.as_ptr(),
+                            len: submit_payload.len(),
+                        },
+                        result_payload: NnrpBufferView {
+                            ptr: result_payload.as_ptr(),
+                            len: result_payload.len(),
+                        },
+                        max_events: 2,
+                        iterations: 1,
+                    },
+                    &mut null_completed_result,
+                    core::ptr::null_mut(),
+                ),
+                NnrpFfiStatus::invalid_argument(126)
+            );
         }
     }
 
