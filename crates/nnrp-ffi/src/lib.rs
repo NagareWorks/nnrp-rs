@@ -21,6 +21,9 @@ pub const NNRP_FFI_ABI_PATCH: u16 = 0;
 pub const NNRP_TRANSPORT_SLOT_QUIC: u32 = 0x0000_0001;
 pub const NNRP_TRANSPORT_SLOT_TCP: u32 = 0x0000_0002;
 
+#[cfg(not(any(feature = "transport-tcp", feature = "transport-quic")))]
+compile_error!("nnrp-ffi must be built with at least one transport feature enabled.");
+
 pub const NNRP_RUNTIME_FEATURE_PROTOCOL_CORE: u64 = 0x0000_0000_0000_0001;
 pub const NNRP_RUNTIME_FEATURE_CLIENT_API: u64 = 0x0000_0000_0000_0002;
 pub const NNRP_RUNTIME_FEATURE_SERVER_API: u64 = 0x0000_0000_0000_0004;
@@ -116,10 +119,9 @@ pub fn runtime_capabilities() -> NnrpRuntimeCapabilities {
         sdk_minor: 0,
         sdk_patch: 0,
         sdk_preview: 3,
-        sdk_revision: 6,
+        sdk_revision: 8,
         reserved1: 0,
-        transport_slots: transport_slot_bit(TransportId::Quic)
-            | transport_slot_bit(TransportId::Tcp),
+        transport_slots: enabled_transport_slots(),
         feature_flags: NNRP_RUNTIME_FEATURE_PROTOCOL_CORE
             | NNRP_RUNTIME_FEATURE_CLIENT_API
             | NNRP_RUNTIME_FEATURE_SERVER_API
@@ -1056,6 +1058,25 @@ pub struct NnrpClientSubmitResultRequest {
     pub max_events: usize,
 }
 
+const fn enabled_transport_slots() -> u32 {
+    let mut slots = 0;
+    if cfg!(feature = "transport-quic") {
+        slots |= transport_slot_bit(TransportId::Quic);
+    }
+    if cfg!(feature = "transport-tcp") {
+        slots |= transport_slot_bit(TransportId::Tcp);
+    }
+    slots
+}
+
+fn transport_id_enabled(transport_id: u32) -> bool {
+    match TransportId::try_from_u32(transport_id) {
+        Ok(TransportId::Quic) => cfg!(feature = "transport-quic"),
+        Ok(TransportId::Tcp) => cfg!(feature = "transport-tcp"),
+        Ok(TransportId::Unspecified) | Err(_) => false,
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct NnrpClientSubmitResultBatchRequest {
@@ -1114,6 +1135,9 @@ pub unsafe extern "C" fn nnrp_client_connect(
 ) -> NnrpFfiStatus {
     if out_connection.is_null() || request.connection_id == 0 || request.generation == 0 {
         return NnrpFfiStatus::invalid_argument(10);
+    }
+    if !transport_id_enabled(request.transport_id) {
+        return NnrpFfiStatus::invalid_argument(46);
     }
 
     let handle = NnrpHandle::new(
@@ -2745,6 +2769,9 @@ pub unsafe extern "C" fn nnrp_server_bind(
     if out_server.is_null() || request.server_id == 0 || request.generation == 0 {
         return NnrpFfiStatus::invalid_argument(18);
     }
+    if !transport_id_enabled(request.transport_id) {
+        return NnrpFfiStatus::invalid_argument(47);
+    }
 
     let handle = NnrpHandle::new(
         NnrpHandleKind::Connection,
@@ -3157,6 +3184,16 @@ mod tests {
     use super::*;
     use core::ptr;
 
+    #[cfg(feature = "transport-quic")]
+    const fn test_transport_id() -> u32 {
+        TransportId::Quic as u32
+    }
+
+    #[cfg(all(not(feature = "transport-quic"), feature = "transport-tcp"))]
+    const fn test_transport_id() -> u32 {
+        TransportId::Tcp as u32
+    }
+
     #[test]
     fn ffi_current_version_stays_aligned() {
         let version = current_protocol_version();
@@ -3178,12 +3215,9 @@ mod tests {
         assert_eq!(capabilities.sdk_minor, 0);
         assert_eq!(capabilities.sdk_patch, 0);
         assert_eq!(capabilities.sdk_preview, 3);
-        assert_eq!(capabilities.sdk_revision, 6);
+        assert_eq!(capabilities.sdk_revision, 8);
         assert_eq!(capabilities.reserved1, 0);
-        assert_eq!(
-            capabilities.transport_slots,
-            NNRP_TRANSPORT_SLOT_QUIC | NNRP_TRANSPORT_SLOT_TCP
-        );
+        assert_eq!(capabilities.transport_slots, enabled_transport_slots());
         assert_eq!(transport_slot_bit(TransportId::Unspecified), 0);
         assert_eq!(
             transport_slot_bit(TransportId::Quic),
@@ -3260,6 +3294,86 @@ mod tests {
     }
 
     #[test]
+    fn ffi_transport_scope_rejects_unavailable_or_unknown_transport_ids() {
+        assert_eq!(
+            transport_id_enabled(TransportId::Tcp as u32),
+            cfg!(feature = "transport-tcp")
+        );
+        assert_eq!(
+            transport_id_enabled(TransportId::Quic as u32),
+            cfg!(feature = "transport-quic")
+        );
+        assert!(!transport_id_enabled(TransportId::Unspecified as u32));
+        assert!(!transport_id_enabled(99));
+
+        let mut client = NnrpHandle::invalid();
+        let client_status = unsafe {
+            nnrp_client_connect(
+                NnrpClientConnectRequest {
+                    connection_id: 12,
+                    generation: 1,
+                    transport_id: TransportId::Unspecified as u32,
+                },
+                &mut client,
+            )
+        };
+        assert_eq!(client_status, NnrpFfiStatus::invalid_argument(46));
+        assert_eq!(client, NnrpHandle::invalid());
+
+        let mut server = NnrpHandle::invalid();
+        let server_status = unsafe {
+            nnrp_server_bind(
+                NnrpServerBindRequest {
+                    server_id: 13,
+                    generation: 1,
+                    transport_id: 99,
+                },
+                &mut server,
+            )
+        };
+        assert_eq!(server_status, NnrpFfiStatus::invalid_argument(47));
+        assert_eq!(server, NnrpHandle::invalid());
+    }
+
+    #[cfg(all(feature = "transport-tcp", not(feature = "transport-quic")))]
+    #[test]
+    fn ffi_tcp_scoped_build_rejects_quic_connection_open() {
+        let mut handle = NnrpHandle::invalid();
+        let status = unsafe {
+            nnrp_client_connect(
+                NnrpClientConnectRequest {
+                    connection_id: 10,
+                    generation: 1,
+                    transport_id: TransportId::Quic as u32,
+                },
+                &mut handle,
+            )
+        };
+
+        assert_eq!(status, NnrpFfiStatus::invalid_argument(46));
+        assert_eq!(handle, NnrpHandle::invalid());
+    }
+
+    #[cfg(all(feature = "transport-quic", not(feature = "transport-tcp")))]
+    #[test]
+    fn ffi_quic_scoped_build_rejects_tcp_server_bind() {
+        let mut handle = NnrpHandle::invalid();
+        let status = unsafe {
+            nnrp_server_bind(
+                NnrpServerBindRequest {
+                    server_id: 11,
+                    generation: 1,
+                    transport_id: TransportId::Tcp as u32,
+                },
+                &mut handle,
+            )
+        };
+
+        assert_eq!(status, NnrpFfiStatus::invalid_argument(47));
+        assert_eq!(handle, NnrpHandle::invalid());
+    }
+
+    #[test]
     fn ffi_handles_validate_kind_and_generation() {
         let connection = NnrpHandle::new(NnrpHandleKind::Connection, 7, 1);
         assert_eq!(connection.validate_kind(NnrpHandleKind::Connection), Ok(()));
@@ -3308,7 +3422,7 @@ mod tests {
                     NnrpConnectionBootstrap {
                         connection_id: 77,
                         generation: 1,
-                        transport_id: 1,
+                        transport_id: test_transport_id(),
                     },
                     &mut connection
                 ),
@@ -3368,7 +3482,7 @@ mod tests {
                     NnrpClientConnectRequest {
                         connection_id: 91_001,
                         generation: 1,
-                        transport_id: 1,
+                        transport_id: test_transport_id(),
                     },
                     &mut connection
                 ),
@@ -3470,7 +3584,7 @@ mod tests {
                     NnrpClientConnectRequest {
                         connection_id: 91_101,
                         generation: 1,
-                        transport_id: 1,
+                        transport_id: test_transport_id(),
                     },
                     &mut connection
                 ),
@@ -3549,7 +3663,7 @@ mod tests {
                     NnrpClientConnectRequest {
                         connection_id: 91_401,
                         generation: 1,
-                        transport_id: 1,
+                        transport_id: test_transport_id(),
                     },
                     &mut connection
                 ),
@@ -3657,7 +3771,7 @@ mod tests {
                     NnrpClientConnectRequest {
                         connection_id: 91_421,
                         generation: 1,
-                        transport_id: 1,
+                        transport_id: test_transport_id(),
                     },
                     &mut connection
                 ),
@@ -3731,7 +3845,7 @@ mod tests {
                     NnrpClientConnectRequest {
                         connection_id: 91_426,
                         generation: 1,
-                        transport_id: 1,
+                        transport_id: test_transport_id(),
                     },
                     &mut connection
                 ),
@@ -3803,7 +3917,7 @@ mod tests {
                     NnrpClientConnectRequest {
                         connection_id: 91_429,
                         generation: 1,
-                        transport_id: 1,
+                        transport_id: test_transport_id(),
                     },
                     &mut connection
                 ),
@@ -3953,7 +4067,7 @@ mod tests {
                     NnrpClientConnectRequest {
                         connection_id: 91_431,
                         generation: 1,
-                        transport_id: 1,
+                        transport_id: test_transport_id(),
                     },
                     &mut connection
                 ),
@@ -4112,7 +4226,7 @@ mod tests {
                     NnrpClientConnectRequest {
                         connection_id: 91_501,
                         generation: 1,
-                        transport_id: 1,
+                        transport_id: test_transport_id(),
                     },
                     &mut connection
                 ),
@@ -4198,7 +4312,7 @@ mod tests {
                     NnrpClientConnectRequest {
                         connection_id: 91_201,
                         generation: 1,
-                        transport_id: 1,
+                        transport_id: test_transport_id(),
                     },
                     &mut connection
                 ),
@@ -4244,7 +4358,7 @@ mod tests {
                     NnrpClientConnectRequest {
                         connection_id: 91_301,
                         generation: 1,
-                        transport_id: 1,
+                        transport_id: test_transport_id(),
                     },
                     &mut connection
                 ),
@@ -4882,7 +4996,7 @@ mod tests {
                     NnrpClientConnectRequest {
                         connection_id: 481_000,
                         generation: 1,
-                        transport_id: 1,
+                        transport_id: test_transport_id(),
                     },
                     &mut connection,
                 ),
@@ -5003,7 +5117,7 @@ mod tests {
                     NnrpClientConnectRequest {
                         connection_id: 481_010,
                         generation: 1,
-                        transport_id: 1,
+                        transport_id: test_transport_id(),
                     },
                     &mut connection,
                 ),
@@ -5171,7 +5285,7 @@ mod tests {
                     NnrpClientConnectRequest {
                         connection_id: 481_100,
                         generation: 1,
-                        transport_id: 1,
+                        transport_id: test_transport_id(),
                     },
                     &mut connection,
                 ),
@@ -5264,7 +5378,7 @@ mod tests {
                     NnrpClientConnectRequest {
                         connection_id: 481_200,
                         generation: 1,
-                        transport_id: 1,
+                        transport_id: test_transport_id(),
                     },
                     &mut connection,
                 ),
@@ -5976,7 +6090,7 @@ mod tests {
                     NnrpClientConnectRequest {
                         connection_id: 91_101,
                         generation: 1,
-                        transport_id: 1,
+                        transport_id: test_transport_id(),
                     },
                     &mut connection,
                 ),
@@ -6053,7 +6167,7 @@ mod tests {
                     NnrpConnectionBootstrap {
                         connection_id: 91_201,
                         generation: 1,
-                        transport_id: 1,
+                        transport_id: test_transport_id(),
                     },
                     &mut connection,
                 ),
@@ -6077,7 +6191,7 @@ mod tests {
                     NnrpServerBindRequest {
                         server_id: 92_001,
                         generation: 1,
-                        transport_id: 1,
+                        transport_id: test_transport_id(),
                     },
                     &mut server,
                 ),
@@ -6187,7 +6301,7 @@ mod tests {
                     NnrpClientConnectRequest {
                         connection_id: 93_001,
                         generation: 1,
-                        transport_id: 1,
+                        transport_id: test_transport_id(),
                     },
                     &mut client,
                 ),
@@ -6199,7 +6313,7 @@ mod tests {
                     NnrpServerBindRequest {
                         server_id: 93_002,
                         generation: 1,
-                        transport_id: 1,
+                        transport_id: test_transport_id(),
                     },
                     &mut server,
                 ),
@@ -6246,7 +6360,7 @@ mod tests {
                     NnrpConnectionBootstrap {
                         connection_id: 0,
                         generation: 1,
-                        transport_id: 1,
+                        transport_id: test_transport_id(),
                     },
                     ptr::null_mut()
                 ),
@@ -6290,7 +6404,7 @@ mod tests {
                     NnrpConnectionBootstrap {
                         connection_id: 90_003,
                         generation: 1,
-                        transport_id: 1,
+                        transport_id: test_transport_id(),
                     },
                     &mut connection
                 ),
@@ -6371,9 +6485,9 @@ mod tests {
                     .get(connection, NnrpHandleKind::Connection)
                     .expect("connection should be registered"),
                 NnrpFfiResource::Connection {
-                    transport_id: 1,
+                    transport_id,
                     role: NnrpFfiConnectionRole::Client
-                }
+                } if *transport_id == test_transport_id()
             ));
             assert!(matches!(
                 store
@@ -6411,7 +6525,7 @@ mod tests {
                     flags: 0,
                 },
                 NnrpFfiResource::Connection {
-                    transport_id: 1,
+                    transport_id: test_transport_id(),
                     role: NnrpFfiConnectionRole::Client,
                 },
             ),
@@ -6421,7 +6535,7 @@ mod tests {
             store.insert(
                 NnrpHandle::new(NnrpHandleKind::Connection, 1, 1),
                 NnrpFfiResource::Connection {
-                    transport_id: 1,
+                    transport_id: test_transport_id(),
                     role: NnrpFfiConnectionRole::Client,
                 },
             ),

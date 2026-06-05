@@ -16,5 +16,10 @@ categories.workspace = true
 [lib]
 crate-type = ["cdylib", "staticlib", "rlib"]
 
+[features]
+default = ["transport-tcp", "transport-quic"]
+transport-tcp = []
+transport-quic = []
+
 [dependencies]
-nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.3.7" }
+nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.3.8" }

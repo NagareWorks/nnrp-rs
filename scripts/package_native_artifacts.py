@@ -58,6 +58,24 @@ TARGETS = {
     "x86_64-linux-android": ("android", "x86_64", "dynamic"),
 }
 
+TRANSPORT_SCOPES = {
+    "all": {
+        "package": "nnrp-ffi",
+        "features": ["transport-tcp", "transport-quic"],
+        "slots": ["tcp", "quic"],
+    },
+    "tcp": {
+        "package": "nnrp-ffi-transport-tcp",
+        "features": ["transport-tcp"],
+        "slots": ["tcp"],
+    },
+    "quic": {
+        "package": "nnrp-ffi-transport-quic",
+        "features": ["transport-quic"],
+        "slots": ["quic"],
+    },
+}
+
 
 def host_os_name() -> str:
     value = platform.system().lower()
@@ -91,12 +109,14 @@ def expected_library_name(os_name: str, library_kind: str) -> str:
     raise SystemExit(f"unsupported artifact OS: {os_name}")
 
 
-def build_library(release: bool, target: str | None) -> None:
+def build_library(release: bool, target: str | None, transport_scope: str) -> None:
     command = ["cargo", "build", "-p", "nnrp-ffi"]
     if target:
         command.extend(["--target", target])
     if release:
         command.append("--release")
+    features = TRANSPORT_SCOPES[transport_scope]["features"]
+    command.extend(["--no-default-features", "--features", ",".join(features)])
     subprocess.run(command, cwd=ROOT, check=True)
 
 
@@ -223,10 +243,13 @@ def package_artifact(
     package_name: str | None,
     out_dir: Path,
     release: bool,
+    transport_scope: str,
 ) -> Path:
     resolved_package_name = package_name or f"{os_name}-{arch_name}"
     if target and package_name is None:
         resolved_package_name = f"{resolved_package_name}-{target}"
+    if transport_scope != "all":
+        resolved_package_name = f"{transport_scope}-{resolved_package_name}"
     package_dir = out_dir / resolved_package_name
     if package_dir.exists():
         shutil.rmtree(package_dir)
@@ -234,7 +257,9 @@ def package_artifact(
     libraries = copy_library_artifacts(library, package_dir, os_name)
     headers = copy_headers(package_dir)
     manifest = {
-        "package": "nnrp-ffi",
+        "package": TRANSPORT_SCOPES[transport_scope]["package"],
+        "transport_scope": transport_scope,
+        "transport_slots": TRANSPORT_SCOPES[transport_scope]["slots"],
         "profile": "release" if release else "debug",
         "os": os_name,
         "arch": arch_name,
@@ -262,6 +287,12 @@ def main() -> None:
     parser.add_argument("--debug", action="store_true", help="Use the debug target profile.")
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--skip-symbol-check", action="store_true")
+    parser.add_argument(
+        "--transport-scope",
+        action="append",
+        choices=sorted(TRANSPORT_SCOPES.keys()),
+        help="Transport scope to package. Repeat to package multiple scopes. Defaults to all.",
+    )
     args = parser.parse_args()
 
     target_os, target_arch, target_library_kind = TARGETS.get(
@@ -273,22 +304,25 @@ def main() -> None:
     library_kind = args.library_kind or target_library_kind
 
     release = not args.debug
-    if not args.skip_build:
-        build_library(release, args.target)
-    library = locate_library(os_name, library_kind, release, args.target)
-    if not args.skip_symbol_check:
-        verify_exports(library, os_name, library_kind)
-    package_dir = package_artifact(
-        library,
-        os_name,
-        arch_name,
-        library_kind,
-        args.target,
-        args.package_name,
-        args.out,
-        release,
-    )
-    print(package_dir)
+    transport_scopes = args.transport_scope or ["all"]
+    for transport_scope in transport_scopes:
+        if not args.skip_build:
+            build_library(release, args.target, transport_scope)
+        library = locate_library(os_name, library_kind, release, args.target)
+        if not args.skip_symbol_check:
+            verify_exports(library, os_name, library_kind)
+        package_dir = package_artifact(
+            library,
+            os_name,
+            arch_name,
+            library_kind,
+            args.target,
+            args.package_name,
+            args.out,
+            release,
+            transport_scope,
+        )
+        print(package_dir)
 
 
 if __name__ == "__main__":

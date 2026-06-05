@@ -153,7 +153,15 @@ jobs:
           fi
 
       - name: Package native link library
-        run: python scripts/package_native_artifacts.py --target ${{ matrix.target }} --package-name ${{ matrix.name }} --out artifacts/native --skip-symbol-check
+        run: >
+          python scripts/package_native_artifacts.py
+          --target ${{ matrix.target }}
+          --package-name ${{ matrix.name }}
+          --out artifacts/native
+          --skip-symbol-check
+          --transport-scope all
+          --transport-scope tcp
+          --transport-scope quic
 
       - name: Upload native artifact
         uses: actions/upload-artifact@v6
@@ -268,12 +276,13 @@ jobs:
       - name: Package WASM primitives
         run: |
           rustup target add wasm32-unknown-unknown
-          python scripts/package_wasm_primitives.py --out artifacts/wasm
+          python scripts/package_wasm_primitives.py --out artifacts/wasm --transport-scope all --transport-scope tcp --transport-scope quic
 
       - name: Bundle release artifacts
         run: |
           python - <<'PY'
           import hashlib
+          import json
           import pathlib
           import shutil
           import zipfile
@@ -322,11 +331,21 @@ jobs:
 
           for package_dir in sorted((dist_dir / 'native').glob('*')):
             if package_dir.is_dir():
-              zip_dir(package_dir, release_dir / f'nnrp-ffi-native-{package_dir.name}-{version}.zip')
+              manifest_path = package_dir / 'manifest.json'
+              manifest = json.loads(manifest_path.read_text()) if manifest_path.is_file() else {}
+              package = manifest.get('package', 'nnrp-ffi')
+              platform_name = package_dir.name
+              scope = manifest.get('transport_scope', 'all')
+              if scope != 'all' and platform_name.startswith(f'{scope}-'):
+                platform_name = platform_name[len(scope) + 1:]
+              zip_dir(package_dir, release_dir / f'{package}-native-{platform_name}-{version}.zip')
 
-          wasm_dir = dist_dir / 'wasm' / 'nnrp-wasm-primitives'
-          if wasm_dir.is_dir():
-            zip_dir(wasm_dir, release_dir / f'nnrp-wasm-primitives-{version}.zip')
+          for wasm_dir in sorted((dist_dir / 'wasm').glob('*')):
+            if wasm_dir.is_dir():
+              manifest_path = wasm_dir / 'manifest.json'
+              manifest = json.loads(manifest_path.read_text()) if manifest_path.is_file() else {}
+              artifact = manifest.get('artifact', manifest.get('package', wasm_dir.name))
+              zip_dir(wasm_dir, release_dir / f'{artifact}-{version}.zip')
 
           checksums = []
           for artifact in sorted(release_dir.glob('*')):

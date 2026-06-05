@@ -16,9 +16,15 @@ categories.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+default = ["transport-tcp", "transport-quic", "wasm-provider"]
+transport-tcp = ["nnrp-transport-provider/tcp"]
+transport-quic = ["nnrp-transport-provider/quic"]
+wasm-provider = ["nnrp-transport-provider/wasm"]
+
 [dependencies]
-nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.3.7" }
-nnrp-transport-provider = { path = "../nnrp-transport-provider", version = "1.0.0-preview.3.7", default-features = false, features = ["tcp", "quic", "wasm"] }
+nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.3.8" }
+nnrp-transport-provider = { path = "../nnrp-transport-provider", version = "1.0.0-preview.3.8", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 wasm-bindgen.workspace = true

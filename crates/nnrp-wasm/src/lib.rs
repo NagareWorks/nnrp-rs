@@ -6,6 +6,9 @@ use nnrp_transport_provider::{
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
+#[cfg(not(any(feature = "transport-tcp", feature = "transport-quic")))]
+compile_error!("nnrp-wasm must be built with at least one transport feature enabled.");
+
 #[wasm_bindgen]
 pub fn nnrp_wasm_protocol_major() -> u8 {
     ProtocolVersion::CURRENT.major
@@ -231,8 +234,23 @@ fn parse_transport_ids(source: &str) -> Result<Vec<TransportId>, JsValue> {
 }
 
 fn parse_transport_id(value: u32) -> Result<TransportId, JsValue> {
-    TransportId::try_from_u32(value)
-        .map_err(|error| js_error(&format!("invalid transport id: {error}")))
+    let transport_id = TransportId::try_from_u32(value)
+        .map_err(|error| js_error(&format!("invalid transport id: {error}")))?;
+    if transport_enabled(transport_id) {
+        Ok(transport_id)
+    } else {
+        Err(js_error(&format!(
+            "transport id {value} is not enabled in this wasm artifact"
+        )))
+    }
+}
+
+const fn transport_enabled(transport_id: TransportId) -> bool {
+    match transport_id {
+        TransportId::Quic => cfg!(feature = "transport-quic"),
+        TransportId::Tcp => cfg!(feature = "transport-tcp"),
+        TransportId::Unspecified => false,
+    }
 }
 
 fn parse_policy(value: &str) -> Result<TransportPolicy, JsValue> {
@@ -278,7 +296,6 @@ fn js_error(message: &str) -> JsValue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::Value;
 
     #[test]
     fn wasm_protocol_version_exports_current_values() {
@@ -289,6 +306,7 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "transport-tcp", feature = "transport-quic"))]
     #[test]
     fn wasm_probe_selection_prefers_measured_tcp_over_flaky_quic() {
         let providers = r#"[
@@ -304,11 +322,12 @@ mod tests {
 
         let output =
             select_transport_with_probe_json(providers, "[1,2]", "prefer_quic", samples).unwrap();
-        let output = serde_json::from_str::<Value>(&output).unwrap();
+        let output = serde_json::from_str::<serde_json::Value>(&output).unwrap();
         assert_eq!(output["selected"]["transport_id"], 2);
         assert_eq!(output["candidates"].as_array().unwrap().len(), 2);
     }
 
+    #[cfg(all(feature = "transport-tcp", feature = "transport-quic"))]
     #[test]
     fn wasm_probe_selection_reports_rejected_unavailable_provider() {
         let providers = r#"[
@@ -321,7 +340,7 @@ mod tests {
 
         let output =
             select_transport_with_probe_json(providers, "[1,2]", "prefer_tcp", samples).unwrap();
-        let output = serde_json::from_str::<Value>(&output).unwrap();
+        let output = serde_json::from_str::<serde_json::Value>(&output).unwrap();
 
         assert_eq!(output["selected"]["kind"], "native_dynamic");
         assert_eq!(output["rejected"][0]["transport_id"], 1);
@@ -332,6 +351,7 @@ mod tests {
             .contains("LocalProviderUnavailable"));
     }
 
+    #[cfg(feature = "transport-quic")]
     #[test]
     fn wasm_score_provider_probe_returns_json_score() {
         let provider = r#"{"name":"quic","version":"0.0.0","transport_id":1,"kind":"pure_rust","available":true}"#;
@@ -341,13 +361,14 @@ mod tests {
         ]"#;
 
         let output = score_provider_probe_json(provider, "force_quic", samples).unwrap();
-        let output = serde_json::from_str::<Value>(&output).unwrap();
+        let output = serde_json::from_str::<serde_json::Value>(&output).unwrap();
 
         assert_eq!(output["sample_count"], 2);
         assert_eq!(output["failure_count"], 0);
         assert_eq!(output["median_rtt_us"], 1200);
     }
 
+    #[cfg(feature = "transport-tcp")]
     #[test]
     fn wasm_score_provider_probe_reports_missing_samples() {
         let provider =
@@ -355,17 +376,36 @@ mod tests {
         assert!(score_provider_probe_json(provider, "auto", "[]").is_err());
     }
 
+    #[cfg(feature = "transport-tcp")]
     #[test]
     fn wasm_rejects_invalid_policy_kind_and_transport_id() {
         let tcp =
             r#"{"name":"tcp","version":"0.0.0","transport_id":2,"kind":"wasm","available":true}"#;
+        let unspecified = r#"{"name":"unspecified","version":"0.0.0","transport_id":0,"kind":"wasm","available":true}"#;
         let bad_kind =
             r#"{"name":"tcp","version":"0.0.0","transport_id":2,"kind":"plugin","available":true}"#;
         let bad_transport =
             r#"{"name":"tcp","version":"0.0.0","transport_id":99,"kind":"wasm","available":true}"#;
 
         assert!(score_provider_probe_json(tcp, "sticky", "[]").is_err());
+        assert!(score_provider_probe_json(unspecified, "auto", "[]").is_err());
         assert!(score_provider_probe_json(bad_kind, "force_tcp", "[]").is_err());
         assert!(score_provider_probe_json(bad_transport, "force_tcp", "[]").is_err());
+    }
+
+    #[cfg(all(feature = "transport-tcp", not(feature = "transport-quic")))]
+    #[test]
+    fn wasm_tcp_scoped_artifact_rejects_quic_provider() {
+        let quic =
+            r#"{"name":"quic","version":"0.0.0","transport_id":1,"kind":"wasm","available":true}"#;
+        assert!(score_provider_probe_json(quic, "force_quic", "[]").is_err());
+    }
+
+    #[cfg(all(feature = "transport-quic", not(feature = "transport-tcp")))]
+    #[test]
+    fn wasm_quic_scoped_artifact_rejects_tcp_provider() {
+        let tcp =
+            r#"{"name":"tcp","version":"0.0.0","transport_id":2,"kind":"wasm","available":true}"#;
+        assert!(score_provider_probe_json(tcp, "force_tcp", "[]").is_err());
     }
 }

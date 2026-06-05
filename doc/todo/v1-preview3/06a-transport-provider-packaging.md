@@ -36,6 +36,9 @@
 - [x] Package the C ABI umbrella/header set (`include/nnrp/nnrp.h`, runtime, error, version, and FFI headers) into every native release artifact.
 - [x] Add CI jobs that verify host native library names/exported symbols and release jobs that build cross-platform artifact matrices.
 - [x] Add Node.js native-loading guidance for backend JS/TS users.
+- [x] Add transport-scoped native artifact build modes for `all`, `tcp`, and `quic` so downstream SDK transport packages consume real scoped link libraries instead of config flags over one hidden artifact.
+- [x] Keep the scoped native artifacts on the existing coarse FFI surface so transport packaging does not introduce extra cross-language boundary calls or regress hot-path performance.
+- [x] Stamp native artifact manifests with `transport_scope` and `transport_slots`, and make scoped builds reject disabled transport ids at connect/bind time.
 
 ## WASM And JS/TS Packaging Boundary
 
@@ -44,6 +47,8 @@
 - [x] Emit WASM package primitives and generated `.d.ts` files for `nnrp-js`; do not keep npm package layout, bundler adapters, or browser app examples in this repository.
 - [x] Document the downstream split: Node may prefer native link libraries and fall back to WASM, while browsers consume WASM plus WebSocket/WebTransport adapters implemented in `nnrp-js`.
 - [x] Keep browser documentation clear that native link libraries are not usable there; browsers consume WASM plus web transports.
+- [x] Add transport-scoped WASM primitive artifacts for `all`, `tcp`, and `quic`, with scoped manifests and runtime rejection for disabled transport ids.
+- [x] Keep scoped WASM artifacts as provider/probe primitives owned by `nnrp-rs`, while package naming and browser/client/server composition remain downstream SDK responsibilities.
 
 ## Validation
 
@@ -52,3 +57,4 @@
 - [x] Add probe selection tests that cover success, timeout, downgrade, and force-policy failure.
 - [x] Add native artifact build checks in release CI.
 - [x] Add WASM build checks and a minimal JS/TS smoke test.
+- [x] Add single-transport FFI checks so scoped builds cannot silently advertise or accept transports outside their artifact boundary.
