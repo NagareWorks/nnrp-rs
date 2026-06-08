@@ -1,5 +1,5 @@
 pub mod adapter_conformance;
-mod preview2_baseline;
+mod nnrp1_baseline;
 pub mod preview3_vectors;
 
 use nnrp_core::ProtocolVersion;

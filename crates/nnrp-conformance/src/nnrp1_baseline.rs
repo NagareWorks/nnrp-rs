@@ -11,7 +11,7 @@ use nnrp_core::{
 };
 use nnrp_core::{ClientHelloMetadata, ResultHintReason};
 
-pub fn execute_preview2_case(case_id: &str) -> Option<Result<(), String>> {
+pub fn execute_nnrp1_baseline_case(case_id: &str) -> Option<Result<(), String>> {
     let result = match case_id {
         "l0.header.fixed_shape.golden" => l0_header_fixed_shape(),
         "l0.control.client_hello.golden" => l0_client_hello(),
@@ -22,8 +22,8 @@ pub fn execute_preview2_case(case_id: &str) -> Option<Result<(), String>> {
         "l0.result_push.metadata.golden" => l0_result_push_metadata(),
         "l0.body_region.prelude.golden" => l0_body_region_prelude(),
         "l0.object_reference.block.golden" => l0_object_reference_block(),
-        "l0.typed_payload.descriptor.golden" => l0_preview2_typed_payload_descriptor(),
-        "l0.typed_payload.frame_regions.golden" => l0_preview2_typed_payload_frame_regions(),
+        "l0.typed_payload.descriptor.golden" => l0_baseline_typed_payload_descriptor(),
+        "l0.typed_payload.frame_regions.golden" => l0_baseline_typed_payload_frame_regions(),
         "l1.flow_update.metadata.validation" => l1_flow_update_validation(),
         "l1.result_hint.metadata.validation" => l1_result_hint_validation(),
         "l1.cache.lifecycle.roundtrip" => l1_cache_lifecycle_roundtrip(),
@@ -118,28 +118,28 @@ fn l0_object_reference_block() -> Result<(), String> {
     )
 }
 
-fn l0_preview2_typed_payload_descriptor() -> Result<(), String> {
+fn l0_baseline_typed_payload_descriptor() -> Result<(), String> {
     let bytes = hex_to_bytes("10000300040000000700000000000000");
-    let descriptor = Preview2TypedPayloadDescriptor::parse(&bytes)?;
+    let descriptor = BaselineTypedPayloadDescriptor::parse(&bytes)?;
     if descriptor.payload_kind != PayloadKindBitmap::STRUCTURED_EVENT
         || descriptor.profile_id != 3
         || descriptor.payload_offset != 4
         || descriptor.payload_length != 7
     {
-        return Err("preview2 typed-payload descriptor fields changed".to_string());
+        return Err("NNRP/1 baseline typed-payload descriptor fields changed".to_string());
     }
     if descriptor.to_bytes() != bytes {
-        return Err("preview2 typed-payload descriptor did not round-trip".to_string());
+        return Err("NNRP/1 baseline typed-payload descriptor did not round-trip".to_string());
     }
     Ok(())
 }
 
-fn l0_preview2_typed_payload_frame_regions() -> Result<(), String> {
+fn l0_baseline_typed_payload_frame_regions() -> Result<(), String> {
     let descriptors = hex_to_bytes(
         "020001000000000003000000000000000400020003000000020000000000000008000300050000000500000000000000100004000a0000000300000000000000",
     );
     let payload = b"tokauvideoevt";
-    validate_preview2_typed_payload_region(
+    validate_baseline_typed_payload_region(
         PayloadKindBitmap::TOKEN_CHUNK
             | PayloadKindBitmap::AUDIO_CHUNK
             | PayloadKindBitmap::VIDEO_CHUNK
@@ -242,7 +242,7 @@ fn l1_frame_submit_parse_emit() -> Result<(), String> {
 fn l1_result_push_parse_emit() -> Result<(), String> {
     let metadata = ResultPushMetadata::parse(&hex_to_bytes("0000040001005400020000004b0302004e030000000000001000000000000000000000000000000000000000010100002900000035001f000300000003000000")).map_err(to_string)?;
     if metadata.payload_frame_count != 3 || !metadata.payload_kind_bitmap.contains_tensor() {
-        return Err("RESULT_PUSH preview2 metadata lost tensor payload bookkeeping".to_string());
+        return Err("RESULT_PUSH baseline metadata lost tensor payload bookkeeping".to_string());
     }
     let cache_ref = ObjectReferenceBlock {
         object_kind: CacheObjectKind::TileIndexBlock,
@@ -325,7 +325,7 @@ fn assert_packet_round_trip(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Preview2TypedPayloadDescriptor {
+struct BaselineTypedPayloadDescriptor {
     payload_kind: u32,
     descriptor_flags: u8,
     profile_id: u16,
@@ -333,11 +333,11 @@ struct Preview2TypedPayloadDescriptor {
     payload_length: u32,
 }
 
-impl Preview2TypedPayloadDescriptor {
+impl BaselineTypedPayloadDescriptor {
     fn parse(source: &[u8]) -> Result<Self, String> {
         if source.len() != 16 {
             return Err(format!(
-                "preview2 typed-payload descriptor must be 16 bytes, got {}",
+                "NNRP/1 baseline typed-payload descriptor must be 16 bytes, got {}",
                 source.len()
             ));
         }
@@ -345,7 +345,7 @@ impl Preview2TypedPayloadDescriptor {
         let reserved = read_u32(source, 12);
         if descriptor_flags != 0 || reserved != 0 {
             return Err(
-                "preview2 typed-payload descriptor reserved fields must be zero".to_string(),
+                "NNRP/1 baseline typed-payload descriptor reserved fields must be zero".to_string(),
             );
         }
         let payload_kind = u32::from(source[0]);
@@ -353,7 +353,9 @@ impl Preview2TypedPayloadDescriptor {
             || payload_kind & (payload_kind - 1) != 0
             || payload_kind & !PAYLOAD_KIND_KNOWN_MASK != 0
         {
-            return Err("preview2 typed-payload descriptor payload_kind is invalid".to_string());
+            return Err(
+                "NNRP/1 baseline typed-payload descriptor payload_kind is invalid".to_string(),
+            );
         }
         Ok(Self {
             payload_kind,
@@ -376,38 +378,40 @@ impl Preview2TypedPayloadDescriptor {
     }
 }
 
-fn validate_preview2_typed_payload_region(
+fn validate_baseline_typed_payload_region(
     payload_kind_bitmap: u32,
     payload_frame_count: u16,
     descriptor_region: &[u8],
     payload_region: &[u8],
 ) -> Result<(), String> {
     if descriptor_region.len() != usize::from(payload_frame_count) * 16 {
-        return Err("preview2 descriptor bytes must match payload_frame_count * 16".to_string());
+        return Err(
+            "NNRP/1 baseline descriptor bytes must match payload_frame_count * 16".to_string(),
+        );
     }
 
     let mut next_offset = 0u32;
     for chunk in descriptor_region.chunks_exact(16) {
-        let descriptor = Preview2TypedPayloadDescriptor::parse(chunk)?;
+        let descriptor = BaselineTypedPayloadDescriptor::parse(chunk)?;
         if descriptor.payload_kind & !payload_kind_bitmap != 0 {
             return Err(
-                "preview2 descriptor payload kind was not declared in metadata".to_string(),
+                "NNRP/1 baseline descriptor payload kind was not declared in metadata".to_string(),
             );
         }
         if descriptor.payload_offset != next_offset {
-            return Err("preview2 typed-payload descriptors must be contiguous".to_string());
+            return Err("NNRP/1 baseline typed-payload descriptors must be contiguous".to_string());
         }
         next_offset = descriptor
             .payload_offset
             .checked_add(descriptor.payload_length)
-            .ok_or_else(|| "preview2 typed-payload range overflowed".to_string())?;
+            .ok_or_else(|| "NNRP/1 baseline typed-payload range overflowed".to_string())?;
         if next_offset as usize > payload_region.len() {
-            return Err("preview2 typed-payload range exceeds payload region".to_string());
+            return Err("NNRP/1 baseline typed-payload range exceeds payload region".to_string());
         }
     }
 
     if next_offset as usize != payload_region.len() {
-        return Err("preview2 payload region must be exactly covered".to_string());
+        return Err("NNRP/1 baseline payload region must be exactly covered".to_string());
     }
     Ok(())
 }
@@ -430,4 +434,94 @@ fn read_u32(source: &[u8], offset: usize) -> u32 {
 
 fn to_string(error: nnrp_core::NnrpError) -> String {
     error.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn descriptor(payload_kind: u8, offset: u32, length: u32) -> Vec<u8> {
+        let descriptor = BaselineTypedPayloadDescriptor {
+            payload_kind: u32::from(payload_kind),
+            descriptor_flags: 0,
+            profile_id: STANDARD_PROFILE_TOKEN,
+            payload_offset: offset,
+            payload_length: length,
+        };
+        descriptor.to_bytes()
+    }
+
+    #[test]
+    fn baseline_typed_payload_descriptor_round_trips() {
+        l0_baseline_typed_payload_descriptor().expect("baseline descriptor should match fixture");
+        l0_baseline_typed_payload_frame_regions()
+            .expect("baseline typed-payload region should match fixture");
+    }
+
+    #[test]
+    fn baseline_typed_payload_descriptor_rejects_invalid_shape() {
+        let short = [PayloadKindBitmap::TOKEN_CHUNK as u8; 15];
+        assert!(BaselineTypedPayloadDescriptor::parse(&short)
+            .expect_err("short descriptor should be rejected")
+            .contains("16 bytes"));
+
+        let mut reserved = descriptor(PayloadKindBitmap::TOKEN_CHUNK as u8, 0, 3);
+        reserved[1] = 1;
+        assert!(BaselineTypedPayloadDescriptor::parse(&reserved)
+            .expect_err("reserved descriptor flags should be rejected")
+            .contains("reserved fields"));
+
+        let invalid_payload_kind = descriptor(3, 0, 3);
+        assert!(BaselineTypedPayloadDescriptor::parse(&invalid_payload_kind)
+            .expect_err("multi-bit payload kind should be rejected")
+            .contains("payload_kind is invalid"));
+    }
+
+    #[test]
+    fn baseline_typed_payload_region_rejects_invalid_descriptor_layouts() {
+        assert!(validate_baseline_typed_payload_region(
+            PayloadKindBitmap::TOKEN_CHUNK,
+            1,
+            &[0; 15],
+            b""
+        )
+        .expect_err("descriptor byte count must match frame count")
+        .contains("payload_frame_count"));
+
+        assert!(validate_baseline_typed_payload_region(
+            PayloadKindBitmap::TOKEN_CHUNK,
+            1,
+            &descriptor(PayloadKindBitmap::VIDEO_CHUNK as u8, 0, 3),
+            b"tok",
+        )
+        .expect_err("undeclared payload kind should be rejected")
+        .contains("not declared"));
+
+        assert!(validate_baseline_typed_payload_region(
+            PayloadKindBitmap::TOKEN_CHUNK,
+            1,
+            &descriptor(PayloadKindBitmap::TOKEN_CHUNK as u8, 1, 2),
+            b"ok",
+        )
+        .expect_err("non-contiguous descriptor should be rejected")
+        .contains("contiguous"));
+
+        assert!(validate_baseline_typed_payload_region(
+            PayloadKindBitmap::TOKEN_CHUNK,
+            1,
+            &descriptor(PayloadKindBitmap::TOKEN_CHUNK as u8, 0, 4),
+            b"tok",
+        )
+        .expect_err("descriptor range must fit payload region")
+        .contains("exceeds"));
+
+        assert!(validate_baseline_typed_payload_region(
+            PayloadKindBitmap::TOKEN_CHUNK,
+            1,
+            &descriptor(PayloadKindBitmap::TOKEN_CHUNK as u8, 0, 2),
+            b"tok",
+        )
+        .expect_err("descriptor coverage must be exact")
+        .contains("exactly covered"));
+    }
 }

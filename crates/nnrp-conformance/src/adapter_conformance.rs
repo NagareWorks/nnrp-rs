@@ -2,7 +2,7 @@ use std::{fs, path::Path};
 
 use serde_json::{json, Value};
 
-use crate::preview2_baseline::execute_preview2_case;
+use crate::nnrp1_baseline::execute_nnrp1_baseline_case;
 use crate::preview3_vectors::execute_preview3_case;
 
 pub const RESULTS_SCHEMA_URL: &str =
@@ -79,7 +79,7 @@ pub fn build_results_report(plan: &Value) -> Result<Value, String> {
             })?;
 
         results.push(
-            match execute_preview3_case(case_id).or_else(|| execute_preview2_case(case_id)) {
+            match execute_preview3_case(case_id).or_else(|| execute_nnrp1_baseline_case(case_id)) {
                 Some(Ok(())) => json!({
                     "id": case_id,
                     "outcome": "pass",
@@ -193,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn build_results_report_passes_preview2_mandatory_baseline_cases() {
+    fn build_results_report_passes_nnrp1_mandatory_baseline_cases() {
         let mandatory_cases = [
             "l0.header.fixed_shape.golden",
             "l0.control.client_hello.golden",
@@ -218,10 +218,10 @@ mod tests {
             .collect();
 
         let report = build_results_report(&json!({
-            "protocol_version": "nnrp-1-preview2",
+            "protocol_version": "nnrp-1-preview3",
             "cases": cases
         }))
-        .expect("preview2 report should build");
+        .expect("NNRP/1 baseline report should build");
 
         let results = report["results"].as_array().expect("results array");
         assert_eq!(results.len(), mandatory_cases.len());
