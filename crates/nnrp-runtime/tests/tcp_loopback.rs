@@ -1,8 +1,11 @@
 use nnrp_core::{
-    BackpressureLevel, CacheObjectId, CacheObjectKind, CommonHeader, FlowScopeKind,
-    FlowUpdateMetadata, FlowUpdateReason, FrameSubmitMetadata, InFlightPolicy, InputProfile,
-    MessageType, OperationState, PartialResultMetadata, PayloadKindBitmap, PressureMetadata,
-    ResultClass, ResultDropReasonMetadata, ResultPushMetadata, SchemaRegistry,
+    BackpressureLevel, CacheMissMetadata, CacheMissReason, CacheObjectId, CacheObjectKind,
+    CacheReferenceMetadata, CacheReuseScope, CommonHeader, FlowScopeKind, FlowUpdateMetadata,
+    FlowUpdateReason, FrameSubmitMetadata, InFlightPolicy, InputProfile, MemoryLocationHint,
+    MessageType, ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata,
+    ObjectReleaseMetadata, ObjectReleaseReason, OperationState, OwnershipHint,
+    PartialResultMetadata, PayloadKindBitmap, PressureMetadata, ResultClass,
+    ResultDropReasonMetadata, ResultPushMetadata, RuntimeObjectKind, RuntimeRole, SchemaRegistry,
     SessionCloseMetadata, SessionCloseReason, SessionMigrateAckMetadata, SessionOpenAckMetadata,
     SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata,
     SessionPatchRejectReason, SessionPriorityClass, SessionStatus, SubmitMode, TileIndexMode,
@@ -267,6 +270,158 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
             assert_eq!(pressure.retry_after_ms, 25);
         }
         event => panic!("expected abort backpressure, got {event:?}"),
+    }
+
+    session.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        let submit = session.receive_submit().await?;
+        let operation_id = submit.frame_id as u64;
+
+        session
+            .send_object_declare(object_descriptor(), b"meta".to_vec())
+            .await?;
+        session
+            .send_object_ref(object_reference(operation_id), Vec::new())
+            .await?;
+        session
+            .send_object_delta(object_delta(), b"abcd".to_vec())
+            .await?;
+        session
+            .send_cache_reference(cache_reference(), b"hint".to_vec())
+            .await?;
+        session
+            .send_result(submit.frame_id, token_result(), b"done".to_vec())
+            .await?;
+        session
+            .send_object_release(
+                object_release(operation_id, ObjectReleaseReason::Completed, 0),
+                Vec::new(),
+            )
+            .await?;
+
+        let close = session.receive_close().await?;
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let mut session = client.open_session().await?;
+    let frame_id = session
+        .submit_nowait(token_submit(), b"prompt".to_vec())
+        .await?;
+
+    match session.await_event().await? {
+        NnrpClientEvent::ObjectDeclare { metadata, body } => {
+            assert_eq!(metadata.object_id, 900);
+            assert_eq!(metadata.object_kind, RuntimeObjectKind::ImageTile);
+            assert_eq!(body, b"meta".to_vec());
+        }
+        event => panic!("expected object declaration, got {event:?}"),
+    }
+    match session.await_event().await? {
+        NnrpClientEvent::ObjectRef { metadata, body } => {
+            assert_eq!(metadata.operation_id, frame_id as u64);
+            assert_eq!(metadata.length, 4);
+            assert!(body.is_empty());
+        }
+        event => panic!("expected object reference, got {event:?}"),
+    }
+    match session.await_event().await? {
+        NnrpClientEvent::ObjectDelta { metadata, body } => {
+            assert_eq!(metadata.object_id, 900);
+            assert_eq!(metadata.delta_bytes, 4);
+            assert_eq!(body, b"abcd".to_vec());
+        }
+        event => panic!("expected object delta, got {event:?}"),
+    }
+    match session.await_event().await? {
+        NnrpClientEvent::CacheReference { metadata, body } => {
+            assert_eq!(metadata.cache_key_lo, 0x5678);
+            assert_eq!(metadata.reuse_scope, CacheReuseScope::Session);
+            assert_eq!(body, b"hint".to_vec());
+        }
+        event => panic!("expected cache reference, got {event:?}"),
+    }
+    match session.await_event().await? {
+        NnrpClientEvent::Result(result) => {
+            assert_eq!(result.frame_id, frame_id);
+            assert_eq!(result.body, b"done".to_vec());
+        }
+        event => panic!("expected result, got {event:?}"),
+    }
+    match session.await_event().await? {
+        NnrpClientEvent::ObjectRelease { metadata, body } => {
+            assert_eq!(metadata.object_id, 900);
+            assert_eq!(metadata.release_reason, ObjectReleaseReason::Completed);
+            assert!(body.is_empty());
+        }
+        event => panic!("expected object release, got {event:?}"),
+    }
+
+    session.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn tcp_loopback_releases_objects_after_cancel_and_reports_cache_miss(
+) -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        let submit = session.receive_submit().await?;
+        let operation_id = submit.frame_id as u64;
+        let control = session.receive_runtime_control().await?;
+        assert_eq!(control.message_type, MessageType::Cancel);
+        session
+            .send_object_release(
+                object_release(operation_id, ObjectReleaseReason::Cancelled, 6),
+                b"cancel".to_vec(),
+            )
+            .await?;
+        session
+            .send_cache_miss(cache_miss(), b"schema".to_vec())
+            .await?;
+
+        let close = session.receive_close().await?;
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let mut session = client.open_session().await?;
+    let frame_id = session
+        .submit_nowait(token_submit(), b"prompt".to_vec())
+        .await?;
+    session.cancel_operation(frame_id as u64, 7).await?;
+
+    match session.await_event().await? {
+        NnrpClientEvent::ObjectRelease { metadata, body } => {
+            assert_eq!(metadata.operation_id, frame_id as u64);
+            assert_eq!(metadata.release_reason, ObjectReleaseReason::Cancelled);
+            assert_eq!(body, b"cancel".to_vec());
+        }
+        event => panic!("expected cancelled object release, got {event:?}"),
+    }
+    match session.await_event().await? {
+        NnrpClientEvent::CacheMiss { metadata, body } => {
+            assert_eq!(metadata.miss_reason, CacheMissReason::SchemaMismatch);
+            assert_eq!(metadata.profile_id, STANDARD_PROFILE_TOKEN);
+            assert_eq!(body, b"schema".to_vec());
+        }
+        event => panic!("expected cache miss, got {event:?}"),
     }
 
     session.close().await?;
@@ -743,6 +898,103 @@ async fn client_preview4_control_event_reader_rejects_malformed_packets() -> Res
 }
 
 #[tokio::test]
+async fn client_preview4_event_reader_rejects_malformed_object_cache_packets(
+) -> Result<(), RuntimeError> {
+    for packet in [
+        object_event_packet(
+            MessageType::ObjectDeclare,
+            2,
+            object_descriptor().to_bytes()?.to_vec(),
+            b"meta".to_vec(),
+        )?,
+        object_event_packet(MessageType::ObjectDeclare, 1, vec![0], Vec::new())?,
+        object_event_packet(
+            MessageType::ObjectDeclare,
+            1,
+            object_descriptor().to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        object_event_packet(
+            MessageType::ObjectRef,
+            2,
+            object_reference(1).to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        object_event_packet(MessageType::ObjectRef, 1, vec![0], Vec::new())?,
+        object_event_packet(
+            MessageType::ObjectRef,
+            1,
+            object_reference(1).to_bytes()?.to_vec(),
+            b"x".to_vec(),
+        )?,
+        object_event_packet(
+            MessageType::ObjectRelease,
+            2,
+            object_release(1, ObjectReleaseReason::Completed, 0)
+                .to_bytes()?
+                .to_vec(),
+            Vec::new(),
+        )?,
+        object_event_packet(MessageType::ObjectRelease, 1, vec![0], Vec::new())?,
+        object_event_packet(
+            MessageType::ObjectRelease,
+            1,
+            object_release(1, ObjectReleaseReason::Completed, 1)
+                .to_bytes()?
+                .to_vec(),
+            Vec::new(),
+        )?,
+        object_event_packet(
+            MessageType::ObjectDelta,
+            2,
+            object_delta().to_bytes()?.to_vec(),
+            b"abcd".to_vec(),
+        )?,
+        object_event_packet(MessageType::ObjectDelta, 1, vec![0], Vec::new())?,
+        object_event_packet(
+            MessageType::ObjectDelta,
+            1,
+            object_delta().to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        object_event_packet(
+            MessageType::CacheReference,
+            2,
+            cache_reference().to_bytes()?.to_vec(),
+            b"hint".to_vec(),
+        )?,
+        object_event_packet(MessageType::CacheReference, 1, vec![0], Vec::new())?,
+        object_event_packet(
+            MessageType::CacheReference,
+            1,
+            cache_reference().to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        object_event_packet(
+            MessageType::CacheMiss,
+            2,
+            cache_miss().to_bytes()?.to_vec(),
+            b"schema".to_vec(),
+        )?,
+        object_event_packet(MessageType::CacheMiss, 1, vec![0], Vec::new())?,
+        object_event_packet(
+            MessageType::CacheMiss,
+            1,
+            cache_miss().to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+    ] {
+        let mut session = scripted_client_session(packet).await?;
+        assert!(matches!(
+            session.await_event().await,
+            Err(RuntimeError::UnexpectedMessage(_))
+        ));
+        session.close_transport().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn server_preview4_control_readers_and_senders_reject_mismatches() -> Result<(), RuntimeError>
 {
     for err in [
@@ -866,6 +1118,50 @@ async fn server_preview4_control_readers_and_senders_reject_mismatches() -> Resu
             err,
             RuntimeError::UnexpectedMessage(_) | RuntimeError::Protocol(_)
         ));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn server_preview4_object_cache_senders_reject_body_mismatches() -> Result<(), RuntimeError> {
+    for err in [
+        server_send_object_error(|mut session| async move {
+            session
+                .send_object_declare(object_descriptor(), Vec::new())
+                .await
+        })
+        .await,
+        server_send_object_error(|mut session| async move {
+            session
+                .send_object_ref(object_reference(1), b"x".to_vec())
+                .await
+        })
+        .await,
+        server_send_object_error(|mut session| async move {
+            session
+                .send_object_release(
+                    object_release(1, ObjectReleaseReason::Completed, 1),
+                    Vec::new(),
+                )
+                .await
+        })
+        .await,
+        server_send_object_error(|mut session| async move {
+            session.send_object_delta(object_delta(), Vec::new()).await
+        })
+        .await,
+        server_send_object_error(|mut session| async move {
+            session
+                .send_cache_reference(cache_reference(), Vec::new())
+                .await
+        })
+        .await,
+        server_send_object_error(|mut session| async move {
+            session.send_cache_miss(cache_miss(), Vec::new()).await
+        })
+        .await,
+    ] {
+        assert!(matches!(err, RuntimeError::UnexpectedMessage(_)));
     }
     Ok(())
 }
@@ -1580,6 +1876,29 @@ where
     .await
 }
 
+async fn server_send_object_error<F, Fut>(send: F) -> RuntimeError
+where
+    F: FnOnce(nnrp_runtime::NnrpServerSession) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<(), RuntimeError>> + Send + 'static,
+{
+    let mut header = CommonHeader::new(
+        MessageType::SessionClose,
+        nnrp_core::SESSION_CLOSE_METADATA_LEN as u32,
+        0,
+    );
+    header.session_id = 1;
+    server_receive_error(
+        RuntimePacket::new(
+            header,
+            close_request().to_bytes().unwrap().to_vec(),
+            Vec::new(),
+        )
+        .expect("close packet should build"),
+        send,
+    )
+    .await
+}
+
 async fn server_send_migrate_ack_error(packet: RuntimePacket) -> RuntimeError {
     server_receive_error(packet, |mut session| async move {
         let migrate = session.receive_migrate().await?;
@@ -1744,7 +2063,97 @@ fn drop_reason(operation_id: u64) -> ResultDropReasonMetadata {
     }
 }
 
+fn object_descriptor() -> ObjectDescriptorMetadata {
+    ObjectDescriptorMetadata {
+        object_id: 900,
+        object_kind: RuntimeObjectKind::ImageTile,
+        producer_role: RuntimeRole::Server,
+        consumer_role: RuntimeRole::Client,
+        session_id: 1,
+        byte_size: 4,
+        compute_cost_units: 2,
+        memory_location_hint: MemoryLocationHint::HostMemory,
+        ownership_hint: OwnershipHint::SessionOwned,
+        lifetime_hint_ms: 1_000,
+        metadata_bytes: 4,
+    }
+}
+
+fn object_reference(operation_id: u64) -> ObjectReferenceMetadata {
+    ObjectReferenceMetadata {
+        object_id: 900,
+        operation_id,
+        object_version: 1,
+        offset: 0,
+        length: 4,
+        flags: 0,
+        metadata_bytes: 0,
+    }
+}
+
+fn object_delta() -> ObjectDeltaMetadata {
+    ObjectDeltaMetadata {
+        object_id: 900,
+        delta_sequence: 1,
+        region_offset: 0,
+        region_bytes: 4,
+        delta_bytes: 4,
+        flags: 0,
+        metadata_bytes: 0,
+    }
+}
+
+fn object_release(
+    operation_id: u64,
+    release_reason: ObjectReleaseReason,
+    diagnostic_bytes: u32,
+) -> ObjectReleaseMetadata {
+    ObjectReleaseMetadata {
+        object_id: 900,
+        operation_id,
+        release_reason,
+        source_role: RuntimeRole::Server,
+        flags: 0,
+        diagnostic_bytes,
+    }
+}
+
+fn cache_reference() -> CacheReferenceMetadata {
+    CacheReferenceMetadata {
+        cache_key_hi: 0x1234,
+        cache_key_lo: 0x5678,
+        profile_id: STANDARD_PROFILE_TOKEN,
+        reuse_scope: CacheReuseScope::Session,
+        lease_id: 0,
+        producer_trace_id: 99,
+        expiration_hint_ms: 1_000,
+        metadata_bytes: 4,
+        flags: 0,
+    }
+}
+
+fn cache_miss() -> CacheMissMetadata {
+    CacheMissMetadata {
+        cache_key_hi: 0x1234,
+        cache_key_lo: 0x5678,
+        miss_reason: CacheMissReason::SchemaMismatch,
+        profile_id: STANDARD_PROFILE_TOKEN,
+        diagnostic_bytes: 6,
+    }
+}
+
 fn control_event_packet(
+    message_type: MessageType,
+    session_id: u32,
+    metadata: Vec<u8>,
+    body: Vec<u8>,
+) -> Result<RuntimePacket, RuntimeError> {
+    let mut header = CommonHeader::new(message_type, metadata.len() as u32, body.len() as u32);
+    header.session_id = session_id;
+    Ok(RuntimePacket::new(header, metadata, body)?)
+}
+
+fn object_event_packet(
     message_type: MessageType,
     session_id: u32,
     metadata: Vec<u8>,

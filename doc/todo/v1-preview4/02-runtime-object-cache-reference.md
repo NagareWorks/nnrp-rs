@@ -50,10 +50,12 @@
 - [ ] Encode object references without copying object payloads.
 - [ ] Encode object deltas with bounded metadata.
 - [ ] Decode object references into borrowed or handle-backed views.
-- [ ] Keep copied snapshot boundaries explicit for downstream SDKs.
-- [ ] Add tests for object release after result delivery.
-- [ ] Add tests for release after cancellation.
+- [x] Keep copied snapshot boundaries explicit for downstream SDKs.
+- [x] Add tests for object release after result delivery.
+- [x] Add tests for release after cancellation.
 - [ ] Add tests for cache miss and invalidation diagnostics.
+  - [x] Cache miss diagnostic loopback coverage.
+  - [ ] Cache invalidation diagnostic loopback coverage.
 
 ## FFI Readiness
 

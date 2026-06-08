@@ -5,21 +5,24 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use nnrp_core::{
     validate_control_request_semantics, validate_partial_result_semantics,
     validate_pressure_semantics, validate_profile_assignment, validate_result_drop_header,
-    validate_result_drop_reason_semantics, validate_scheduling_semantics, CacheObjectId,
-    CacheObjectKind, CommonHeader, ConnectionLifecycle, ControlRequestMetadata, FlowUpdateMetadata,
-    FrameSubmitMetadata, MessageType, OperationCancelRequest, OperationDescriptor,
-    OperationRegistry, PartialResultMetadata, PressureMetadata, ResultDropReasonMetadata,
-    ResultPushMetadata, SchedulingMetadata, SchemaRegistry, SessionCloseAckMetadata,
-    SessionCloseMetadata, SessionCloseStatus, SessionMigrateAckMetadata, SessionMigrateMetadata,
-    SessionOpenAckMetadata, SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchMetadata,
-    SessionStatus, CONTROL_REQUEST_METADATA_LEN, FLOW_UPDATE_METADATA_LEN,
-    FRAME_SUBMIT_METADATA_LEN, PARTIAL_RESULT_METADATA_LEN, PRESSURE_METADATA_LEN,
-    RESULT_DROP_REASON_METADATA_LEN, RESULT_PUSH_METADATA_LEN, SCHEDULING_METADATA_LEN,
-    SESSION_ACK_FLAG_RESUME_ENABLED, SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_LIMIT_REACHED,
-    SESSION_ERROR_NONE, SESSION_ERROR_PROFILE_UNSUPPORTED, SESSION_ERROR_RESUME_REJECTED,
-    SESSION_ERROR_SCHEMA_UNSUPPORTED, SESSION_FLAG_ALLOW_RESUME, SESSION_MIGRATE_ACK_METADATA_LEN,
-    SESSION_MIGRATE_METADATA_LEN, SESSION_OPEN_ACK_METADATA_LEN, SESSION_PATCH_ACK_METADATA_LEN,
-    SESSION_PATCH_METADATA_LEN,
+    validate_result_drop_reason_semantics, validate_scheduling_semantics, CacheMissMetadata,
+    CacheObjectId, CacheObjectKind, CacheReferenceMetadata, CommonHeader, ConnectionLifecycle,
+    ControlRequestMetadata, FlowUpdateMetadata, FrameSubmitMetadata, MessageType,
+    ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata, ObjectReleaseMetadata,
+    OperationCancelRequest, OperationDescriptor, OperationRegistry, PartialResultMetadata,
+    PressureMetadata, ResultDropReasonMetadata, ResultPushMetadata, SchedulingMetadata,
+    SchemaRegistry, SessionCloseAckMetadata, SessionCloseMetadata, SessionCloseStatus,
+    SessionMigrateAckMetadata, SessionMigrateMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
+    SessionPatchAckMetadata, SessionPatchMetadata, SessionStatus, CACHE_MISS_METADATA_LEN,
+    CACHE_REFERENCE_METADATA_LEN, CONTROL_REQUEST_METADATA_LEN, FLOW_UPDATE_METADATA_LEN,
+    FRAME_SUBMIT_METADATA_LEN, OBJECT_DELTA_METADATA_LEN, OBJECT_DESCRIPTOR_METADATA_LEN,
+    OBJECT_REFERENCE_METADATA_LEN, OBJECT_RELEASE_METADATA_LEN, PARTIAL_RESULT_METADATA_LEN,
+    PRESSURE_METADATA_LEN, RESULT_DROP_REASON_METADATA_LEN, RESULT_PUSH_METADATA_LEN,
+    SCHEDULING_METADATA_LEN, SESSION_ACK_FLAG_RESUME_ENABLED, SESSION_CLOSE_ACK_METADATA_LEN,
+    SESSION_ERROR_LIMIT_REACHED, SESSION_ERROR_NONE, SESSION_ERROR_PROFILE_UNSUPPORTED,
+    SESSION_ERROR_RESUME_REJECTED, SESSION_ERROR_SCHEMA_UNSUPPORTED, SESSION_FLAG_ALLOW_RESUME,
+    SESSION_MIGRATE_ACK_METADATA_LEN, SESSION_MIGRATE_METADATA_LEN, SESSION_OPEN_ACK_METADATA_LEN,
+    SESSION_PATCH_ACK_METADATA_LEN, SESSION_PATCH_METADATA_LEN,
 };
 use tokio::net::TcpListener;
 
@@ -580,6 +583,160 @@ impl NnrpServerSession {
             .await
     }
 
+    pub async fn send_object_declare(
+        &mut self,
+        metadata: ObjectDescriptorMetadata,
+        body: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        require_body_len(
+            body.len(),
+            metadata.metadata_bytes as usize,
+            "server OBJECT_DECLARE body length mismatch",
+        )?;
+        let mut header = CommonHeader::new(
+            MessageType::ObjectDeclare,
+            OBJECT_DESCRIPTOR_METADATA_LEN as u32,
+            body.len() as u32,
+        );
+        header.session_id = self.session_id;
+        self.transport
+            .write_packet(&RuntimePacket::new(
+                header,
+                metadata.to_bytes()?.to_vec(),
+                body,
+            )?)
+            .await
+    }
+
+    pub async fn send_object_ref(
+        &mut self,
+        metadata: ObjectReferenceMetadata,
+        body: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        require_body_len(
+            body.len(),
+            metadata.metadata_bytes as usize,
+            "server OBJECT_REF body length mismatch",
+        )?;
+        let mut header = CommonHeader::new(
+            MessageType::ObjectRef,
+            OBJECT_REFERENCE_METADATA_LEN as u32,
+            body.len() as u32,
+        );
+        header.session_id = self.session_id;
+        header.frame_id = metadata.operation_id as u32;
+        self.transport
+            .write_packet(&RuntimePacket::new(
+                header,
+                metadata.to_bytes()?.to_vec(),
+                body,
+            )?)
+            .await
+    }
+
+    pub async fn send_object_release(
+        &mut self,
+        metadata: ObjectReleaseMetadata,
+        body: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        require_body_len(
+            body.len(),
+            metadata.diagnostic_bytes as usize,
+            "server OBJECT_RELEASE body length mismatch",
+        )?;
+        let mut header = CommonHeader::new(
+            MessageType::ObjectRelease,
+            OBJECT_RELEASE_METADATA_LEN as u32,
+            body.len() as u32,
+        );
+        header.session_id = self.session_id;
+        header.frame_id = metadata.operation_id as u32;
+        self.transport
+            .write_packet(&RuntimePacket::new(
+                header,
+                metadata.to_bytes()?.to_vec(),
+                body,
+            )?)
+            .await
+    }
+
+    pub async fn send_object_delta(
+        &mut self,
+        metadata: ObjectDeltaMetadata,
+        body: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        let expected_body_len =
+            metadata.metadata_bytes.saturating_add(metadata.delta_bytes) as usize;
+        require_body_len(
+            body.len(),
+            expected_body_len,
+            "server object delta body length mismatch",
+        )?;
+        let mut header = CommonHeader::new(
+            MessageType::ObjectDelta,
+            OBJECT_DELTA_METADATA_LEN as u32,
+            body.len() as u32,
+        );
+        header.session_id = self.session_id;
+        self.transport
+            .write_packet(&RuntimePacket::new(
+                header,
+                metadata.to_bytes()?.to_vec(),
+                body,
+            )?)
+            .await
+    }
+
+    pub async fn send_cache_reference(
+        &mut self,
+        metadata: CacheReferenceMetadata,
+        body: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        require_body_len(
+            body.len(),
+            metadata.metadata_bytes as usize,
+            "server CACHE_REFERENCE body length mismatch",
+        )?;
+        let mut header = CommonHeader::new(
+            MessageType::CacheReference,
+            CACHE_REFERENCE_METADATA_LEN as u32,
+            body.len() as u32,
+        );
+        header.session_id = self.session_id;
+        self.transport
+            .write_packet(&RuntimePacket::new(
+                header,
+                metadata.to_bytes()?.to_vec(),
+                body,
+            )?)
+            .await
+    }
+
+    pub async fn send_cache_miss(
+        &mut self,
+        metadata: CacheMissMetadata,
+        body: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        require_body_len(
+            body.len(),
+            metadata.diagnostic_bytes as usize,
+            "server CACHE_MISS body length mismatch",
+        )?;
+        let mut header = CommonHeader::new(
+            MessageType::CacheMiss,
+            CACHE_MISS_METADATA_LEN as u32,
+            body.len() as u32,
+        );
+        header.session_id = self.session_id;
+        self.transport
+            .write_packet(&RuntimePacket::new(
+                header,
+                metadata.to_bytes()?.to_vec(),
+                body,
+            )?)
+            .await
+    }
+
     pub async fn receive_cancel(&mut self) -> Result<NnrpCancel, RuntimeError> {
         let packet = self.transport.read_packet().await?;
         if packet.header.message_type != MessageType::FrameCancel {
@@ -900,4 +1057,15 @@ impl NnrpServerSession {
             .lock()
             .map_err(|_| RuntimeError::Internal("server session registry lock poisoned"))
     }
+}
+
+fn require_body_len(
+    actual: usize,
+    expected: usize,
+    message: &'static str,
+) -> Result<(), RuntimeError> {
+    if actual != expected {
+        return Err(RuntimeError::UnexpectedMessage(message));
+    }
+    Ok(())
 }

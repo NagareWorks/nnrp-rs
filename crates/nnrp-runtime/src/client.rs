@@ -3,19 +3,23 @@ use std::fmt;
 use nnrp_core::{
     validate_control_request_semantics, validate_partial_result_semantics,
     validate_pressure_semantics, validate_result_drop_header,
-    validate_result_drop_reason_semantics, validate_scheduling_semantics, CacheObjectKind,
-    CommonHeader, ConnectionLifecycle, ControlRequestMetadata, FlowUpdateMetadata,
-    FrameSubmitMetadata, InFlightPolicy, MessageType, PartialResultMetadata, PressureMetadata,
-    ResultDropReasonMetadata, ResultPushMetadata, SchedulingMetadata, SessionCloseAckMetadata,
-    SessionCloseMetadata, SessionCloseReason, SessionMigrateAckMetadata, SessionMigrateMetadata,
-    SessionOpenAckMetadata, SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchMetadata,
-    SessionPriorityClass, SessionStatus, TransportId, CONTROL_REQUEST_METADATA_LEN,
-    FRAME_SUBMIT_METADATA_LEN, PARTIAL_RESULT_METADATA_LEN, PRESSURE_METADATA_LEN,
-    RESULT_DROP_REASON_METADATA_LEN, RESULT_PUSH_METADATA_LEN, SCHEDULING_METADATA_LEN,
-    SESSION_CLOSE_ACK_METADATA_LEN, SESSION_CLOSE_METADATA_LEN, SESSION_ERROR_NONE,
-    SESSION_MIGRATE_ACK_METADATA_LEN, SESSION_MIGRATE_METADATA_LEN, SESSION_OPEN_METADATA_LEN,
-    SESSION_PATCH_ACK_METADATA_LEN, SESSION_PATCH_METADATA_LEN, STANDARD_PROFILE_TOKEN,
-    TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
+    validate_result_drop_reason_semantics, validate_scheduling_semantics, CacheMissMetadata,
+    CacheObjectKind, CacheReferenceMetadata, CommonHeader, ConnectionLifecycle,
+    ControlRequestMetadata, FlowUpdateMetadata, FrameSubmitMetadata, InFlightPolicy, MessageType,
+    ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata, ObjectReleaseMetadata,
+    PartialResultMetadata, PressureMetadata, ResultDropReasonMetadata, ResultPushMetadata,
+    SchedulingMetadata, SessionCloseAckMetadata, SessionCloseMetadata, SessionCloseReason,
+    SessionMigrateAckMetadata, SessionMigrateMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
+    SessionPatchAckMetadata, SessionPatchMetadata, SessionPriorityClass, SessionStatus,
+    TransportId, CACHE_MISS_METADATA_LEN, CACHE_REFERENCE_METADATA_LEN,
+    CONTROL_REQUEST_METADATA_LEN, FRAME_SUBMIT_METADATA_LEN, OBJECT_DELTA_METADATA_LEN,
+    OBJECT_DESCRIPTOR_METADATA_LEN, OBJECT_REFERENCE_METADATA_LEN, OBJECT_RELEASE_METADATA_LEN,
+    PARTIAL_RESULT_METADATA_LEN, PRESSURE_METADATA_LEN, RESULT_DROP_REASON_METADATA_LEN,
+    RESULT_PUSH_METADATA_LEN, SCHEDULING_METADATA_LEN, SESSION_CLOSE_ACK_METADATA_LEN,
+    SESSION_CLOSE_METADATA_LEN, SESSION_ERROR_NONE, SESSION_MIGRATE_ACK_METADATA_LEN,
+    SESSION_MIGRATE_METADATA_LEN, SESSION_OPEN_METADATA_LEN, SESSION_PATCH_ACK_METADATA_LEN,
+    SESSION_PATCH_METADATA_LEN, STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID,
+    TOKEN_DELTA_SCHEMA_VERSION,
 };
 
 use crate::{
@@ -110,6 +114,30 @@ pub enum NnrpClientEvent {
     FlowUpdate(FlowUpdateMetadata),
     Backpressure(PressureMetadata),
     CreditUpdate(PressureMetadata),
+    ObjectDeclare {
+        metadata: ObjectDescriptorMetadata,
+        body: Vec<u8>,
+    },
+    ObjectRef {
+        metadata: ObjectReferenceMetadata,
+        body: Vec<u8>,
+    },
+    ObjectRelease {
+        metadata: ObjectReleaseMetadata,
+        body: Vec<u8>,
+    },
+    ObjectDelta {
+        metadata: ObjectDeltaMetadata,
+        body: Vec<u8>,
+    },
+    CacheReference {
+        metadata: CacheReferenceMetadata,
+        body: Vec<u8>,
+    },
+    CacheMiss {
+        metadata: CacheMissMetadata,
+        body: Vec<u8>,
+    },
 }
 
 impl NnrpClient {
@@ -293,6 +321,14 @@ impl NnrpClientSession {
             NnrpClientEvent::CreditUpdate(_) => Err(RuntimeError::UnexpectedMessage(
                 "client expected RESULT_PUSH but received CREDIT_UPDATE",
             )),
+            NnrpClientEvent::ObjectDeclare { .. }
+            | NnrpClientEvent::ObjectRef { .. }
+            | NnrpClientEvent::ObjectRelease { .. }
+            | NnrpClientEvent::ObjectDelta { .. }
+            | NnrpClientEvent::CacheReference { .. }
+            | NnrpClientEvent::CacheMiss { .. } => Err(RuntimeError::UnexpectedMessage(
+                "client expected RESULT_PUSH but received object/cache event",
+            )),
         }
     }
 
@@ -378,6 +414,134 @@ impl NnrpClientSession {
                     MessageType::CreditUpdate => Ok(NnrpClientEvent::CreditUpdate(metadata)),
                     _ => unreachable!("message type was already matched"),
                 }
+            }
+            MessageType::ObjectDeclare => {
+                self.require_session_packet(
+                    &packet,
+                    "client received object declaration for another session",
+                )?;
+                if packet.metadata.len() != OBJECT_DESCRIPTOR_METADATA_LEN {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "client received malformed OBJECT_DECLARE metadata length",
+                    ));
+                }
+                let metadata = ObjectDescriptorMetadata::parse(&packet.metadata)?;
+                require_body_len(
+                    packet.body.len(),
+                    metadata.metadata_bytes as usize,
+                    "client received OBJECT_DECLARE body length mismatch",
+                )?;
+                Ok(NnrpClientEvent::ObjectDeclare {
+                    metadata,
+                    body: packet.body,
+                })
+            }
+            MessageType::ObjectRef => {
+                self.require_session_packet(
+                    &packet,
+                    "client received object reference for another session",
+                )?;
+                if packet.metadata.len() != OBJECT_REFERENCE_METADATA_LEN {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "client received malformed OBJECT_REF metadata length",
+                    ));
+                }
+                let metadata = ObjectReferenceMetadata::parse(&packet.metadata)?;
+                require_body_len(
+                    packet.body.len(),
+                    metadata.metadata_bytes as usize,
+                    "client received OBJECT_REF body length mismatch",
+                )?;
+                Ok(NnrpClientEvent::ObjectRef {
+                    metadata,
+                    body: packet.body,
+                })
+            }
+            MessageType::ObjectRelease => {
+                self.require_session_packet(
+                    &packet,
+                    "client received object release for another session",
+                )?;
+                if packet.metadata.len() != OBJECT_RELEASE_METADATA_LEN {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "client received malformed OBJECT_RELEASE metadata length",
+                    ));
+                }
+                let metadata = ObjectReleaseMetadata::parse(&packet.metadata)?;
+                require_body_len(
+                    packet.body.len(),
+                    metadata.diagnostic_bytes as usize,
+                    "client received OBJECT_RELEASE body length mismatch",
+                )?;
+                Ok(NnrpClientEvent::ObjectRelease {
+                    metadata,
+                    body: packet.body,
+                })
+            }
+            MessageType::ObjectPatch | MessageType::ObjectDelta => {
+                self.require_session_packet(
+                    &packet,
+                    "client received object delta for another session",
+                )?;
+                if packet.metadata.len() != OBJECT_DELTA_METADATA_LEN {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "client received malformed object delta metadata length",
+                    ));
+                }
+                let metadata = ObjectDeltaMetadata::parse(&packet.metadata)?;
+                let expected_body_len =
+                    metadata.metadata_bytes.saturating_add(metadata.delta_bytes) as usize;
+                require_body_len(
+                    packet.body.len(),
+                    expected_body_len,
+                    "client received object delta body length mismatch",
+                )?;
+                Ok(NnrpClientEvent::ObjectDelta {
+                    metadata,
+                    body: packet.body,
+                })
+            }
+            MessageType::CacheReference => {
+                self.require_session_packet(
+                    &packet,
+                    "client received cache reference for another session",
+                )?;
+                if packet.metadata.len() != CACHE_REFERENCE_METADATA_LEN {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "client received malformed CACHE_REFERENCE metadata length",
+                    ));
+                }
+                let metadata = CacheReferenceMetadata::parse(&packet.metadata)?;
+                require_body_len(
+                    packet.body.len(),
+                    metadata.metadata_bytes as usize,
+                    "client received CACHE_REFERENCE body length mismatch",
+                )?;
+                Ok(NnrpClientEvent::CacheReference {
+                    metadata,
+                    body: packet.body,
+                })
+            }
+            MessageType::CacheMiss => {
+                self.require_session_packet(
+                    &packet,
+                    "client received cache miss for another session",
+                )?;
+                if packet.metadata.len() != CACHE_MISS_METADATA_LEN {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "client received malformed CACHE_MISS metadata length",
+                    ));
+                }
+                let metadata = CacheMissMetadata::parse(&packet.metadata)?;
+                require_body_len(
+                    packet.body.len(),
+                    metadata.diagnostic_bytes as usize,
+                    "client received CACHE_MISS body length mismatch",
+                )?;
+                Ok(NnrpClientEvent::CacheMiss {
+                    metadata,
+                    body: packet.body,
+                })
             }
             _ => Err(RuntimeError::UnexpectedMessage(
                 "client expected a runtime result or control event",
@@ -706,6 +870,17 @@ impl NnrpClientSession {
         }
         Ok(())
     }
+}
+
+fn require_body_len(
+    actual: usize,
+    expected: usize,
+    message: &'static str,
+) -> Result<(), RuntimeError> {
+    if actual != expected {
+        return Err(RuntimeError::UnexpectedMessage(message));
+    }
+    Ok(())
 }
 
 impl fmt::Debug for NnrpClient {
