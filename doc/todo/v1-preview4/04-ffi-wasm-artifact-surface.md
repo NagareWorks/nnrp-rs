@@ -34,8 +34,10 @@
 - [ ] Add TypeScript-visible runtime control structures.
 - [ ] Add TypeScript-visible runtime object structures.
 - [ ] Add WASM event polling batch calls.
-- [ ] Add WASM helpers for WebSocket binary frame mapping.
+- [ ] Add WASM helpers for browser WebSocket binary frame mapping.
 - [ ] Keep browser APIs aligned with native role package semantics.
+- [ ] Keep TCP, QUIC, and IPC transport implementations out of browser WASM packages.
+- [ ] Keep browser WASM output focused on Rust-owned framing, control, runtime-object, and WebSocket substrate helpers.
 - [ ] Add wasm-bindgen tests for encode/decode and event batching.
 
 ## Artifact Packaging
@@ -45,10 +47,9 @@
   - [ ] QUIC.
   - [ ] IPC.
   - [ ] WebSocket.
-- [ ] Package transport-scoped WASM outputs.
-  - [ ] TCP frame/runtime primitives where applicable.
-  - [ ] QUIC frame/runtime primitives where applicable.
-  - [ ] IPC frame/runtime primitives for non-browser hosts where applicable.
-  - [ ] WebSocket browser substrate helpers.
+- [ ] Package browser-scoped WASM outputs.
+  - [ ] Runtime control frame codecs.
+  - [ ] Runtime object reference codecs.
+  - [ ] Browser WebSocket substrate helpers.
 - [ ] Write manifest fields for transport name, protocol version, ABI version, and enabled features.
 - [ ] Reject release artifacts that collapse all transport behavior into one hidden package.

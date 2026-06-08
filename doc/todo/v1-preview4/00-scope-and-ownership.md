@@ -30,6 +30,6 @@
 
 - [ ] Core protocol structs can proceed independently from transport crates.
 - [ ] IPC transport can proceed independently from WebSocket transport.
-- [ ] FFI bindings can proceed after Rust core structs compile, without waiting for every transport implementation.
-- [ ] WASM bindings can proceed after shared frame codecs and object descriptors are available.
-- [ ] Wire conformance runner can proceed against mock endpoints first, then switch to concrete transports.
+- [ ] FFI bindings consume the Rust core structs directly and remain independent from unfinished transport crates.
+- [ ] WASM bindings consume the shared frame codecs and object descriptor types from `nnrp-core`.
+- [ ] Wire conformance runner owns direct endpoint scenarios and can use reference endpoints without SDK adapters.

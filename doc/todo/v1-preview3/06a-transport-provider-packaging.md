@@ -24,7 +24,7 @@
 
 - [x] Resolve local provider availability against user policy: `auto`, `prefer_quic`, `prefer_tcp`, `force_quic`, `force_tcp`.
 - [x] Intersect local provider availability with remote transport support learned from manifest, endpoint metadata, or probe/hello ack.
-- [x] Probe all viable candidate bindings when both TCP and QUIC are available and policy allows both.
+- [x] Probe all viable candidate bindings in TCP+QUIC dual-candidate policy scenarios.
 - [x] Score probe results using latency, timeout/failure rate, and effective throughput rather than choosing the first successful path.
 - [x] Expose the selected transport and rejected candidates for debug/telemetry.
 - [x] Feed the selected transport into `SESSION_OPEN` and preserve migration/fallback through `SESSION_MIGRATE`.

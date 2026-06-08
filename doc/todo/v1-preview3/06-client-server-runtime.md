@@ -4,7 +4,7 @@
 
 - [x] Keep this shard responsible for the usable Rust client/server SDK surface, transport runtime, and runtime-backed FFI entrypoints.
 - [x] Treat `nnrp-core` as the protocol and state-machine source of truth; runtime APIs must consume core semantics rather than redefining protocol behavior.
-- [x] Treat `nnrp-ffi` as the downstream ABI boundary; FFI functions may expose runtime handles only after the Rust runtime surface exists.
+- [x] Treat `nnrp-ffi` as the downstream ABI boundary; FFI functions expose runtime handles over the Rust runtime surface.
 
 ## Transport Abstraction
 

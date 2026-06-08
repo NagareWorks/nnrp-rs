@@ -5,6 +5,19 @@ pub const SERVER_HELLO_ACK_METADATA_LEN: usize = 80;
 pub const SESSION_PATCH_METADATA_LEN: usize = 36;
 pub const SESSION_PATCH_ACK_METADATA_LEN: usize = 48;
 pub const RESULT_HINT_METADATA_LEN: usize = 16;
+pub const CONTROL_REQUEST_METADATA_LEN: usize = 32;
+pub const SCHEDULING_METADATA_LEN: usize = 32;
+pub const SUPERSEDE_METADATA_LEN: usize = 32;
+pub const BUDGET_METADATA_LEN: usize = 40;
+pub const PROGRESS_METADATA_LEN: usize = 32;
+pub const PARTIAL_RESULT_METADATA_LEN: usize = 40;
+pub const PRESSURE_METADATA_LEN: usize = 32;
+pub const CAPABILITY_METADATA_LEN: usize = 32;
+pub const ROUTE_HINT_METADATA_LEN: usize = 32;
+pub const TRACE_CONTEXT_METADATA_LEN: usize = 32;
+pub const RESULT_DROP_REASON_METADATA_LEN: usize = 32;
+pub const RECOVERABLE_ERROR_METADATA_LEN: usize = 32;
+pub const RETRY_AFTER_METADATA_LEN: usize = 32;
 pub const TRANSPORT_PROBE_METADATA_LEN: usize = 16;
 pub const TRANSPORT_PROBE_ACK_METADATA_LEN: usize = 16;
 pub const SESSION_MIGRATE_METADATA_LEN: usize = 24;
@@ -13,6 +26,18 @@ pub const ERROR_METADATA_LEN: usize = 32;
 
 pub const SESSION_PATCH_FIELD_KNOWN_MASK: u32 = 0x0000_007f;
 pub const SERVER_HELLO_ACK_FLAGS_KNOWN_MASK: u32 = 0x0000_0001;
+pub const CONTROL_REQUEST_FLAGS_KNOWN_MASK: u8 = 0x03;
+pub const SCHEDULING_FLAGS_KNOWN_MASK: u32 = 0x0000_0003;
+pub const SUPERSEDE_FLAGS_KNOWN_MASK: u16 = 0x0001;
+pub const BUDGET_FLAGS_KNOWN_MASK: u32 = 0x0000_0003;
+pub const PARTIAL_RESULT_FLAGS_KNOWN_MASK: u32 = 0x0000_0003;
+pub const PRESSURE_FLAGS_KNOWN_MASK: u32 = 0x0000_0003;
+pub const CAPABILITY_FLAGS_KNOWN_MASK: u32 = 0x0000_0003;
+pub const ROUTE_HINT_FLAGS_KNOWN_MASK: u32 = 0x0000_0003;
+pub const TRACE_CONTEXT_FLAGS_KNOWN_MASK: u16 = 0x0003;
+pub const RESULT_DROP_FLAGS_KNOWN_MASK: u8 = 0x03;
+pub const RECOVERABLE_ERROR_FLAGS_KNOWN_MASK: u8 = 0x03;
+pub const RETRY_AFTER_FLAGS_KNOWN_MASK: u8 = 0x03;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
@@ -642,6 +667,609 @@ impl ResultHintMetadata {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlRequestMetadata {
+    pub operation_id: u64,
+    pub control_sequence: u64,
+    pub reason_code: u16,
+    pub source_role: u8,
+    pub flags: u8,
+    pub diagnostic_bytes: u32,
+}
+
+impl ControlRequestMetadata {
+    pub fn parse(source: &[u8]) -> Result<Self, NnrpError> {
+        require_len(source, CONTROL_REQUEST_METADATA_LEN)?;
+        validate_mask_u8(source[19], CONTROL_REQUEST_FLAGS_KNOWN_MASK)?;
+        validate_zero_u64("control_request.reserved", read_u64(source, 24))?;
+        Ok(Self {
+            operation_id: read_u64(source, 0),
+            control_sequence: read_u64(source, 8),
+            reason_code: read_u16(source, 16),
+            source_role: source[18],
+            flags: source[19],
+            diagnostic_bytes: read_u32(source, 20),
+        })
+    }
+
+    pub fn write(&self, destination: &mut [u8]) -> Result<(), NnrpError> {
+        require_destination_len(destination, CONTROL_REQUEST_METADATA_LEN)?;
+        validate_mask_u8(self.flags, CONTROL_REQUEST_FLAGS_KNOWN_MASK)?;
+        destination[..CONTROL_REQUEST_METADATA_LEN].fill(0);
+        write_u64(destination, 0, self.operation_id);
+        write_u64(destination, 8, self.control_sequence);
+        write_u16(destination, 16, self.reason_code);
+        destination[18] = self.source_role;
+        destination[19] = self.flags;
+        write_u32(destination, 20, self.diagnostic_bytes);
+        Ok(())
+    }
+
+    pub fn to_bytes(&self) -> Result<[u8; CONTROL_REQUEST_METADATA_LEN], NnrpError> {
+        let mut bytes = [0u8; CONTROL_REQUEST_METADATA_LEN];
+        self.write(&mut bytes)?;
+        Ok(bytes)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SchedulingMetadata {
+    pub operation_id: u64,
+    pub control_sequence: u64,
+    pub priority_class: u16,
+    pub priority_delta: i16,
+    pub deadline_unix_ms: u64,
+    pub flags: u32,
+}
+
+impl SchedulingMetadata {
+    pub fn parse(source: &[u8]) -> Result<Self, NnrpError> {
+        require_len(source, SCHEDULING_METADATA_LEN)?;
+        let flags = read_u32(source, 28);
+        validate_mask_u32(flags, SCHEDULING_FLAGS_KNOWN_MASK)?;
+        Ok(Self {
+            operation_id: read_u64(source, 0),
+            control_sequence: read_u64(source, 8),
+            priority_class: read_u16(source, 16),
+            priority_delta: read_i16(source, 18),
+            deadline_unix_ms: read_u64(source, 20),
+            flags,
+        })
+    }
+
+    pub fn write(&self, destination: &mut [u8]) -> Result<(), NnrpError> {
+        require_destination_len(destination, SCHEDULING_METADATA_LEN)?;
+        validate_mask_u32(self.flags, SCHEDULING_FLAGS_KNOWN_MASK)?;
+        write_u64(destination, 0, self.operation_id);
+        write_u64(destination, 8, self.control_sequence);
+        write_u16(destination, 16, self.priority_class);
+        write_i16(destination, 18, self.priority_delta);
+        write_u64(destination, 20, self.deadline_unix_ms);
+        write_u32(destination, 28, self.flags);
+        Ok(())
+    }
+
+    pub fn to_bytes(&self) -> Result<[u8; SCHEDULING_METADATA_LEN], NnrpError> {
+        let mut bytes = [0u8; SCHEDULING_METADATA_LEN];
+        self.write(&mut bytes)?;
+        Ok(bytes)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SupersedeMetadata {
+    pub old_operation_id: u64,
+    pub new_operation_id: u64,
+    pub control_sequence: u64,
+    pub drop_reason_code: u16,
+    pub flags: u16,
+    pub diagnostic_bytes: u32,
+}
+
+impl SupersedeMetadata {
+    pub fn parse(source: &[u8]) -> Result<Self, NnrpError> {
+        require_len(source, SUPERSEDE_METADATA_LEN)?;
+        let flags = read_u16(source, 26);
+        validate_mask_u16(flags, SUPERSEDE_FLAGS_KNOWN_MASK)?;
+        Ok(Self {
+            old_operation_id: read_u64(source, 0),
+            new_operation_id: read_u64(source, 8),
+            control_sequence: read_u64(source, 16),
+            drop_reason_code: read_u16(source, 24),
+            flags,
+            diagnostic_bytes: read_u32(source, 28),
+        })
+    }
+
+    pub fn write(&self, destination: &mut [u8]) -> Result<(), NnrpError> {
+        require_destination_len(destination, SUPERSEDE_METADATA_LEN)?;
+        validate_mask_u16(self.flags, SUPERSEDE_FLAGS_KNOWN_MASK)?;
+        write_u64(destination, 0, self.old_operation_id);
+        write_u64(destination, 8, self.new_operation_id);
+        write_u64(destination, 16, self.control_sequence);
+        write_u16(destination, 24, self.drop_reason_code);
+        write_u16(destination, 26, self.flags);
+        write_u32(destination, 28, self.diagnostic_bytes);
+        Ok(())
+    }
+
+    pub fn to_bytes(&self) -> Result<[u8; SUPERSEDE_METADATA_LEN], NnrpError> {
+        let mut bytes = [0u8; SUPERSEDE_METADATA_LEN];
+        self.write(&mut bytes)?;
+        Ok(bytes)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BudgetMetadata {
+    pub operation_id: u64,
+    pub compute_budget_units: u64,
+    pub memory_budget_bytes: u64,
+    pub bandwidth_budget_bytes: u64,
+    pub token_budget: u32,
+    pub flags: u32,
+}
+
+impl BudgetMetadata {
+    pub fn parse(source: &[u8]) -> Result<Self, NnrpError> {
+        require_len(source, BUDGET_METADATA_LEN)?;
+        let flags = read_u32(source, 36);
+        validate_mask_u32(flags, BUDGET_FLAGS_KNOWN_MASK)?;
+        Ok(Self {
+            operation_id: read_u64(source, 0),
+            compute_budget_units: read_u64(source, 8),
+            memory_budget_bytes: read_u64(source, 16),
+            bandwidth_budget_bytes: read_u64(source, 24),
+            token_budget: read_u32(source, 32),
+            flags,
+        })
+    }
+
+    pub fn write(&self, destination: &mut [u8]) -> Result<(), NnrpError> {
+        require_destination_len(destination, BUDGET_METADATA_LEN)?;
+        validate_mask_u32(self.flags, BUDGET_FLAGS_KNOWN_MASK)?;
+        write_u64(destination, 0, self.operation_id);
+        write_u64(destination, 8, self.compute_budget_units);
+        write_u64(destination, 16, self.memory_budget_bytes);
+        write_u64(destination, 24, self.bandwidth_budget_bytes);
+        write_u32(destination, 32, self.token_budget);
+        write_u32(destination, 36, self.flags);
+        Ok(())
+    }
+
+    pub fn to_bytes(&self) -> Result<[u8; BUDGET_METADATA_LEN], NnrpError> {
+        let mut bytes = [0u8; BUDGET_METADATA_LEN];
+        self.write(&mut bytes)?;
+        Ok(bytes)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProgressMetadata {
+    pub operation_id: u64,
+    pub progress_sequence: u64,
+    pub stage_code: u16,
+    pub percent_x100: u16,
+    pub object_id: u64,
+    pub body_bytes: u32,
+}
+
+impl ProgressMetadata {
+    pub fn parse(source: &[u8]) -> Result<Self, NnrpError> {
+        require_len(source, PROGRESS_METADATA_LEN)?;
+        let percent_x100 = read_u16(source, 18);
+        validate_percent_x100(percent_x100)?;
+        Ok(Self {
+            operation_id: read_u64(source, 0),
+            progress_sequence: read_u64(source, 8),
+            stage_code: read_u16(source, 16),
+            percent_x100,
+            object_id: read_u64(source, 20),
+            body_bytes: read_u32(source, 28),
+        })
+    }
+
+    pub fn write(&self, destination: &mut [u8]) -> Result<(), NnrpError> {
+        require_destination_len(destination, PROGRESS_METADATA_LEN)?;
+        validate_percent_x100(self.percent_x100)?;
+        write_u64(destination, 0, self.operation_id);
+        write_u64(destination, 8, self.progress_sequence);
+        write_u16(destination, 16, self.stage_code);
+        write_u16(destination, 18, self.percent_x100);
+        write_u64(destination, 20, self.object_id);
+        write_u32(destination, 28, self.body_bytes);
+        Ok(())
+    }
+
+    pub fn to_bytes(&self) -> Result<[u8; PROGRESS_METADATA_LEN], NnrpError> {
+        let mut bytes = [0u8; PROGRESS_METADATA_LEN];
+        self.write(&mut bytes)?;
+        Ok(bytes)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PartialResultMetadata {
+    pub operation_id: u64,
+    pub result_sequence: u64,
+    pub object_id: u64,
+    pub delta_sequence: u64,
+    pub body_bytes: u32,
+    pub flags: u32,
+}
+
+impl PartialResultMetadata {
+    pub fn parse(source: &[u8]) -> Result<Self, NnrpError> {
+        require_len(source, PARTIAL_RESULT_METADATA_LEN)?;
+        let flags = read_u32(source, 36);
+        validate_mask_u32(flags, PARTIAL_RESULT_FLAGS_KNOWN_MASK)?;
+        Ok(Self {
+            operation_id: read_u64(source, 0),
+            result_sequence: read_u64(source, 8),
+            object_id: read_u64(source, 16),
+            delta_sequence: read_u64(source, 24),
+            body_bytes: read_u32(source, 32),
+            flags,
+        })
+    }
+
+    pub fn write(&self, destination: &mut [u8]) -> Result<(), NnrpError> {
+        require_destination_len(destination, PARTIAL_RESULT_METADATA_LEN)?;
+        validate_mask_u32(self.flags, PARTIAL_RESULT_FLAGS_KNOWN_MASK)?;
+        write_u64(destination, 0, self.operation_id);
+        write_u64(destination, 8, self.result_sequence);
+        write_u64(destination, 16, self.object_id);
+        write_u64(destination, 24, self.delta_sequence);
+        write_u32(destination, 32, self.body_bytes);
+        write_u32(destination, 36, self.flags);
+        Ok(())
+    }
+
+    pub fn to_bytes(&self) -> Result<[u8; PARTIAL_RESULT_METADATA_LEN], NnrpError> {
+        let mut bytes = [0u8; PARTIAL_RESULT_METADATA_LEN];
+        self.write(&mut bytes)?;
+        Ok(bytes)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PressureMetadata {
+    pub scope_id: u64,
+    pub credit_window: u64,
+    pub pressure_level: u16,
+    pub pressure_reason: u16,
+    pub retry_after_ms: u32,
+    pub flags: u32,
+}
+
+impl PressureMetadata {
+    pub fn parse(source: &[u8]) -> Result<Self, NnrpError> {
+        require_len(source, PRESSURE_METADATA_LEN)?;
+        let flags = read_u32(source, 24);
+        validate_mask_u32(flags, PRESSURE_FLAGS_KNOWN_MASK)?;
+        validate_zero_u32("pressure.reserved", read_u32(source, 28))?;
+        Ok(Self {
+            scope_id: read_u64(source, 0),
+            credit_window: read_u64(source, 8),
+            pressure_level: read_u16(source, 16),
+            pressure_reason: read_u16(source, 18),
+            retry_after_ms: read_u32(source, 20),
+            flags,
+        })
+    }
+
+    pub fn write(&self, destination: &mut [u8]) -> Result<(), NnrpError> {
+        require_destination_len(destination, PRESSURE_METADATA_LEN)?;
+        validate_mask_u32(self.flags, PRESSURE_FLAGS_KNOWN_MASK)?;
+        destination[..PRESSURE_METADATA_LEN].fill(0);
+        write_u64(destination, 0, self.scope_id);
+        write_u64(destination, 8, self.credit_window);
+        write_u16(destination, 16, self.pressure_level);
+        write_u16(destination, 18, self.pressure_reason);
+        write_u32(destination, 20, self.retry_after_ms);
+        write_u32(destination, 24, self.flags);
+        Ok(())
+    }
+
+    pub fn to_bytes(&self) -> Result<[u8; PRESSURE_METADATA_LEN], NnrpError> {
+        let mut bytes = [0u8; PRESSURE_METADATA_LEN];
+        self.write(&mut bytes)?;
+        Ok(bytes)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapabilityMetadata {
+    pub profile_id: u16,
+    pub capability_count: u16,
+    pub cost_model_id: u16,
+    pub preference_rank: u16,
+    pub limit_bytes: u64,
+    pub limit_units: u64,
+    pub body_bytes: u32,
+    pub flags: u32,
+}
+
+impl CapabilityMetadata {
+    pub fn parse(source: &[u8]) -> Result<Self, NnrpError> {
+        require_len(source, CAPABILITY_METADATA_LEN)?;
+        let flags = read_u32(source, 28);
+        validate_mask_u32(flags, CAPABILITY_FLAGS_KNOWN_MASK)?;
+        Ok(Self {
+            profile_id: read_u16(source, 0),
+            capability_count: read_u16(source, 2),
+            cost_model_id: read_u16(source, 4),
+            preference_rank: read_u16(source, 6),
+            limit_bytes: read_u64(source, 8),
+            limit_units: read_u64(source, 16),
+            body_bytes: read_u32(source, 24),
+            flags,
+        })
+    }
+
+    pub fn write(&self, destination: &mut [u8]) -> Result<(), NnrpError> {
+        require_destination_len(destination, CAPABILITY_METADATA_LEN)?;
+        validate_mask_u32(self.flags, CAPABILITY_FLAGS_KNOWN_MASK)?;
+        write_u16(destination, 0, self.profile_id);
+        write_u16(destination, 2, self.capability_count);
+        write_u16(destination, 4, self.cost_model_id);
+        write_u16(destination, 6, self.preference_rank);
+        write_u64(destination, 8, self.limit_bytes);
+        write_u64(destination, 16, self.limit_units);
+        write_u32(destination, 24, self.body_bytes);
+        write_u32(destination, 28, self.flags);
+        Ok(())
+    }
+
+    pub fn to_bytes(&self) -> Result<[u8; CAPABILITY_METADATA_LEN], NnrpError> {
+        let mut bytes = [0u8; CAPABILITY_METADATA_LEN];
+        self.write(&mut bytes)?;
+        Ok(bytes)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RouteHintMetadata {
+    pub operation_id: u64,
+    pub route_id: u32,
+    pub executor_class: u16,
+    pub affinity_class: u16,
+    pub deadline_unix_ms: u64,
+    pub body_bytes: u32,
+    pub flags: u32,
+}
+
+impl RouteHintMetadata {
+    pub fn parse(source: &[u8]) -> Result<Self, NnrpError> {
+        require_len(source, ROUTE_HINT_METADATA_LEN)?;
+        let flags = read_u32(source, 28);
+        validate_mask_u32(flags, ROUTE_HINT_FLAGS_KNOWN_MASK)?;
+        Ok(Self {
+            operation_id: read_u64(source, 0),
+            route_id: read_u32(source, 8),
+            executor_class: read_u16(source, 12),
+            affinity_class: read_u16(source, 14),
+            deadline_unix_ms: read_u64(source, 16),
+            body_bytes: read_u32(source, 24),
+            flags,
+        })
+    }
+
+    pub fn write(&self, destination: &mut [u8]) -> Result<(), NnrpError> {
+        require_destination_len(destination, ROUTE_HINT_METADATA_LEN)?;
+        validate_mask_u32(self.flags, ROUTE_HINT_FLAGS_KNOWN_MASK)?;
+        write_u64(destination, 0, self.operation_id);
+        write_u32(destination, 8, self.route_id);
+        write_u16(destination, 12, self.executor_class);
+        write_u16(destination, 14, self.affinity_class);
+        write_u64(destination, 16, self.deadline_unix_ms);
+        write_u32(destination, 24, self.body_bytes);
+        write_u32(destination, 28, self.flags);
+        Ok(())
+    }
+
+    pub fn to_bytes(&self) -> Result<[u8; ROUTE_HINT_METADATA_LEN], NnrpError> {
+        let mut bytes = [0u8; ROUTE_HINT_METADATA_LEN];
+        self.write(&mut bytes)?;
+        Ok(bytes)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TraceContextMetadata {
+    pub trace_id: u64,
+    pub span_id: u64,
+    pub parent_span_id: u64,
+    pub stage_code: u16,
+    pub flags: u16,
+    pub body_bytes: u32,
+}
+
+impl TraceContextMetadata {
+    pub fn parse(source: &[u8]) -> Result<Self, NnrpError> {
+        require_len(source, TRACE_CONTEXT_METADATA_LEN)?;
+        let flags = read_u16(source, 26);
+        validate_mask_u16(flags, TRACE_CONTEXT_FLAGS_KNOWN_MASK)?;
+        Ok(Self {
+            trace_id: read_u64(source, 0),
+            span_id: read_u64(source, 8),
+            parent_span_id: read_u64(source, 16),
+            stage_code: read_u16(source, 24),
+            flags,
+            body_bytes: read_u32(source, 28),
+        })
+    }
+
+    pub fn write(&self, destination: &mut [u8]) -> Result<(), NnrpError> {
+        require_destination_len(destination, TRACE_CONTEXT_METADATA_LEN)?;
+        validate_mask_u16(self.flags, TRACE_CONTEXT_FLAGS_KNOWN_MASK)?;
+        write_u64(destination, 0, self.trace_id);
+        write_u64(destination, 8, self.span_id);
+        write_u64(destination, 16, self.parent_span_id);
+        write_u16(destination, 24, self.stage_code);
+        write_u16(destination, 26, self.flags);
+        write_u32(destination, 28, self.body_bytes);
+        Ok(())
+    }
+
+    pub fn to_bytes(&self) -> Result<[u8; TRACE_CONTEXT_METADATA_LEN], NnrpError> {
+        let mut bytes = [0u8; TRACE_CONTEXT_METADATA_LEN];
+        self.write(&mut bytes)?;
+        Ok(bytes)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResultDropReasonMetadata {
+    pub operation_id: u64,
+    pub result_sequence: u64,
+    pub drop_reason_code: u16,
+    pub source_role: u8,
+    pub flags: u8,
+    pub diagnostic_bytes: u32,
+}
+
+impl ResultDropReasonMetadata {
+    pub fn parse(source: &[u8]) -> Result<Self, NnrpError> {
+        require_len(source, RESULT_DROP_REASON_METADATA_LEN)?;
+        validate_mask_u8(source[19], RESULT_DROP_FLAGS_KNOWN_MASK)?;
+        validate_zero_u64("result_drop_reason.reserved", read_u64(source, 24))?;
+        Ok(Self {
+            operation_id: read_u64(source, 0),
+            result_sequence: read_u64(source, 8),
+            drop_reason_code: read_u16(source, 16),
+            source_role: source[18],
+            flags: source[19],
+            diagnostic_bytes: read_u32(source, 20),
+        })
+    }
+
+    pub fn write(&self, destination: &mut [u8]) -> Result<(), NnrpError> {
+        require_destination_len(destination, RESULT_DROP_REASON_METADATA_LEN)?;
+        validate_mask_u8(self.flags, RESULT_DROP_FLAGS_KNOWN_MASK)?;
+        destination[..RESULT_DROP_REASON_METADATA_LEN].fill(0);
+        write_u64(destination, 0, self.operation_id);
+        write_u64(destination, 8, self.result_sequence);
+        write_u16(destination, 16, self.drop_reason_code);
+        destination[18] = self.source_role;
+        destination[19] = self.flags;
+        write_u32(destination, 20, self.diagnostic_bytes);
+        Ok(())
+    }
+
+    pub fn to_bytes(&self) -> Result<[u8; RESULT_DROP_REASON_METADATA_LEN], NnrpError> {
+        let mut bytes = [0u8; RESULT_DROP_REASON_METADATA_LEN];
+        self.write(&mut bytes)?;
+        Ok(bytes)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecoverableErrorMetadata {
+    pub error_code: u32,
+    pub error_scope: ErrorScope,
+    pub recovery_action: u16,
+    pub source_role: u8,
+    pub flags: u8,
+    pub retry_after_ms: u32,
+    pub related_session_id: u32,
+    pub related_frame_id: u32,
+    pub related_view_id: u32,
+    pub diagnostic_bytes: u32,
+}
+
+impl RecoverableErrorMetadata {
+    pub fn parse(source: &[u8]) -> Result<Self, NnrpError> {
+        require_len(source, RECOVERABLE_ERROR_METADATA_LEN)?;
+        let flags = source[11];
+        validate_mask_u8(flags, RECOVERABLE_ERROR_FLAGS_KNOWN_MASK)?;
+        Ok(Self {
+            error_code: read_u32(source, 0),
+            error_scope: ErrorScope::try_from_u32(read_u32(source, 4))?,
+            recovery_action: read_u16(source, 8),
+            source_role: source[10],
+            flags,
+            retry_after_ms: read_u32(source, 12),
+            related_session_id: read_u32(source, 16),
+            related_frame_id: read_u32(source, 20),
+            related_view_id: read_u32(source, 24),
+            diagnostic_bytes: read_u32(source, 28),
+        })
+    }
+
+    pub fn write(&self, destination: &mut [u8]) -> Result<(), NnrpError> {
+        require_destination_len(destination, RECOVERABLE_ERROR_METADATA_LEN)?;
+        validate_mask_u8(self.flags, RECOVERABLE_ERROR_FLAGS_KNOWN_MASK)?;
+        write_u32(destination, 0, self.error_code);
+        write_u32(destination, 4, self.error_scope as u32);
+        write_u16(destination, 8, self.recovery_action);
+        destination[10] = self.source_role;
+        destination[11] = self.flags;
+        write_u32(destination, 12, self.retry_after_ms);
+        write_u32(destination, 16, self.related_session_id);
+        write_u32(destination, 20, self.related_frame_id);
+        write_u32(destination, 24, self.related_view_id);
+        write_u32(destination, 28, self.diagnostic_bytes);
+        Ok(())
+    }
+
+    pub fn to_bytes(&self) -> Result<[u8; RECOVERABLE_ERROR_METADATA_LEN], NnrpError> {
+        let mut bytes = [0u8; RECOVERABLE_ERROR_METADATA_LEN];
+        self.write(&mut bytes)?;
+        Ok(bytes)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryAfterMetadata {
+    pub scope_id: u64,
+    pub control_sequence: u64,
+    pub retry_after_ms: u32,
+    pub jitter_ms: u32,
+    pub reason_code: u16,
+    pub source_role: u8,
+    pub flags: u8,
+    pub diagnostic_bytes: u32,
+}
+
+impl RetryAfterMetadata {
+    pub fn parse(source: &[u8]) -> Result<Self, NnrpError> {
+        require_len(source, RETRY_AFTER_METADATA_LEN)?;
+        let flags = source[27];
+        validate_mask_u8(flags, RETRY_AFTER_FLAGS_KNOWN_MASK)?;
+        Ok(Self {
+            scope_id: read_u64(source, 0),
+            control_sequence: read_u64(source, 8),
+            retry_after_ms: read_u32(source, 16),
+            jitter_ms: read_u32(source, 20),
+            reason_code: read_u16(source, 24),
+            source_role: source[26],
+            flags,
+            diagnostic_bytes: read_u32(source, 28),
+        })
+    }
+
+    pub fn write(&self, destination: &mut [u8]) -> Result<(), NnrpError> {
+        require_destination_len(destination, RETRY_AFTER_METADATA_LEN)?;
+        validate_mask_u8(self.flags, RETRY_AFTER_FLAGS_KNOWN_MASK)?;
+        write_u64(destination, 0, self.scope_id);
+        write_u64(destination, 8, self.control_sequence);
+        write_u32(destination, 16, self.retry_after_ms);
+        write_u32(destination, 20, self.jitter_ms);
+        write_u16(destination, 24, self.reason_code);
+        destination[26] = self.source_role;
+        destination[27] = self.flags;
+        write_u32(destination, 28, self.diagnostic_bytes);
+        Ok(())
+    }
+
+    pub fn to_bytes(&self) -> Result<[u8; RETRY_AFTER_METADATA_LEN], NnrpError> {
+        let mut bytes = [0u8; RETRY_AFTER_METADATA_LEN];
+        self.write(&mut bytes)?;
+        Ok(bytes)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TransportProbeMetadata {
     pub probe_id: u32,
     pub probe_payload_bytes: u32,
@@ -917,6 +1545,33 @@ fn validate_zero_u32(field: &'static str, value: u32) -> Result<(), NnrpError> {
     Ok(())
 }
 
+fn validate_zero_u64(field: &'static str, value: u64) -> Result<(), NnrpError> {
+    if value != 0 {
+        return Err(NnrpError::NonZeroReservedField { field });
+    }
+    Ok(())
+}
+
+fn validate_mask_u8(value: u8, allowed: u8) -> Result<(), NnrpError> {
+    if value & !allowed != 0 {
+        return Err(NnrpError::ReservedBitsSet {
+            value: value as u64,
+            allowed: allowed as u64,
+        });
+    }
+    Ok(())
+}
+
+fn validate_mask_u16(value: u16, allowed: u16) -> Result<(), NnrpError> {
+    if value & !allowed != 0 {
+        return Err(NnrpError::ReservedBitsSet {
+            value: value as u64,
+            allowed: allowed as u64,
+        });
+    }
+    Ok(())
+}
+
 fn validate_mask_u32(value: u32, allowed: u32) -> Result<(), NnrpError> {
     if value & !allowed != 0 {
         return Err(NnrpError::ReservedBitsSet {
@@ -927,6 +1582,15 @@ fn validate_mask_u32(value: u32, allowed: u32) -> Result<(), NnrpError> {
     Ok(())
 }
 
+fn validate_percent_x100(value: u16) -> Result<(), NnrpError> {
+    if value <= 10_000 || value == u16::MAX {
+        return Ok(());
+    }
+    Err(NnrpError::InvalidProtocolCombination {
+        rule: "progress.percent_x100 must be 0..10000 or 0xffff",
+    })
+}
+
 fn validate_specified_transport(
     transport_id: TransportId,
     rule: &'static str,
@@ -935,6 +1599,10 @@ fn validate_specified_transport(
         return Err(NnrpError::InvalidProtocolCombination { rule });
     }
     Ok(())
+}
+
+fn read_i16(source: &[u8], offset: usize) -> i16 {
+    i16::from_le_bytes(source[offset..offset + 2].try_into().expect("slice length"))
 }
 
 fn read_u16(source: &[u8], offset: usize) -> u16 {
@@ -950,6 +1618,10 @@ fn read_u64(source: &[u8], offset: usize) -> u64 {
 }
 
 fn write_u16(destination: &mut [u8], offset: usize, value: u16) {
+    destination[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+fn write_i16(destination: &mut [u8], offset: usize, value: i16) {
     destination[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
 }
 
@@ -1207,6 +1879,307 @@ mod tests {
         assert_eq!(
             SessionMigrateAckMetadata::parse(&migrate_ack.to_bytes().unwrap()).unwrap(),
             migrate_ack
+        );
+    }
+
+    #[test]
+    fn runtime_control_metadata_round_trips() {
+        let control = ControlRequestMetadata {
+            operation_id: 11,
+            control_sequence: 12,
+            reason_code: 1,
+            source_role: 4,
+            flags: CONTROL_REQUEST_FLAGS_KNOWN_MASK,
+            diagnostic_bytes: 128,
+        };
+        assert_eq!(
+            ControlRequestMetadata::parse(&control.to_bytes().unwrap()).unwrap(),
+            control
+        );
+
+        let scheduling = SchedulingMetadata {
+            operation_id: 21,
+            control_sequence: 22,
+            priority_class: 2,
+            priority_delta: -3,
+            deadline_unix_ms: 1_800_000,
+            flags: SCHEDULING_FLAGS_KNOWN_MASK,
+        };
+        assert_eq!(
+            SchedulingMetadata::parse(&scheduling.to_bytes().unwrap()).unwrap(),
+            scheduling
+        );
+
+        let supersede = SupersedeMetadata {
+            old_operation_id: 31,
+            new_operation_id: 32,
+            control_sequence: 33,
+            drop_reason_code: 2,
+            flags: SUPERSEDE_FLAGS_KNOWN_MASK,
+            diagnostic_bytes: 64,
+        };
+        assert_eq!(
+            SupersedeMetadata::parse(&supersede.to_bytes().unwrap()).unwrap(),
+            supersede
+        );
+
+        let budget = BudgetMetadata {
+            operation_id: 41,
+            compute_budget_units: 42,
+            memory_budget_bytes: 43,
+            bandwidth_budget_bytes: 44,
+            token_budget: 45,
+            flags: BUDGET_FLAGS_KNOWN_MASK,
+        };
+        assert_eq!(
+            BudgetMetadata::parse(&budget.to_bytes().unwrap()).unwrap(),
+            budget
+        );
+
+        let progress = ProgressMetadata {
+            operation_id: 51,
+            progress_sequence: 52,
+            stage_code: 5,
+            percent_x100: 8750,
+            object_id: 53,
+            body_bytes: 54,
+        };
+        assert_eq!(
+            ProgressMetadata::parse(&progress.to_bytes().unwrap()).unwrap(),
+            progress
+        );
+
+        let partial = PartialResultMetadata {
+            operation_id: 61,
+            result_sequence: 62,
+            object_id: 63,
+            delta_sequence: 64,
+            body_bytes: 65,
+            flags: PARTIAL_RESULT_FLAGS_KNOWN_MASK,
+        };
+        assert_eq!(
+            PartialResultMetadata::parse(&partial.to_bytes().unwrap()).unwrap(),
+            partial
+        );
+
+        let pressure = PressureMetadata {
+            scope_id: 71,
+            credit_window: 72,
+            pressure_level: 2,
+            pressure_reason: 4,
+            retry_after_ms: 73,
+            flags: PRESSURE_FLAGS_KNOWN_MASK,
+        };
+        assert_eq!(
+            PressureMetadata::parse(&pressure.to_bytes().unwrap()).unwrap(),
+            pressure
+        );
+
+        let capability = CapabilityMetadata {
+            profile_id: 0x0100,
+            capability_count: 3,
+            cost_model_id: 2,
+            preference_rank: 1,
+            limit_bytes: 81,
+            limit_units: 82,
+            body_bytes: 83,
+            flags: CAPABILITY_FLAGS_KNOWN_MASK,
+        };
+        assert_eq!(
+            CapabilityMetadata::parse(&capability.to_bytes().unwrap()).unwrap(),
+            capability
+        );
+
+        let route = RouteHintMetadata {
+            operation_id: 91,
+            route_id: 92,
+            executor_class: 3,
+            affinity_class: 4,
+            deadline_unix_ms: 93,
+            body_bytes: 94,
+            flags: ROUTE_HINT_FLAGS_KNOWN_MASK,
+        };
+        assert_eq!(
+            RouteHintMetadata::parse(&route.to_bytes().unwrap()).unwrap(),
+            route
+        );
+
+        let trace = TraceContextMetadata {
+            trace_id: 101,
+            span_id: 102,
+            parent_span_id: 103,
+            stage_code: 6,
+            flags: TRACE_CONTEXT_FLAGS_KNOWN_MASK,
+            body_bytes: 104,
+        };
+        assert_eq!(
+            TraceContextMetadata::parse(&trace.to_bytes().unwrap()).unwrap(),
+            trace
+        );
+
+        let drop_reason = ResultDropReasonMetadata {
+            operation_id: 111,
+            result_sequence: 112,
+            drop_reason_code: 3,
+            source_role: 6,
+            flags: RESULT_DROP_FLAGS_KNOWN_MASK,
+            diagnostic_bytes: 113,
+        };
+        assert_eq!(
+            ResultDropReasonMetadata::parse(&drop_reason.to_bytes().unwrap()).unwrap(),
+            drop_reason
+        );
+
+        let recoverable = RecoverableErrorMetadata {
+            error_code: 121,
+            error_scope: ErrorScope::Frame,
+            recovery_action: 3,
+            source_role: 6,
+            flags: RECOVERABLE_ERROR_FLAGS_KNOWN_MASK,
+            retry_after_ms: 122,
+            related_session_id: 123,
+            related_frame_id: 124,
+            related_view_id: 125,
+            diagnostic_bytes: 126,
+        };
+        assert_eq!(
+            RecoverableErrorMetadata::parse(&recoverable.to_bytes().unwrap()).unwrap(),
+            recoverable
+        );
+
+        let retry_after = RetryAfterMetadata {
+            scope_id: 131,
+            control_sequence: 132,
+            retry_after_ms: 133,
+            jitter_ms: 134,
+            reason_code: 4,
+            source_role: 6,
+            flags: RETRY_AFTER_FLAGS_KNOWN_MASK,
+            diagnostic_bytes: 135,
+        };
+        assert_eq!(
+            RetryAfterMetadata::parse(&retry_after.to_bytes().unwrap()).unwrap(),
+            retry_after
+        );
+    }
+
+    #[test]
+    fn runtime_control_metadata_rejects_reserved_bits_and_invalid_values() {
+        let mut control = ControlRequestMetadata {
+            operation_id: 1,
+            control_sequence: 2,
+            reason_code: 0,
+            source_role: 1,
+            flags: 0x04,
+            diagnostic_bytes: 0,
+        };
+        assert_eq!(
+            control.to_bytes(),
+            Err(NnrpError::ReservedBitsSet {
+                value: 0x04,
+                allowed: CONTROL_REQUEST_FLAGS_KNOWN_MASK as u64
+            })
+        );
+        control.flags = 0;
+        let mut control_bytes = control.to_bytes().unwrap();
+        write_u64(&mut control_bytes, 24, 1);
+        assert_eq!(
+            ControlRequestMetadata::parse(&control_bytes),
+            Err(NnrpError::NonZeroReservedField {
+                field: "control_request.reserved"
+            })
+        );
+
+        let mut progress = ProgressMetadata {
+            operation_id: 1,
+            progress_sequence: 2,
+            stage_code: 0,
+            percent_x100: 10_001,
+            object_id: 0,
+            body_bytes: 0,
+        };
+        assert_eq!(
+            progress.to_bytes(),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "progress.percent_x100 must be 0..10000 or 0xffff"
+            })
+        );
+        progress.percent_x100 = u16::MAX;
+        assert!(progress.to_bytes().is_ok());
+
+        let mut pressure = PressureMetadata {
+            scope_id: 0,
+            credit_window: 0,
+            pressure_level: 0,
+            pressure_reason: 0,
+            retry_after_ms: 0,
+            flags: 0,
+        }
+        .to_bytes()
+        .unwrap();
+        write_u32(&mut pressure, 28, 1);
+        assert_eq!(
+            PressureMetadata::parse(&pressure),
+            Err(NnrpError::NonZeroReservedField {
+                field: "pressure.reserved"
+            })
+        );
+
+        let mut route = RouteHintMetadata {
+            operation_id: 0,
+            route_id: 0,
+            executor_class: 0,
+            affinity_class: 0,
+            deadline_unix_ms: 0,
+            body_bytes: 0,
+            flags: 0x04,
+        };
+        assert_eq!(
+            route.to_bytes(),
+            Err(NnrpError::ReservedBitsSet {
+                value: 0x04,
+                allowed: ROUTE_HINT_FLAGS_KNOWN_MASK as u64
+            })
+        );
+        route.flags = 0;
+        assert!(route.to_bytes().is_ok());
+
+        let recoverable = RecoverableErrorMetadata {
+            error_code: 0,
+            error_scope: ErrorScope::Frame,
+            recovery_action: 0,
+            source_role: 0,
+            flags: 0x04,
+            retry_after_ms: 0,
+            related_session_id: 0,
+            related_frame_id: 0,
+            related_view_id: 0,
+            diagnostic_bytes: 0,
+        };
+        assert_eq!(
+            recoverable.to_bytes(),
+            Err(NnrpError::ReservedBitsSet {
+                value: 0x04,
+                allowed: RECOVERABLE_ERROR_FLAGS_KNOWN_MASK as u64
+            })
+        );
+
+        let retry_after = RetryAfterMetadata {
+            scope_id: 0,
+            control_sequence: 0,
+            retry_after_ms: 1,
+            jitter_ms: 0,
+            reason_code: 0,
+            source_role: 0,
+            flags: 0x04,
+            diagnostic_bytes: 0,
+        };
+        assert_eq!(
+            retry_after.to_bytes(),
+            Err(NnrpError::ReservedBitsSet {
+                value: 0x04,
+                allowed: RETRY_AFTER_FLAGS_KNOWN_MASK as u64
+            })
         );
     }
 

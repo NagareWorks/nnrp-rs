@@ -102,7 +102,7 @@ Release CI packages Windows, Linux, macOS, Android, and iOS targets, including
 targets. Desktop and Android packages ship dynamic libraries; iOS packages ship
 static libraries for app/toolchain linking.
 
-WASM primitives are for future `nnrp-js` wrapping. Node.js should probe native libraries first and fall back to WASM when native loading is unavailable; browsers consume WASM plus WebSocket/WebTransport adapters from the JS/TS layer.
+WASM primitives are consumed by `nnrp-js` wrapping. Node.js should probe native libraries first and fall back to WASM when native loading is unavailable; browsers consume WASM plus WebSocket/WebTransport adapters from the JS/TS layer.
 
 ```powershell
 rustup target add wasm32-unknown-unknown

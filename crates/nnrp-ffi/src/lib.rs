@@ -5230,6 +5230,7 @@ mod tests {
                 nnrp_cache_query(
                     NnrpCacheLeaseRequest {
                         now_ms: result.expires_at_ms,
+                        ttl_ms: 0,
                         ..request
                     },
                     &mut result,

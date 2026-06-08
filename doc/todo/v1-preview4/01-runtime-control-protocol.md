@@ -2,53 +2,53 @@
 
 ## Control Frame Model
 
-- [ ] Add Rust enums and payload structs for cancellation and abort.
-  - [ ] `CANCEL`.
-  - [ ] `ABORT`.
-  - [ ] Cancellation source.
-  - [ ] Cancellation reason.
-  - [ ] Operation identifier.
-- [ ] Add Rust enums and payload structs for scheduling.
-  - [ ] `PRIORITY_UPDATE`.
-  - [ ] `DEADLINE`.
-  - [ ] `EXPIRE_AT`.
-  - [ ] `SUPERSEDE`.
-  - [ ] `BUDGET_UPDATE`.
-- [ ] Add Rust enums and payload structs for streaming progress.
-  - [ ] `PROGRESS`.
-  - [ ] `PARTIAL_RESULT`.
-  - [ ] Progress stage.
-  - [ ] Optional percentage.
-  - [ ] Optional object reference.
-- [ ] Add Rust enums and payload structs for pressure management.
-  - [ ] `BACKPRESSURE`.
-  - [ ] `CREDIT_UPDATE`.
-  - [ ] Window size.
-  - [ ] Pressure reason.
-- [ ] Add Rust enums and payload structs for negotiation and routing.
-  - [ ] `CAPABILITY_NEGOTIATION`.
-  - [ ] `DEGRADE_PROFILE`.
-  - [ ] `ROUTE_HINT`.
-  - [ ] `EXECUTION_HINT`.
-  - [ ] Cost and preference metadata.
-- [ ] Add Rust enums and payload structs for diagnostics.
-  - [ ] `TRACE_CONTEXT`.
-  - [ ] `RESULT_DROP_REASON`.
-  - [ ] `ERROR_RECOVERABLE`.
-  - [ ] `RETRY_AFTER`.
+- [x] Add Rust enums and payload structs for cancellation and abort.
+  - [x] `CANCEL`.
+  - [x] `ABORT`.
+  - [x] Cancellation source.
+  - [x] Cancellation reason.
+  - [x] Operation identifier.
+- [x] Add Rust enums and payload structs for scheduling.
+  - [x] `PRIORITY_UPDATE`.
+  - [x] `DEADLINE`.
+  - [x] `EXPIRE_AT`.
+  - [x] `SUPERSEDE`.
+  - [x] `BUDGET_UPDATE`.
+- [x] Add Rust enums and payload structs for streaming progress.
+  - [x] `PROGRESS`.
+  - [x] `PARTIAL_RESULT`.
+  - [x] Progress stage.
+  - [x] Optional percentage.
+  - [x] Optional object reference.
+- [x] Add Rust enums and payload structs for pressure management.
+  - [x] `BACKPRESSURE`.
+  - [x] `CREDIT_UPDATE`.
+  - [x] Window size.
+  - [x] Pressure reason.
+- [x] Add Rust enums and payload structs for negotiation and routing.
+  - [x] `CAPABILITY_NEGOTIATION`.
+  - [x] `DEGRADE_PROFILE`.
+  - [x] `ROUTE_HINT`.
+  - [x] `EXECUTION_HINT`.
+  - [x] Cost and preference metadata.
+- [x] Add Rust enums and payload structs for diagnostics.
+  - [x] `TRACE_CONTEXT`.
+  - [x] `RESULT_DROP_REASON`.
+  - [x] `ERROR_RECOVERABLE`.
+  - [x] `RETRY_AFTER`.
 
 ## Encoding And Validation
 
 - [ ] Add binary encoding helpers for every control frame family.
-  - [ ] Validate fixed fields.
+  - [x] Validate fixed fields.
   - [ ] Validate variable metadata lengths.
-  - [ ] Reject unknown required fields.
+  - [x] Reject unknown required fields.
   - [ ] Preserve unknown optional extension fields for diagnostics.
 - [ ] Add decoding helpers for every control frame family.
-  - [ ] Decode without heap allocation where fixed layout is enough.
+  - [x] Decode without heap allocation where fixed layout is enough.
   - [ ] Surface typed error families instead of generic decode failures.
   - [ ] Preserve trace identifiers through decode errors when present.
-- [ ] Add roundtrip tests for every frame family.
+- [x] Add roundtrip tests for every frame family.
 - [ ] Add negative tests for malformed operation IDs, deadlines, credits, and trace metadata.
 
 ## Runtime Semantics
