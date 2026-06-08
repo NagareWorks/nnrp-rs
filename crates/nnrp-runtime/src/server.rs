@@ -3,15 +3,20 @@ use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use nnrp_core::{
-    validate_profile_assignment, validate_result_drop_header, CacheObjectId, CacheObjectKind,
-    CommonHeader, ConnectionLifecycle, FlowUpdateMetadata, FrameSubmitMetadata, MessageType,
-    OperationCancelRequest, OperationDescriptor, OperationRegistry, ResultPushMetadata,
-    SchemaRegistry, SessionCloseAckMetadata, SessionCloseMetadata, SessionCloseStatus,
-    SessionMigrateAckMetadata, SessionMigrateMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
-    SessionPatchAckMetadata, SessionPatchMetadata, SessionStatus, FLOW_UPDATE_METADATA_LEN,
-    FRAME_SUBMIT_METADATA_LEN, RESULT_PUSH_METADATA_LEN, SESSION_ACK_FLAG_RESUME_ENABLED,
-    SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_LIMIT_REACHED, SESSION_ERROR_NONE,
-    SESSION_ERROR_PROFILE_UNSUPPORTED, SESSION_ERROR_RESUME_REJECTED,
+    validate_control_request_semantics, validate_partial_result_semantics,
+    validate_pressure_semantics, validate_profile_assignment, validate_result_drop_header,
+    validate_result_drop_reason_semantics, validate_scheduling_semantics, CacheObjectId,
+    CacheObjectKind, CommonHeader, ConnectionLifecycle, ControlRequestMetadata, FlowUpdateMetadata,
+    FrameSubmitMetadata, MessageType, OperationCancelRequest, OperationDescriptor,
+    OperationRegistry, PartialResultMetadata, PressureMetadata, ResultDropReasonMetadata,
+    ResultPushMetadata, SchedulingMetadata, SchemaRegistry, SessionCloseAckMetadata,
+    SessionCloseMetadata, SessionCloseStatus, SessionMigrateAckMetadata, SessionMigrateMetadata,
+    SessionOpenAckMetadata, SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchMetadata,
+    SessionStatus, CONTROL_REQUEST_METADATA_LEN, FLOW_UPDATE_METADATA_LEN,
+    FRAME_SUBMIT_METADATA_LEN, PARTIAL_RESULT_METADATA_LEN, PRESSURE_METADATA_LEN,
+    RESULT_DROP_REASON_METADATA_LEN, RESULT_PUSH_METADATA_LEN, SCHEDULING_METADATA_LEN,
+    SESSION_ACK_FLAG_RESUME_ENABLED, SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_LIMIT_REACHED,
+    SESSION_ERROR_NONE, SESSION_ERROR_PROFILE_UNSUPPORTED, SESSION_ERROR_RESUME_REJECTED,
     SESSION_ERROR_SCHEMA_UNSUPPORTED, SESSION_FLAG_ALLOW_RESUME, SESSION_MIGRATE_ACK_METADATA_LEN,
     SESSION_MIGRATE_METADATA_LEN, SESSION_OPEN_ACK_METADATA_LEN, SESSION_PATCH_ACK_METADATA_LEN,
     SESSION_PATCH_METADATA_LEN,
@@ -204,6 +209,24 @@ pub struct NnrpCancel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NnrpMigration {
     pub metadata: SessionMigrateMetadata,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpRuntimeControl {
+    pub message_type: MessageType,
+    pub metadata: ControlRequestMetadata,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpSchedulingUpdate {
+    pub message_type: MessageType,
+    pub metadata: SchedulingMetadata,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpPressureUpdate {
+    pub message_type: MessageType,
+    pub metadata: PressureMetadata,
 }
 
 impl NnrpServer {
@@ -509,6 +532,54 @@ impl NnrpServerSession {
             .await
     }
 
+    pub async fn send_partial_result(
+        &mut self,
+        metadata: PartialResultMetadata,
+        body: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        validate_partial_result_semantics(&metadata)?;
+        if metadata.body_bytes as usize != body.len() {
+            return Err(RuntimeError::UnexpectedMessage(
+                "server PARTIAL_RESULT body length mismatch",
+            ));
+        }
+        let mut header = CommonHeader::new(
+            MessageType::PartialResult,
+            PARTIAL_RESULT_METADATA_LEN as u32,
+            body.len() as u32,
+        );
+        header.session_id = self.session_id;
+        header.frame_id = metadata.operation_id as u32;
+        self.transport
+            .write_packet(&RuntimePacket::new(
+                header,
+                metadata.to_bytes()?.to_vec(),
+                body,
+            )?)
+            .await
+    }
+
+    pub async fn send_result_drop_reason(
+        &mut self,
+        metadata: ResultDropReasonMetadata,
+    ) -> Result<(), RuntimeError> {
+        validate_result_drop_reason_semantics(&metadata)?;
+        let mut header = CommonHeader::new(
+            MessageType::ResultDropReason,
+            RESULT_DROP_REASON_METADATA_LEN as u32,
+            0,
+        );
+        header.session_id = self.session_id;
+        header.frame_id = metadata.operation_id as u32;
+        self.transport
+            .write_packet(&RuntimePacket::new(
+                header,
+                metadata.to_bytes()?.to_vec(),
+                Vec::new(),
+            )?)
+            .await
+    }
+
     pub async fn receive_cancel(&mut self) -> Result<NnrpCancel, RuntimeError> {
         let packet = self.transport.read_packet().await?;
         if packet.header.message_type != MessageType::FrameCancel {
@@ -530,6 +601,111 @@ impl NnrpServerSession {
         Ok(NnrpCancel {
             frame_id: packet.header.frame_id,
         })
+    }
+
+    pub async fn receive_runtime_control(&mut self) -> Result<NnrpRuntimeControl, RuntimeError> {
+        let packet = self.transport.read_packet().await?;
+        if !matches!(
+            packet.header.message_type,
+            MessageType::Cancel | MessageType::Abort
+        ) {
+            return Err(RuntimeError::UnexpectedMessage(
+                "server expected CANCEL or ABORT",
+            ));
+        }
+        self.require_session_packet(&packet, "server received control for another session")?;
+        if packet.metadata.len() != CONTROL_REQUEST_METADATA_LEN || !packet.body.is_empty() {
+            return Err(RuntimeError::UnexpectedMessage(
+                "server received malformed runtime control lengths",
+            ));
+        }
+
+        let metadata = ControlRequestMetadata::parse(&packet.metadata)?;
+        validate_control_request_semantics(packet.header.message_type, &metadata)?;
+        self.operations.cancel(OperationCancelRequest {
+            session_id: self.session_id,
+            operation_id: metadata.operation_id,
+            cancel_scope: nnrp_core::CancelScope::Operation,
+        })?;
+        Ok(NnrpRuntimeControl {
+            message_type: packet.header.message_type,
+            metadata,
+        })
+    }
+
+    pub async fn receive_scheduling_update(
+        &mut self,
+    ) -> Result<NnrpSchedulingUpdate, RuntimeError> {
+        let packet = self.transport.read_packet().await?;
+        if !matches!(
+            packet.header.message_type,
+            MessageType::PriorityUpdate | MessageType::Deadline | MessageType::ExpireAt
+        ) {
+            return Err(RuntimeError::UnexpectedMessage(
+                "server expected PRIORITY_UPDATE, DEADLINE, or EXPIRE_AT",
+            ));
+        }
+        self.require_session_packet(
+            &packet,
+            "server received scheduling update for another session",
+        )?;
+        if packet.metadata.len() != SCHEDULING_METADATA_LEN || !packet.body.is_empty() {
+            return Err(RuntimeError::UnexpectedMessage(
+                "server received malformed scheduling metadata length",
+            ));
+        }
+
+        let metadata = SchedulingMetadata::parse(&packet.metadata)?;
+        validate_scheduling_semantics(packet.header.message_type, &metadata)?;
+        Ok(NnrpSchedulingUpdate {
+            message_type: packet.header.message_type,
+            metadata,
+        })
+    }
+
+    pub async fn receive_pressure_update(&mut self) -> Result<NnrpPressureUpdate, RuntimeError> {
+        let packet = self.transport.read_packet().await?;
+        if !matches!(
+            packet.header.message_type,
+            MessageType::Backpressure | MessageType::CreditUpdate
+        ) {
+            return Err(RuntimeError::UnexpectedMessage(
+                "server expected BACKPRESSURE or CREDIT_UPDATE",
+            ));
+        }
+        self.require_optional_session_packet(
+            &packet,
+            "server received pressure update for another session",
+        )?;
+        if packet.metadata.len() != PRESSURE_METADATA_LEN || !packet.body.is_empty() {
+            return Err(RuntimeError::UnexpectedMessage(
+                "server received malformed pressure metadata length",
+            ));
+        }
+
+        let metadata = PressureMetadata::parse(&packet.metadata)?;
+        validate_pressure_semantics(packet.header.message_type, &metadata)?;
+        Ok(NnrpPressureUpdate {
+            message_type: packet.header.message_type,
+            metadata,
+        })
+    }
+
+    pub async fn send_backpressure(
+        &mut self,
+        metadata: PressureMetadata,
+    ) -> Result<(), RuntimeError> {
+        validate_pressure_semantics(MessageType::Backpressure, &metadata)?;
+        let mut header =
+            CommonHeader::new(MessageType::Backpressure, PRESSURE_METADATA_LEN as u32, 0);
+        header.session_id = self.session_id;
+        self.transport
+            .write_packet(&RuntimePacket::new(
+                header,
+                metadata.to_bytes()?.to_vec(),
+                Vec::new(),
+            )?)
+            .await
     }
 
     pub fn track_cache_object(&mut self, object_id: CacheObjectId) -> Result<(), RuntimeError> {
@@ -688,6 +864,17 @@ impl NnrpServerSession {
         message: &'static str,
     ) -> Result<(), RuntimeError> {
         if packet.header.session_id != self.session_id {
+            return Err(RuntimeError::UnexpectedMessage(message));
+        }
+        Ok(())
+    }
+
+    fn require_optional_session_packet(
+        &self,
+        packet: &RuntimePacket,
+        message: &'static str,
+    ) -> Result<(), RuntimeError> {
+        if packet.header.session_id != 0 && packet.header.session_id != self.session_id {
             return Err(RuntimeError::UnexpectedMessage(message));
         }
         Ok(())

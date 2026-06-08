@@ -1,14 +1,15 @@
 use nnrp_core::{
     BackpressureLevel, CacheObjectId, CacheObjectKind, CommonHeader, FlowScopeKind,
     FlowUpdateMetadata, FlowUpdateReason, FrameSubmitMetadata, InFlightPolicy, InputProfile,
-    MessageType, OperationState, PayloadKindBitmap, ResultClass, ResultPushMetadata,
-    SchemaRegistry, SessionCloseMetadata, SessionCloseReason, SessionMigrateAckMetadata,
-    SessionOpenAckMetadata, SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchAckStatus,
-    SessionPatchMetadata, SessionPatchRejectReason, SessionPriorityClass, SessionStatus,
-    SubmitMode, TileIndexMode, TransportId, FLOW_UPDATE_FLAG_CREDIT_VALID,
-    RESULT_PUSH_METADATA_LEN, SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE,
-    SESSION_OPEN_ACK_METADATA_LEN, SESSION_OPEN_METADATA_LEN, STANDARD_PROFILE_TOKEN,
-    TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
+    MessageType, OperationState, PartialResultMetadata, PayloadKindBitmap, PressureMetadata,
+    ResultClass, ResultDropReasonMetadata, ResultPushMetadata, SchemaRegistry,
+    SessionCloseMetadata, SessionCloseReason, SessionMigrateAckMetadata, SessionOpenAckMetadata,
+    SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata,
+    SessionPatchRejectReason, SessionPriorityClass, SessionStatus, SubmitMode, TileIndexMode,
+    TransportId, FLOW_UPDATE_FLAG_CREDIT_VALID, RESULT_PUSH_METADATA_LEN,
+    SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE, SESSION_OPEN_ACK_METADATA_LEN,
+    SESSION_OPEN_METADATA_LEN, STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID,
+    TOKEN_DELTA_SCHEMA_VERSION,
 };
 use nnrp_runtime::{
     BoxedFramedTransport, FramedListener, FramedTransport, NnrpClient, NnrpClientConfig,
@@ -143,6 +144,129 @@ async fn tcp_loopback_handles_cancel_drop_flow_and_patch() -> Result<(), Runtime
     match session.await_event().await? {
         NnrpClientEvent::ResultDrop { frame_id: dropped } => assert_eq!(dropped, frame_id),
         event => panic!("expected result drop, got {event:?}"),
+    }
+
+    session.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        let submit = session.receive_submit().await?;
+        assert_eq!(submit.frame_id, 1);
+
+        let priority = session.receive_scheduling_update().await?;
+        assert_eq!(priority.message_type, MessageType::PriorityUpdate);
+        assert_eq!(priority.metadata.operation_id, submit.frame_id as u64);
+
+        let deadline = session.receive_scheduling_update().await?;
+        assert_eq!(deadline.message_type, MessageType::Deadline);
+        assert_eq!(deadline.metadata.deadline_unix_ms, 1_800_000_000_000);
+
+        let credit = session.receive_pressure_update().await?;
+        assert_eq!(credit.message_type, MessageType::CreditUpdate);
+        assert_eq!(credit.metadata.credit_window, 9);
+
+        session.send_backpressure(soft_backpressure()).await?;
+        session
+            .send_partial_result(partial_result(submit.frame_id as u64), b"partial".to_vec())
+            .await?;
+
+        let control = session.receive_runtime_control().await?;
+        assert_eq!(control.message_type, MessageType::Cancel);
+        assert_eq!(control.metadata.operation_id, submit.frame_id as u64);
+        assert_eq!(
+            session
+                .operations()
+                .operation(submit.frame_id as u64)
+                .expect("operation should be registered")
+                .state,
+            OperationState::Cancelled
+        );
+        session
+            .send_result_drop_reason(drop_reason(submit.frame_id as u64))
+            .await?;
+
+        let abort_submit = session.receive_submit().await?;
+        assert_eq!(abort_submit.frame_id, 2);
+
+        let expire = session.receive_scheduling_update().await?;
+        assert_eq!(expire.message_type, MessageType::ExpireAt);
+        assert_eq!(expire.metadata.operation_id, abort_submit.frame_id as u64);
+        assert_eq!(expire.metadata.deadline_unix_ms, 1_800_000_000_500);
+
+        let abort = session.receive_runtime_control().await?;
+        assert_eq!(abort.message_type, MessageType::Abort);
+        assert_eq!(abort.metadata.operation_id, abort_submit.frame_id as u64);
+        assert_eq!(
+            session
+                .operations()
+                .operation(abort_submit.frame_id as u64)
+                .expect("operation should be registered")
+                .state,
+            OperationState::Cancelled
+        );
+        session.send_backpressure(soft_backpressure()).await?;
+
+        let close = session.receive_close().await?;
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let mut session = client.open_session().await?;
+    let frame_id = session
+        .submit_nowait(token_submit(), b"prompt".to_vec())
+        .await?;
+    session.update_priority(frame_id as u64, 1, -2).await?;
+    session
+        .update_deadline(frame_id as u64, 1_800_000_000_000)
+        .await?;
+    session.send_credit_update(credit_update()).await?;
+    session.cancel_operation(frame_id as u64, 7).await?;
+
+    match session.await_event().await? {
+        NnrpClientEvent::Backpressure(pressure) => {
+            assert_eq!(pressure.pressure_level, BackpressureLevel::Soft as u16);
+            assert_eq!(pressure.retry_after_ms, 25);
+        }
+        event => panic!("expected backpressure, got {event:?}"),
+    }
+    match session.await_event().await? {
+        NnrpClientEvent::PartialResult { metadata, body } => {
+            assert_eq!(metadata.operation_id, frame_id as u64);
+            assert_eq!(body, b"partial".to_vec());
+        }
+        event => panic!("expected partial result, got {event:?}"),
+    }
+    match session.await_event().await? {
+        NnrpClientEvent::ResultDropReason(reason) => {
+            assert_eq!(reason.operation_id, frame_id as u64);
+            assert_eq!(reason.drop_reason_code, 7);
+        }
+        event => panic!("expected drop reason, got {event:?}"),
+    }
+
+    let abort_frame_id = session
+        .submit_nowait(token_submit(), b"abort-prompt".to_vec())
+        .await?;
+    session
+        .expire_at(abort_frame_id as u64, 1_800_000_000_500)
+        .await?;
+    session.abort_operation(abort_frame_id as u64, 9).await?;
+
+    match session.await_event().await? {
+        NnrpClientEvent::Backpressure(pressure) => {
+            assert_eq!(pressure.pressure_level, BackpressureLevel::Soft as u16);
+            assert_eq!(pressure.retry_after_ms, 25);
+        }
+        event => panic!("expected abort backpressure, got {event:?}"),
     }
 
     session.close().await?;
@@ -527,6 +651,222 @@ async fn client_result_and_patch_helpers_reject_control_mismatches() -> Result<(
         client_patch_error(malformed_patch_ack).await,
         RuntimeError::UnexpectedMessage(_)
     ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn client_result_helper_rejects_preview4_control_non_result_events(
+) -> Result<(), RuntimeError> {
+    for packet in [
+        control_event_packet(
+            MessageType::ResultDropReason,
+            1,
+            drop_reason(1).to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        control_event_packet(
+            MessageType::PartialResult,
+            1,
+            partial_result(1).to_bytes()?.to_vec(),
+            b"partial".to_vec(),
+        )?,
+        control_event_packet(
+            MessageType::Backpressure,
+            1,
+            soft_backpressure().to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        control_event_packet(
+            MessageType::CreditUpdate,
+            1,
+            credit_update().to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+    ] {
+        let mut session = scripted_client_session(packet).await?;
+        assert!(matches!(
+            session.await_result().await,
+            Err(RuntimeError::UnexpectedMessage(_))
+        ));
+        session.close_transport().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn client_preview4_control_event_reader_rejects_malformed_packets() -> Result<(), RuntimeError>
+{
+    for packet in [
+        control_event_packet(
+            MessageType::ResultDropReason,
+            2,
+            drop_reason(1).to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        control_event_packet(MessageType::ResultDropReason, 1, vec![0], Vec::new())?,
+        control_event_packet(
+            MessageType::PartialResult,
+            2,
+            partial_result(1).to_bytes()?.to_vec(),
+            b"partial".to_vec(),
+        )?,
+        control_event_packet(MessageType::PartialResult, 1, vec![0], Vec::new())?,
+        control_event_packet(
+            MessageType::PartialResult,
+            1,
+            partial_result(1).to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        control_event_packet(
+            MessageType::Backpressure,
+            2,
+            soft_backpressure().to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        control_event_packet(MessageType::Backpressure, 1, vec![0], Vec::new())?,
+        control_event_packet(
+            MessageType::CreditUpdate,
+            2,
+            credit_update().to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        control_event_packet(MessageType::CreditUpdate, 1, vec![0], Vec::new())?,
+    ] {
+        let mut session = scripted_client_session(packet).await?;
+        assert!(matches!(
+            session.await_event().await,
+            Err(RuntimeError::UnexpectedMessage(_))
+        ));
+        session.close_transport().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn server_preview4_control_readers_and_senders_reject_mismatches() -> Result<(), RuntimeError>
+{
+    for err in [
+        server_receive_runtime_control_error(control_event_packet(
+            MessageType::FlowUpdate,
+            1,
+            session_flow_update().to_bytes()?.to_vec(),
+            Vec::new(),
+        )?)
+        .await,
+        server_receive_runtime_control_error(control_event_packet(
+            MessageType::Cancel,
+            2,
+            nnrp_core::ControlRequestMetadata {
+                operation_id: 1,
+                control_sequence: 1,
+                reason_code: 7,
+                source_role: 1,
+                flags: 0,
+                diagnostic_bytes: 0,
+            }
+            .to_bytes()?
+            .to_vec(),
+            Vec::new(),
+        )?)
+        .await,
+        server_receive_runtime_control_error(control_event_packet(
+            MessageType::Cancel,
+            1,
+            vec![0],
+            Vec::new(),
+        )?)
+        .await,
+        server_receive_scheduling_update_error(control_event_packet(
+            MessageType::Cancel,
+            1,
+            nnrp_core::ControlRequestMetadata {
+                operation_id: 1,
+                control_sequence: 1,
+                reason_code: 7,
+                source_role: 1,
+                flags: 0,
+                diagnostic_bytes: 0,
+            }
+            .to_bytes()?
+            .to_vec(),
+            Vec::new(),
+        )?)
+        .await,
+        server_receive_scheduling_update_error(control_event_packet(
+            MessageType::Deadline,
+            1,
+            vec![0],
+            Vec::new(),
+        )?)
+        .await,
+        server_receive_pressure_update_error(control_event_packet(
+            MessageType::Deadline,
+            1,
+            nnrp_core::SchedulingMetadata {
+                operation_id: 1,
+                control_sequence: 1,
+                priority_class: 0,
+                priority_delta: 0,
+                deadline_unix_ms: 100,
+                flags: 0,
+            }
+            .to_bytes()?
+            .to_vec(),
+            Vec::new(),
+        )?)
+        .await,
+        server_receive_pressure_update_error(control_event_packet(
+            MessageType::Backpressure,
+            2,
+            soft_backpressure().to_bytes()?.to_vec(),
+            Vec::new(),
+        )?)
+        .await,
+        server_receive_pressure_update_error(control_event_packet(
+            MessageType::Backpressure,
+            1,
+            vec![0],
+            Vec::new(),
+        )?)
+        .await,
+        server_send_control_error(|mut session| async move {
+            session
+                .send_partial_result(partial_result(1), Vec::new())
+                .await
+        })
+        .await,
+        server_send_control_error(|mut session| async move {
+            session
+                .send_result_drop_reason(nnrp_core::ResultDropReasonMetadata {
+                    operation_id: 1,
+                    result_sequence: 1,
+                    drop_reason_code: 0,
+                    source_role: 2,
+                    flags: 0,
+                    diagnostic_bytes: 0,
+                })
+                .await
+        })
+        .await,
+        server_send_control_error(|mut session| async move {
+            session
+                .send_backpressure(nnrp_core::PressureMetadata {
+                    scope_id: 1,
+                    credit_window: 1,
+                    pressure_level: 0,
+                    pressure_reason: 0,
+                    retry_after_ms: 0,
+                    flags: 0,
+                })
+                .await
+        })
+        .await,
+    ] {
+        assert!(matches!(
+            err,
+            RuntimeError::UnexpectedMessage(_) | RuntimeError::Protocol(_)
+        ));
+    }
     Ok(())
 }
 
@@ -1196,6 +1536,50 @@ async fn server_receive_migrate_error(packet: RuntimePacket) -> RuntimeError {
     .await
 }
 
+async fn server_receive_runtime_control_error(packet: RuntimePacket) -> RuntimeError {
+    server_receive_error(packet, |mut session| async move {
+        session.receive_runtime_control().await.map(|_| ())
+    })
+    .await
+}
+
+async fn server_receive_scheduling_update_error(packet: RuntimePacket) -> RuntimeError {
+    server_receive_error(packet, |mut session| async move {
+        session.receive_scheduling_update().await.map(|_| ())
+    })
+    .await
+}
+
+async fn server_receive_pressure_update_error(packet: RuntimePacket) -> RuntimeError {
+    server_receive_error(packet, |mut session| async move {
+        session.receive_pressure_update().await.map(|_| ())
+    })
+    .await
+}
+
+async fn server_send_control_error<F, Fut>(send: F) -> RuntimeError
+where
+    F: FnOnce(nnrp_runtime::NnrpServerSession) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<(), RuntimeError>> + Send + 'static,
+{
+    let mut header = CommonHeader::new(
+        MessageType::SessionClose,
+        nnrp_core::SESSION_CLOSE_METADATA_LEN as u32,
+        0,
+    );
+    header.session_id = 1;
+    server_receive_error(
+        RuntimePacket::new(
+            header,
+            close_request().to_bytes().unwrap().to_vec(),
+            Vec::new(),
+        )
+        .expect("close packet should build"),
+        send,
+    )
+    .await
+}
+
 async fn server_send_migrate_ack_error(packet: RuntimePacket) -> RuntimeError {
     server_receive_error(packet, |mut session| async move {
         let migrate = session.receive_migrate().await?;
@@ -1314,6 +1698,61 @@ fn session_flow_update() -> FlowUpdateMetadata {
         credit_epoch: 1,
         flow_flags: FLOW_UPDATE_FLAG_CREDIT_VALID,
     }
+}
+
+fn credit_update() -> PressureMetadata {
+    PressureMetadata {
+        scope_id: 1,
+        credit_window: 9,
+        pressure_level: BackpressureLevel::None as u16,
+        pressure_reason: 0,
+        retry_after_ms: 0,
+        flags: 0,
+    }
+}
+
+fn soft_backpressure() -> PressureMetadata {
+    PressureMetadata {
+        scope_id: 1,
+        credit_window: 2,
+        pressure_level: BackpressureLevel::Soft as u16,
+        pressure_reason: 1,
+        retry_after_ms: 25,
+        flags: 0,
+    }
+}
+
+fn partial_result(operation_id: u64) -> PartialResultMetadata {
+    PartialResultMetadata {
+        operation_id,
+        result_sequence: 1,
+        object_id: 0,
+        delta_sequence: 0,
+        body_bytes: 7,
+        flags: 0,
+    }
+}
+
+fn drop_reason(operation_id: u64) -> ResultDropReasonMetadata {
+    ResultDropReasonMetadata {
+        operation_id,
+        result_sequence: 1,
+        drop_reason_code: 7,
+        source_role: 2,
+        flags: 0,
+        diagnostic_bytes: 0,
+    }
+}
+
+fn control_event_packet(
+    message_type: MessageType,
+    session_id: u32,
+    metadata: Vec<u8>,
+    body: Vec<u8>,
+) -> Result<RuntimePacket, RuntimeError> {
+    let mut header = CommonHeader::new(message_type, metadata.len() as u32, body.len() as u32);
+    header.session_id = session_id;
+    Ok(RuntimePacket::new(header, metadata, body)?)
 }
 
 fn migration_request() -> nnrp_core::SessionMigrateMetadata {

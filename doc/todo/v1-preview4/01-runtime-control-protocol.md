@@ -54,20 +54,21 @@
 ## Runtime Semantics
 
 - [ ] Route cancellation into operation lifecycle state.
-  - [ ] Cooperative cancellation.
+  - [x] Cooperative cancellation.
   - [ ] Hard abort.
   - [ ] Late result suppression.
 - [ ] Route priority and deadline changes into scheduler metadata.
-  - [ ] Update priority without reopening the session.
+  - [x] Update priority without reopening the session.
   - [ ] Expire stale work before final result delivery.
   - [ ] Emit `RESULT_DROP_REASON` when stale work is discarded.
+  - [x] Expose typed `RESULT_DROP_REASON` send/read APIs for host-controlled discard paths.
 - [ ] Route progress and partial results through event queues.
   - [ ] Preserve order within one operation.
   - [ ] Allow interleaving across operations.
-  - [ ] Support bounded event polling.
+  - [x] Support host polling for `PARTIAL_RESULT`.
 - [ ] Route backpressure and credit changes through transport/provider state.
   - [ ] Apply send window changes.
-  - [ ] Report pressure to host code.
+  - [x] Report pressure to host code.
   - [ ] Avoid unbounded buffering in runtime queues.
 
 ## Conformance Hooks
@@ -75,3 +76,5 @@
 - [ ] Add control-frame capability declarations to Rust capability reports.
 - [ ] Add conformance fixture coverage for representative control frames.
 - [ ] Add runtime tests that mirror wire scenarios for cancel, priority/deadline, progress/backpressure, and route/cache behavior.
+  - [x] Runtime loopback coverage for cancel, priority/deadline, partial result, drop reason, and backpressure.
+  - [ ] Runtime loopback coverage for route/cache behavior.

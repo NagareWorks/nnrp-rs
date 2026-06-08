@@ -1,16 +1,21 @@
 use std::fmt;
 
 use nnrp_core::{
-    validate_result_drop_header, CacheObjectKind, CommonHeader, ConnectionLifecycle,
-    FlowUpdateMetadata, FrameSubmitMetadata, InFlightPolicy, MessageType, ResultPushMetadata,
-    SessionCloseAckMetadata, SessionCloseMetadata, SessionCloseReason, SessionMigrateAckMetadata,
-    SessionMigrateMetadata, SessionOpenAckMetadata, SessionOpenMetadata, SessionPatchAckMetadata,
-    SessionPatchMetadata, SessionPriorityClass, SessionStatus, TransportId,
-    FRAME_SUBMIT_METADATA_LEN, RESULT_PUSH_METADATA_LEN, SESSION_CLOSE_ACK_METADATA_LEN,
-    SESSION_CLOSE_METADATA_LEN, SESSION_ERROR_NONE, SESSION_MIGRATE_ACK_METADATA_LEN,
-    SESSION_MIGRATE_METADATA_LEN, SESSION_OPEN_METADATA_LEN, SESSION_PATCH_ACK_METADATA_LEN,
-    SESSION_PATCH_METADATA_LEN, STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID,
-    TOKEN_DELTA_SCHEMA_VERSION,
+    validate_control_request_semantics, validate_partial_result_semantics,
+    validate_pressure_semantics, validate_result_drop_header,
+    validate_result_drop_reason_semantics, validate_scheduling_semantics, CacheObjectKind,
+    CommonHeader, ConnectionLifecycle, ControlRequestMetadata, FlowUpdateMetadata,
+    FrameSubmitMetadata, InFlightPolicy, MessageType, PartialResultMetadata, PressureMetadata,
+    ResultDropReasonMetadata, ResultPushMetadata, SchedulingMetadata, SessionCloseAckMetadata,
+    SessionCloseMetadata, SessionCloseReason, SessionMigrateAckMetadata, SessionMigrateMetadata,
+    SessionOpenAckMetadata, SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchMetadata,
+    SessionPriorityClass, SessionStatus, TransportId, CONTROL_REQUEST_METADATA_LEN,
+    FRAME_SUBMIT_METADATA_LEN, PARTIAL_RESULT_METADATA_LEN, PRESSURE_METADATA_LEN,
+    RESULT_DROP_REASON_METADATA_LEN, RESULT_PUSH_METADATA_LEN, SCHEDULING_METADATA_LEN,
+    SESSION_CLOSE_ACK_METADATA_LEN, SESSION_CLOSE_METADATA_LEN, SESSION_ERROR_NONE,
+    SESSION_MIGRATE_ACK_METADATA_LEN, SESSION_MIGRATE_METADATA_LEN, SESSION_OPEN_METADATA_LEN,
+    SESSION_PATCH_ACK_METADATA_LEN, SESSION_PATCH_METADATA_LEN, STANDARD_PROFILE_TOKEN,
+    TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
 };
 
 use crate::{
@@ -94,8 +99,17 @@ pub struct NnrpResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NnrpClientEvent {
     Result(NnrpResult),
-    ResultDrop { frame_id: u32 },
+    PartialResult {
+        metadata: PartialResultMetadata,
+        body: Vec<u8>,
+    },
+    ResultDrop {
+        frame_id: u32,
+    },
+    ResultDropReason(ResultDropReasonMetadata),
     FlowUpdate(FlowUpdateMetadata),
+    Backpressure(PressureMetadata),
+    CreditUpdate(PressureMetadata),
 }
 
 impl NnrpClient {
@@ -264,8 +278,20 @@ impl NnrpClientSession {
             NnrpClientEvent::ResultDrop { .. } => Err(RuntimeError::UnexpectedMessage(
                 "client expected RESULT_PUSH but received RESULT_DROP",
             )),
+            NnrpClientEvent::ResultDropReason(_) => Err(RuntimeError::UnexpectedMessage(
+                "client expected RESULT_PUSH but received RESULT_DROP_REASON",
+            )),
             NnrpClientEvent::FlowUpdate(_) => Err(RuntimeError::UnexpectedMessage(
                 "client expected RESULT_PUSH but received FLOW_UPDATE",
+            )),
+            NnrpClientEvent::PartialResult { .. } => Err(RuntimeError::UnexpectedMessage(
+                "client expected RESULT_PUSH but received PARTIAL_RESULT",
+            )),
+            NnrpClientEvent::Backpressure(_) => Err(RuntimeError::UnexpectedMessage(
+                "client expected RESULT_PUSH but received BACKPRESSURE",
+            )),
+            NnrpClientEvent::CreditUpdate(_) => Err(RuntimeError::UnexpectedMessage(
+                "client expected RESULT_PUSH but received CREDIT_UPDATE",
             )),
         }
     }
@@ -293,16 +319,217 @@ impl NnrpClientSession {
                     frame_id: packet.header.frame_id,
                 })
             }
+            MessageType::ResultDropReason => {
+                self.require_session_packet(
+                    &packet,
+                    "client received drop reason for another session",
+                )?;
+                if packet.metadata.len() != RESULT_DROP_REASON_METADATA_LEN {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "client received malformed RESULT_DROP_REASON metadata length",
+                    ));
+                }
+                let metadata = ResultDropReasonMetadata::parse(&packet.metadata)?;
+                validate_result_drop_reason_semantics(&metadata)?;
+                Ok(NnrpClientEvent::ResultDropReason(metadata))
+            }
+            MessageType::PartialResult => {
+                self.require_session_packet(
+                    &packet,
+                    "client received partial result for another session",
+                )?;
+                if packet.metadata.len() != PARTIAL_RESULT_METADATA_LEN {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "client received malformed PARTIAL_RESULT metadata length",
+                    ));
+                }
+                let metadata = PartialResultMetadata::parse(&packet.metadata)?;
+                validate_partial_result_semantics(&metadata)?;
+                if metadata.body_bytes as usize != packet.body.len() {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "client received PARTIAL_RESULT body length mismatch",
+                    ));
+                }
+                Ok(NnrpClientEvent::PartialResult {
+                    metadata,
+                    body: packet.body,
+                })
+            }
             MessageType::FlowUpdate => {
                 let metadata = FlowUpdateMetadata::parse(&packet.metadata)?;
                 self.lifecycle
                     .validate_flow_update(&packet.header, &metadata)?;
                 Ok(NnrpClientEvent::FlowUpdate(metadata))
             }
+            MessageType::Backpressure | MessageType::CreditUpdate => {
+                self.require_optional_session_packet(
+                    &packet,
+                    "client received pressure update for another session",
+                )?;
+                if packet.metadata.len() != PRESSURE_METADATA_LEN {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "client received malformed pressure metadata length",
+                    ));
+                }
+                let metadata = PressureMetadata::parse(&packet.metadata)?;
+                validate_pressure_semantics(packet.header.message_type, &metadata)?;
+                match packet.header.message_type {
+                    MessageType::Backpressure => Ok(NnrpClientEvent::Backpressure(metadata)),
+                    MessageType::CreditUpdate => Ok(NnrpClientEvent::CreditUpdate(metadata)),
+                    _ => unreachable!("message type was already matched"),
+                }
+            }
             _ => Err(RuntimeError::UnexpectedMessage(
-                "client expected RESULT_PUSH, RESULT_DROP, or FLOW_UPDATE",
+                "client expected a runtime result or control event",
             )),
         }
+    }
+
+    pub async fn cancel_operation(
+        &mut self,
+        operation_id: u64,
+        reason_code: u16,
+    ) -> Result<(), RuntimeError> {
+        self.send_control_request(
+            MessageType::Cancel,
+            ControlRequestMetadata {
+                operation_id,
+                control_sequence: operation_id,
+                reason_code,
+                source_role: 1,
+                flags: 0,
+                diagnostic_bytes: 0,
+            },
+        )
+        .await
+    }
+
+    pub async fn abort_operation(
+        &mut self,
+        operation_id: u64,
+        reason_code: u16,
+    ) -> Result<(), RuntimeError> {
+        self.send_control_request(
+            MessageType::Abort,
+            ControlRequestMetadata {
+                operation_id,
+                control_sequence: operation_id,
+                reason_code,
+                source_role: 1,
+                flags: 0,
+                diagnostic_bytes: 0,
+            },
+        )
+        .await
+    }
+
+    pub async fn send_control_request(
+        &mut self,
+        message_type: MessageType,
+        metadata: ControlRequestMetadata,
+    ) -> Result<(), RuntimeError> {
+        validate_control_request_semantics(message_type, &metadata)?;
+        let mut header = CommonHeader::new(message_type, CONTROL_REQUEST_METADATA_LEN as u32, 0);
+        header.session_id = self.session_id;
+        self.transport
+            .write_packet(&RuntimePacket::new(
+                header,
+                metadata.to_bytes()?.to_vec(),
+                Vec::new(),
+            )?)
+            .await
+    }
+
+    pub async fn update_priority(
+        &mut self,
+        operation_id: u64,
+        priority_class: u16,
+        priority_delta: i16,
+    ) -> Result<(), RuntimeError> {
+        self.send_scheduling_update(
+            MessageType::PriorityUpdate,
+            SchedulingMetadata {
+                operation_id,
+                control_sequence: operation_id,
+                priority_class,
+                priority_delta,
+                deadline_unix_ms: 0,
+                flags: 0,
+            },
+        )
+        .await
+    }
+
+    pub async fn update_deadline(
+        &mut self,
+        operation_id: u64,
+        deadline_unix_ms: u64,
+    ) -> Result<(), RuntimeError> {
+        self.send_scheduling_update(
+            MessageType::Deadline,
+            SchedulingMetadata {
+                operation_id,
+                control_sequence: operation_id,
+                priority_class: 0,
+                priority_delta: 0,
+                deadline_unix_ms,
+                flags: 0,
+            },
+        )
+        .await
+    }
+
+    pub async fn expire_at(
+        &mut self,
+        operation_id: u64,
+        deadline_unix_ms: u64,
+    ) -> Result<(), RuntimeError> {
+        self.send_scheduling_update(
+            MessageType::ExpireAt,
+            SchedulingMetadata {
+                operation_id,
+                control_sequence: operation_id,
+                priority_class: 0,
+                priority_delta: 0,
+                deadline_unix_ms,
+                flags: 0,
+            },
+        )
+        .await
+    }
+
+    pub async fn send_scheduling_update(
+        &mut self,
+        message_type: MessageType,
+        metadata: SchedulingMetadata,
+    ) -> Result<(), RuntimeError> {
+        validate_scheduling_semantics(message_type, &metadata)?;
+        let mut header = CommonHeader::new(message_type, SCHEDULING_METADATA_LEN as u32, 0);
+        header.session_id = self.session_id;
+        self.transport
+            .write_packet(&RuntimePacket::new(
+                header,
+                metadata.to_bytes()?.to_vec(),
+                Vec::new(),
+            )?)
+            .await
+    }
+
+    pub async fn send_credit_update(
+        &mut self,
+        metadata: PressureMetadata,
+    ) -> Result<(), RuntimeError> {
+        validate_pressure_semantics(MessageType::CreditUpdate, &metadata)?;
+        let mut header =
+            CommonHeader::new(MessageType::CreditUpdate, PRESSURE_METADATA_LEN as u32, 0);
+        header.session_id = self.session_id;
+        self.transport
+            .write_packet(&RuntimePacket::new(
+                header,
+                metadata.to_bytes()?.to_vec(),
+                Vec::new(),
+            )?)
+            .await
     }
 
     pub async fn cancel_frame(&mut self, frame_id: u32) -> Result<(), RuntimeError> {
@@ -464,6 +691,17 @@ impl NnrpClientSession {
         message: &'static str,
     ) -> Result<(), RuntimeError> {
         if packet.header.session_id != self.session_id {
+            return Err(RuntimeError::UnexpectedMessage(message));
+        }
+        Ok(())
+    }
+
+    fn require_optional_session_packet(
+        &self,
+        packet: &RuntimePacket,
+        message: &'static str,
+    ) -> Result<(), RuntimeError> {
+        if packet.header.session_id != 0 && packet.header.session_id != self.session_id {
             return Err(RuntimeError::UnexpectedMessage(message));
         }
         Ok(())
