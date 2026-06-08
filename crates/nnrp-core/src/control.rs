@@ -1269,6 +1269,119 @@ impl RetryAfterMetadata {
     }
 }
 
+pub fn validate_control_request_semantics(
+    message_type: MessageType,
+    metadata: &ControlRequestMetadata,
+) -> Result<(), NnrpError> {
+    match message_type {
+        MessageType::Cancel | MessageType::Abort => {}
+        _ => {
+            return Err(NnrpError::InvalidProtocolCombination {
+                rule: "control request metadata requires CANCEL or ABORT",
+            });
+        }
+    }
+
+    validate_standard_role(metadata.source_role)?;
+    Ok(())
+}
+
+pub fn validate_scheduling_semantics(
+    message_type: MessageType,
+    metadata: &SchedulingMetadata,
+) -> Result<(), NnrpError> {
+    match message_type {
+        MessageType::PriorityUpdate => Ok(()),
+        MessageType::Deadline | MessageType::ExpireAt => {
+            if metadata.deadline_unix_ms == 0 {
+                return Err(NnrpError::InvalidProtocolCombination {
+                    rule: "DEADLINE and EXPIRE_AT require deadline_unix_ms",
+                });
+            }
+            Ok(())
+        }
+        _ => Err(NnrpError::InvalidProtocolCombination {
+            rule: "scheduling metadata requires PRIORITY_UPDATE, DEADLINE, or EXPIRE_AT",
+        }),
+    }
+}
+
+pub fn validate_progress_semantics(metadata: &ProgressMetadata) -> Result<(), NnrpError> {
+    if metadata.operation_id == 0 {
+        return Err(NnrpError::InvalidProtocolCombination {
+            rule: "PROGRESS requires a non-zero operation_id",
+        });
+    }
+    Ok(())
+}
+
+pub fn validate_partial_result_semantics(
+    metadata: &PartialResultMetadata,
+) -> Result<(), NnrpError> {
+    if metadata.operation_id == 0 {
+        return Err(NnrpError::InvalidProtocolCombination {
+            rule: "PARTIAL_RESULT requires a non-zero operation_id",
+        });
+    }
+    if metadata.flags & 0x0000_0002 != 0 && metadata.object_id == 0 {
+        return Err(NnrpError::InvalidProtocolCombination {
+            rule: "PARTIAL_RESULT object-ref flag requires object_id",
+        });
+    }
+    if metadata.body_bytes == 0 && metadata.object_id == 0 {
+        return Err(NnrpError::InvalidProtocolCombination {
+            rule: "PARTIAL_RESULT requires inline body bytes or object_id",
+        });
+    }
+    Ok(())
+}
+
+pub fn validate_pressure_semantics(
+    message_type: MessageType,
+    metadata: &PressureMetadata,
+) -> Result<(), NnrpError> {
+    match message_type {
+        MessageType::Backpressure => {
+            if metadata.pressure_level == 0 {
+                return Err(NnrpError::InvalidProtocolCombination {
+                    rule: "BACKPRESSURE requires non-zero pressure_level",
+                });
+            }
+            validate_pressure_level(metadata.pressure_level)
+        }
+        MessageType::CreditUpdate => Ok(()),
+        _ => Err(NnrpError::InvalidProtocolCombination {
+            rule: "pressure metadata requires BACKPRESSURE or CREDIT_UPDATE",
+        }),
+    }
+}
+
+pub fn validate_trace_context_semantics(metadata: &TraceContextMetadata) -> Result<(), NnrpError> {
+    if metadata.trace_id == 0 || metadata.span_id == 0 {
+        return Err(NnrpError::InvalidProtocolCombination {
+            rule: "TRACE_CONTEXT requires non-zero trace_id and span_id",
+        });
+    }
+    Ok(())
+}
+
+pub fn validate_result_drop_reason_semantics(
+    metadata: &ResultDropReasonMetadata,
+) -> Result<(), NnrpError> {
+    if metadata.operation_id == 0 {
+        return Err(NnrpError::InvalidProtocolCombination {
+            rule: "RESULT_DROP_REASON requires a non-zero operation_id",
+        });
+    }
+    if metadata.drop_reason_code == 0 {
+        return Err(NnrpError::InvalidProtocolCombination {
+            rule: "RESULT_DROP_REASON requires a non-zero drop_reason_code",
+        });
+    }
+    validate_standard_role(metadata.source_role)?;
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TransportProbeMetadata {
     pub probe_id: u32,
@@ -1588,6 +1701,26 @@ fn validate_percent_x100(value: u16) -> Result<(), NnrpError> {
     }
     Err(NnrpError::InvalidProtocolCombination {
         rule: "progress.percent_x100 must be 0..10000 or 0xffff",
+    })
+}
+
+fn validate_pressure_level(value: u16) -> Result<(), NnrpError> {
+    if value <= 3 {
+        return Ok(());
+    }
+    Err(NnrpError::UnknownEnumValue {
+        enum_name: "pressure_level",
+        value: value as u64,
+    })
+}
+
+fn validate_standard_role(value: u8) -> Result<(), NnrpError> {
+    if value <= 0x07 || value >= 0x80 {
+        return Ok(());
+    }
+    Err(NnrpError::UnknownEnumValue {
+        enum_name: "runtime_role",
+        value: value as u64,
     })
 }
 
@@ -2179,6 +2312,251 @@ mod tests {
             Err(NnrpError::ReservedBitsSet {
                 value: 0x04,
                 allowed: RETRY_AFTER_FLAGS_KNOWN_MASK as u64
+            })
+        );
+    }
+
+    #[test]
+    fn runtime_control_semantics_validate_message_specific_requirements() {
+        let control = ControlRequestMetadata {
+            operation_id: 0,
+            control_sequence: 1,
+            reason_code: 1,
+            source_role: 1,
+            flags: 0,
+            diagnostic_bytes: 0,
+        };
+        assert_eq!(
+            validate_control_request_semantics(MessageType::Cancel, &control),
+            Ok(())
+        );
+        assert_eq!(
+            validate_control_request_semantics(MessageType::Progress, &control),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "control request metadata requires CANCEL or ABORT"
+            })
+        );
+
+        let mut scheduling = SchedulingMetadata {
+            operation_id: 11,
+            control_sequence: 12,
+            priority_class: 1,
+            priority_delta: 0,
+            deadline_unix_ms: 0,
+            flags: 0,
+        };
+        assert_eq!(
+            validate_scheduling_semantics(MessageType::PriorityUpdate, &scheduling),
+            Ok(())
+        );
+        assert_eq!(
+            validate_scheduling_semantics(MessageType::Deadline, &scheduling),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "DEADLINE and EXPIRE_AT require deadline_unix_ms"
+            })
+        );
+        scheduling.deadline_unix_ms = 1;
+        assert_eq!(
+            validate_scheduling_semantics(MessageType::ExpireAt, &scheduling),
+            Ok(())
+        );
+        assert_eq!(
+            validate_scheduling_semantics(MessageType::Cancel, &scheduling),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "scheduling metadata requires PRIORITY_UPDATE, DEADLINE, or EXPIRE_AT"
+            })
+        );
+
+        let mut progress = ProgressMetadata {
+            operation_id: 0,
+            progress_sequence: 1,
+            stage_code: 1,
+            percent_x100: u16::MAX,
+            object_id: 0,
+            body_bytes: 0,
+        };
+        assert_eq!(
+            validate_progress_semantics(&progress),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "PROGRESS requires a non-zero operation_id"
+            })
+        );
+        progress.operation_id = 1;
+        assert_eq!(validate_progress_semantics(&progress), Ok(()));
+
+        let partial_without_operation = PartialResultMetadata {
+            operation_id: 0,
+            result_sequence: 1,
+            object_id: 0,
+            delta_sequence: 0,
+            body_bytes: 1,
+            flags: 0,
+        };
+        assert_eq!(
+            validate_partial_result_semantics(&partial_without_operation),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "PARTIAL_RESULT requires a non-zero operation_id"
+            })
+        );
+        let partial_without_payload = PartialResultMetadata {
+            operation_id: 1,
+            body_bytes: 0,
+            ..partial_without_operation
+        };
+        assert_eq!(
+            validate_partial_result_semantics(&partial_without_payload),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "PARTIAL_RESULT requires inline body bytes or object_id"
+            })
+        );
+        let partial_missing_ref = PartialResultMetadata {
+            flags: 0x0000_0002,
+            ..partial_without_payload
+        };
+        assert_eq!(
+            validate_partial_result_semantics(&partial_missing_ref),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "PARTIAL_RESULT object-ref flag requires object_id"
+            })
+        );
+        assert_eq!(
+            validate_partial_result_semantics(&PartialResultMetadata {
+                object_id: 7,
+                ..partial_missing_ref
+            }),
+            Ok(())
+        );
+        assert_eq!(
+            validate_partial_result_semantics(&PartialResultMetadata {
+                body_bytes: 1,
+                flags: 0,
+                ..partial_without_payload
+            }),
+            Ok(())
+        );
+
+        let pressure = PressureMetadata {
+            scope_id: 1,
+            credit_window: 0,
+            pressure_level: 0,
+            pressure_reason: 0,
+            retry_after_ms: 0,
+            flags: 0,
+        };
+        assert_eq!(
+            validate_pressure_semantics(MessageType::Backpressure, &pressure),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "BACKPRESSURE requires non-zero pressure_level"
+            })
+        );
+        assert_eq!(
+            validate_pressure_semantics(MessageType::CreditUpdate, &pressure),
+            Ok(())
+        );
+        assert_eq!(
+            validate_pressure_semantics(MessageType::Progress, &pressure),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "pressure metadata requires BACKPRESSURE or CREDIT_UPDATE"
+            })
+        );
+        assert_eq!(
+            validate_pressure_semantics(
+                MessageType::Backpressure,
+                &PressureMetadata {
+                    pressure_level: 3,
+                    ..pressure
+                }
+            ),
+            Ok(())
+        );
+        let invalid_pressure = PressureMetadata {
+            pressure_level: 4,
+            ..pressure
+        };
+        assert_eq!(
+            validate_pressure_semantics(MessageType::Backpressure, &invalid_pressure),
+            Err(NnrpError::UnknownEnumValue {
+                enum_name: "pressure_level",
+                value: 4
+            })
+        );
+
+        let trace = TraceContextMetadata {
+            trace_id: 0,
+            span_id: 1,
+            parent_span_id: 0,
+            stage_code: 0,
+            flags: 0,
+            body_bytes: 0,
+        };
+        assert_eq!(
+            validate_trace_context_semantics(&trace),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "TRACE_CONTEXT requires non-zero trace_id and span_id"
+            })
+        );
+        assert_eq!(
+            validate_trace_context_semantics(&TraceContextMetadata {
+                trace_id: 1,
+                ..trace
+            }),
+            Ok(())
+        );
+
+        let drop_reason = ResultDropReasonMetadata {
+            operation_id: 1,
+            result_sequence: 0,
+            drop_reason_code: 0,
+            source_role: 2,
+            flags: 0,
+            diagnostic_bytes: 0,
+        };
+        assert_eq!(
+            validate_result_drop_reason_semantics(&drop_reason),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "RESULT_DROP_REASON requires a non-zero drop_reason_code"
+            })
+        );
+        assert_eq!(
+            validate_result_drop_reason_semantics(&ResultDropReasonMetadata {
+                operation_id: 0,
+                drop_reason_code: 1,
+                ..drop_reason
+            }),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "RESULT_DROP_REASON requires a non-zero operation_id"
+            })
+        );
+        assert_eq!(
+            validate_result_drop_reason_semantics(&ResultDropReasonMetadata {
+                drop_reason_code: 1,
+                source_role: 0x08,
+                ..drop_reason
+            }),
+            Err(NnrpError::UnknownEnumValue {
+                enum_name: "runtime_role",
+                value: 0x08
+            })
+        );
+        assert_eq!(
+            validate_result_drop_reason_semantics(&ResultDropReasonMetadata {
+                drop_reason_code: 1,
+                source_role: 0x80,
+                ..drop_reason
+            }),
+            Ok(())
+        );
+        assert_eq!(
+            validate_control_request_semantics(
+                MessageType::Abort,
+                &ControlRequestMetadata {
+                    source_role: 0x08,
+                    ..control
+                }
+            ),
+            Err(NnrpError::UnknownEnumValue {
+                enum_name: "runtime_role",
+                value: 0x08
             })
         );
     }

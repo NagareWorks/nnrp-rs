@@ -27,23 +27,23 @@
 
 ## Cache Reference Model
 
-- [ ] Add cache reference frames.
+- [x] Add cache reference frames.
   - [x] `CACHE_REFERENCE`.
   - [x] `CACHE_MISS`.
-  - [ ] `CACHE_INVALIDATE`.
+  - [x] `CACHE_INVALIDATE` is inherited from the existing NNRP/1 message type, not re-assigned in preview4.
 - [x] Add cache identity fields.
   - [x] Cache key.
   - [x] Schema/profile anchor.
   - [x] Optional lease ID.
   - [x] Optional producer trace ID.
-- [ ] Add cache policy fields.
+- [x] Add cache policy fields.
   - [x] Reuse scope.
   - [x] Expiration hint.
-  - [ ] Invalidation reason.
+  - [x] Invalidation reason is carried by inherited `CACHE_INVALIDATE` metadata.
   - [x] Miss reason.
-- [ ] Keep cache references optional and workload-declared.
-  - [ ] Do not assume dynamic rendering frames are cache-friendly.
-  - [ ] Do not add cache lookup to hot paths unless the profile declares it.
+- [x] Keep cache references optional and workload-declared.
+  - [x] Do not assume dynamic rendering frames are cache-friendly.
+  - [x] Do not add cache lookup to hot paths unless the profile declares it.
 
 ## Encoding And Copy Boundaries
 

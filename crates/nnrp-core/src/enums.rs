@@ -382,6 +382,7 @@ pub enum BackpressureLevel {
     None = 0,
     Soft = 1,
     Hard = 2,
+    Paused = 3,
 }
 
 impl BackpressureLevel {
@@ -390,6 +391,7 @@ impl BackpressureLevel {
             0 => Ok(Self::None),
             1 => Ok(Self::Soft),
             2 => Ok(Self::Hard),
+            3 => Ok(Self::Paused),
             _ => Err(NnrpError::UnknownEnumValue {
                 enum_name: "backpressure_level",
                 value: value as u64,
@@ -559,7 +561,7 @@ mod tests {
     fn preview3_flow_enums_are_frozen() {
         assert_enum_u8("scope_kind", FlowScopeKind::try_from_u8, 0, 2);
         assert_enum_u8("update_reason", FlowUpdateReason::try_from_u8, 0, 4);
-        assert_enum_u8("backpressure_level", BackpressureLevel::try_from_u8, 0, 2);
+        assert_enum_u8("backpressure_level", BackpressureLevel::try_from_u8, 0, 3);
     }
 
     #[test]

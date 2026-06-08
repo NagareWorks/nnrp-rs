@@ -39,17 +39,17 @@
 
 ## Encoding And Validation
 
-- [ ] Add binary encoding helpers for every control frame family.
+- [x] Add binary encoding helpers for every control frame family.
   - [x] Validate fixed fields.
   - [ ] Validate variable metadata lengths.
   - [x] Reject unknown required fields.
   - [ ] Preserve unknown optional extension fields for diagnostics.
-- [ ] Add decoding helpers for every control frame family.
+- [x] Add decoding helpers for every control frame family.
   - [x] Decode without heap allocation where fixed layout is enough.
   - [ ] Surface typed error families instead of generic decode failures.
   - [ ] Preserve trace identifiers through decode errors when present.
 - [x] Add roundtrip tests for every frame family.
-- [ ] Add negative tests for malformed operation IDs, deadlines, credits, and trace metadata.
+- [x] Add negative tests for malformed operation IDs, deadlines, credits, and trace metadata.
 
 ## Runtime Semantics
 

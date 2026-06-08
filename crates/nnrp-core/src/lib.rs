@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod capability;
 pub mod codes;
 pub mod control;
 pub mod data;
@@ -21,6 +22,15 @@ pub use cache::{
     CACHE_ACK_METADATA_LEN, CACHE_INVALIDATE_METADATA_LEN, CACHE_PUT_FLAGS_KNOWN_MASK,
     CACHE_PUT_METADATA_LEN,
 };
+pub use capability::{
+    CACHE_REFERENCE, CONTROL_BUDGET_UPDATE, CONTROL_CANCEL_ABORT, CONTROL_CAPABILITY_COSTS,
+    CONTROL_CREDIT_BACKPRESSURE, CONTROL_DEADLINE_EXPIRE, CONTROL_DEGRADE_PROFILE,
+    CONTROL_PRIORITY_UPDATE, CONTROL_PROGRESS_PARTIAL, CONTROL_RECOVERABLE_ERROR,
+    CONTROL_RESULT_DROP_REASON, CONTROL_RETRY_AFTER, CONTROL_ROUTE_EXECUTION_HINT,
+    CONTROL_SUPERSEDE, CONTROL_TRACE_CONTEXT, OBJECT_COST, OBJECT_DELTA, OBJECT_LIFECYCLE,
+    OBJECT_OWNERSHIP, PREVIEW4_CONTROL_CAPABILITY_TOKENS, PREVIEW4_OBJECT_CAPABILITY_TOKENS,
+    PREVIEW4_TRANSPORT_NAMES, TRANSPORT_IPC, TRANSPORT_QUIC, TRANSPORT_TCP, TRANSPORT_WEBSOCKET,
+};
 pub use codes::{
     CACHE_ERROR_DEPENDENCY_INVALID, CACHE_ERROR_LEASE_EXPIRED, CACHE_ERROR_MISS, CACHE_ERROR_NONE,
     CACHE_ERROR_SCHEMA_MISMATCH, CACHE_ERROR_VERSION_MISMATCH, SCHEMA_ERROR_DEPENDENCY_MISSING,
@@ -31,19 +41,22 @@ pub use codes::{
     SESSION_ERROR_RESUME_REJECTED, SESSION_ERROR_SCHEMA_UNSUPPORTED,
 };
 pub use control::{
-    validate_close_header, validate_empty_control_header, BudgetMetadata, CapabilityMetadata,
-    ClientHelloMetadata, ControlRequestMetadata, ErrorMetadata, ErrorScope, PartialResultMetadata,
-    PressureMetadata, ProgressMetadata, RecoverableErrorMetadata, ResultDropReasonMetadata,
-    ResultHintBudgetPolicy, ResultHintCongestionState, ResultHintMetadata, ResultHintReason,
-    RetryAfterMetadata, RouteHintMetadata, SchedulingMetadata, ServerHelloAckMetadata,
-    SessionMigrateAckMetadata, SessionMigrateMetadata, SessionPatchAckMetadata,
-    SessionPatchAckStatus, SessionPatchMetadata, SessionPatchRejectReason, SupersedeMetadata,
-    TraceContextMetadata, TransportId, TransportProbeAckMetadata, TransportProbeMetadata,
-    BUDGET_FLAGS_KNOWN_MASK, BUDGET_METADATA_LEN, CAPABILITY_FLAGS_KNOWN_MASK,
-    CAPABILITY_METADATA_LEN, CLIENT_HELLO_METADATA_LEN, CONTROL_REQUEST_FLAGS_KNOWN_MASK,
-    CONTROL_REQUEST_METADATA_LEN, ERROR_METADATA_LEN, PARTIAL_RESULT_FLAGS_KNOWN_MASK,
-    PARTIAL_RESULT_METADATA_LEN, PRESSURE_FLAGS_KNOWN_MASK, PRESSURE_METADATA_LEN,
-    PROGRESS_METADATA_LEN, RECOVERABLE_ERROR_FLAGS_KNOWN_MASK, RECOVERABLE_ERROR_METADATA_LEN,
+    validate_close_header, validate_control_request_semantics, validate_empty_control_header,
+    validate_partial_result_semantics, validate_pressure_semantics, validate_progress_semantics,
+    validate_result_drop_reason_semantics, validate_scheduling_semantics,
+    validate_trace_context_semantics, BudgetMetadata, CapabilityMetadata, ClientHelloMetadata,
+    ControlRequestMetadata, ErrorMetadata, ErrorScope, PartialResultMetadata, PressureMetadata,
+    ProgressMetadata, RecoverableErrorMetadata, ResultDropReasonMetadata, ResultHintBudgetPolicy,
+    ResultHintCongestionState, ResultHintMetadata, ResultHintReason, RetryAfterMetadata,
+    RouteHintMetadata, SchedulingMetadata, ServerHelloAckMetadata, SessionMigrateAckMetadata,
+    SessionMigrateMetadata, SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata,
+    SessionPatchRejectReason, SupersedeMetadata, TraceContextMetadata, TransportId,
+    TransportProbeAckMetadata, TransportProbeMetadata, BUDGET_FLAGS_KNOWN_MASK,
+    BUDGET_METADATA_LEN, CAPABILITY_FLAGS_KNOWN_MASK, CAPABILITY_METADATA_LEN,
+    CLIENT_HELLO_METADATA_LEN, CONTROL_REQUEST_FLAGS_KNOWN_MASK, CONTROL_REQUEST_METADATA_LEN,
+    ERROR_METADATA_LEN, PARTIAL_RESULT_FLAGS_KNOWN_MASK, PARTIAL_RESULT_METADATA_LEN,
+    PRESSURE_FLAGS_KNOWN_MASK, PRESSURE_METADATA_LEN, PROGRESS_METADATA_LEN,
+    RECOVERABLE_ERROR_FLAGS_KNOWN_MASK, RECOVERABLE_ERROR_METADATA_LEN,
     RESULT_DROP_FLAGS_KNOWN_MASK, RESULT_DROP_REASON_METADATA_LEN, RESULT_HINT_METADATA_LEN,
     RETRY_AFTER_FLAGS_KNOWN_MASK, RETRY_AFTER_METADATA_LEN, ROUTE_HINT_FLAGS_KNOWN_MASK,
     ROUTE_HINT_METADATA_LEN, SCHEDULING_FLAGS_KNOWN_MASK, SCHEDULING_METADATA_LEN,
