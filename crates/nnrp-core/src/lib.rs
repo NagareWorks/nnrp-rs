@@ -7,6 +7,7 @@ pub mod error;
 pub mod flow;
 pub mod header;
 pub mod lifecycle;
+pub mod object;
 pub mod operation;
 pub mod recovery;
 pub mod schema;
@@ -75,6 +76,15 @@ pub use flow::{
 pub use header::{CommonHeader, ALPN, COMMON_HEADER_LEN, CURRENT_VERSION_MAJOR};
 pub use lifecycle::{
     ConnectionLifecycle, ConnectionLifecycleState, SessionLifecycle, SessionLifecycleState,
+};
+pub use object::{
+    CacheMissMetadata, CacheMissReason, CacheReferenceMetadata, CacheReuseScope,
+    MemoryLocationHint, ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata,
+    ObjectReleaseMetadata, ObjectReleaseReason, OwnershipHint, RuntimeObjectKind, RuntimeRole,
+    CACHE_MISS_METADATA_LEN, CACHE_REFERENCE_FLAGS_KNOWN_MASK, CACHE_REFERENCE_METADATA_LEN,
+    OBJECT_DELTA_FLAGS_KNOWN_MASK, OBJECT_DELTA_METADATA_LEN, OBJECT_DESCRIPTOR_METADATA_LEN,
+    OBJECT_REFERENCE_FLAGS_KNOWN_MASK, OBJECT_REFERENCE_METADATA_LEN,
+    OBJECT_RELEASE_FLAGS_KNOWN_MASK, OBJECT_RELEASE_METADATA_LEN,
 };
 pub use operation::{
     OperationCancelRequest, OperationDescriptor, OperationRecord, OperationRegistry,

@@ -2,45 +2,45 @@
 
 ## Runtime Object Model
 
-- [ ] Add object identity primitives.
-  - [ ] Object ID.
-  - [ ] Object kind.
-  - [ ] Producer role.
-  - [ ] Consumer role.
-  - [ ] Session ownership.
-- [ ] Add object lifecycle frames.
-  - [ ] `OBJECT_DECLARE`.
-  - [ ] `OBJECT_REF`.
-  - [ ] `OBJECT_RELEASE`.
-  - [ ] Release reason.
-- [ ] Add object delta frames.
-  - [ ] `OBJECT_PATCH`.
-  - [ ] `OBJECT_DELTA`.
-  - [ ] Region or segment descriptor.
-  - [ ] Delta sequence number.
-- [ ] Add object metadata.
-  - [ ] Byte size.
-  - [ ] Compute cost.
-  - [ ] Memory location hint.
-  - [ ] Lifetime hint.
-  - [ ] Ownership hint.
+- [x] Add object identity primitives.
+  - [x] Object ID.
+  - [x] Object kind.
+  - [x] Producer role.
+  - [x] Consumer role.
+  - [x] Session ownership.
+- [x] Add object lifecycle frames.
+  - [x] `OBJECT_DECLARE`.
+  - [x] `OBJECT_REF`.
+  - [x] `OBJECT_RELEASE`.
+  - [x] Release reason.
+- [x] Add object delta frames.
+  - [x] `OBJECT_PATCH`.
+  - [x] `OBJECT_DELTA`.
+  - [x] Region or segment descriptor.
+  - [x] Delta sequence number.
+- [x] Add object metadata.
+  - [x] Byte size.
+  - [x] Compute cost.
+  - [x] Memory location hint.
+  - [x] Lifetime hint.
+  - [x] Ownership hint.
 
 ## Cache Reference Model
 
 - [ ] Add cache reference frames.
-  - [ ] `CACHE_REFERENCE`.
-  - [ ] `CACHE_MISS`.
+  - [x] `CACHE_REFERENCE`.
+  - [x] `CACHE_MISS`.
   - [ ] `CACHE_INVALIDATE`.
-- [ ] Add cache identity fields.
-  - [ ] Cache key.
-  - [ ] Schema/profile anchor.
-  - [ ] Optional lease ID.
-  - [ ] Optional producer trace ID.
+- [x] Add cache identity fields.
+  - [x] Cache key.
+  - [x] Schema/profile anchor.
+  - [x] Optional lease ID.
+  - [x] Optional producer trace ID.
 - [ ] Add cache policy fields.
-  - [ ] Reuse scope.
-  - [ ] Expiration hint.
+  - [x] Reuse scope.
+  - [x] Expiration hint.
   - [ ] Invalidation reason.
-  - [ ] Miss reason.
+  - [x] Miss reason.
 - [ ] Keep cache references optional and workload-declared.
   - [ ] Do not assume dynamic rendering frames are cache-friendly.
   - [ ] Do not add cache lookup to hot paths unless the profile declares it.
@@ -50,7 +50,7 @@
 - [ ] Encode object references without copying object payloads.
 - [ ] Encode object deltas with bounded metadata.
 - [ ] Decode object references into borrowed or handle-backed views.
-- [ ] Keep copied fallback paths explicit for downstream SDKs.
+- [ ] Keep copied snapshot boundaries explicit for downstream SDKs.
 - [ ] Add tests for object release after result delivery.
 - [ ] Add tests for release after cancellation.
 - [ ] Add tests for cache miss and invalidation diagnostics.
