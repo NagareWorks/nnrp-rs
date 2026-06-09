@@ -247,7 +247,7 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
                 .operation(abort_submit.frame_id as u64)
                 .expect("operation should be registered")
                 .state,
-            OperationState::Cancelled
+            OperationState::Failed
         );
         session.send_backpressure(soft_backpressure()).await?;
 

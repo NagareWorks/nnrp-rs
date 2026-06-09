@@ -823,11 +823,19 @@ impl NnrpServerSession {
 
         let metadata = ControlRequestMetadata::parse(&packet.metadata)?;
         validate_control_request_semantics(packet.header.message_type, &metadata)?;
-        self.operations.cancel(OperationCancelRequest {
-            session_id: self.session_id,
-            operation_id: metadata.operation_id,
-            cancel_scope: nnrp_core::CancelScope::Operation,
-        })?;
+        match packet.header.message_type {
+            MessageType::Cancel => {
+                self.operations.cancel(OperationCancelRequest {
+                    session_id: self.session_id,
+                    operation_id: metadata.operation_id,
+                    cancel_scope: nnrp_core::CancelScope::Operation,
+                })?;
+            }
+            MessageType::Abort => {
+                self.operations.abort(metadata.operation_id)?;
+            }
+            _ => unreachable!("runtime control message type was validated earlier"),
+        }
         Ok(NnrpRuntimeControl {
             message_type: packet.header.message_type,
             metadata,

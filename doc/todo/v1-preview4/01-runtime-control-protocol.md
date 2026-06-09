@@ -53,9 +53,9 @@
 
 ## Runtime Semantics
 
-- [ ] Route cancellation into operation lifecycle state.
+- [x] Route cancellation into operation lifecycle state.
   - [x] Cooperative cancellation.
-  - [ ] Hard abort.
+  - [x] Hard abort.
   - [x] Late result suppression.
 - [ ] Route priority and deadline changes into scheduler metadata.
   - [x] Update priority without reopening the session.

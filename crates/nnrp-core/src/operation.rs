@@ -141,6 +141,22 @@ impl OperationRegistry {
         Ok(())
     }
 
+    pub fn abort(&mut self, operation_id: u64) -> Result<(), NnrpError> {
+        let record = self
+            .operations
+            .get_mut(&operation_id)
+            .ok_or(NnrpError::UnknownOperation(operation_id))?;
+        if !record.state.can_transition_to(OperationState::Failed) {
+            return Err(NnrpError::InvalidOperationTransition {
+                from: record.state,
+                to: OperationState::Failed,
+            });
+        }
+
+        record.state = OperationState::Failed;
+        Ok(())
+    }
+
     pub fn expire_if_stale(
         &mut self,
         operation_id: u64,
@@ -455,6 +471,27 @@ mod tests {
             })
         );
         assert_eq!(registry.complete(99), Err(NnrpError::UnknownOperation(99)));
+    }
+
+    #[test]
+    fn aborts_operations_into_failed_terminal_state() {
+        let mut registry = OperationRegistry::new();
+        registry.register(OperationDescriptor::new(42, 1)).unwrap();
+        registry.register(OperationDescriptor::new(42, 2)).unwrap();
+        registry.transition(2, OperationState::Running).unwrap();
+
+        assert_eq!(registry.abort(1), Ok(()));
+        assert_eq!(registry.operation(1).unwrap().state, OperationState::Failed);
+        assert_eq!(registry.abort(2), Ok(()));
+        assert_eq!(registry.operation(2).unwrap().state, OperationState::Failed);
+        assert_eq!(
+            registry.abort(1),
+            Err(NnrpError::InvalidOperationTransition {
+                from: OperationState::Failed,
+                to: OperationState::Failed,
+            })
+        );
+        assert_eq!(registry.abort(99), Err(NnrpError::UnknownOperation(99)));
     }
 
     #[test]
