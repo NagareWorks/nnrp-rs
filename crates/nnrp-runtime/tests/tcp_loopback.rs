@@ -1,18 +1,18 @@
 use nnrp_core::{
-    BackpressureLevel, CacheMissMetadata, CacheMissReason, CacheObjectId, CacheObjectKind,
-    CacheReferenceMetadata, CacheReuseScope, CommonHeader, FlowScopeKind, FlowUpdateMetadata,
-    FlowUpdateReason, FrameSubmitMetadata, InFlightPolicy, InputProfile, MemoryLocationHint,
-    MessageType, ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata,
-    ObjectReleaseMetadata, ObjectReleaseReason, OperationState, OwnershipHint,
-    PartialResultMetadata, PayloadKindBitmap, PressureMetadata, ResultClass,
-    ResultDropReasonMetadata, ResultPushMetadata, RuntimeObjectKind, RuntimeRole, SchemaRegistry,
-    SessionCloseMetadata, SessionCloseReason, SessionMigrateAckMetadata, SessionOpenAckMetadata,
-    SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata,
-    SessionPatchRejectReason, SessionPriorityClass, SessionStatus, SubmitMode, TileIndexMode,
-    TransportId, FLOW_UPDATE_FLAG_CREDIT_VALID, RESULT_PUSH_METADATA_LEN,
-    SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE, SESSION_OPEN_ACK_METADATA_LEN,
-    SESSION_OPEN_METADATA_LEN, STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID,
-    TOKEN_DELTA_SCHEMA_VERSION,
+    BackpressureLevel, CacheInvalidateMetadata, CacheInvalidateScope, CacheMissMetadata,
+    CacheMissReason, CacheObjectId, CacheObjectKind, CacheReferenceMetadata, CacheReuseScope,
+    CommonHeader, FlowScopeKind, FlowUpdateMetadata, FlowUpdateReason, FrameSubmitMetadata,
+    InFlightPolicy, InputProfile, MemoryLocationHint, MessageType, ObjectDeltaMetadata,
+    ObjectDescriptorMetadata, ObjectReferenceMetadata, ObjectReleaseMetadata, ObjectReleaseReason,
+    OperationState, OwnershipHint, PartialResultMetadata, PayloadKindBitmap, PressureMetadata,
+    ResultClass, ResultDropReasonMetadata, ResultPushMetadata, RuntimeObjectKind, RuntimeRole,
+    SchemaRegistry, SessionCloseMetadata, SessionCloseReason, SessionMigrateAckMetadata,
+    SessionOpenAckMetadata, SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchAckStatus,
+    SessionPatchMetadata, SessionPatchRejectReason, SessionPriorityClass, SessionStatus,
+    SubmitMode, TileIndexMode, TransportId, FLOW_UPDATE_FLAG_CREDIT_VALID,
+    RESULT_PUSH_METADATA_LEN, SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE,
+    SESSION_OPEN_ACK_METADATA_LEN, SESSION_OPEN_METADATA_LEN, STANDARD_PROFILE_TOKEN,
+    TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
 };
 use nnrp_runtime::{
     BoxedFramedTransport, FramedListener, FramedTransport, NnrpClient, NnrpClientConfig,
@@ -299,6 +299,7 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
         session
             .send_cache_reference(cache_reference(), b"hint".to_vec())
             .await?;
+        session.send_cache_invalidate(cache_invalidate()).await?;
         session
             .send_result(submit.frame_id, token_result(), b"done".to_vec())
             .await?;
@@ -351,6 +352,16 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
             assert_eq!(body, b"hint".to_vec());
         }
         event => panic!("expected cache reference, got {event:?}"),
+    }
+    match session.await_event().await? {
+        NnrpClientEvent::CacheInvalidate(metadata) => {
+            assert_eq!(metadata.invalidate_scope, CacheInvalidateScope::ObjectKey);
+            assert_eq!(metadata.cache_namespace, 42);
+            assert_eq!(metadata.cache_key_hi, 0x1234);
+            assert_eq!(metadata.cache_key_lo, 0x5678);
+            assert_eq!(metadata.reason_code, 77);
+        }
+        event => panic!("expected cache invalidate, got {event:?}"),
     }
     match session.await_event().await? {
         NnrpClientEvent::Result(result) => {
@@ -837,6 +848,12 @@ async fn client_result_helper_rejects_preview4_control_non_result_events(
             credit_update().to_bytes()?.to_vec(),
             Vec::new(),
         )?,
+        object_event_packet(
+            MessageType::CacheInvalidate,
+            1,
+            cache_invalidate().to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
     ] {
         let mut session = scripted_client_session(packet).await?;
         assert!(matches!(
@@ -982,6 +999,19 @@ async fn client_preview4_event_reader_rejects_malformed_object_cache_packets(
             1,
             cache_miss().to_bytes()?.to_vec(),
             Vec::new(),
+        )?,
+        object_event_packet(
+            MessageType::CacheInvalidate,
+            2,
+            cache_invalidate().to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        object_event_packet(MessageType::CacheInvalidate, 1, vec![0], Vec::new())?,
+        object_event_packet(
+            MessageType::CacheInvalidate,
+            1,
+            cache_invalidate().to_bytes()?.to_vec(),
+            b"body".to_vec(),
         )?,
     ] {
         let mut session = scripted_client_session(packet).await?;
@@ -2139,6 +2169,16 @@ fn cache_miss() -> CacheMissMetadata {
         miss_reason: CacheMissReason::SchemaMismatch,
         profile_id: STANDARD_PROFILE_TOKEN,
         diagnostic_bytes: 6,
+    }
+}
+
+fn cache_invalidate() -> CacheInvalidateMetadata {
+    CacheInvalidateMetadata {
+        invalidate_scope: CacheInvalidateScope::ObjectKey,
+        cache_namespace: 42,
+        cache_key_hi: 0x1234,
+        cache_key_lo: 0x5678,
+        reason_code: 77,
     }
 }
 

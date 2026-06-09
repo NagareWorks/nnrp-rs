@@ -3,23 +3,23 @@ use std::fmt;
 use nnrp_core::{
     validate_control_request_semantics, validate_partial_result_semantics,
     validate_pressure_semantics, validate_result_drop_header,
-    validate_result_drop_reason_semantics, validate_scheduling_semantics, CacheMissMetadata,
-    CacheObjectKind, CacheReferenceMetadata, CommonHeader, ConnectionLifecycle,
+    validate_result_drop_reason_semantics, validate_scheduling_semantics, CacheInvalidateMetadata,
+    CacheMissMetadata, CacheObjectKind, CacheReferenceMetadata, CommonHeader, ConnectionLifecycle,
     ControlRequestMetadata, FlowUpdateMetadata, FrameSubmitMetadata, InFlightPolicy, MessageType,
     ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata, ObjectReleaseMetadata,
     PartialResultMetadata, PressureMetadata, ResultDropReasonMetadata, ResultPushMetadata,
     SchedulingMetadata, SessionCloseAckMetadata, SessionCloseMetadata, SessionCloseReason,
     SessionMigrateAckMetadata, SessionMigrateMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
     SessionPatchAckMetadata, SessionPatchMetadata, SessionPriorityClass, SessionStatus,
-    TransportId, CACHE_MISS_METADATA_LEN, CACHE_REFERENCE_METADATA_LEN,
-    CONTROL_REQUEST_METADATA_LEN, FRAME_SUBMIT_METADATA_LEN, OBJECT_DELTA_METADATA_LEN,
-    OBJECT_DESCRIPTOR_METADATA_LEN, OBJECT_REFERENCE_METADATA_LEN, OBJECT_RELEASE_METADATA_LEN,
-    PARTIAL_RESULT_METADATA_LEN, PRESSURE_METADATA_LEN, RESULT_DROP_REASON_METADATA_LEN,
-    RESULT_PUSH_METADATA_LEN, SCHEDULING_METADATA_LEN, SESSION_CLOSE_ACK_METADATA_LEN,
-    SESSION_CLOSE_METADATA_LEN, SESSION_ERROR_NONE, SESSION_MIGRATE_ACK_METADATA_LEN,
-    SESSION_MIGRATE_METADATA_LEN, SESSION_OPEN_METADATA_LEN, SESSION_PATCH_ACK_METADATA_LEN,
-    SESSION_PATCH_METADATA_LEN, STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID,
-    TOKEN_DELTA_SCHEMA_VERSION,
+    TransportId, CACHE_INVALIDATE_METADATA_LEN, CACHE_MISS_METADATA_LEN,
+    CACHE_REFERENCE_METADATA_LEN, CONTROL_REQUEST_METADATA_LEN, FRAME_SUBMIT_METADATA_LEN,
+    OBJECT_DELTA_METADATA_LEN, OBJECT_DESCRIPTOR_METADATA_LEN, OBJECT_REFERENCE_METADATA_LEN,
+    OBJECT_RELEASE_METADATA_LEN, PARTIAL_RESULT_METADATA_LEN, PRESSURE_METADATA_LEN,
+    RESULT_DROP_REASON_METADATA_LEN, RESULT_PUSH_METADATA_LEN, SCHEDULING_METADATA_LEN,
+    SESSION_CLOSE_ACK_METADATA_LEN, SESSION_CLOSE_METADATA_LEN, SESSION_ERROR_NONE,
+    SESSION_MIGRATE_ACK_METADATA_LEN, SESSION_MIGRATE_METADATA_LEN, SESSION_OPEN_METADATA_LEN,
+    SESSION_PATCH_ACK_METADATA_LEN, SESSION_PATCH_METADATA_LEN, STANDARD_PROFILE_TOKEN,
+    TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
 };
 
 use crate::{
@@ -138,6 +138,7 @@ pub enum NnrpClientEvent {
         metadata: CacheMissMetadata,
         body: Vec<u8>,
     },
+    CacheInvalidate(CacheInvalidateMetadata),
 }
 
 impl NnrpClient {
@@ -326,7 +327,8 @@ impl NnrpClientSession {
             | NnrpClientEvent::ObjectRelease { .. }
             | NnrpClientEvent::ObjectDelta { .. }
             | NnrpClientEvent::CacheReference { .. }
-            | NnrpClientEvent::CacheMiss { .. } => Err(RuntimeError::UnexpectedMessage(
+            | NnrpClientEvent::CacheMiss { .. }
+            | NnrpClientEvent::CacheInvalidate(_) => Err(RuntimeError::UnexpectedMessage(
                 "client expected RESULT_PUSH but received object/cache event",
             )),
         }
@@ -542,6 +544,21 @@ impl NnrpClientSession {
                     metadata,
                     body: packet.body,
                 })
+            }
+            MessageType::CacheInvalidate => {
+                self.require_session_packet(
+                    &packet,
+                    "client received cache invalidate for another session",
+                )?;
+                if packet.metadata.len() != CACHE_INVALIDATE_METADATA_LEN || !packet.body.is_empty()
+                {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "client received malformed CACHE_INVALIDATE lengths",
+                    ));
+                }
+                Ok(NnrpClientEvent::CacheInvalidate(
+                    CacheInvalidateMetadata::parse(&packet.metadata)?,
+                ))
             }
             _ => Err(RuntimeError::UnexpectedMessage(
                 "client expected a runtime result or control event",

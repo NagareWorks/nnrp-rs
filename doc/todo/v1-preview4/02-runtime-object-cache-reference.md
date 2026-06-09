@@ -56,9 +56,9 @@
 - [x] Surface declared-length mismatches as typed decode errors.
 - [x] Add tests for object release after result delivery.
 - [x] Add tests for release after cancellation.
-- [ ] Add tests for cache miss and invalidation diagnostics.
+- [x] Add tests for cache miss and invalidation diagnostics.
   - [x] Cache miss diagnostic loopback coverage.
-  - [ ] Cache invalidation diagnostic loopback coverage.
+  - [x] Cache invalidation diagnostic loopback coverage.
 
 ## FFI Readiness
 
