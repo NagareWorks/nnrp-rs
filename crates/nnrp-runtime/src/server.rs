@@ -834,6 +834,11 @@ impl NnrpServerSession {
 
         let metadata = SchedulingMetadata::parse(&packet.metadata)?;
         validate_scheduling_semantics(packet.header.message_type, &metadata)?;
+        self.operations.apply_scheduling_update(
+            self.session_id,
+            packet.header.message_type,
+            metadata,
+        )?;
         Ok(NnrpSchedulingUpdate {
             message_type: packet.header.message_type,
             metadata,

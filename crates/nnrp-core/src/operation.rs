@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{CancelScope, NnrpError, OperationState};
+use crate::{CancelScope, MessageType, NnrpError, OperationState, SchedulingMetadata};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OperationDescriptor {
@@ -25,6 +25,7 @@ impl OperationDescriptor {
 pub struct OperationRecord {
     pub descriptor: OperationDescriptor,
     pub state: OperationState,
+    pub schedule: OperationSchedule,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +33,15 @@ pub struct OperationCancelRequest {
     pub session_id: u32,
     pub operation_id: u64,
     pub cancel_scope: CancelScope,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct OperationSchedule {
+    pub priority_class: u16,
+    pub priority_delta: i16,
+    pub deadline_unix_ms: u64,
+    pub expire_at_unix_ms: u64,
+    pub update_sequence: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -75,6 +85,7 @@ impl OperationRegistry {
             OperationRecord {
                 descriptor,
                 state: OperationState::Accepted,
+                schedule: OperationSchedule::default(),
             },
         );
         Ok(())
@@ -98,6 +109,50 @@ impl OperationRegistry {
 
         record.state = next_state;
         Ok(())
+    }
+
+    pub fn apply_scheduling_update(
+        &mut self,
+        session_id: u32,
+        message_type: MessageType,
+        metadata: SchedulingMetadata,
+    ) -> Result<OperationSchedule, NnrpError> {
+        let record = self
+            .operations
+            .get_mut(&metadata.operation_id)
+            .ok_or(NnrpError::UnknownOperation(metadata.operation_id))?;
+        if record.descriptor.session_id != session_id {
+            return Err(NnrpError::InvalidOperationRelationship {
+                rule: "scheduling update session_id must match the target operation",
+            });
+        }
+        if record.state.is_terminal() {
+            return Err(NnrpError::InvalidOperationTransition {
+                from: record.state,
+                to: record.state,
+            });
+        }
+
+        record.schedule.update_sequence = metadata.control_sequence;
+        match message_type {
+            MessageType::PriorityUpdate => {
+                record.schedule.priority_class = metadata.priority_class;
+                record.schedule.priority_delta = metadata.priority_delta;
+            }
+            MessageType::Deadline => {
+                record.schedule.deadline_unix_ms = metadata.deadline_unix_ms;
+            }
+            MessageType::ExpireAt => {
+                record.schedule.expire_at_unix_ms = metadata.deadline_unix_ms;
+            }
+            _ => {
+                return Err(NnrpError::InvalidProtocolCombination {
+                    rule: "scheduling update requires PRIORITY_UPDATE, DEADLINE, or EXPIRE_AT",
+                });
+            }
+        }
+
+        Ok(record.schedule)
     }
 
     pub fn cancel(&mut self, request: OperationCancelRequest) -> Result<Vec<u64>, NnrpError> {
@@ -203,7 +258,7 @@ fn validate_descriptor_shape(descriptor: &OperationDescriptor) -> Result<(), Nnr
 
 #[cfg(test)]
 mod tests {
-    use crate::{CancelScope, NnrpError, OperationState};
+    use crate::{CancelScope, MessageType, NnrpError, OperationState, SchedulingMetadata};
 
     use super::{OperationCancelRequest, OperationDescriptor, OperationRegistry};
 
@@ -389,6 +444,87 @@ mod tests {
         );
     }
 
+    #[test]
+    fn applies_scheduling_updates_to_operation_records() {
+        let mut registry = OperationRegistry::new();
+        registry.register(OperationDescriptor::new(42, 1)).unwrap();
+
+        assert_eq!(
+            registry.apply_scheduling_update(
+                42,
+                MessageType::PriorityUpdate,
+                scheduling(1, 10, 3, -1, 0),
+            ),
+            Ok(super::OperationSchedule {
+                priority_class: 3,
+                priority_delta: -1,
+                update_sequence: 10,
+                ..super::OperationSchedule::default()
+            })
+        );
+
+        assert_eq!(
+            registry.apply_scheduling_update(
+                42,
+                MessageType::Deadline,
+                scheduling(1, 11, 0, 0, 50)
+            ),
+            Ok(super::OperationSchedule {
+                priority_class: 3,
+                priority_delta: -1,
+                deadline_unix_ms: 50,
+                update_sequence: 11,
+                ..super::OperationSchedule::default()
+            })
+        );
+
+        assert_eq!(
+            registry.apply_scheduling_update(
+                42,
+                MessageType::ExpireAt,
+                scheduling(1, 12, 0, 0, 60),
+            ),
+            Ok(super::OperationSchedule {
+                priority_class: 3,
+                priority_delta: -1,
+                deadline_unix_ms: 50,
+                expire_at_unix_ms: 60,
+                update_sequence: 12,
+            })
+        );
+        assert_eq!(
+            registry.operation(1).unwrap().schedule.expire_at_unix_ms,
+            60
+        );
+    }
+
+    #[test]
+    fn rejects_scheduling_updates_for_wrong_session_unknown_operation_and_terminal_records() {
+        let mut registry = OperationRegistry::new();
+        registry.register(OperationDescriptor::new(42, 1)).unwrap();
+
+        assert_eq!(
+            registry.apply_scheduling_update(7, MessageType::Deadline, scheduling(1, 1, 0, 0, 5)),
+            Err(NnrpError::InvalidOperationRelationship {
+                rule: "scheduling update session_id must match the target operation"
+            })
+        );
+        assert_eq!(
+            registry.apply_scheduling_update(42, MessageType::Deadline, scheduling(9, 1, 0, 0, 5)),
+            Err(NnrpError::UnknownOperation(9))
+        );
+
+        registry.transition(1, OperationState::Running).unwrap();
+        registry.transition(1, OperationState::Completed).unwrap();
+        assert_eq!(
+            registry.apply_scheduling_update(42, MessageType::Deadline, scheduling(1, 1, 0, 0, 5)),
+            Err(NnrpError::InvalidOperationTransition {
+                from: OperationState::Completed,
+                to: OperationState::Completed,
+            })
+        );
+    }
+
     fn grouped(
         operation_id: u64,
         parent_operation_id: Option<u64>,
@@ -399,6 +535,23 @@ mod tests {
             operation_id,
             parent_operation_id,
             operation_group_id: Some(operation_group_id),
+        }
+    }
+
+    fn scheduling(
+        operation_id: u64,
+        control_sequence: u64,
+        priority_class: u16,
+        priority_delta: i16,
+        deadline_unix_ms: u64,
+    ) -> SchedulingMetadata {
+        SchedulingMetadata {
+            operation_id,
+            control_sequence,
+            flags: 0,
+            priority_class,
+            priority_delta,
+            deadline_unix_ms,
         }
     }
 }

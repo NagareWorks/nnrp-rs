@@ -6321,7 +6321,7 @@ mod tests {
             assert_eq!(
                 nnrp_cache_query(
                     NnrpCacheLeaseRequest {
-                        now_ms: result.expires_at_ms,
+                        now_ms: result.expires_at_ms.saturating_add(1),
                         ttl_ms: 0,
                         ..request
                     },

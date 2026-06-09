@@ -167,10 +167,23 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
         let priority = session.receive_scheduling_update().await?;
         assert_eq!(priority.message_type, MessageType::PriorityUpdate);
         assert_eq!(priority.metadata.operation_id, submit.frame_id as u64);
+        let schedule = session
+            .operations()
+            .operation(submit.frame_id as u64)
+            .expect("operation should be registered")
+            .schedule;
+        assert_eq!(schedule.priority_class, 1);
+        assert_eq!(schedule.priority_delta, -2);
 
         let deadline = session.receive_scheduling_update().await?;
         assert_eq!(deadline.message_type, MessageType::Deadline);
         assert_eq!(deadline.metadata.deadline_unix_ms, 1_800_000_000_000);
+        let schedule = session
+            .operations()
+            .operation(submit.frame_id as u64)
+            .expect("operation should be registered")
+            .schedule;
+        assert_eq!(schedule.deadline_unix_ms, 1_800_000_000_000);
 
         let credit = session.receive_pressure_update().await?;
         assert_eq!(credit.message_type, MessageType::CreditUpdate);
@@ -203,6 +216,12 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
         assert_eq!(expire.message_type, MessageType::ExpireAt);
         assert_eq!(expire.metadata.operation_id, abort_submit.frame_id as u64);
         assert_eq!(expire.metadata.deadline_unix_ms, 1_800_000_000_500);
+        let schedule = session
+            .operations()
+            .operation(abort_submit.frame_id as u64)
+            .expect("operation should be registered")
+            .schedule;
+        assert_eq!(schedule.expire_at_unix_ms, 1_800_000_000_500);
 
         let abort = session.receive_runtime_control().await?;
         assert_eq!(abort.message_type, MessageType::Abort);
