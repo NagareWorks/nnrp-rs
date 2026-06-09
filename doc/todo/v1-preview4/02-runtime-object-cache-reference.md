@@ -48,9 +48,11 @@
 ## Encoding And Copy Boundaries
 
 - [ ] Encode object references without copying object payloads.
-- [ ] Encode object deltas with bounded metadata.
-- [ ] Decode object references into borrowed or handle-backed views.
+- [x] Encode object deltas with bounded metadata.
+- [x] Decode object references into borrowed or handle-backed views.
 - [x] Keep copied snapshot boundaries explicit for downstream SDKs.
+- [x] Validate declared metadata and diagnostic segment lengths before exposing borrowed views.
+- [x] Surface declared-length mismatches as typed decode errors.
 - [x] Add tests for object release after result delivery.
 - [x] Add tests for release after cancellation.
 - [ ] Add tests for cache miss and invalidation diagnostics.

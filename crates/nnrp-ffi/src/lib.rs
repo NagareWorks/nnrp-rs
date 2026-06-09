@@ -250,6 +250,7 @@ impl NnrpFfiStatus {
             | NnrpError::InvalidMagic
             | NnrpError::InvalidHeaderLength(_)
             | NnrpError::PacketLengthMismatch { .. }
+            | NnrpError::DeclaredLengthMismatch { .. }
             | NnrpError::MessageLengthOverflow => Self {
                 status_code: NnrpFfiStatusCode::ProtocolError as u32,
                 error_family: NnrpErrorFamily::Transport as u32,

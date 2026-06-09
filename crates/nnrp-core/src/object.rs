@@ -294,6 +294,28 @@ impl ObjectDescriptorMetadata {
         self.write(&mut bytes)?;
         Ok(bytes)
     }
+
+    pub fn parse_with_extension(source: &[u8]) -> Result<(Self, &[u8]), NnrpError> {
+        let metadata = Self::parse(source)?;
+        let extension = split_declared_tail(
+            source,
+            OBJECT_DESCRIPTOR_METADATA_LEN,
+            metadata.metadata_bytes as usize,
+            "object_descriptor.metadata_bytes",
+        )?;
+        Ok((metadata, extension))
+    }
+
+    pub fn to_vec_with_extension(&self, extension: &[u8]) -> Result<Vec<u8>, NnrpError> {
+        require_declared_len(
+            "object_descriptor.metadata_bytes",
+            self.metadata_bytes as usize,
+            extension.len(),
+        )?;
+        let mut bytes = self.to_bytes()?.to_vec();
+        bytes.extend_from_slice(extension);
+        Ok(bytes)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -339,6 +361,28 @@ impl ObjectReferenceMetadata {
     pub fn to_bytes(&self) -> Result<[u8; OBJECT_REFERENCE_METADATA_LEN], NnrpError> {
         let mut bytes = [0u8; OBJECT_REFERENCE_METADATA_LEN];
         self.write(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    pub fn parse_with_extension(source: &[u8]) -> Result<(Self, &[u8]), NnrpError> {
+        let metadata = Self::parse(source)?;
+        let extension = split_declared_tail(
+            source,
+            OBJECT_REFERENCE_METADATA_LEN,
+            metadata.metadata_bytes as usize,
+            "object_reference.metadata_bytes",
+        )?;
+        Ok((metadata, extension))
+    }
+
+    pub fn to_vec_with_extension(&self, extension: &[u8]) -> Result<Vec<u8>, NnrpError> {
+        require_declared_len(
+            "object_reference.metadata_bytes",
+            self.metadata_bytes as usize,
+            extension.len(),
+        )?;
+        let mut bytes = self.to_bytes()?.to_vec();
+        bytes.extend_from_slice(extension);
         Ok(bytes)
     }
 }
@@ -387,6 +431,28 @@ impl ObjectReleaseMetadata {
         self.write(&mut bytes)?;
         Ok(bytes)
     }
+
+    pub fn parse_with_diagnostics(source: &[u8]) -> Result<(Self, &[u8]), NnrpError> {
+        let metadata = Self::parse(source)?;
+        let diagnostics = split_declared_tail(
+            source,
+            OBJECT_RELEASE_METADATA_LEN,
+            metadata.diagnostic_bytes as usize,
+            "object_release.diagnostic_bytes",
+        )?;
+        Ok((metadata, diagnostics))
+    }
+
+    pub fn to_vec_with_diagnostics(&self, diagnostics: &[u8]) -> Result<Vec<u8>, NnrpError> {
+        require_declared_len(
+            "object_release.diagnostic_bytes",
+            self.diagnostic_bytes as usize,
+            diagnostics.len(),
+        )?;
+        let mut bytes = self.to_bytes()?.to_vec();
+        bytes.extend_from_slice(diagnostics);
+        Ok(bytes)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -432,6 +498,28 @@ impl ObjectDeltaMetadata {
     pub fn to_bytes(&self) -> Result<[u8; OBJECT_DELTA_METADATA_LEN], NnrpError> {
         let mut bytes = [0u8; OBJECT_DELTA_METADATA_LEN];
         self.write(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    pub fn parse_with_extension(source: &[u8]) -> Result<(Self, &[u8]), NnrpError> {
+        let metadata = Self::parse(source)?;
+        let extension = split_declared_tail(
+            source,
+            OBJECT_DELTA_METADATA_LEN,
+            metadata.metadata_bytes as usize,
+            "object_delta.metadata_bytes",
+        )?;
+        Ok((metadata, extension))
+    }
+
+    pub fn to_vec_with_extension(&self, extension: &[u8]) -> Result<Vec<u8>, NnrpError> {
+        require_declared_len(
+            "object_delta.metadata_bytes",
+            self.metadata_bytes as usize,
+            extension.len(),
+        )?;
+        let mut bytes = self.to_bytes()?.to_vec();
+        bytes.extend_from_slice(extension);
         Ok(bytes)
     }
 }
@@ -487,6 +575,28 @@ impl CacheReferenceMetadata {
         self.write(&mut bytes)?;
         Ok(bytes)
     }
+
+    pub fn parse_with_extension(source: &[u8]) -> Result<(Self, &[u8]), NnrpError> {
+        let metadata = Self::parse(source)?;
+        let extension = split_declared_tail(
+            source,
+            CACHE_REFERENCE_METADATA_LEN,
+            metadata.metadata_bytes as usize,
+            "cache_reference.metadata_bytes",
+        )?;
+        Ok((metadata, extension))
+    }
+
+    pub fn to_vec_with_extension(&self, extension: &[u8]) -> Result<Vec<u8>, NnrpError> {
+        require_declared_len(
+            "cache_reference.metadata_bytes",
+            self.metadata_bytes as usize,
+            extension.len(),
+        )?;
+        let mut bytes = self.to_bytes()?.to_vec();
+        bytes.extend_from_slice(extension);
+        Ok(bytes)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -527,6 +637,28 @@ impl CacheMissMetadata {
         self.write(&mut bytes)?;
         Ok(bytes)
     }
+
+    pub fn parse_with_diagnostics(source: &[u8]) -> Result<(Self, &[u8]), NnrpError> {
+        let metadata = Self::parse(source)?;
+        let diagnostics = split_declared_tail(
+            source,
+            CACHE_MISS_METADATA_LEN,
+            metadata.diagnostic_bytes as usize,
+            "cache_miss.diagnostic_bytes",
+        )?;
+        Ok((metadata, diagnostics))
+    }
+
+    pub fn to_vec_with_diagnostics(&self, diagnostics: &[u8]) -> Result<Vec<u8>, NnrpError> {
+        require_declared_len(
+            "cache_miss.diagnostic_bytes",
+            self.diagnostic_bytes as usize,
+            diagnostics.len(),
+        )?;
+        let mut bytes = self.to_bytes()?.to_vec();
+        bytes.extend_from_slice(diagnostics);
+        Ok(bytes)
+    }
 }
 
 fn require_len(source: &[u8], expected: usize) -> Result<(), NnrpError> {
@@ -547,6 +679,33 @@ fn require_destination_len(destination: &[u8], expected: usize) -> Result<(), Nn
         });
     }
     Ok(())
+}
+
+fn require_declared_len(
+    field: &'static str,
+    declared: usize,
+    actual: usize,
+) -> Result<(), NnrpError> {
+    if declared != actual {
+        return Err(NnrpError::DeclaredLengthMismatch {
+            field,
+            declared,
+            actual,
+        });
+    }
+    Ok(())
+}
+
+fn split_declared_tail<'a>(
+    source: &'a [u8],
+    fixed_len: usize,
+    declared_tail_len: usize,
+    field: &'static str,
+) -> Result<&'a [u8], NnrpError> {
+    require_len(source, fixed_len)?;
+    let actual_tail_len = source.len() - fixed_len;
+    require_declared_len(field, declared_tail_len, actual_tail_len)?;
+    Ok(&source[fixed_len..])
 }
 
 fn validate_mask_u8(value: u8, allowed: u8) -> Result<(), NnrpError> {
@@ -695,6 +854,102 @@ mod tests {
     }
 
     #[test]
+    fn object_and_cache_metadata_round_trips_declared_extension_segments() {
+        let descriptor = ObjectDescriptorMetadata {
+            object_id: 1,
+            object_kind: RuntimeObjectKind::Tensor,
+            producer_role: RuntimeRole::Runtime,
+            consumer_role: RuntimeRole::Client,
+            session_id: 2,
+            byte_size: 4096,
+            compute_cost_units: 7,
+            memory_location_hint: MemoryLocationHint::DeviceMemory,
+            ownership_hint: OwnershipHint::Borrowed,
+            lifetime_hint_ms: 500,
+            metadata_bytes: 3,
+        };
+        let descriptor_bytes = descriptor.to_vec_with_extension(&[1, 2, 3]).unwrap();
+        assert_eq!(
+            ObjectDescriptorMetadata::parse_with_extension(&descriptor_bytes).unwrap(),
+            (descriptor, &[1, 2, 3][..])
+        );
+
+        let reference = ObjectReferenceMetadata {
+            object_id: 1,
+            operation_id: 3,
+            object_version: 4,
+            offset: 8,
+            length: 16,
+            flags: OBJECT_REFERENCE_FLAGS_KNOWN_MASK,
+            metadata_bytes: 2,
+        };
+        let reference_bytes = reference.to_vec_with_extension(&[9, 8]).unwrap();
+        assert_eq!(
+            ObjectReferenceMetadata::parse_with_extension(&reference_bytes).unwrap(),
+            (reference, &[9, 8][..])
+        );
+
+        let delta = ObjectDeltaMetadata {
+            object_id: 1,
+            delta_sequence: 2,
+            region_offset: 64,
+            region_bytes: 32,
+            delta_bytes: 16,
+            flags: OBJECT_DELTA_FLAGS_KNOWN_MASK,
+            metadata_bytes: 4,
+        };
+        let delta_bytes = delta.to_vec_with_extension(&[4, 3, 2, 1]).unwrap();
+        assert_eq!(
+            ObjectDeltaMetadata::parse_with_extension(&delta_bytes).unwrap(),
+            (delta, &[4, 3, 2, 1][..])
+        );
+
+        let release = ObjectReleaseMetadata {
+            object_id: 1,
+            operation_id: 3,
+            release_reason: ObjectReleaseReason::Cancelled,
+            source_role: RuntimeRole::Scheduler,
+            flags: OBJECT_RELEASE_FLAGS_KNOWN_MASK,
+            diagnostic_bytes: 3,
+        };
+        let release_bytes = release.to_vec_with_diagnostics(&[7, 8, 9]).unwrap();
+        assert_eq!(
+            ObjectReleaseMetadata::parse_with_diagnostics(&release_bytes).unwrap(),
+            (release, &[7, 8, 9][..])
+        );
+
+        let cache_ref = CacheReferenceMetadata {
+            cache_key_hi: 0x1122,
+            cache_key_lo: 0x3344,
+            profile_id: 3,
+            reuse_scope: CacheReuseScope::Session,
+            lease_id: 5,
+            producer_trace_id: 6,
+            expiration_hint_ms: 700,
+            metadata_bytes: 2,
+            flags: CACHE_REFERENCE_FLAGS_KNOWN_MASK,
+        };
+        let cache_ref_bytes = cache_ref.to_vec_with_extension(&[5, 6]).unwrap();
+        assert_eq!(
+            CacheReferenceMetadata::parse_with_extension(&cache_ref_bytes).unwrap(),
+            (cache_ref, &[5, 6][..])
+        );
+
+        let miss = CacheMissMetadata {
+            cache_key_hi: 0x1122,
+            cache_key_lo: 0x3344,
+            miss_reason: CacheMissReason::SchemaMismatch,
+            profile_id: 3,
+            diagnostic_bytes: 3,
+        };
+        let miss_bytes = miss.to_vec_with_diagnostics(&[1, 3, 5]).unwrap();
+        assert_eq!(
+            CacheMissMetadata::parse_with_diagnostics(&miss_bytes).unwrap(),
+            (miss, &[1, 3, 5][..])
+        );
+    }
+
+    #[test]
     fn object_and_cache_metadata_reject_reserved_bits_and_fields() {
         assert_eq!(
             ObjectReferenceMetadata {
@@ -781,6 +1036,58 @@ mod tests {
             CacheMissMetadata::parse(&miss),
             Err(NnrpError::NonZeroReservedField {
                 field: "cache_miss.reserved"
+            })
+        );
+    }
+
+    #[test]
+    fn object_and_cache_metadata_reject_declared_extension_length_mismatch() {
+        let descriptor = ObjectDescriptorMetadata {
+            object_id: 1,
+            object_kind: RuntimeObjectKind::Tensor,
+            producer_role: RuntimeRole::Runtime,
+            consumer_role: RuntimeRole::Client,
+            session_id: 2,
+            byte_size: 4096,
+            compute_cost_units: 7,
+            memory_location_hint: MemoryLocationHint::DeviceMemory,
+            ownership_hint: OwnershipHint::Borrowed,
+            lifetime_hint_ms: 500,
+            metadata_bytes: 2,
+        };
+        assert_eq!(
+            descriptor.to_vec_with_extension(&[1, 2, 3]),
+            Err(NnrpError::DeclaredLengthMismatch {
+                field: "object_descriptor.metadata_bytes",
+                declared: 2,
+                actual: 3
+            })
+        );
+
+        let mut descriptor_bytes = descriptor.to_bytes().unwrap().to_vec();
+        descriptor_bytes.extend_from_slice(&[1]);
+        assert_eq!(
+            ObjectDescriptorMetadata::parse_with_extension(&descriptor_bytes),
+            Err(NnrpError::DeclaredLengthMismatch {
+                field: "object_descriptor.metadata_bytes",
+                declared: 2,
+                actual: 1
+            })
+        );
+
+        let miss = CacheMissMetadata {
+            cache_key_hi: 0x1122,
+            cache_key_lo: 0x3344,
+            miss_reason: CacheMissReason::SchemaMismatch,
+            profile_id: 3,
+            diagnostic_bytes: 1,
+        };
+        assert_eq!(
+            miss.to_vec_with_diagnostics(&[]),
+            Err(NnrpError::DeclaredLengthMismatch {
+                field: "cache_miss.diagnostic_bytes",
+                declared: 1,
+                actual: 0
             })
         );
     }
