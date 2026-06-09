@@ -30,8 +30,8 @@
 - [ ] Add loopback tests.
   - [x] Client to server handshake.
   - [x] Submit/result.
-  - [ ] Cancel/drop reason.
-  - [ ] Backpressure credit update.
+  - [x] Cancel/drop reason.
+  - [x] Backpressure credit update.
 
 ## WebSocket Transport
 
@@ -50,7 +50,9 @@
   - [x] Client to server handshake.
   - [x] Submit/result.
   - [ ] Progress/partial result.
-  - [ ] Backpressure credit update.
+    - [ ] Progress.
+    - [x] Partial result.
+  - [x] Backpressure credit update.
 
 ## WASM And Browser Boundary
 

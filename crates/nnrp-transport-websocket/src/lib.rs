@@ -321,10 +321,11 @@ fn runtime_ws(error: WebSocketError) -> RuntimeError {
 mod tests {
     use super::*;
     use nnrp_core::{
-        FrameSubmitMetadata, InputProfile, PayloadKindBitmap, ResultClass, ResultPushMetadata,
-        SubmitMode, TileIndexMode, STANDARD_PROFILE_TOKEN,
+        BackpressureLevel, FrameSubmitMetadata, InputProfile, PartialResultMetadata,
+        PayloadKindBitmap, PressureMetadata, ResultClass, ResultPushMetadata, SubmitMode,
+        TileIndexMode, STANDARD_PROFILE_TOKEN,
     };
-    use nnrp_runtime::NnrpResult;
+    use nnrp_runtime::{NnrpClientEvent, NnrpResult};
     use nnrp_transport_provider::{RemoteTransportSupport, TransportPolicy};
 
     #[test]
@@ -408,6 +409,51 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn websocket_loopback_routes_partial_result_and_pressure() -> Result<(), RuntimeError> {
+        let server = WebSocketProvider::bind("127.0.0.1:0", NnrpServerConfig::default()).await?;
+        let endpoint = WebSocketEndpoint::ws(format!("ws://{}", server.local_addr()?))?;
+
+        let server_task = tokio::spawn(async move {
+            let mut session = server.accept().await?;
+            let submit = session.receive_submit().await?;
+            let credit = session.receive_pressure_update().await?;
+            assert_eq!(credit.metadata.credit_window, 9);
+            session.send_backpressure(soft_backpressure()).await?;
+            session
+                .send_partial_result(partial_result(submit.frame_id as u64), b"partial".to_vec())
+                .await
+        });
+
+        let client = WebSocketProvider::connect(&endpoint, NnrpClientConfig::default()).await?;
+        let mut session = client.open_session().await?;
+        let frame_id = session
+            .submit_nowait(token_submit(), b"partial-request".to_vec())
+            .await?;
+        session.send_credit_update(credit_update()).await?;
+
+        match session.await_event().await? {
+            NnrpClientEvent::Backpressure(pressure) => {
+                assert_eq!(pressure.pressure_level, BackpressureLevel::Soft as u16);
+                assert_eq!(pressure.credit_window, 2);
+            }
+            event => panic!("expected backpressure event, got {event:?}"),
+        }
+        match session.await_event().await? {
+            NnrpClientEvent::PartialResult { metadata, body } => {
+                assert_eq!(metadata.operation_id, frame_id as u64);
+                assert_eq!(metadata.result_sequence, 1);
+                assert_eq!(body, b"partial");
+            }
+            event => panic!("expected partial result event, got {event:?}"),
+        }
+
+        server_task
+            .await
+            .map_err(|_| RuntimeError::Internal("websocket control server task panicked"))??;
+        Ok(())
+    }
+
     fn token_submit() -> FrameSubmitMetadata {
         FrameSubmitMetadata {
             src_width: 0,
@@ -454,6 +500,39 @@ mod tests {
             dropped_tile_count: 0,
             payload_kind_bitmap: PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),
             payload_frame_count: 1,
+        }
+    }
+
+    fn credit_update() -> PressureMetadata {
+        PressureMetadata {
+            scope_id: 1,
+            credit_window: 9,
+            pressure_level: BackpressureLevel::None as u16,
+            pressure_reason: 0,
+            retry_after_ms: 0,
+            flags: 0,
+        }
+    }
+
+    fn soft_backpressure() -> PressureMetadata {
+        PressureMetadata {
+            scope_id: 1,
+            credit_window: 2,
+            pressure_level: BackpressureLevel::Soft as u16,
+            pressure_reason: 1,
+            retry_after_ms: 25,
+            flags: 0,
+        }
+    }
+
+    fn partial_result(operation_id: u64) -> PartialResultMetadata {
+        PartialResultMetadata {
+            operation_id,
+            result_sequence: 1,
+            object_id: 0,
+            delta_sequence: 0,
+            body_bytes: 7,
+            flags: 0,
         }
     }
 }

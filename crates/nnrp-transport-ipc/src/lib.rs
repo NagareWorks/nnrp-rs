@@ -516,11 +516,12 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use nnrp_core::{
-        FrameSubmitMetadata, InputProfile, PayloadKindBitmap, ResultClass, ResultPushMetadata,
-        SubmitMode, TileIndexMode, STANDARD_PROFILE_TOKEN,
+        BackpressureLevel, FrameSubmitMetadata, InputProfile, PayloadKindBitmap, PressureMetadata,
+        ResultClass, ResultDropReasonMetadata, ResultPushMetadata, SubmitMode, TileIndexMode,
+        STANDARD_PROFILE_TOKEN,
     };
     #[cfg(unix)]
-    use nnrp_runtime::NnrpResult;
+    use nnrp_runtime::{NnrpClientEvent, NnrpResult};
     use nnrp_transport_provider::{RemoteTransportSupport, TransportPolicy};
 
     #[test]
@@ -624,6 +625,62 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_ipc_loopback_routes_cancel_drop_reason_and_pressure() -> Result<(), RuntimeError>
+    {
+        let path = std::env::temp_dir().join(format!(
+            "nnrp-ipc-control-{}-{}.sock",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let endpoint = IpcEndpoint::unix(path.clone());
+        let server = IpcProvider::bind(&endpoint, NnrpServerConfig::default()).await?;
+
+        let server_task = tokio::spawn(async move {
+            let mut session = server.accept().await?;
+            let submit = session.receive_submit().await?;
+            let credit = session.receive_pressure_update().await?;
+            assert_eq!(credit.metadata.credit_window, 9);
+            session.send_backpressure(soft_backpressure()).await?;
+
+            let control = session.receive_runtime_control().await?;
+            assert_eq!(control.metadata.operation_id, submit.frame_id as u64);
+            session
+                .send_result_drop_reason(drop_reason(submit.frame_id as u64))
+                .await
+        });
+
+        let client = IpcProvider::connect(&endpoint, NnrpClientConfig::default()).await?;
+        let mut session = client.open_session().await?;
+        let frame_id = session
+            .submit_nowait(token_submit(), b"cancel-me".to_vec())
+            .await?;
+        session.send_credit_update(credit_update()).await?;
+        session.cancel_operation(frame_id as u64, 7).await?;
+
+        match session.await_event().await? {
+            NnrpClientEvent::Backpressure(pressure) => {
+                assert_eq!(pressure.pressure_level, BackpressureLevel::Soft as u16);
+                assert_eq!(pressure.credit_window, 2);
+            }
+            event => panic!("expected backpressure event, got {event:?}"),
+        }
+        match session.await_event().await? {
+            NnrpClientEvent::ResultDropReason(reason) => {
+                assert_eq!(reason.operation_id, frame_id as u64);
+                assert_eq!(reason.drop_reason_code, 7);
+            }
+            event => panic!("expected result drop reason event, got {event:?}"),
+        }
+
+        server_task
+            .await
+            .map_err(|_| RuntimeError::Internal("ipc control server task panicked"))??;
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
     #[cfg(not(windows))]
     #[tokio::test]
     async fn named_pipe_endpoints_report_platform_boundary() {
@@ -694,6 +751,42 @@ mod tests {
             dropped_tile_count: 0,
             payload_kind_bitmap: PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),
             payload_frame_count: 1,
+        }
+    }
+
+    #[cfg(unix)]
+    fn credit_update() -> PressureMetadata {
+        PressureMetadata {
+            scope_id: 1,
+            credit_window: 9,
+            pressure_level: BackpressureLevel::None as u16,
+            pressure_reason: 0,
+            retry_after_ms: 0,
+            flags: 0,
+        }
+    }
+
+    #[cfg(unix)]
+    fn soft_backpressure() -> PressureMetadata {
+        PressureMetadata {
+            scope_id: 1,
+            credit_window: 2,
+            pressure_level: BackpressureLevel::Soft as u16,
+            pressure_reason: 1,
+            retry_after_ms: 25,
+            flags: 0,
+        }
+    }
+
+    #[cfg(unix)]
+    fn drop_reason(operation_id: u64) -> ResultDropReasonMetadata {
+        ResultDropReasonMetadata {
+            operation_id,
+            result_sequence: 1,
+            drop_reason_code: 7,
+            source_role: 2,
+            flags: 0,
+            diagnostic_bytes: 0,
         }
     }
 }
