@@ -2,6 +2,7 @@ pub mod adapter_conformance;
 mod nnrp1_baseline;
 pub mod preview3_vectors;
 pub mod preview4_vectors;
+pub mod wire_conformance;
 
 use nnrp_core::ProtocolVersion;
 

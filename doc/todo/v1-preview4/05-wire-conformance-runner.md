@@ -2,11 +2,11 @@
 
 ## Plan Consumption
 
-- [ ] Consume `wire-conformance/nnrp-1-preview4/manifest.json`.
-- [ ] Consume target manifests with TCP, QUIC, IPC, and WebSocket endpoints.
-- [ ] Generate execution plans through the shared conformance runner.
-- [ ] Preserve selected scenario IDs exactly in result reports.
-- [ ] Write evidence paths for frame logs and timing traces.
+- [x] Consume `wire-conformance/nnrp-1-preview4/manifest.json`.
+- [x] Consume target manifests with TCP, QUIC, IPC, and WebSocket endpoints.
+- [x] Generate execution plans through the shared conformance runner.
+- [x] Preserve selected scenario IDs exactly in result reports.
+- [x] Write evidence paths for frame logs and timing traces.
 
 ## Direct Endpoint Driver
 
@@ -44,11 +44,11 @@
 - [ ] Validate required frame presence.
 - [ ] Validate result drop reason when expected.
 - [ ] Validate trace context propagation when expected.
-- [ ] Preserve skipped outcomes when a target does not claim the required transport or capability.
+- [x] Preserve skipped outcomes when a target does not claim the required transport or capability.
 
 ## CI Integration
 
-- [ ] Keep dry-run plan generation in conformance CI.
+- [x] Keep dry-run plan generation in conformance CI.
 - [ ] Add local reference endpoint tests for each concrete transport crate.
 - [ ] Add negative target tests for unsupported modes and transports.
 - [ ] Add matrix coverage for TCP, QUIC, IPC, and WebSocket reference endpoints.
