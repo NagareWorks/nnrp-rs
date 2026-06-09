@@ -20,11 +20,11 @@
   - [x] Use `quic`.
   - [x] Use `ipc`.
   - [x] Use `websocket`.
-- [ ] Align result terminal states with wire result reports.
-  - [ ] Support `success`.
-  - [ ] Support `cancelled`.
-  - [ ] Support `dropped`.
-  - [ ] Support `error`.
+- [x] Align result terminal states with wire result reports.
+  - [x] Support `success`.
+  - [x] Support `cancelled`.
+  - [x] Support `dropped`.
+  - [x] Support `error`.
 
 ## Parallel Work Ownership
 

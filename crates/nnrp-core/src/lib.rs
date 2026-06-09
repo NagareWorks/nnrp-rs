@@ -77,8 +77,8 @@ pub use data::{
 };
 pub use enums::{
     BackpressureLevel, CancelScope, FlowScopeKind, FlowUpdateReason, HeaderFlags, InFlightPolicy,
-    MessageType, OperationState, SessionCloseReason, SessionCloseStatus, SessionPriorityClass,
-    SessionStatus,
+    MessageType, OperationState, ResultTerminalState, SessionCloseReason, SessionCloseStatus,
+    SessionPriorityClass, SessionStatus,
 };
 pub use error::NnrpError;
 pub use flow::{

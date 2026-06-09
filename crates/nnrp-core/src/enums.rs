@@ -306,6 +306,52 @@ impl OperationState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+pub enum ResultTerminalState {
+    Success = 0,
+    Cancelled = 1,
+    Dropped = 2,
+    Error = 3,
+}
+
+impl ResultTerminalState {
+    pub fn try_from_u8(value: u8) -> Result<Self, NnrpError> {
+        match value {
+            0 => Ok(Self::Success),
+            1 => Ok(Self::Cancelled),
+            2 => Ok(Self::Dropped),
+            3 => Ok(Self::Error),
+            _ => Err(NnrpError::UnknownEnumValue {
+                enum_name: "result_terminal_state",
+                value: value as u64,
+            }),
+        }
+    }
+
+    pub fn from_operation_state(state: OperationState) -> Option<Self> {
+        match state {
+            OperationState::Completed => Some(Self::Success),
+            OperationState::Cancelled => Some(Self::Cancelled),
+            OperationState::Superseded => Some(Self::Dropped),
+            OperationState::Failed => Some(Self::Error),
+            OperationState::Accepted
+            | OperationState::Running
+            | OperationState::Partial
+            | OperationState::WaitingTool => None,
+        }
+    }
+
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Cancelled => "cancelled",
+            Self::Dropped => "dropped",
+            Self::Error => "error",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum CancelScope {
     Operation = 0,
     Subtree = 1,
@@ -436,8 +482,8 @@ mod tests {
 
     use super::{
         BackpressureLevel, CancelScope, FlowScopeKind, FlowUpdateReason, HeaderFlags,
-        InFlightPolicy, MessageType, OperationState, SessionCloseReason, SessionCloseStatus,
-        SessionPriorityClass, SessionStatus,
+        InFlightPolicy, MessageType, OperationState, ResultTerminalState, SessionCloseReason,
+        SessionCloseStatus, SessionPriorityClass, SessionStatus,
     };
 
     #[test]
@@ -573,6 +619,49 @@ mod tests {
         assert!(OperationState::WaitingTool.can_transition_to(OperationState::Running));
         assert!(!OperationState::Completed.can_transition_to(OperationState::Running));
         assert!(!OperationState::Accepted.can_transition_to(OperationState::Partial));
+    }
+
+    #[test]
+    fn result_terminal_state_reports_wire_names_from_operation_states() {
+        assert_enum_u8(
+            "result_terminal_state",
+            ResultTerminalState::try_from_u8,
+            0,
+            3,
+        );
+        assert_eq!(
+            ResultTerminalState::try_from_u8(4),
+            Err(NnrpError::UnknownEnumValue {
+                enum_name: "result_terminal_state",
+                value: 4
+            })
+        );
+
+        assert_eq!(
+            ResultTerminalState::from_operation_state(OperationState::Completed),
+            Some(ResultTerminalState::Success)
+        );
+        assert_eq!(
+            ResultTerminalState::from_operation_state(OperationState::Cancelled),
+            Some(ResultTerminalState::Cancelled)
+        );
+        assert_eq!(
+            ResultTerminalState::from_operation_state(OperationState::Superseded),
+            Some(ResultTerminalState::Dropped)
+        );
+        assert_eq!(
+            ResultTerminalState::from_operation_state(OperationState::Failed),
+            Some(ResultTerminalState::Error)
+        );
+        assert_eq!(
+            ResultTerminalState::from_operation_state(OperationState::Running),
+            None
+        );
+
+        assert_eq!(ResultTerminalState::Success.wire_name(), "success");
+        assert_eq!(ResultTerminalState::Cancelled.wire_name(), "cancelled");
+        assert_eq!(ResultTerminalState::Dropped.wire_name(), "dropped");
+        assert_eq!(ResultTerminalState::Error.wire_name(), "error");
     }
 
     fn assert_enum_u8<T: Copy>(
