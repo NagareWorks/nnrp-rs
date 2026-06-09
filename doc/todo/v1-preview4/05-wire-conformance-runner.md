@@ -5,6 +5,7 @@
 - [x] Consume `wire-conformance/nnrp-1-preview4/manifest.json`.
 - [x] Consume target manifests with TCP, QUIC, IPC, and WebSocket endpoints.
 - [x] Generate execution plans through the shared conformance runner.
+- [x] Expose a CLI dry-run entrypoint for suite and target manifest inputs.
 - [x] Preserve selected scenario IDs exactly in result reports.
 - [x] Write evidence paths for frame logs and timing traces.
 

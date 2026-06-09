@@ -1,8 +1,81 @@
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 pub const WIRE_DRY_RUN_REPORT_SCHEMA: &str =
     "https://raw.githubusercontent.com/NagareWorks/nnrp-conformance/main/schemas/wire-dry-run-results.schema.json";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireRunnerArguments {
+    pub suite_manifest: PathBuf,
+    pub target_manifest: PathBuf,
+    pub output: PathBuf,
+    pub selected_case_ids: Vec<String>,
+}
+
+pub fn parse_wire_arguments<I, S>(args: I) -> Result<WireRunnerArguments, String>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let mut suite_manifest = None;
+    let mut target_manifest = None;
+    let mut output = None;
+    let mut selected_case_ids = Vec::new();
+    let mut iter = args.into_iter().map(Into::into);
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--suite" => suite_manifest = Some(next_path(&mut iter, "--suite")?),
+            "--target" => target_manifest = Some(next_path(&mut iter, "--target")?),
+            "--output" => output = Some(next_path(&mut iter, "--output")?),
+            "--case" => selected_case_ids.push(next_value(&mut iter, "--case")?),
+            "--help" | "-h" => return Err(wire_usage()),
+            value => return Err(format!("unknown wire conformance argument '{value}'")),
+        }
+    }
+
+    Ok(WireRunnerArguments {
+        suite_manifest: suite_manifest
+            .ok_or_else(|| "wire suite manifest path is required via --suite".to_string())?,
+        target_manifest: target_manifest
+            .ok_or_else(|| "wire target manifest path is required via --target".to_string())?,
+        output: output.ok_or_else(|| "wire result path is required via --output".to_string())?,
+        selected_case_ids,
+    })
+}
+
+pub fn write_wire_dry_run_report(
+    suite_manifest_path: &Path,
+    target_manifest_path: &Path,
+    output_path: &Path,
+    selected_case_ids: &[String],
+) -> Result<(), String> {
+    let suite_manifest = read_json_file(suite_manifest_path, "wire suite manifest")?;
+    let target_manifest = read_json_file(target_manifest_path, "wire target manifest")?;
+    let selected: Vec<&str> = selected_case_ids.iter().map(String::as_str).collect();
+    let plan = build_wire_execution_plan(&suite_manifest, &target_manifest, &selected)?;
+    let report = build_wire_dry_run_report(&plan)?;
+    if let Some(parent) = output_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "failed to create wire result directory '{}': {error}",
+                    parent.display()
+                )
+            })?;
+        }
+    }
+    let bytes = serde_json::to_vec_pretty(&report)
+        .map_err(|error| format!("failed to serialize wire dry-run report: {error}"))?;
+    fs::write(output_path, bytes).map_err(|error| {
+        format!(
+            "failed to write wire dry-run report '{}': {error}",
+            output_path.display()
+        )
+    })
+}
 
 pub fn build_wire_execution_plan(
     suite_manifest: &Value,
@@ -213,10 +286,37 @@ fn string_array_field(value: Option<&Value>) -> Result<Vec<&str>, String> {
         .collect()
 }
 
+fn read_json_file(path: &Path, label: &str) -> Result<Value, String> {
+    let content = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read {label} '{}': {error}", path.display()))?;
+    serde_json::from_str(&content)
+        .map_err(|error| format!("{label} '{}' must be valid JSON: {error}", path.display()))
+}
+
+fn next_path(iter: &mut impl Iterator<Item = String>, flag: &str) -> Result<PathBuf, String> {
+    Ok(PathBuf::from(next_value(iter, flag)?))
+}
+
+fn next_value(iter: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
+    iter.next()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("{flag} requires a value"))
+}
+
+fn wire_usage() -> String {
+    "usage: nnrp-conformance-wire --suite <manifest.json> --target <target.json> --output <results.json> [--case <id>]..."
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{build_wire_dry_run_report, build_wire_execution_plan};
+    use super::{
+        build_wire_dry_run_report, build_wire_execution_plan, parse_wire_arguments,
+        write_wire_dry_run_report,
+    };
     use serde_json::json;
+    use std::fs;
+    use std::path::PathBuf;
 
     fn suite_manifest() -> serde_json::Value {
         json!({
@@ -313,5 +413,141 @@ mod tests {
                 .unwrap_err(),
             "selected wire scenario id 'missing' is not in the suite manifest"
         );
+    }
+
+    #[test]
+    fn wire_argument_parser_accepts_multiple_selected_cases() {
+        let args = parse_wire_arguments([
+            "--suite",
+            "suite.json",
+            "--target",
+            "target.json",
+            "--output",
+            "results.json",
+            "--case",
+            "wire.cancel.ipc",
+            "--case",
+            "wire.progress.websocket",
+        ])
+        .expect("args");
+        assert_eq!(args.suite_manifest, PathBuf::from("suite.json"));
+        assert_eq!(args.target_manifest, PathBuf::from("target.json"));
+        assert_eq!(args.output, PathBuf::from("results.json"));
+        assert_eq!(
+            args.selected_case_ids,
+            vec!["wire.cancel.ipc", "wire.progress.websocket"]
+        );
+    }
+
+    #[test]
+    fn wire_argument_parser_reports_help_and_unknown_arguments() {
+        let usage = parse_wire_arguments(["--help"]).expect_err("usage error");
+        assert!(usage.starts_with("usage: nnrp-conformance-wire"));
+
+        let unknown = parse_wire_arguments(["--bogus"]).expect_err("unknown argument");
+        assert_eq!(unknown, "unknown wire conformance argument '--bogus'");
+    }
+
+    #[test]
+    fn wire_writer_reads_manifests_and_writes_dry_run_report() {
+        let root = temp_dir("nnrp-wire-dry-run");
+        let suite_path = root.join("suite.json");
+        let target_path = root.join("target.json");
+        let output_path = root.join("nested").join("results.json");
+        fs::create_dir_all(&root).expect("temp dir");
+        fs::write(
+            &suite_path,
+            serde_json::to_vec(&suite_manifest()).expect("suite json"),
+        )
+        .expect("write suite");
+        fs::write(
+            &target_path,
+            serde_json::to_vec(&target_manifest()).expect("target json"),
+        )
+        .expect("write target");
+
+        write_wire_dry_run_report(
+            &suite_path,
+            &target_path,
+            &output_path,
+            &[String::from("wire.cancel.ipc")],
+        )
+        .expect("write report");
+
+        let report: serde_json::Value =
+            serde_json::from_slice(&fs::read(&output_path).expect("read report"))
+                .expect("report json");
+        assert_eq!(report["mode"], "dry-run");
+        assert_eq!(report["results"][0]["id"], "wire.cancel.ipc");
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn wire_writer_reports_output_directory_creation_failures() {
+        let root = temp_dir("nnrp-wire-dry-run-create-error");
+        let suite_path = root.join("suite.json");
+        let target_path = root.join("target.json");
+        let blocked_parent = root.join("blocked-parent");
+        let output_path = blocked_parent.join("results.json");
+        fs::create_dir_all(&root).expect("temp dir");
+        fs::write(
+            &suite_path,
+            serde_json::to_vec(&suite_manifest()).expect("suite json"),
+        )
+        .expect("write suite");
+        fs::write(
+            &target_path,
+            serde_json::to_vec(&target_manifest()).expect("target json"),
+        )
+        .expect("write target");
+        fs::write(&blocked_parent, b"file").expect("write blocking file");
+
+        let error = write_wire_dry_run_report(&suite_path, &target_path, &output_path, &[])
+            .expect_err("create dir error");
+        assert!(error.starts_with("failed to create wire result directory"));
+        assert!(error.contains("blocked-parent"));
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn wire_writer_reports_output_write_failures() {
+        let root = temp_dir("nnrp-wire-dry-run-write-error");
+        let suite_path = root.join("suite.json");
+        let target_path = root.join("target.json");
+        let output_path = root.join("results-as-directory");
+        fs::create_dir_all(&output_path).expect("output dir");
+        fs::write(
+            &suite_path,
+            serde_json::to_vec(&suite_manifest()).expect("suite json"),
+        )
+        .expect("write suite");
+        fs::write(
+            &target_path,
+            serde_json::to_vec(&target_manifest()).expect("target json"),
+        )
+        .expect("write target");
+
+        let error = write_wire_dry_run_report(&suite_path, &target_path, &output_path, &[])
+            .expect_err("write error");
+        assert!(error.starts_with("failed to write wire dry-run report"));
+        assert!(error.contains("results-as-directory"));
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    fn temp_dir(prefix: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "{}-{}-{}",
+            prefix,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        path
     }
 }
