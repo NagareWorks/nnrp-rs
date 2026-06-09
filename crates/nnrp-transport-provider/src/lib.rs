@@ -769,6 +769,76 @@ mod tests {
     }
 
     #[test]
+    fn registry_selects_single_installed_transport_without_probe() {
+        for transport_id in [
+            TransportId::Tcp,
+            TransportId::Quic,
+            TransportId::Ipc,
+            TransportId::WebSocket,
+        ] {
+            let provider_name = provider_name(transport_id);
+            let registry = TransportProviderRegistry::new()
+                .with_provider(available(provider_name, transport_id));
+            let remote = RemoteTransportSupport::new([transport_id]);
+
+            let selection = registry
+                .select(&remote, TransportPolicy::Auto)
+                .expect("single installed transport should be selected directly");
+
+            assert_eq!(selection.selected.transport_id, transport_id);
+            assert_eq!(selection.selected.name, provider_name);
+            assert!(selection.rejected.is_empty());
+        }
+    }
+
+    #[test]
+    fn probe_selection_preserves_four_transport_scores_and_rejections() {
+        let providers = [
+            available("tcp", TransportId::Tcp),
+            available("quic", TransportId::Quic),
+            available("ipc", TransportId::Ipc),
+            available("websocket", TransportId::WebSocket),
+        ];
+        let remote =
+            RemoteTransportSupport::new([TransportId::Tcp, TransportId::Quic, TransportId::Ipc]);
+        let samples = [
+            ProbeSample::success(TransportId::Tcp, "tcp", 20_000, 2_000, 4096, 4096),
+            ProbeSample::success(TransportId::Quic, "quic", 20_000, 700, 4096, 4096),
+            ProbeSample::success(TransportId::Ipc, "ipc", 5_000, 150, 8192, 8192),
+            ProbeSample::success(
+                TransportId::WebSocket,
+                "websocket",
+                50_000,
+                8_000,
+                1024,
+                1024,
+            ),
+        ];
+
+        let selection =
+            select_transport_with_probe(&providers, &remote, TransportPolicy::Auto, &samples)
+                .expect("probe selection should pick from reachable transports");
+
+        assert_eq!(selection.selected.transport_id, TransportId::Ipc);
+        assert_eq!(selection.candidates.len(), 3);
+        assert!(selection.candidates.iter().any(|candidate| {
+            candidate.provider.transport_id == TransportId::Quic
+                && candidate.probe_score.median_rtt_us == 700
+                && candidate.probe_score.sample_count == 1
+        }));
+        assert!(selection.candidates.iter().any(|candidate| {
+            candidate.provider.transport_id == TransportId::Tcp
+                && candidate.probe_score.throughput_bytes_per_sec > 0
+        }));
+        assert_eq!(selection.rejected.len(), 1);
+        assert_eq!(selection.rejected[0].transport_id, TransportId::WebSocket);
+        assert_eq!(
+            selection.rejected[0].reason,
+            TransportRejectionReason::RemoteUnsupported
+        );
+    }
+
+    #[test]
     fn probe_selection_prefers_lower_latency_viable_candidate() {
         let providers = [
             available("tcp", TransportId::Tcp),
@@ -900,6 +970,16 @@ mod tests {
             transport_id,
             TransportProviderKind::PureRust,
         )
+    }
+
+    fn provider_name(transport_id: TransportId) -> &'static str {
+        match transport_id {
+            TransportId::Tcp => "tcp",
+            TransportId::Quic => "quic",
+            TransportId::Ipc => "ipc",
+            TransportId::WebSocket => "websocket",
+            _ => "unknown",
+        }
     }
 
     fn missing(name: &str, transport_id: TransportId) -> TransportProviderDescriptor {

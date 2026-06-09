@@ -2,17 +2,17 @@
 
 ## Transport Provider Contract
 
-- [ ] Extend the provider registry to expose four named transport providers.
-  - [ ] TCP provider.
-  - [ ] QUIC provider.
+- [x] Extend the provider registry to expose four named transport providers.
+  - [x] TCP provider.
+  - [x] QUIC provider.
   - [x] IPC provider.
   - [x] WebSocket provider.
-- [ ] Keep provider probing behavior stable.
-  - [ ] If one transport package is present, select that transport directly.
-  - [ ] If multiple transport packages are present, probe candidates by policy.
-  - [ ] Preserve capability, cost, and preference metadata in probe results.
-- [ ] Ensure every provider owns real connect/listen/send/receive behavior.
-- [ ] Keep provider packages from becoming configuration-only switches.
+- [x] Keep provider probing behavior stable.
+  - [x] If one transport package is present, select that transport directly.
+  - [x] If multiple transport packages are present, probe candidates by policy.
+  - [x] Preserve capability, cost, and preference metadata in probe results.
+- [x] Ensure every provider owns real connect/listen/send/receive behavior.
+- [x] Keep provider packages from becoming configuration-only switches.
 
 ## IPC Transport
 
