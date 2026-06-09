@@ -18,12 +18,13 @@ use nnrp_core::{
 };
 use nnrp_runtime::{
     BoxedFramedTransport, FramedListener, FramedTransport, NnrpClient, NnrpClientConfig,
-    NnrpClientEvent, NnrpServer, NnrpServerConfig, NnrpServerPolicy, RuntimeError, RuntimePacket,
-    RuntimeTransportKind, TcpFramedListener, TcpTransport,
+    NnrpClientEvent, NnrpServer, NnrpServerConfig, NnrpServerPolicy, RuntimeError,
+    RuntimeFrameLimits, RuntimePacket, RuntimeTransportKind, TcpFramedListener, TcpTransport,
 };
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use tokio::net::TcpListener;
+use tokio::io::AsyncWriteExt;
+use tokio::net::{TcpListener, TcpStream};
 
 #[tokio::test]
 async fn tcp_loopback_opens_matching_client_and_server_sessions() -> Result<(), RuntimeError> {
@@ -54,6 +55,38 @@ async fn tcp_loopback_opens_matching_client_and_server_sessions() -> Result<(), 
         server_task.await.expect("server task should join")?;
     assert_eq!(server_session_id, 42);
     assert_eq!(server_profile_id, config.profile_id);
+    Ok(())
+}
+
+#[tokio::test]
+async fn tcp_transport_rejects_oversized_declared_packet_before_body_read(
+) -> Result<(), RuntimeError> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let client_task = tokio::spawn(async move {
+        let mut stream = TcpStream::connect(addr).await?;
+        let oversized_body_len = (RuntimeFrameLimits::DEFAULT_MAX_PACKET_BYTES
+            - nnrp_core::COMMON_HEADER_LEN
+            + 1) as u32;
+        let header = CommonHeader::new(MessageType::ResultPush, 0, oversized_body_len);
+        stream.write_all(&header.to_bytes()?).await?;
+        Ok::<_, RuntimeError>(())
+    });
+
+    let (stream, _) = listener.accept().await?;
+    let mut transport = TcpTransport::new(stream);
+    let error = transport
+        .read_packet()
+        .await
+        .expect_err("oversized declared packet should be rejected before body read");
+    assert!(matches!(
+        error,
+        RuntimeError::FrameTooLarge {
+            declared,
+            max: RuntimeFrameLimits::DEFAULT_MAX_PACKET_BYTES,
+        } if declared == RuntimeFrameLimits::DEFAULT_MAX_PACKET_BYTES + 1
+    ));
+    client_task.await.expect("client task should join")?;
     Ok(())
 }
 

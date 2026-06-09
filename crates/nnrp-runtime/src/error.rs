@@ -14,6 +14,9 @@ pub enum RuntimeError {
     #[error("frame id overflowed")]
     FrameIdOverflow,
 
+    #[error("runtime frame too large: declared {declared} bytes exceeds max {max} bytes")]
+    FrameTooLarge { declared: usize, max: usize },
+
     #[error("unexpected runtime message: {0}")]
     UnexpectedMessage(&'static str),
 

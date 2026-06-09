@@ -15,6 +15,6 @@ pub use server::{
     NnrpSubmit,
 };
 pub use transport::{
-    BoxedFramedListener, BoxedFramedTransport, FramedListener, FramedTransport,
+    BoxedFramedListener, BoxedFramedTransport, FramedListener, FramedTransport, RuntimeFrameLimits,
     RuntimeTransportKind, TcpFramedListener, TcpTransport,
 };

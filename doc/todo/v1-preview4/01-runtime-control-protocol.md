@@ -67,10 +67,10 @@
   - [x] Preserve order within one operation.
   - [x] Allow interleaving across operations.
   - [x] Support host polling for `PARTIAL_RESULT`.
-- [ ] Route backpressure and credit changes through transport/provider state.
+- [x] Route backpressure and credit changes through transport/provider state.
   - [x] Apply send window changes.
   - [x] Report pressure to host code.
-  - [ ] Avoid unbounded buffering in runtime queues.
+  - [x] Avoid unbounded buffering in runtime queues.
 
 ## Conformance Hooks
 
