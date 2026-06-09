@@ -5,7 +5,7 @@
 - [ ] Extend the provider registry to expose four named transport providers.
   - [ ] TCP provider.
   - [ ] QUIC provider.
-  - [ ] IPC provider.
+  - [x] IPC provider.
   - [ ] WebSocket provider.
 - [ ] Keep provider probing behavior stable.
   - [ ] If one transport package is present, select that transport directly.
@@ -16,20 +16,20 @@
 
 ## IPC Transport
 
-- [ ] Add `nnrp-transport-ipc` crate.
-  - [ ] Add Cargo package metadata.
-  - [ ] Add provider registration.
-  - [ ] Add endpoint parser for `unix://` paths.
-  - [ ] Add endpoint parser for `npipe://` paths.
-  - [ ] Add endpoint parser tests.
-- [ ] Implement local client connect.
-- [ ] Implement local server listen.
-- [ ] Implement framed read/write over IPC streams.
-- [ ] Implement graceful close.
+- [x] Add `nnrp-transport-ipc` crate.
+  - [x] Add Cargo package metadata.
+  - [x] Add provider registration.
+  - [x] Add endpoint parser for `unix://` paths.
+  - [x] Add endpoint parser for `npipe://` paths.
+  - [x] Add endpoint parser tests.
+- [x] Implement local client connect.
+- [x] Implement local server listen.
+- [x] Implement framed read/write over IPC streams.
+- [x] Implement graceful close.
 - [ ] Implement cancellation-safe read/write tasks.
 - [ ] Add loopback tests.
-  - [ ] Client to server handshake.
-  - [ ] Submit/result.
+  - [x] Client to server handshake.
+  - [x] Submit/result.
   - [ ] Cancel/drop reason.
   - [ ] Backpressure credit update.
 
