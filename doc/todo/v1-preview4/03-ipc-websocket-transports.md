@@ -45,7 +45,7 @@
 - [x] Implement native WebSocket server accept.
 - [x] Map binary WebSocket messages to NNRP frames.
 - [x] Reject text-message protocol paths for NNRP data frames.
-- [ ] Implement close frame mapping to NNRP transport close diagnostics.
+- [x] Implement close frame mapping to NNRP transport close diagnostics.
 - [ ] Add loopback tests.
   - [x] Client to server handshake.
   - [x] Submit/result.

@@ -14,7 +14,7 @@ use nnrp_transport_provider::{
 use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
 use tokio_tungstenite::{
     accept_async, connect_async,
-    tungstenite::{Error as WebSocketError, Message},
+    tungstenite::{protocol::CloseFrame, Error as WebSocketError, Message},
     MaybeTlsStream, WebSocketStream,
 };
 
@@ -118,11 +118,7 @@ impl FramedTransport for WebSocketTransport {
                         "websocket text messages are not valid NNRP data frames",
                     ));
                 }
-                Message::Close(_) => {
-                    return Err(RuntimeError::UnexpectedMessage(
-                        "websocket close frame received before an NNRP data frame",
-                    ));
-                }
+                Message::Close(close) => return Err(websocket_close_error(close)),
                 Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => continue,
             }
         }
@@ -317,6 +313,23 @@ fn runtime_ws(error: WebSocketError) -> RuntimeError {
     RuntimeError::Io(std::io::Error::other(error))
 }
 
+fn websocket_close_error(close: Option<CloseFrame>) -> RuntimeError {
+    let detail = match close {
+        Some(frame) => {
+            let code = u16::from(frame.code);
+            format!(
+                "websocket close frame received before an NNRP data frame: code={code}, reason={}",
+                frame.reason
+            )
+        }
+        None => "websocket close frame received before an NNRP data frame without code".to_string(),
+    };
+    RuntimeError::TransportClosed {
+        transport: RuntimeTransportKind::WebSocket,
+        detail,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,6 +340,7 @@ mod tests {
     };
     use nnrp_runtime::{NnrpClientEvent, NnrpResult};
     use nnrp_transport_provider::{RemoteTransportSupport, TransportPolicy};
+    use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
     #[test]
     fn websocket_endpoint_parses_ws_and_wss_schemes() {
@@ -406,6 +420,39 @@ mod tests {
             .map_err(|_| RuntimeError::Internal("websocket text server task panicked"))?
             .expect_err("text messages should be rejected");
         assert!(matches!(error, RuntimeError::UnexpectedMessage(_)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn websocket_maps_close_frame_to_transport_diagnostics() -> Result<(), RuntimeError> {
+        let listener = WebSocketFramedListener::bind("127.0.0.1:0").await?;
+        let endpoint = WebSocketEndpoint::ws(format!("ws://{}", listener.local_addr()?))?;
+        let server_task = tokio::spawn(async move {
+            let mut accepted = listener.accept().await?;
+            accepted.read_packet().await
+        });
+
+        let (mut client, _) = connect_async(endpoint.as_str()).await.map_err(runtime_ws)?;
+        client
+            .close(Some(CloseFrame {
+                code: CloseCode::Policy,
+                reason: "policy-close".into(),
+            }))
+            .await
+            .map_err(runtime_ws)?;
+
+        let error = server_task
+            .await
+            .map_err(|_| RuntimeError::Internal("websocket close server task panicked"))?
+            .expect_err("close frames should map to transport diagnostics");
+        match error {
+            RuntimeError::TransportClosed { transport, detail } => {
+                assert_eq!(transport, RuntimeTransportKind::WebSocket);
+                assert!(detail.contains("code=1008"));
+                assert!(detail.contains("policy-close"));
+            }
+            error => panic!("expected transport close diagnostic, got {error:?}"),
+        }
         Ok(())
     }
 
