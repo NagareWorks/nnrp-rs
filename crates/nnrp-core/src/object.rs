@@ -1,4 +1,4 @@
-use crate::NnrpError;
+use crate::{CommonHeader, MessageType, NnrpError};
 
 pub const OBJECT_DESCRIPTOR_METADATA_LEN: usize = 48;
 pub const OBJECT_REFERENCE_METADATA_LEN: usize = 48;
@@ -329,6 +329,13 @@ pub struct ObjectReferenceMetadata {
     pub metadata_bytes: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectReferencePacket<'a> {
+    pub header: CommonHeader,
+    pub metadata: ObjectReferenceMetadata,
+    pub extension_metadata: &'a [u8],
+}
+
 impl ObjectReferenceMetadata {
     pub fn parse(source: &[u8]) -> Result<Self, NnrpError> {
         require_len(source, OBJECT_REFERENCE_METADATA_LEN)?;
@@ -466,6 +473,14 @@ pub struct ObjectDeltaMetadata {
     pub metadata_bytes: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectDeltaPacket<'a> {
+    pub header: CommonHeader,
+    pub metadata: ObjectDeltaMetadata,
+    pub extension_metadata: &'a [u8],
+    pub delta_payload: &'a [u8],
+}
+
 impl ObjectDeltaMetadata {
     pub fn parse(source: &[u8]) -> Result<Self, NnrpError> {
         require_len(source, OBJECT_DELTA_METADATA_LEN)?;
@@ -522,6 +537,75 @@ impl ObjectDeltaMetadata {
         bytes.extend_from_slice(extension);
         Ok(bytes)
     }
+}
+
+pub fn parse_object_reference_packet(
+    source: &[u8],
+) -> Result<ObjectReferencePacket<'_>, NnrpError> {
+    let (header, metadata_bytes, body) = CommonHeader::parse_packet(source)?;
+    require_message_type(header.message_type, MessageType::ObjectRef)?;
+    require_declared_len("object_reference.body_len", 0, body.len())?;
+    let (metadata, extension_metadata) =
+        ObjectReferenceMetadata::parse_with_extension(metadata_bytes)?;
+    Ok(ObjectReferencePacket {
+        header,
+        metadata,
+        extension_metadata,
+    })
+}
+
+pub fn object_reference_packet_bytes(
+    metadata: &ObjectReferenceMetadata,
+    extension_metadata: &[u8],
+) -> Result<Vec<u8>, NnrpError> {
+    let metadata_bytes = metadata.to_vec_with_extension(extension_metadata)?;
+    let header = CommonHeader::new(
+        MessageType::ObjectRef,
+        checked_u32_len(metadata_bytes.len())?,
+        0,
+    );
+    let mut packet = header.to_bytes()?.to_vec();
+    packet.extend_from_slice(&metadata_bytes);
+    Ok(packet)
+}
+
+pub fn parse_object_delta_packet(source: &[u8]) -> Result<ObjectDeltaPacket<'_>, NnrpError> {
+    let (header, metadata_bytes, body) = CommonHeader::parse_packet(source)?;
+    require_message_type(header.message_type, MessageType::ObjectDelta)?;
+    let (metadata, extension_metadata) = ObjectDeltaMetadata::parse_with_extension(metadata_bytes)?;
+    require_declared_len(
+        "object_delta.delta_bytes",
+        metadata.delta_bytes as usize,
+        body.len(),
+    )?;
+    Ok(ObjectDeltaPacket {
+        header,
+        metadata,
+        extension_metadata,
+        delta_payload: body,
+    })
+}
+
+pub fn object_delta_packet_bytes(
+    metadata: &ObjectDeltaMetadata,
+    extension_metadata: &[u8],
+    delta_payload: &[u8],
+) -> Result<Vec<u8>, NnrpError> {
+    require_declared_len(
+        "object_delta.delta_bytes",
+        metadata.delta_bytes as usize,
+        delta_payload.len(),
+    )?;
+    let metadata_bytes = metadata.to_vec_with_extension(extension_metadata)?;
+    let header = CommonHeader::new(
+        MessageType::ObjectDelta,
+        checked_u32_len(metadata_bytes.len())?,
+        checked_u32_len(delta_payload.len())?,
+    );
+    let mut packet = header.to_bytes()?.to_vec();
+    packet.extend_from_slice(&metadata_bytes);
+    packet.extend_from_slice(delta_payload);
+    Ok(packet)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -694,6 +778,19 @@ fn require_declared_len(
         });
     }
     Ok(())
+}
+
+fn require_message_type(actual: MessageType, expected: MessageType) -> Result<(), NnrpError> {
+    if actual != expected {
+        return Err(NnrpError::InvalidProtocolCombination {
+            rule: "object packet message type does not match parser",
+        });
+    }
+    Ok(())
+}
+
+fn checked_u32_len(value: usize) -> Result<u32, NnrpError> {
+    u32::try_from(value).map_err(|_| NnrpError::MessageLengthOverflow)
 }
 
 fn split_declared_tail<'a>(
@@ -950,6 +1047,40 @@ mod tests {
     }
 
     #[test]
+    fn object_reference_and_delta_packets_borrow_payload_boundaries() {
+        let reference = ObjectReferenceMetadata {
+            object_id: 1,
+            operation_id: 3,
+            object_version: 4,
+            offset: 8,
+            length: 16,
+            flags: OBJECT_REFERENCE_FLAGS_KNOWN_MASK,
+            metadata_bytes: 2,
+        };
+        let reference_packet = object_reference_packet_bytes(&reference, &[9, 8]).unwrap();
+        let parsed_reference = parse_object_reference_packet(&reference_packet).unwrap();
+        assert_eq!(parsed_reference.header.message_type, MessageType::ObjectRef);
+        assert_eq!(parsed_reference.metadata, reference);
+        assert_eq!(parsed_reference.extension_metadata, &[9, 8]);
+
+        let delta = ObjectDeltaMetadata {
+            object_id: 1,
+            delta_sequence: 2,
+            region_offset: 64,
+            region_bytes: 32,
+            delta_bytes: 3,
+            flags: OBJECT_DELTA_FLAGS_KNOWN_MASK,
+            metadata_bytes: 2,
+        };
+        let delta_packet = object_delta_packet_bytes(&delta, &[4, 5], &[7, 8, 9]).unwrap();
+        let parsed_delta = parse_object_delta_packet(&delta_packet).unwrap();
+        assert_eq!(parsed_delta.header.message_type, MessageType::ObjectDelta);
+        assert_eq!(parsed_delta.metadata, delta);
+        assert_eq!(parsed_delta.extension_metadata, &[4, 5]);
+        assert_eq!(parsed_delta.delta_payload, &[7, 8, 9]);
+    }
+
+    #[test]
     fn object_and_cache_metadata_reject_reserved_bits_and_fields() {
         assert_eq!(
             ObjectReferenceMetadata {
@@ -1036,6 +1167,67 @@ mod tests {
             CacheMissMetadata::parse(&miss),
             Err(NnrpError::NonZeroReservedField {
                 field: "cache_miss.reserved"
+            })
+        );
+    }
+
+    #[test]
+    fn object_reference_and_delta_packets_reject_mismatched_payload_boundaries() {
+        let reference = ObjectReferenceMetadata {
+            object_id: 1,
+            operation_id: 3,
+            object_version: 4,
+            offset: 8,
+            length: 16,
+            flags: OBJECT_REFERENCE_FLAGS_KNOWN_MASK,
+            metadata_bytes: 0,
+        };
+        let reference_metadata = reference.to_bytes().unwrap();
+        let mut bad_reference_header = CommonHeader::new(
+            MessageType::ObjectRef,
+            OBJECT_REFERENCE_METADATA_LEN as u32,
+            1,
+        );
+        bad_reference_header.trace_id = 0x77;
+        let mut bad_reference = bad_reference_header.to_bytes().unwrap().to_vec();
+        bad_reference.extend_from_slice(&reference_metadata);
+        bad_reference.push(0xaa);
+        assert_eq!(
+            parse_object_reference_packet(&bad_reference),
+            Err(NnrpError::DeclaredLengthMismatch {
+                field: "object_reference.body_len",
+                declared: 0,
+                actual: 1
+            })
+        );
+
+        let delta = ObjectDeltaMetadata {
+            object_id: 1,
+            delta_sequence: 2,
+            region_offset: 64,
+            region_bytes: 32,
+            delta_bytes: 2,
+            flags: 0,
+            metadata_bytes: 0,
+        };
+        assert_eq!(
+            object_delta_packet_bytes(&delta, &[], &[1, 2, 3]),
+            Err(NnrpError::DeclaredLengthMismatch {
+                field: "object_delta.delta_bytes",
+                declared: 2,
+                actual: 3
+            })
+        );
+
+        let wrong_type_header =
+            CommonHeader::new(MessageType::ObjectRef, OBJECT_DELTA_METADATA_LEN as u32, 2);
+        let mut wrong_type_packet = wrong_type_header.to_bytes().unwrap().to_vec();
+        wrong_type_packet.extend_from_slice(&delta.to_bytes().unwrap());
+        wrong_type_packet.extend_from_slice(&[1, 2]);
+        assert_eq!(
+            parse_object_delta_packet(&wrong_type_packet),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "object packet message type does not match parser"
             })
         );
     }
