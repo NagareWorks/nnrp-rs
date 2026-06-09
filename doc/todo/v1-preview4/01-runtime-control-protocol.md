@@ -75,7 +75,7 @@
 ## Conformance Hooks
 
 - [x] Add control-frame capability declarations to Rust capability reports.
-- [ ] Add conformance fixture coverage for representative control frames.
+- [x] Add conformance fixture coverage for representative control frames.
 - [x] Add runtime tests that mirror wire scenarios for cancel, priority/deadline, progress/backpressure, and route/cache behavior.
   - [x] Runtime loopback coverage for cancel, priority/deadline, partial result, drop reason, and backpressure.
   - [x] Runtime loopback coverage for route/cache behavior.
