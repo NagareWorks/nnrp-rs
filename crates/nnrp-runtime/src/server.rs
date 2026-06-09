@@ -31,7 +31,7 @@ use tokio::net::TcpListener;
 
 use crate::{
     BoxedFramedListener, BoxedFramedTransport, FramedListener, RuntimeError, RuntimePacket,
-    RuntimeTransportKind, TcpFramedListener,
+    RuntimePressureState, RuntimeTransportKind, TcpFramedListener,
 };
 
 #[derive(Clone)]
@@ -182,6 +182,7 @@ pub struct NnrpServerSession {
     transport: BoxedFramedTransport,
     lifecycle: ConnectionLifecycle,
     operations: OperationRegistry,
+    pressure: RuntimePressureState,
     cache_objects: Vec<CacheObjectId>,
     max_cache_objects: usize,
     sessions: SharedSessionRegistry,
@@ -351,6 +352,7 @@ impl NnrpServer {
             transport,
             lifecycle,
             operations: OperationRegistry::new(),
+            pressure: RuntimePressureState::default(),
             cache_objects: Vec::new(),
             max_cache_objects: self.config.max_cache_objects,
             sessions: Arc::clone(&self.sessions),
@@ -448,6 +450,7 @@ impl fmt::Debug for NnrpServerSession {
             .field("transport", &self.transport.transport_kind())
             .field("lifecycle", &self.lifecycle)
             .field("operations", &self.operations)
+            .field("pressure", &self.pressure)
             .field("cache_objects", &self.cache_objects)
             .field("max_cache_objects", &self.max_cache_objects)
             .finish_non_exhaustive()
@@ -469,6 +472,10 @@ impl NnrpServerSession {
 
     pub fn operations(&self) -> &OperationRegistry {
         &self.operations
+    }
+
+    pub fn pressure_state(&self) -> RuntimePressureState {
+        self.pressure
     }
 
     pub fn cache_object_count(&self) -> usize {
@@ -899,6 +906,8 @@ impl NnrpServerSession {
 
         let metadata = PressureMetadata::parse(&packet.metadata)?;
         validate_pressure_semantics(packet.header.message_type, &metadata)?;
+        self.pressure
+            .apply_inbound(packet.header.message_type, metadata)?;
         Ok(NnrpPressureUpdate {
             message_type: packet.header.message_type,
             metadata,
@@ -910,6 +919,8 @@ impl NnrpServerSession {
         metadata: PressureMetadata,
     ) -> Result<(), RuntimeError> {
         validate_pressure_semantics(MessageType::Backpressure, &metadata)?;
+        self.pressure
+            .apply_outbound(MessageType::Backpressure, metadata)?;
         let mut header =
             CommonHeader::new(MessageType::Backpressure, PRESSURE_METADATA_LEN as u32, 0);
         header.session_id = self.session_id;

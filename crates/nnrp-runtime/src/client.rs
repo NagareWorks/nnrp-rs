@@ -25,8 +25,8 @@ use nnrp_core::{
 };
 
 use crate::{
-    BoxedFramedTransport, FramedTransport, RuntimeError, RuntimePacket, RuntimeTransportKind,
-    TcpTransport,
+    BoxedFramedTransport, FramedTransport, RuntimeError, RuntimePacket, RuntimePressureState,
+    RuntimeTransportKind, TcpTransport,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +93,7 @@ pub struct NnrpClientSession {
     next_frame_id: u32,
     transport: BoxedFramedTransport,
     lifecycle: ConnectionLifecycle,
+    pressure: RuntimePressureState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,6 +232,7 @@ impl NnrpClient {
             next_frame_id: 1,
             transport: self.transport,
             lifecycle: self.lifecycle,
+            pressure: RuntimePressureState::default(),
         })
     }
 
@@ -264,6 +266,10 @@ impl NnrpClientSession {
 
     pub fn lifecycle(&self) -> &ConnectionLifecycle {
         &self.lifecycle
+    }
+
+    pub fn pressure_state(&self) -> RuntimePressureState {
+        self.pressure
     }
 
     pub async fn submit(
@@ -413,6 +419,8 @@ impl NnrpClientSession {
                 }
                 let metadata = PressureMetadata::parse(&packet.metadata)?;
                 validate_pressure_semantics(packet.header.message_type, &metadata)?;
+                self.pressure
+                    .apply_inbound(packet.header.message_type, metadata)?;
                 match packet.header.message_type {
                     MessageType::Backpressure => Ok(NnrpClientEvent::Backpressure(metadata)),
                     MessageType::CreditUpdate => Ok(NnrpClientEvent::CreditUpdate(metadata)),
@@ -703,6 +711,8 @@ impl NnrpClientSession {
         metadata: PressureMetadata,
     ) -> Result<(), RuntimeError> {
         validate_pressure_semantics(MessageType::CreditUpdate, &metadata)?;
+        self.pressure
+            .apply_outbound(MessageType::CreditUpdate, metadata)?;
         let mut header =
             CommonHeader::new(MessageType::CreditUpdate, PRESSURE_METADATA_LEN as u32, 0);
         header.session_id = self.session_id;

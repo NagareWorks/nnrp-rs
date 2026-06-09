@@ -68,7 +68,7 @@
   - [x] Allow interleaving across operations.
   - [x] Support host polling for `PARTIAL_RESULT`.
 - [ ] Route backpressure and credit changes through transport/provider state.
-  - [ ] Apply send window changes.
+  - [x] Apply send window changes.
   - [x] Report pressure to host code.
   - [ ] Avoid unbounded buffering in runtime queues.
 

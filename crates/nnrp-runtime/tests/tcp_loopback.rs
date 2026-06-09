@@ -203,8 +203,14 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
         let credit = session.receive_pressure_update().await?;
         assert_eq!(credit.message_type, MessageType::CreditUpdate);
         assert_eq!(credit.metadata.credit_window, 9);
+        assert_eq!(session.pressure_state().outbound_credit_window, 9);
 
         session.send_backpressure(soft_backpressure()).await?;
+        assert_eq!(
+            session.pressure_state().local_backpressure_level,
+            BackpressureLevel::Soft as u16
+        );
+        assert_eq!(session.pressure_state().inbound_credit_window, 2);
         session
             .send_partial_result(partial_result(submit.frame_id as u64), b"partial".to_vec())
             .await?;
@@ -266,12 +272,18 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
         .update_deadline(frame_id as u64, 1_800_000_000_000)
         .await?;
     session.send_credit_update(credit_update()).await?;
+    assert_eq!(session.pressure_state().inbound_credit_window, 9);
     session.cancel_operation(frame_id as u64, 7).await?;
 
     match session.await_event().await? {
         NnrpClientEvent::Backpressure(pressure) => {
             assert_eq!(pressure.pressure_level, BackpressureLevel::Soft as u16);
             assert_eq!(pressure.retry_after_ms, 25);
+            assert_eq!(
+                session.pressure_state().remote_backpressure_level,
+                BackpressureLevel::Soft as u16
+            );
+            assert_eq!(session.pressure_state().outbound_credit_window, 2);
         }
         event => panic!("expected backpressure, got {event:?}"),
     }
