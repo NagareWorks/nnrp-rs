@@ -56,7 +56,7 @@
 - [ ] Route cancellation into operation lifecycle state.
   - [x] Cooperative cancellation.
   - [ ] Hard abort.
-  - [ ] Late result suppression.
+  - [x] Late result suppression.
 - [ ] Route priority and deadline changes into scheduler metadata.
   - [x] Update priority without reopening the session.
   - [x] Persist priority, deadline, and expire-at metadata in the operation registry.

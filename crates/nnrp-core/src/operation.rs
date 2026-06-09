@@ -111,6 +111,32 @@ impl OperationRegistry {
         Ok(())
     }
 
+    pub fn complete(&mut self, operation_id: u64) -> Result<(), NnrpError> {
+        let record = self
+            .operations
+            .get_mut(&operation_id)
+            .ok_or(NnrpError::UnknownOperation(operation_id))?;
+        if record.state.is_terminal() {
+            return Err(NnrpError::InvalidOperationTransition {
+                from: record.state,
+                to: OperationState::Completed,
+            });
+        }
+
+        if record.state == OperationState::Accepted {
+            record.state = OperationState::Running;
+        }
+        if !record.state.can_transition_to(OperationState::Completed) {
+            return Err(NnrpError::InvalidOperationTransition {
+                from: record.state,
+                to: OperationState::Completed,
+            });
+        }
+
+        record.state = OperationState::Completed;
+        Ok(())
+    }
+
     pub fn apply_scheduling_update(
         &mut self,
         session_id: u32,
@@ -359,6 +385,39 @@ mod tests {
             registry.transition(99, OperationState::Running),
             Err(NnrpError::UnknownOperation(99))
         );
+    }
+
+    #[test]
+    fn completes_active_operations_and_rejects_terminal_or_unknown_records() {
+        let mut registry = OperationRegistry::new();
+        registry.register(OperationDescriptor::new(42, 1)).unwrap();
+        registry.register(OperationDescriptor::new(42, 2)).unwrap();
+        registry.register(OperationDescriptor::new(42, 3)).unwrap();
+        registry.transition(2, OperationState::Running).unwrap();
+        registry.transition(2, OperationState::Cancelled).unwrap();
+        registry.transition(3, OperationState::Running).unwrap();
+        registry.transition(3, OperationState::WaitingTool).unwrap();
+
+        assert_eq!(registry.complete(1), Ok(()));
+        assert_eq!(
+            registry.operation(1).unwrap().state,
+            OperationState::Completed
+        );
+        assert_eq!(
+            registry.complete(2),
+            Err(NnrpError::InvalidOperationTransition {
+                from: OperationState::Cancelled,
+                to: OperationState::Completed,
+            })
+        );
+        assert_eq!(
+            registry.complete(3),
+            Err(NnrpError::InvalidOperationTransition {
+                from: OperationState::WaitingTool,
+                to: OperationState::Completed,
+            })
+        );
+        assert_eq!(registry.complete(99), Err(NnrpError::UnknownOperation(99)));
     }
 
     #[test]

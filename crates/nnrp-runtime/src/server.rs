@@ -510,6 +510,7 @@ impl NnrpServerSession {
         metadata: ResultPushMetadata,
         body: Vec<u8>,
     ) -> Result<(), RuntimeError> {
+        self.operations.complete(frame_id as u64)?;
         let mut header = CommonHeader::new(
             MessageType::ResultPush,
             RESULT_PUSH_METADATA_LEN as u32,

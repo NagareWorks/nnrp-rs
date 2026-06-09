@@ -73,6 +73,14 @@ async fn tcp_loopback_submits_frame_receives_result_and_closes() -> Result<(), R
         session
             .send_result(submit.frame_id, token_result(), b"delta".to_vec())
             .await?;
+        assert_eq!(
+            session
+                .operations()
+                .operation(submit.frame_id as u64)
+                .expect("operation should be registered")
+                .state,
+            OperationState::Completed
+        );
         let close = session.receive_close().await?;
         assert_eq!(close.last_operation_id, 1);
         session.ack_close(&close).await?;
@@ -114,6 +122,12 @@ async fn tcp_loopback_handles_cancel_drop_flow_and_patch() -> Result<(), Runtime
                 .state,
             OperationState::Cancelled
         );
+        assert!(matches!(
+            session
+                .send_result(submit.frame_id, token_result(), b"late".to_vec())
+                .await,
+            Err(RuntimeError::Protocol(_))
+        ));
 
         let patch = session.receive_patch().await?;
         assert_eq!(patch.patch_mask, 1);
