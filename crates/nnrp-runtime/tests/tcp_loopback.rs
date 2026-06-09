@@ -6,9 +6,9 @@ use nnrp_core::{
     FrameSubmitMetadata, InFlightPolicy, InputProfile, MemoryLocationHint, MessageType,
     ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata, ObjectReleaseMetadata,
     ObjectReleaseReason, OperationState, OwnershipHint, PartialResultMetadata, PayloadKindBitmap,
-    PressureMetadata, ResultClass, ResultDropReasonMetadata, ResultPushMetadata, RouteHintMetadata,
-    RuntimeObjectKind, RuntimeRole, SchemaRegistry, SessionCloseMetadata, SessionCloseReason,
-    SessionMigrateAckMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
+    PressureMetadata, ProgressMetadata, ResultClass, ResultDropReasonMetadata, ResultPushMetadata,
+    RouteHintMetadata, RuntimeObjectKind, RuntimeRole, SchemaRegistry, SessionCloseMetadata,
+    SessionCloseReason, SessionMigrateAckMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
     SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata, SessionPatchRejectReason,
     SessionPriorityClass, SessionStatus, SubmitMode, TileIndexMode, TransportId,
     FLOW_UPDATE_FLAG_CREDIT_VALID, RESULT_DROP_REASON_DEADLINE_EXPIRED, RESULT_PUSH_METADATA_LEN,
@@ -246,6 +246,9 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
         );
         assert_eq!(session.pressure_state().inbound_credit_window, 2);
         session
+            .send_progress(progress(submit.frame_id as u64), b"stage".to_vec())
+            .await?;
+        session
             .send_partial_result(partial_result(submit.frame_id as u64), b"partial".to_vec())
             .await?;
 
@@ -320,6 +323,15 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
             assert_eq!(session.pressure_state().outbound_credit_window, 2);
         }
         event => panic!("expected backpressure, got {event:?}"),
+    }
+    match session.await_event().await? {
+        NnrpClientEvent::Progress { metadata, body } => {
+            assert_eq!(metadata.operation_id, frame_id as u64);
+            assert_eq!(metadata.progress_sequence, 1);
+            assert_eq!(metadata.percent_x100, 2_500);
+            assert_eq!(body, b"stage".to_vec());
+        }
+        event => panic!("expected progress, got {event:?}"),
     }
     match session.await_event().await? {
         NnrpClientEvent::PartialResult { metadata, body } => {
@@ -1149,6 +1161,19 @@ async fn client_preview4_control_event_reader_rejects_malformed_packets() -> Res
             Vec::new(),
         )?,
         control_event_packet(
+            MessageType::Progress,
+            2,
+            progress(1).to_bytes()?.to_vec(),
+            b"stage".to_vec(),
+        )?,
+        control_event_packet(MessageType::Progress, 1, vec![0], Vec::new())?,
+        control_event_packet(
+            MessageType::Progress,
+            1,
+            progress(1).to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        control_event_packet(
             MessageType::Backpressure,
             2,
             soft_backpressure().to_bytes()?.to_vec(),
@@ -1388,6 +1413,10 @@ async fn server_preview4_control_readers_and_senders_reject_mismatches() -> Resu
             session
                 .send_partial_result(partial_result(1), Vec::new())
                 .await
+        })
+        .await,
+        server_send_control_error(|mut session| async move {
+            session.send_progress(progress(1), Vec::new()).await
         })
         .await,
         server_send_control_error(|mut session| async move {
@@ -2374,6 +2403,17 @@ fn soft_backpressure() -> PressureMetadata {
 
 fn partial_result(operation_id: u64) -> PartialResultMetadata {
     partial_result_sequence(operation_id, 1, 7)
+}
+
+fn progress(operation_id: u64) -> ProgressMetadata {
+    ProgressMetadata {
+        operation_id,
+        progress_sequence: 1,
+        stage_code: 2,
+        percent_x100: 2_500,
+        object_id: 0,
+        body_bytes: 5,
+    }
 }
 
 fn partial_result_sequence(

@@ -335,8 +335,8 @@ mod tests {
     use super::*;
     use nnrp_core::{
         BackpressureLevel, FrameSubmitMetadata, InputProfile, PartialResultMetadata,
-        PayloadKindBitmap, PressureMetadata, ResultClass, ResultPushMetadata, SubmitMode,
-        TileIndexMode, STANDARD_PROFILE_TOKEN,
+        PayloadKindBitmap, PressureMetadata, ProgressMetadata, ResultClass, ResultPushMetadata,
+        SubmitMode, TileIndexMode, STANDARD_PROFILE_TOKEN,
     };
     use nnrp_runtime::{NnrpClientEvent, NnrpResult};
     use nnrp_transport_provider::{RemoteTransportSupport, TransportPolicy};
@@ -457,7 +457,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn websocket_loopback_routes_partial_result_and_pressure() -> Result<(), RuntimeError> {
+    async fn websocket_loopback_routes_progress_partial_result_and_pressure(
+    ) -> Result<(), RuntimeError> {
         let server = WebSocketProvider::bind("127.0.0.1:0", NnrpServerConfig::default()).await?;
         let endpoint = WebSocketEndpoint::ws(format!("ws://{}", server.local_addr()?))?;
 
@@ -467,6 +468,9 @@ mod tests {
             let credit = session.receive_pressure_update().await?;
             assert_eq!(credit.metadata.credit_window, 9);
             session.send_backpressure(soft_backpressure()).await?;
+            session
+                .send_progress(progress(submit.frame_id as u64), b"stage".to_vec())
+                .await?;
             session
                 .send_partial_result(partial_result(submit.frame_id as u64), b"partial".to_vec())
                 .await
@@ -485,6 +489,15 @@ mod tests {
                 assert_eq!(pressure.credit_window, 2);
             }
             event => panic!("expected backpressure event, got {event:?}"),
+        }
+        match session.await_event().await? {
+            NnrpClientEvent::Progress { metadata, body } => {
+                assert_eq!(metadata.operation_id, frame_id as u64);
+                assert_eq!(metadata.progress_sequence, 1);
+                assert_eq!(metadata.percent_x100, 2_500);
+                assert_eq!(body, b"stage");
+            }
+            event => panic!("expected progress event, got {event:?}"),
         }
         match session.await_event().await? {
             NnrpClientEvent::PartialResult { metadata, body } => {
@@ -569,6 +582,17 @@ mod tests {
             pressure_reason: 1,
             retry_after_ms: 25,
             flags: 0,
+        }
+    }
+
+    fn progress(operation_id: u64) -> ProgressMetadata {
+        ProgressMetadata {
+            operation_id,
+            progress_sequence: 1,
+            stage_code: 2,
+            percent_x100: 2_500,
+            object_id: 0,
+            body_bytes: 5,
         }
     }
 

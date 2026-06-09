@@ -49,8 +49,8 @@
 - [ ] Add loopback tests.
   - [x] Client to server handshake.
   - [x] Submit/result.
-  - [ ] Progress/partial result.
-    - [ ] Progress.
+  - [x] Progress/partial result.
+    - [x] Progress.
     - [x] Partial result.
   - [x] Backpressure credit update.
 
