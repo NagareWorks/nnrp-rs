@@ -2,22 +2,28 @@ export type TransportPolicy =
   | "auto"
   | "prefer_quic"
   | "prefer_tcp"
+  | "prefer_ipc"
+  | "prefer_websocket"
   | "force_quic"
-  | "force_tcp";
+  | "force_tcp"
+  | "force_ipc"
+  | "force_websocket";
+
+export type TransportId = 1 | 2 | 3 | 4;
 
 export type ProviderKind = "pure_rust" | "native_dynamic" | "wasm";
 
 export interface TransportProviderInput {
   name: string;
   version: string;
-  transport_id: 1 | 2;
+  transport_id: TransportId;
   kind?: ProviderKind;
   available?: boolean;
   diagnostic?: string;
 }
 
 export interface ProbeSampleInput {
-  transport_id: 1 | 2;
+  transport_id: TransportId;
   provider_name: string;
   elapsed_us: number;
   rtt_us: number | null;
@@ -40,7 +46,40 @@ export interface TransportSelection {
   selected: TransportProviderInput;
   selected_score: ProbeScore;
   candidates: Array<{ provider: TransportProviderInput; probe_score: ProbeScore }>;
-  rejected: Array<{ transport_id: 1 | 2; provider_name?: string; reason: string }>;
+  rejected: Array<{ transport_id: TransportId; provider_name?: string; reason: string }>;
+}
+
+export interface WebSocketFrameHeaderInput {
+  message_type: number;
+  flags?: number;
+  session_id?: number;
+  frame_id?: number;
+  view_id?: number;
+  route_id?: number;
+  trace_id?: number;
+}
+
+export interface WebSocketFrameHeaderOutput {
+  version_major: number;
+  wire_format: number;
+  message_type: number;
+  header_len: number;
+  flags: number;
+  meta_len: number;
+  body_len: number;
+  session_id: number;
+  frame_id: number;
+  view_id: number;
+  route_id: number;
+  trace_id: number;
+}
+
+export interface WebSocketFrameOutput {
+  header: WebSocketFrameHeaderOutput;
+  metadata_offset: number;
+  metadata_len: number;
+  body_offset: number;
+  body_len: number;
 }
 
 export function nnrp_wasm_protocol_major(): number;
@@ -58,3 +97,11 @@ export function scoreProviderProbeJson(
   policy: TransportPolicy,
   samplesJson: string,
 ): string;
+
+export function encodeWebSocketBinaryFrameJson(
+  headerJson: string,
+  metadata: Uint8Array,
+  body: Uint8Array,
+): Uint8Array;
+
+export function decodeWebSocketBinaryFrameJson(frame: Uint8Array): string;

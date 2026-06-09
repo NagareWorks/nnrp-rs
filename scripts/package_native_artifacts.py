@@ -8,6 +8,8 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+PROTOCOL_VERSION = "NNRP/1"
+FFI_ABI_VERSION = "1.6.0"
 EXPECTED_EXPORTS = [
     "nnrp_current_protocol_version",
     "nnrp_runtime_capabilities",
@@ -61,8 +63,13 @@ TARGETS = {
 TRANSPORT_SCOPES = {
     "all": {
         "package": "nnrp-ffi",
-        "features": ["transport-tcp", "transport-quic"],
-        "slots": ["tcp", "quic"],
+        "features": [
+            "transport-tcp",
+            "transport-quic",
+            "transport-ipc",
+            "transport-websocket",
+        ],
+        "slots": ["tcp", "quic", "ipc", "websocket"],
     },
     "tcp": {
         "package": "nnrp-ffi-transport-tcp",
@@ -73,6 +80,16 @@ TRANSPORT_SCOPES = {
         "package": "nnrp-ffi-transport-quic",
         "features": ["transport-quic"],
         "slots": ["quic"],
+    },
+    "ipc": {
+        "package": "nnrp-ffi-transport-ipc",
+        "features": ["transport-ipc"],
+        "slots": ["ipc"],
+    },
+    "websocket": {
+        "package": "nnrp-ffi-transport-websocket",
+        "features": ["transport-websocket"],
+        "slots": ["websocket"],
     },
 }
 
@@ -258,8 +275,12 @@ def package_artifact(
     headers = copy_headers(package_dir)
     manifest = {
         "package": TRANSPORT_SCOPES[transport_scope]["package"],
+        "transport_name": transport_scope,
         "transport_scope": transport_scope,
         "transport_slots": TRANSPORT_SCOPES[transport_scope]["slots"],
+        "protocol_version": PROTOCOL_VERSION,
+        "abi_version": FFI_ABI_VERSION,
+        "enabled_features": TRANSPORT_SCOPES[transport_scope]["features"],
         "profile": "release" if release else "debug",
         "os": os_name,
         "arch": arch_name,

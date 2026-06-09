@@ -9,7 +9,12 @@ use nnrp_transport_provider::{
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
-#[cfg(not(any(feature = "transport-tcp", feature = "transport-quic")))]
+#[cfg(not(any(
+    feature = "transport-tcp",
+    feature = "transport-quic",
+    feature = "transport-ipc",
+    feature = "transport-websocket"
+)))]
 compile_error!("nnrp-wasm must be built with at least one transport feature enabled.");
 
 #[wasm_bindgen]

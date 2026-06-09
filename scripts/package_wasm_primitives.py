@@ -6,28 +6,16 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+PROTOCOL_VERSION = "NNRP/1"
+WASM_ABI_VERSION = "1.0.0"
 
 TRANSPORT_SCOPES = {
-    "all": {
+    "browser": {
         "package": "nnrp-wasm",
-        "artifact": "nnrp-wasm-primitives",
-        "directory": "nnrp-wasm-primitives",
-        "features": ["transport-tcp", "transport-quic", "wasm-provider"],
-        "slots": ["tcp", "quic"],
-    },
-    "tcp": {
-        "package": "nnrp-wasm-transport-tcp",
-        "artifact": "nnrp-wasm-transport-tcp",
-        "directory": "nnrp-wasm-transport-tcp",
-        "features": ["transport-tcp", "wasm-provider"],
-        "slots": ["tcp"],
-    },
-    "quic": {
-        "package": "nnrp-wasm-transport-quic",
-        "artifact": "nnrp-wasm-transport-quic",
-        "directory": "nnrp-wasm-transport-quic",
-        "features": ["transport-quic", "wasm-provider"],
-        "slots": ["quic"],
+        "artifact": "nnrp-wasm-browser",
+        "directory": "nnrp-wasm-browser",
+        "features": ["transport-websocket", "wasm-provider"],
+        "slots": ["websocket"],
     },
 }
 
@@ -68,8 +56,12 @@ def package_wasm(out_dir: Path, transport_scope: str) -> Path:
     manifest = {
         "package": scope["package"],
         "artifact": scope["artifact"],
+        "transport_name": transport_scope,
         "transport_scope": transport_scope,
         "transport_slots": scope["slots"],
+        "protocol_version": PROTOCOL_VERSION,
+        "abi_version": WASM_ABI_VERSION,
+        "enabled_features": scope["features"],
         "wasm": "nnrp_wasm.wasm",
         "types": "nnrp_wasm.d.ts",
         "owner": "nnrp-rs",
@@ -79,6 +71,8 @@ def package_wasm(out_dir: Path, transport_scope: str) -> Path:
             "nnrp_wasm_wire_format",
             "selectTransportWithProbeJson",
             "scoreProviderProbeJson",
+            "encodeWebSocketBinaryFrameJson",
+            "decodeWebSocketBinaryFrameJson",
         ],
     }
     (package_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
@@ -93,11 +87,11 @@ def main() -> None:
         "--transport-scope",
         action="append",
         choices=sorted(TRANSPORT_SCOPES.keys()),
-        help="Transport scope to package. Repeat to package multiple scopes. Defaults to all.",
+        help="Transport scope to package. Repeat to package multiple scopes. Defaults to browser.",
     )
     args = parser.parse_args()
 
-    for transport_scope in args.transport_scope or ["all"]:
+    for transport_scope in args.transport_scope or ["browser"]:
         if not args.skip_build:
             build_wasm(transport_scope)
         print(package_wasm(args.out, transport_scope))

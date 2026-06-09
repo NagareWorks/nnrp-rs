@@ -63,7 +63,7 @@
 
 ## Packaging
 
-- [ ] Add IPC native artifacts to release packaging.
-- [ ] Add WebSocket native artifacts to release packaging.
-- [ ] Ensure transport-specific artifacts remain scoped to transport packages.
-- [ ] Ensure downstream SDK manifests can distinguish TCP, QUIC, IPC, and WebSocket artifacts.
+- [x] Add IPC native artifacts to release packaging.
+- [x] Add WebSocket native artifacts to release packaging.
+- [x] Ensure transport-specific artifacts remain scoped to transport packages.
+- [x] Ensure downstream SDK manifests can distinguish TCP, QUIC, IPC, and WebSocket artifacts.
