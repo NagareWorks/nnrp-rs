@@ -12,16 +12,17 @@ use nnrp_core::{
     MessageType, ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata,
     ObjectReleaseMetadata, OperationCancelRequest, OperationDescriptor, OperationRegistry,
     PartialResultMetadata, PressureMetadata, ResultDropReasonMetadata, ResultPushMetadata,
-    SchedulingMetadata, SchemaRegistry, SessionCloseAckMetadata, SessionCloseMetadata,
+    RuntimeRole, SchedulingMetadata, SchemaRegistry, SessionCloseAckMetadata, SessionCloseMetadata,
     SessionCloseStatus, SessionMigrateAckMetadata, SessionMigrateMetadata, SessionOpenAckMetadata,
     SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchMetadata, SessionStatus,
     CACHE_INVALIDATE_METADATA_LEN, CACHE_MISS_METADATA_LEN, CACHE_REFERENCE_METADATA_LEN,
     CONTROL_REQUEST_METADATA_LEN, FLOW_UPDATE_METADATA_LEN, FRAME_SUBMIT_METADATA_LEN,
     OBJECT_DELTA_METADATA_LEN, OBJECT_DESCRIPTOR_METADATA_LEN, OBJECT_REFERENCE_METADATA_LEN,
     OBJECT_RELEASE_METADATA_LEN, PARTIAL_RESULT_METADATA_LEN, PRESSURE_METADATA_LEN,
-    RESULT_DROP_REASON_METADATA_LEN, RESULT_PUSH_METADATA_LEN, SCHEDULING_METADATA_LEN,
-    SESSION_ACK_FLAG_RESUME_ENABLED, SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_LIMIT_REACHED,
-    SESSION_ERROR_NONE, SESSION_ERROR_PROFILE_UNSUPPORTED, SESSION_ERROR_RESUME_REJECTED,
+    RESULT_DROP_REASON_DEADLINE_EXPIRED, RESULT_DROP_REASON_METADATA_LEN, RESULT_PUSH_METADATA_LEN,
+    SCHEDULING_FLAG_EMIT_DROP_REASON, SCHEDULING_METADATA_LEN, SESSION_ACK_FLAG_RESUME_ENABLED,
+    SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_LIMIT_REACHED, SESSION_ERROR_NONE,
+    SESSION_ERROR_PROFILE_UNSUPPORTED, SESSION_ERROR_RESUME_REJECTED,
     SESSION_ERROR_SCHEMA_UNSUPPORTED, SESSION_FLAG_ALLOW_RESUME, SESSION_MIGRATE_ACK_METADATA_LEN,
     SESSION_MIGRATE_METADATA_LEN, SESSION_OPEN_ACK_METADATA_LEN, SESSION_PATCH_ACK_METADATA_LEN,
     SESSION_PATCH_METADATA_LEN,
@@ -511,10 +512,21 @@ impl NnrpServerSession {
         metadata: ResultPushMetadata,
         body: Vec<u8>,
     ) -> Result<(), RuntimeError> {
-        if self
+        if let Some(schedule) = self
             .operations
             .expire_if_stale(frame_id as u64, current_unix_ms())?
         {
+            if schedule.flags & SCHEDULING_FLAG_EMIT_DROP_REASON != 0 {
+                self.send_result_drop_reason(ResultDropReasonMetadata {
+                    operation_id: frame_id as u64,
+                    result_sequence: schedule.update_sequence,
+                    drop_reason_code: RESULT_DROP_REASON_DEADLINE_EXPIRED,
+                    source_role: RuntimeRole::Server as u8,
+                    flags: 0,
+                    diagnostic_bytes: 0,
+                })
+                .await?;
+            }
             return Err(nnrp_core::NnrpError::InvalidOperationTransition {
                 from: nnrp_core::OperationState::Superseded,
                 to: nnrp_core::OperationState::Completed,

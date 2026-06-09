@@ -11,9 +11,9 @@ use nnrp_core::{
     SessionOpenAckMetadata, SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchAckStatus,
     SessionPatchMetadata, SessionPatchRejectReason, SessionPriorityClass, SessionStatus,
     SubmitMode, TileIndexMode, TransportId, FLOW_UPDATE_FLAG_CREDIT_VALID,
-    RESULT_PUSH_METADATA_LEN, SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE,
-    SESSION_OPEN_ACK_METADATA_LEN, SESSION_OPEN_METADATA_LEN, STANDARD_PROFILE_TOKEN,
-    TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
+    RESULT_DROP_REASON_DEADLINE_EXPIRED, RESULT_PUSH_METADATA_LEN, SESSION_CLOSE_ACK_METADATA_LEN,
+    SESSION_ERROR_NONE, SESSION_OPEN_ACK_METADATA_LEN, SESSION_OPEN_METADATA_LEN,
+    STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
 };
 use nnrp_runtime::{
     BoxedFramedTransport, FramedListener, FramedTransport, NnrpClient, NnrpClientConfig,
@@ -725,6 +725,15 @@ async fn tcp_loopback_suppresses_expired_final_results() -> Result<(), RuntimeEr
         .submit_nowait(token_submit(), b"prompt".to_vec())
         .await?;
     session.expire_at(frame_id as u64, 1).await?;
+    match session.await_event().await? {
+        NnrpClientEvent::ResultDropReason(reason) => {
+            assert_eq!(reason.operation_id, frame_id as u64);
+            assert_eq!(reason.result_sequence, frame_id as u64);
+            assert_eq!(reason.drop_reason_code, RESULT_DROP_REASON_DEADLINE_EXPIRED);
+            assert_eq!(reason.source_role, RuntimeRole::Server as u8);
+        }
+        event => panic!("expected stale result drop reason, got {event:?}"),
+    }
     session.close().await?;
     server_task.await.expect("server task should join")?;
     Ok(())

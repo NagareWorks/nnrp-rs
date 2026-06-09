@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{CancelScope, MessageType, NnrpError, OperationState, SchedulingMetadata};
+use crate::{
+    CancelScope, MessageType, NnrpError, OperationState, SchedulingMetadata,
+    SCHEDULING_FLAG_DISCARD_STALE,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OperationDescriptor {
@@ -42,6 +45,7 @@ pub struct OperationSchedule {
     pub deadline_unix_ms: u64,
     pub expire_at_unix_ms: u64,
     pub update_sequence: u64,
+    pub flags: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -141,17 +145,19 @@ impl OperationRegistry {
         &mut self,
         operation_id: u64,
         now_unix_ms: u64,
-    ) -> Result<bool, NnrpError> {
+    ) -> Result<Option<OperationSchedule>, NnrpError> {
         let record = self
             .operations
             .get_mut(&operation_id)
             .ok_or(NnrpError::UnknownOperation(operation_id))?;
         if record.state.is_terminal() {
-            return Ok(false);
+            return Ok(None);
         }
-        if record.schedule.expire_at_unix_ms == 0 || record.schedule.expire_at_unix_ms > now_unix_ms
+        if record.schedule.flags & SCHEDULING_FLAG_DISCARD_STALE == 0
+            || record.schedule.expire_at_unix_ms == 0
+            || record.schedule.expire_at_unix_ms > now_unix_ms
         {
-            return Ok(false);
+            return Ok(None);
         }
         if !record.state.can_transition_to(OperationState::Superseded) {
             return Err(NnrpError::InvalidOperationTransition {
@@ -161,7 +167,7 @@ impl OperationRegistry {
         }
 
         record.state = OperationState::Superseded;
-        Ok(true)
+        Ok(Some(record.schedule))
     }
 
     pub fn apply_scheduling_update(
@@ -197,6 +203,7 @@ impl OperationRegistry {
             }
             MessageType::ExpireAt => {
                 record.schedule.expire_at_unix_ms = metadata.deadline_unix_ms;
+                record.schedule.flags = metadata.flags;
             }
             _ => {
                 return Err(NnrpError::InvalidProtocolCombination {
@@ -311,7 +318,10 @@ fn validate_descriptor_shape(descriptor: &OperationDescriptor) -> Result<(), Nnr
 
 #[cfg(test)]
 mod tests {
-    use crate::{CancelScope, MessageType, NnrpError, OperationState, SchedulingMetadata};
+    use crate::{
+        CancelScope, MessageType, NnrpError, OperationState, SchedulingMetadata,
+        SCHEDULING_FLAG_DISCARD_STALE, SCHEDULING_FLAG_EMIT_DROP_REASON,
+    };
 
     use super::{OperationCancelRequest, OperationDescriptor, OperationRegistry};
 
@@ -576,6 +586,7 @@ mod tests {
                 deadline_unix_ms: 50,
                 expire_at_unix_ms: 60,
                 update_sequence: 12,
+                ..super::OperationSchedule::default()
             })
         );
         assert_eq!(
@@ -600,7 +611,7 @@ mod tests {
                     priority_class: 0,
                     priority_delta: 0,
                     deadline_unix_ms: 200,
-                    flags: 0,
+                    flags: SCHEDULING_FLAG_DISCARD_STALE | SCHEDULING_FLAG_EMIT_DROP_REASON,
                 },
             )
             .unwrap();
@@ -621,18 +632,25 @@ mod tests {
         registry.transition(3, OperationState::Running).unwrap();
         registry.transition(3, OperationState::Completed).unwrap();
 
-        assert_eq!(registry.expire_if_stale(1, 199), Ok(false));
+        assert_eq!(registry.expire_if_stale(1, 199), Ok(None));
         assert_eq!(
             registry.operation(1).unwrap().state,
             OperationState::Accepted
         );
-        assert_eq!(registry.expire_if_stale(1, 200), Ok(true));
+        assert_eq!(
+            registry.expire_if_stale(1, 200).unwrap().unwrap().flags,
+            SCHEDULING_FLAG_DISCARD_STALE | SCHEDULING_FLAG_EMIT_DROP_REASON
+        );
         assert_eq!(
             registry.operation(1).unwrap().state,
             OperationState::Superseded
         );
-        assert_eq!(registry.expire_if_stale(2, 200), Ok(false));
-        assert_eq!(registry.expire_if_stale(3, 1_000), Ok(false));
+        assert_eq!(registry.expire_if_stale(2, 500), Ok(None));
+        assert_eq!(
+            registry.operation(2).unwrap().state,
+            OperationState::Accepted
+        );
+        assert_eq!(registry.expire_if_stale(3, 1_000), Ok(None));
         assert_eq!(
             registry.expire_if_stale(99, 1_000),
             Err(NnrpError::UnknownOperation(99))
