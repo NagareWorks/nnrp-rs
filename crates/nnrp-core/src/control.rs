@@ -709,6 +709,28 @@ impl ControlRequestMetadata {
         self.write(&mut bytes)?;
         Ok(bytes)
     }
+
+    pub fn parse_with_diagnostics(source: &[u8]) -> Result<(Self, &[u8]), NnrpError> {
+        let metadata = Self::parse(source)?;
+        let diagnostics = split_declared_tail(
+            source,
+            CONTROL_REQUEST_METADATA_LEN,
+            metadata.diagnostic_bytes as usize,
+            "control_request.diagnostic_bytes",
+        )?;
+        Ok((metadata, diagnostics))
+    }
+
+    pub fn to_vec_with_diagnostics(&self, diagnostics: &[u8]) -> Result<Vec<u8>, NnrpError> {
+        require_declared_len(
+            "control_request.diagnostic_bytes",
+            self.diagnostic_bytes as usize,
+            diagnostics.len(),
+        )?;
+        let mut bytes = self.to_bytes()?.to_vec();
+        bytes.extend_from_slice(diagnostics);
+        Ok(bytes)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -795,6 +817,28 @@ impl SupersedeMetadata {
     pub fn to_bytes(&self) -> Result<[u8; SUPERSEDE_METADATA_LEN], NnrpError> {
         let mut bytes = [0u8; SUPERSEDE_METADATA_LEN];
         self.write(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    pub fn parse_with_diagnostics(source: &[u8]) -> Result<(Self, &[u8]), NnrpError> {
+        let metadata = Self::parse(source)?;
+        let diagnostics = split_declared_tail(
+            source,
+            SUPERSEDE_METADATA_LEN,
+            metadata.diagnostic_bytes as usize,
+            "supersede.diagnostic_bytes",
+        )?;
+        Ok((metadata, diagnostics))
+    }
+
+    pub fn to_vec_with_diagnostics(&self, diagnostics: &[u8]) -> Result<Vec<u8>, NnrpError> {
+        require_declared_len(
+            "supersede.diagnostic_bytes",
+            self.diagnostic_bytes as usize,
+            diagnostics.len(),
+        )?;
+        let mut bytes = self.to_bytes()?.to_vec();
+        bytes.extend_from_slice(diagnostics);
         Ok(bytes)
     }
 }
@@ -885,6 +929,24 @@ impl ProgressMetadata {
         self.write(&mut bytes)?;
         Ok(bytes)
     }
+
+    pub fn parse_with_body(source: &[u8]) -> Result<(Self, &[u8]), NnrpError> {
+        let metadata = Self::parse(source)?;
+        let body = split_declared_tail(
+            source,
+            PROGRESS_METADATA_LEN,
+            metadata.body_bytes as usize,
+            "progress.body_bytes",
+        )?;
+        Ok((metadata, body))
+    }
+
+    pub fn to_vec_with_body(&self, body: &[u8]) -> Result<Vec<u8>, NnrpError> {
+        require_declared_len("progress.body_bytes", self.body_bytes as usize, body.len())?;
+        let mut bytes = self.to_bytes()?.to_vec();
+        bytes.extend_from_slice(body);
+        Ok(bytes)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -927,6 +989,28 @@ impl PartialResultMetadata {
     pub fn to_bytes(&self) -> Result<[u8; PARTIAL_RESULT_METADATA_LEN], NnrpError> {
         let mut bytes = [0u8; PARTIAL_RESULT_METADATA_LEN];
         self.write(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    pub fn parse_with_body(source: &[u8]) -> Result<(Self, &[u8]), NnrpError> {
+        let metadata = Self::parse(source)?;
+        let body = split_declared_tail(
+            source,
+            PARTIAL_RESULT_METADATA_LEN,
+            metadata.body_bytes as usize,
+            "partial_result.body_bytes",
+        )?;
+        Ok((metadata, body))
+    }
+
+    pub fn to_vec_with_body(&self, body: &[u8]) -> Result<Vec<u8>, NnrpError> {
+        require_declared_len(
+            "partial_result.body_bytes",
+            self.body_bytes as usize,
+            body.len(),
+        )?;
+        let mut bytes = self.to_bytes()?.to_vec();
+        bytes.extend_from_slice(body);
         Ok(bytes)
     }
 }
@@ -1025,6 +1109,28 @@ impl CapabilityMetadata {
         self.write(&mut bytes)?;
         Ok(bytes)
     }
+
+    pub fn parse_with_body(source: &[u8]) -> Result<(Self, &[u8]), NnrpError> {
+        let metadata = Self::parse(source)?;
+        let body = split_declared_tail(
+            source,
+            CAPABILITY_METADATA_LEN,
+            metadata.body_bytes as usize,
+            "capability.body_bytes",
+        )?;
+        Ok((metadata, body))
+    }
+
+    pub fn to_vec_with_body(&self, body: &[u8]) -> Result<Vec<u8>, NnrpError> {
+        require_declared_len(
+            "capability.body_bytes",
+            self.body_bytes as usize,
+            body.len(),
+        )?;
+        let mut bytes = self.to_bytes()?.to_vec();
+        bytes.extend_from_slice(body);
+        Ok(bytes)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1072,6 +1178,28 @@ impl RouteHintMetadata {
         self.write(&mut bytes)?;
         Ok(bytes)
     }
+
+    pub fn parse_with_body(source: &[u8]) -> Result<(Self, &[u8]), NnrpError> {
+        let metadata = Self::parse(source)?;
+        let body = split_declared_tail(
+            source,
+            ROUTE_HINT_METADATA_LEN,
+            metadata.body_bytes as usize,
+            "route_hint.body_bytes",
+        )?;
+        Ok((metadata, body))
+    }
+
+    pub fn to_vec_with_body(&self, body: &[u8]) -> Result<Vec<u8>, NnrpError> {
+        require_declared_len(
+            "route_hint.body_bytes",
+            self.body_bytes as usize,
+            body.len(),
+        )?;
+        let mut bytes = self.to_bytes()?.to_vec();
+        bytes.extend_from_slice(body);
+        Ok(bytes)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1114,6 +1242,28 @@ impl TraceContextMetadata {
     pub fn to_bytes(&self) -> Result<[u8; TRACE_CONTEXT_METADATA_LEN], NnrpError> {
         let mut bytes = [0u8; TRACE_CONTEXT_METADATA_LEN];
         self.write(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    pub fn parse_with_body(source: &[u8]) -> Result<(Self, &[u8]), NnrpError> {
+        let metadata = Self::parse(source)?;
+        let body = split_declared_tail(
+            source,
+            TRACE_CONTEXT_METADATA_LEN,
+            metadata.body_bytes as usize,
+            "trace_context.body_bytes",
+        )?;
+        Ok((metadata, body))
+    }
+
+    pub fn to_vec_with_body(&self, body: &[u8]) -> Result<Vec<u8>, NnrpError> {
+        require_declared_len(
+            "trace_context.body_bytes",
+            self.body_bytes as usize,
+            body.len(),
+        )?;
+        let mut bytes = self.to_bytes()?.to_vec();
+        bytes.extend_from_slice(body);
         Ok(bytes)
     }
 }
@@ -1159,6 +1309,28 @@ impl ResultDropReasonMetadata {
     pub fn to_bytes(&self) -> Result<[u8; RESULT_DROP_REASON_METADATA_LEN], NnrpError> {
         let mut bytes = [0u8; RESULT_DROP_REASON_METADATA_LEN];
         self.write(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    pub fn parse_with_diagnostics(source: &[u8]) -> Result<(Self, &[u8]), NnrpError> {
+        let metadata = Self::parse(source)?;
+        let diagnostics = split_declared_tail(
+            source,
+            RESULT_DROP_REASON_METADATA_LEN,
+            metadata.diagnostic_bytes as usize,
+            "result_drop_reason.diagnostic_bytes",
+        )?;
+        Ok((metadata, diagnostics))
+    }
+
+    pub fn to_vec_with_diagnostics(&self, diagnostics: &[u8]) -> Result<Vec<u8>, NnrpError> {
+        require_declared_len(
+            "result_drop_reason.diagnostic_bytes",
+            self.diagnostic_bytes as usize,
+            diagnostics.len(),
+        )?;
+        let mut bytes = self.to_bytes()?.to_vec();
+        bytes.extend_from_slice(diagnostics);
         Ok(bytes)
     }
 }
@@ -1217,6 +1389,28 @@ impl RecoverableErrorMetadata {
         self.write(&mut bytes)?;
         Ok(bytes)
     }
+
+    pub fn parse_with_diagnostics(source: &[u8]) -> Result<(Self, &[u8]), NnrpError> {
+        let metadata = Self::parse(source)?;
+        let diagnostics = split_declared_tail(
+            source,
+            RECOVERABLE_ERROR_METADATA_LEN,
+            metadata.diagnostic_bytes as usize,
+            "recoverable_error.diagnostic_bytes",
+        )?;
+        Ok((metadata, diagnostics))
+    }
+
+    pub fn to_vec_with_diagnostics(&self, diagnostics: &[u8]) -> Result<Vec<u8>, NnrpError> {
+        require_declared_len(
+            "recoverable_error.diagnostic_bytes",
+            self.diagnostic_bytes as usize,
+            diagnostics.len(),
+        )?;
+        let mut bytes = self.to_bytes()?.to_vec();
+        bytes.extend_from_slice(diagnostics);
+        Ok(bytes)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1265,6 +1459,28 @@ impl RetryAfterMetadata {
     pub fn to_bytes(&self) -> Result<[u8; RETRY_AFTER_METADATA_LEN], NnrpError> {
         let mut bytes = [0u8; RETRY_AFTER_METADATA_LEN];
         self.write(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    pub fn parse_with_diagnostics(source: &[u8]) -> Result<(Self, &[u8]), NnrpError> {
+        let metadata = Self::parse(source)?;
+        let diagnostics = split_declared_tail(
+            source,
+            RETRY_AFTER_METADATA_LEN,
+            metadata.diagnostic_bytes as usize,
+            "retry_after.diagnostic_bytes",
+        )?;
+        Ok((metadata, diagnostics))
+    }
+
+    pub fn to_vec_with_diagnostics(&self, diagnostics: &[u8]) -> Result<Vec<u8>, NnrpError> {
+        require_declared_len(
+            "retry_after.diagnostic_bytes",
+            self.diagnostic_bytes as usize,
+            diagnostics.len(),
+        )?;
+        let mut bytes = self.to_bytes()?.to_vec();
+        bytes.extend_from_slice(diagnostics);
         Ok(bytes)
     }
 }
@@ -1617,6 +1833,33 @@ fn require_destination_len(destination: &[u8], expected: usize) -> Result<(), Nn
         });
     }
     Ok(())
+}
+
+fn require_declared_len(
+    field: &'static str,
+    declared: usize,
+    actual: usize,
+) -> Result<(), NnrpError> {
+    if declared != actual {
+        return Err(NnrpError::DeclaredLengthMismatch {
+            field,
+            declared,
+            actual,
+        });
+    }
+    Ok(())
+}
+
+fn split_declared_tail<'a>(
+    source: &'a [u8],
+    fixed_len: usize,
+    declared_tail_len: usize,
+    field: &'static str,
+) -> Result<&'a [u8], NnrpError> {
+    require_len(source, fixed_len)?;
+    let actual_tail_len = source.len() - fixed_len;
+    require_declared_len(field, declared_tail_len, actual_tail_len)?;
+    Ok(&source[fixed_len..])
 }
 
 fn require_nonzero(rule: &'static str, value: u32) -> Result<(), NnrpError> {
@@ -2193,6 +2436,192 @@ mod tests {
         assert_eq!(
             RetryAfterMetadata::parse(&retry_after.to_bytes().unwrap()).unwrap(),
             retry_after
+        );
+    }
+
+    #[test]
+    fn runtime_control_metadata_round_trips_declared_tail_segments() {
+        let control = ControlRequestMetadata {
+            operation_id: 11,
+            control_sequence: 12,
+            reason_code: 1,
+            source_role: 4,
+            flags: CONTROL_REQUEST_FLAGS_KNOWN_MASK,
+            diagnostic_bytes: 3,
+        };
+        let control_bytes = control.to_vec_with_diagnostics(&[1, 2, 3]).unwrap();
+        assert_eq!(
+            ControlRequestMetadata::parse_with_diagnostics(&control_bytes).unwrap(),
+            (control, &[1, 2, 3][..])
+        );
+
+        let progress = ProgressMetadata {
+            operation_id: 51,
+            progress_sequence: 52,
+            stage_code: 5,
+            percent_x100: 8750,
+            object_id: 53,
+            body_bytes: 2,
+        };
+        let progress_bytes = progress.to_vec_with_body(&[9, 8]).unwrap();
+        assert_eq!(
+            ProgressMetadata::parse_with_body(&progress_bytes).unwrap(),
+            (progress, &[9, 8][..])
+        );
+
+        let partial = PartialResultMetadata {
+            operation_id: 61,
+            result_sequence: 62,
+            object_id: 63,
+            delta_sequence: 64,
+            body_bytes: 3,
+            flags: PARTIAL_RESULT_FLAGS_KNOWN_MASK,
+        };
+        let partial_bytes = partial.to_vec_with_body(&[7, 8, 9]).unwrap();
+        assert_eq!(
+            PartialResultMetadata::parse_with_body(&partial_bytes).unwrap(),
+            (partial, &[7, 8, 9][..])
+        );
+
+        let capability = CapabilityMetadata {
+            profile_id: 0x0100,
+            capability_count: 3,
+            cost_model_id: 2,
+            preference_rank: 1,
+            limit_bytes: 81,
+            limit_units: 82,
+            body_bytes: 2,
+            flags: CAPABILITY_FLAGS_KNOWN_MASK,
+        };
+        let capability_bytes = capability.to_vec_with_body(&[1, 0]).unwrap();
+        assert_eq!(
+            CapabilityMetadata::parse_with_body(&capability_bytes).unwrap(),
+            (capability, &[1, 0][..])
+        );
+
+        let route = RouteHintMetadata {
+            operation_id: 91,
+            route_id: 92,
+            executor_class: 3,
+            affinity_class: 4,
+            deadline_unix_ms: 93,
+            body_bytes: 4,
+            flags: ROUTE_HINT_FLAGS_KNOWN_MASK,
+        };
+        let route_bytes = route.to_vec_with_body(&[1, 2, 3, 4]).unwrap();
+        assert_eq!(
+            RouteHintMetadata::parse_with_body(&route_bytes).unwrap(),
+            (route, &[1, 2, 3, 4][..])
+        );
+
+        let trace = TraceContextMetadata {
+            trace_id: 101,
+            span_id: 102,
+            parent_span_id: 103,
+            stage_code: 6,
+            flags: TRACE_CONTEXT_FLAGS_KNOWN_MASK,
+            body_bytes: 1,
+        };
+        let trace_bytes = trace.to_vec_with_body(&[5]).unwrap();
+        assert_eq!(
+            TraceContextMetadata::parse_with_body(&trace_bytes).unwrap(),
+            (trace, &[5][..])
+        );
+
+        let drop_reason = ResultDropReasonMetadata {
+            operation_id: 111,
+            result_sequence: 112,
+            drop_reason_code: 3,
+            source_role: 6,
+            flags: RESULT_DROP_FLAGS_KNOWN_MASK,
+            diagnostic_bytes: 2,
+        };
+        let drop_reason_bytes = drop_reason.to_vec_with_diagnostics(&[6, 7]).unwrap();
+        assert_eq!(
+            ResultDropReasonMetadata::parse_with_diagnostics(&drop_reason_bytes).unwrap(),
+            (drop_reason, &[6, 7][..])
+        );
+
+        let recoverable = RecoverableErrorMetadata {
+            error_code: 121,
+            error_scope: ErrorScope::Frame,
+            recovery_action: 3,
+            source_role: 6,
+            flags: RECOVERABLE_ERROR_FLAGS_KNOWN_MASK,
+            retry_after_ms: 122,
+            related_session_id: 123,
+            related_frame_id: 124,
+            related_view_id: 125,
+            diagnostic_bytes: 2,
+        };
+        let recoverable_bytes = recoverable.to_vec_with_diagnostics(&[8, 9]).unwrap();
+        assert_eq!(
+            RecoverableErrorMetadata::parse_with_diagnostics(&recoverable_bytes).unwrap(),
+            (recoverable, &[8, 9][..])
+        );
+
+        let retry_after = RetryAfterMetadata {
+            scope_id: 131,
+            control_sequence: 132,
+            retry_after_ms: 133,
+            jitter_ms: 134,
+            reason_code: 4,
+            source_role: 6,
+            flags: RETRY_AFTER_FLAGS_KNOWN_MASK,
+            diagnostic_bytes: 3,
+        };
+        let retry_after_bytes = retry_after.to_vec_with_diagnostics(&[1, 3, 5]).unwrap();
+        assert_eq!(
+            RetryAfterMetadata::parse_with_diagnostics(&retry_after_bytes).unwrap(),
+            (retry_after, &[1, 3, 5][..])
+        );
+    }
+
+    #[test]
+    fn runtime_control_metadata_rejects_declared_tail_length_mismatch() {
+        let control = ControlRequestMetadata {
+            operation_id: 11,
+            control_sequence: 12,
+            reason_code: 1,
+            source_role: 4,
+            flags: CONTROL_REQUEST_FLAGS_KNOWN_MASK,
+            diagnostic_bytes: 2,
+        };
+        assert_eq!(
+            control.to_vec_with_diagnostics(&[1]),
+            Err(NnrpError::DeclaredLengthMismatch {
+                field: "control_request.diagnostic_bytes",
+                declared: 2,
+                actual: 1
+            })
+        );
+
+        let mut control_bytes = control.to_bytes().unwrap().to_vec();
+        control_bytes.extend_from_slice(&[1, 2, 3]);
+        assert_eq!(
+            ControlRequestMetadata::parse_with_diagnostics(&control_bytes),
+            Err(NnrpError::DeclaredLengthMismatch {
+                field: "control_request.diagnostic_bytes",
+                declared: 2,
+                actual: 3
+            })
+        );
+
+        let trace = TraceContextMetadata {
+            trace_id: 101,
+            span_id: 102,
+            parent_span_id: 103,
+            stage_code: 6,
+            flags: TRACE_CONTEXT_FLAGS_KNOWN_MASK,
+            body_bytes: 2,
+        };
+        assert_eq!(
+            trace.to_vec_with_body(&[]),
+            Err(NnrpError::DeclaredLengthMismatch {
+                field: "trace_context.body_bytes",
+                declared: 2,
+                actual: 0
+            })
         );
     }
 
