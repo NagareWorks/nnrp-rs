@@ -2,18 +2,19 @@ use nnrp_core::NnrpError;
 use nnrp_core::{
     BackpressureLevel, CacheInvalidateMetadata, CacheInvalidateScope, CacheMissMetadata,
     CacheMissReason, CacheObjectId, CacheObjectKind, CacheReferenceMetadata, CacheReuseScope,
-    CommonHeader, FlowScopeKind, FlowUpdateMetadata, FlowUpdateReason, FrameSubmitMetadata,
-    InFlightPolicy, InputProfile, MemoryLocationHint, MessageType, ObjectDeltaMetadata,
-    ObjectDescriptorMetadata, ObjectReferenceMetadata, ObjectReleaseMetadata, ObjectReleaseReason,
-    OperationState, OwnershipHint, PartialResultMetadata, PayloadKindBitmap, PressureMetadata,
-    ResultClass, ResultDropReasonMetadata, ResultPushMetadata, RuntimeObjectKind, RuntimeRole,
-    SchemaRegistry, SessionCloseMetadata, SessionCloseReason, SessionMigrateAckMetadata,
-    SessionOpenAckMetadata, SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchAckStatus,
-    SessionPatchMetadata, SessionPatchRejectReason, SessionPriorityClass, SessionStatus,
-    SubmitMode, TileIndexMode, TransportId, FLOW_UPDATE_FLAG_CREDIT_VALID,
-    RESULT_DROP_REASON_DEADLINE_EXPIRED, RESULT_PUSH_METADATA_LEN, SESSION_CLOSE_ACK_METADATA_LEN,
-    SESSION_ERROR_NONE, SESSION_OPEN_ACK_METADATA_LEN, SESSION_OPEN_METADATA_LEN,
-    STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
+    CapabilityMetadata, CommonHeader, FlowScopeKind, FlowUpdateMetadata, FlowUpdateReason,
+    FrameSubmitMetadata, InFlightPolicy, InputProfile, MemoryLocationHint, MessageType,
+    ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata, ObjectReleaseMetadata,
+    ObjectReleaseReason, OperationState, OwnershipHint, PartialResultMetadata, PayloadKindBitmap,
+    PressureMetadata, ResultClass, ResultDropReasonMetadata, ResultPushMetadata, RouteHintMetadata,
+    RuntimeObjectKind, RuntimeRole, SchemaRegistry, SessionCloseMetadata, SessionCloseReason,
+    SessionMigrateAckMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
+    SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata, SessionPatchRejectReason,
+    SessionPriorityClass, SessionStatus, SubmitMode, TileIndexMode, TransportId,
+    FLOW_UPDATE_FLAG_CREDIT_VALID, RESULT_DROP_REASON_DEADLINE_EXPIRED, RESULT_PUSH_METADATA_LEN,
+    SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE, SESSION_OPEN_ACK_METADATA_LEN,
+    SESSION_OPEN_METADATA_LEN, STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID,
+    TOKEN_DELTA_SCHEMA_VERSION,
 };
 use nnrp_runtime::{
     BoxedFramedTransport, FramedListener, FramedTransport, NnrpClient, NnrpClientConfig,
@@ -402,6 +403,20 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
         let operation_id = submit.frame_id as u64;
 
         session
+            .send_capability(
+                MessageType::CapabilityNegotiation,
+                capability_metadata(),
+                b"cap!".to_vec(),
+            )
+            .await?;
+        session
+            .send_route_hint(
+                MessageType::RouteHint,
+                route_hint(operation_id),
+                b"hint".to_vec(),
+            )
+            .await?;
+        session
             .send_object_declare(object_descriptor(), b"meta".to_vec())
             .await?;
         session
@@ -435,6 +450,34 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
         .submit_nowait(token_submit(), b"prompt".to_vec())
         .await?;
 
+    match session.await_event().await? {
+        NnrpClientEvent::Capability {
+            message_type,
+            metadata,
+            body,
+        } => {
+            assert_eq!(message_type, MessageType::CapabilityNegotiation);
+            assert_eq!(metadata.profile_id, STANDARD_PROFILE_TOKEN);
+            assert_eq!(metadata.capability_count, 2);
+            assert_eq!(metadata.preference_rank, 1);
+            assert_eq!(body, b"cap!".to_vec());
+        }
+        event => panic!("expected capability negotiation, got {event:?}"),
+    }
+    match session.await_event().await? {
+        NnrpClientEvent::RouteHint {
+            message_type,
+            metadata,
+            body,
+        } => {
+            assert_eq!(message_type, MessageType::RouteHint);
+            assert_eq!(metadata.operation_id, frame_id as u64);
+            assert_eq!(metadata.route_id, 92);
+            assert_eq!(metadata.executor_class, 3);
+            assert_eq!(body, b"hint".to_vec());
+        }
+        event => panic!("expected route hint, got {event:?}"),
+    }
     match session.await_event().await? {
         NnrpClientEvent::ObjectDeclare { metadata, body } => {
             assert_eq!(metadata.object_id, 900);
@@ -1025,6 +1068,18 @@ async fn client_result_helper_rejects_preview4_control_non_result_events(
             cache_invalidate().to_bytes()?.to_vec(),
             Vec::new(),
         )?,
+        control_event_packet(
+            MessageType::CapabilityNegotiation,
+            1,
+            capability_metadata().to_bytes()?.to_vec(),
+            b"cap!".to_vec(),
+        )?,
+        control_event_packet(
+            MessageType::RouteHint,
+            1,
+            route_hint(1).to_bytes()?.to_vec(),
+            b"hint".to_vec(),
+        )?,
     ] {
         let mut session = scripted_client_session(packet).await?;
         assert!(matches!(
@@ -1074,6 +1129,20 @@ async fn client_preview4_control_event_reader_rejects_malformed_packets() -> Res
             Vec::new(),
         )?,
         control_event_packet(MessageType::CreditUpdate, 1, vec![0], Vec::new())?,
+        control_event_packet(MessageType::CapabilityNegotiation, 1, vec![0], Vec::new())?,
+        control_event_packet(
+            MessageType::CapabilityNegotiation,
+            1,
+            capability_metadata().to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        control_event_packet(MessageType::RouteHint, 1, vec![0], Vec::new())?,
+        control_event_packet(
+            MessageType::RouteHint,
+            1,
+            route_hint(1).to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
     ] {
         let mut session = scripted_client_session(packet).await?;
         assert!(matches!(
@@ -1311,6 +1380,34 @@ async fn server_preview4_control_readers_and_senders_reject_mismatches() -> Resu
                     retry_after_ms: 0,
                     flags: 0,
                 })
+                .await
+        })
+        .await,
+        server_send_control_error(|mut session| async move {
+            session
+                .send_capability(MessageType::Cancel, capability_metadata(), b"cap!".to_vec())
+                .await
+        })
+        .await,
+        server_send_control_error(|mut session| async move {
+            session
+                .send_capability(
+                    MessageType::CapabilityNegotiation,
+                    capability_metadata(),
+                    Vec::new(),
+                )
+                .await
+        })
+        .await,
+        server_send_control_error(|mut session| async move {
+            session
+                .send_route_hint(MessageType::Cancel, route_hint(1), b"hint".to_vec())
+                .await
+        })
+        .await,
+        server_send_control_error(|mut session| async move {
+            session
+                .send_route_hint(MessageType::RouteHint, route_hint(1), Vec::new())
                 .await
         })
         .await,
@@ -2288,6 +2385,31 @@ fn drop_reason(operation_id: u64) -> ResultDropReasonMetadata {
         source_role: 2,
         flags: 0,
         diagnostic_bytes: 0,
+    }
+}
+
+fn capability_metadata() -> CapabilityMetadata {
+    CapabilityMetadata {
+        profile_id: STANDARD_PROFILE_TOKEN,
+        capability_count: 2,
+        cost_model_id: 1,
+        preference_rank: 1,
+        limit_bytes: 4096,
+        limit_units: 8,
+        body_bytes: 4,
+        flags: 0,
+    }
+}
+
+fn route_hint(operation_id: u64) -> RouteHintMetadata {
+    RouteHintMetadata {
+        operation_id,
+        route_id: 92,
+        executor_class: 3,
+        affinity_class: 4,
+        deadline_unix_ms: 1_800_000_000_000,
+        body_bytes: 4,
+        flags: 0,
     }
 }
 

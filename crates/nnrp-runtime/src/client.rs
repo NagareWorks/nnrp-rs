@@ -4,24 +4,25 @@ use nnrp_core::{
     validate_control_request_semantics, validate_partial_result_semantics,
     validate_pressure_semantics, validate_result_drop_header,
     validate_result_drop_reason_semantics, validate_scheduling_semantics, CacheInvalidateMetadata,
-    CacheMissMetadata, CacheObjectKind, CacheReferenceMetadata, CommonHeader, ConnectionLifecycle,
-    ControlRequestMetadata, FlowUpdateMetadata, FrameSubmitMetadata, InFlightPolicy, MessageType,
-    ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata, ObjectReleaseMetadata,
-    PartialResultMetadata, PressureMetadata, ResultDropReasonMetadata, ResultPushMetadata,
-    SchedulingMetadata, SessionCloseAckMetadata, SessionCloseMetadata, SessionCloseReason,
-    SessionMigrateAckMetadata, SessionMigrateMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
-    SessionPatchAckMetadata, SessionPatchMetadata, SessionPriorityClass, SessionStatus,
-    TransportId, CACHE_INVALIDATE_METADATA_LEN, CACHE_MISS_METADATA_LEN,
-    CACHE_REFERENCE_METADATA_LEN, CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED,
+    CacheMissMetadata, CacheObjectKind, CacheReferenceMetadata, CapabilityMetadata, CommonHeader,
+    ConnectionLifecycle, ControlRequestMetadata, FlowUpdateMetadata, FrameSubmitMetadata,
+    InFlightPolicy, MessageType, ObjectDeltaMetadata, ObjectDescriptorMetadata,
+    ObjectReferenceMetadata, ObjectReleaseMetadata, PartialResultMetadata, PressureMetadata,
+    ResultDropReasonMetadata, ResultPushMetadata, RouteHintMetadata, SchedulingMetadata,
+    SessionCloseAckMetadata, SessionCloseMetadata, SessionCloseReason, SessionMigrateAckMetadata,
+    SessionMigrateMetadata, SessionOpenAckMetadata, SessionOpenMetadata, SessionPatchAckMetadata,
+    SessionPatchMetadata, SessionPriorityClass, SessionStatus, TransportId,
+    CACHE_INVALIDATE_METADATA_LEN, CACHE_MISS_METADATA_LEN, CACHE_REFERENCE_METADATA_LEN,
+    CAPABILITY_METADATA_LEN, CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED,
     CONTROL_REQUEST_FLAG_HARD_ABORT_ALLOWED, CONTROL_REQUEST_METADATA_LEN,
     FRAME_SUBMIT_METADATA_LEN, OBJECT_DELTA_METADATA_LEN, OBJECT_DESCRIPTOR_METADATA_LEN,
     OBJECT_REFERENCE_METADATA_LEN, OBJECT_RELEASE_METADATA_LEN, PARTIAL_RESULT_METADATA_LEN,
     PRESSURE_METADATA_LEN, RESULT_DROP_REASON_METADATA_LEN, RESULT_PUSH_METADATA_LEN,
-    SCHEDULING_FLAG_DISCARD_STALE, SCHEDULING_FLAG_EMIT_DROP_REASON, SCHEDULING_METADATA_LEN,
-    SESSION_CLOSE_ACK_METADATA_LEN, SESSION_CLOSE_METADATA_LEN, SESSION_ERROR_NONE,
-    SESSION_MIGRATE_ACK_METADATA_LEN, SESSION_MIGRATE_METADATA_LEN, SESSION_OPEN_METADATA_LEN,
-    SESSION_PATCH_ACK_METADATA_LEN, SESSION_PATCH_METADATA_LEN, STANDARD_PROFILE_TOKEN,
-    TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
+    ROUTE_HINT_METADATA_LEN, SCHEDULING_FLAG_DISCARD_STALE, SCHEDULING_FLAG_EMIT_DROP_REASON,
+    SCHEDULING_METADATA_LEN, SESSION_CLOSE_ACK_METADATA_LEN, SESSION_CLOSE_METADATA_LEN,
+    SESSION_ERROR_NONE, SESSION_MIGRATE_ACK_METADATA_LEN, SESSION_MIGRATE_METADATA_LEN,
+    SESSION_OPEN_METADATA_LEN, SESSION_PATCH_ACK_METADATA_LEN, SESSION_PATCH_METADATA_LEN,
+    STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
 };
 
 use crate::{
@@ -142,6 +143,16 @@ pub enum NnrpClientEvent {
         body: Vec<u8>,
     },
     CacheInvalidate(CacheInvalidateMetadata),
+    Capability {
+        message_type: MessageType,
+        metadata: CapabilityMetadata,
+        body: Vec<u8>,
+    },
+    RouteHint {
+        message_type: MessageType,
+        metadata: RouteHintMetadata,
+        body: Vec<u8>,
+    },
 }
 
 impl NnrpClient {
@@ -336,7 +347,9 @@ impl NnrpClientSession {
             | NnrpClientEvent::ObjectDelta { .. }
             | NnrpClientEvent::CacheReference { .. }
             | NnrpClientEvent::CacheMiss { .. }
-            | NnrpClientEvent::CacheInvalidate(_) => Err(RuntimeError::UnexpectedMessage(
+            | NnrpClientEvent::CacheInvalidate(_)
+            | NnrpClientEvent::Capability { .. }
+            | NnrpClientEvent::RouteHint { .. } => Err(RuntimeError::UnexpectedMessage(
                 "client expected RESULT_PUSH but received object/cache event",
             )),
         }
@@ -426,6 +439,50 @@ impl NnrpClientSession {
                     MessageType::CreditUpdate => Ok(NnrpClientEvent::CreditUpdate(metadata)),
                     _ => unreachable!("message type was already matched"),
                 }
+            }
+            MessageType::CapabilityNegotiation | MessageType::DegradeProfile => {
+                self.require_optional_session_packet(
+                    &packet,
+                    "client received capability update for another session",
+                )?;
+                if packet.metadata.len() != CAPABILITY_METADATA_LEN {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "client received malformed capability metadata length",
+                    ));
+                }
+                let metadata = CapabilityMetadata::parse(&packet.metadata)?;
+                require_body_len(
+                    packet.body.len(),
+                    metadata.body_bytes as usize,
+                    "client received capability body length mismatch",
+                )?;
+                Ok(NnrpClientEvent::Capability {
+                    message_type: packet.header.message_type,
+                    metadata,
+                    body: packet.body,
+                })
+            }
+            MessageType::RouteHint | MessageType::ExecutionHint => {
+                self.require_optional_session_packet(
+                    &packet,
+                    "client received route hint for another session",
+                )?;
+                if packet.metadata.len() != ROUTE_HINT_METADATA_LEN {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "client received malformed route hint metadata length",
+                    ));
+                }
+                let metadata = RouteHintMetadata::parse(&packet.metadata)?;
+                require_body_len(
+                    packet.body.len(),
+                    metadata.body_bytes as usize,
+                    "client received route hint body length mismatch",
+                )?;
+                Ok(NnrpClientEvent::RouteHint {
+                    message_type: packet.header.message_type,
+                    metadata,
+                    body: packet.body,
+                })
             }
             MessageType::ObjectDeclare => {
                 self.require_session_packet(
