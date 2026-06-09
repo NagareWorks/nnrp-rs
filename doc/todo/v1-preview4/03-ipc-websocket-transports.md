@@ -6,7 +6,7 @@
   - [ ] TCP provider.
   - [ ] QUIC provider.
   - [x] IPC provider.
-  - [ ] WebSocket provider.
+  - [x] WebSocket provider.
 - [ ] Keep provider probing behavior stable.
   - [ ] If one transport package is present, select that transport directly.
   - [ ] If multiple transport packages are present, probe candidates by policy.
@@ -35,20 +35,20 @@
 
 ## WebSocket Transport
 
-- [ ] Add `nnrp-transport-websocket` crate.
-  - [ ] Add Cargo package metadata.
-  - [ ] Add provider registration.
-  - [ ] Add endpoint parser for `ws://`.
-  - [ ] Add endpoint parser for `wss://`.
-  - [ ] Add endpoint parser tests.
-- [ ] Implement native WebSocket client connect.
-- [ ] Implement native WebSocket server accept.
-- [ ] Map binary WebSocket messages to NNRP frames.
-- [ ] Reject text-message protocol paths for NNRP data frames.
+- [x] Add `nnrp-transport-websocket` crate.
+  - [x] Add Cargo package metadata.
+  - [x] Add provider registration.
+  - [x] Add endpoint parser for `ws://`.
+  - [x] Add endpoint parser for `wss://`.
+  - [x] Add endpoint parser tests.
+- [x] Implement native WebSocket client connect.
+- [x] Implement native WebSocket server accept.
+- [x] Map binary WebSocket messages to NNRP frames.
+- [x] Reject text-message protocol paths for NNRP data frames.
 - [ ] Implement close frame mapping to NNRP transport close diagnostics.
 - [ ] Add loopback tests.
-  - [ ] Client to server handshake.
-  - [ ] Submit/result.
+  - [x] Client to server handshake.
+  - [x] Submit/result.
   - [ ] Progress/partial result.
   - [ ] Backpressure credit update.
 
