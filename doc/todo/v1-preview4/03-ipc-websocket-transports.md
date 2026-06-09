@@ -27,7 +27,7 @@
 - [x] Implement framed read/write over IPC streams.
 - [x] Implement graceful close.
 - [ ] Implement cancellation-safe read/write tasks.
-- [ ] Add loopback tests.
+- [x] Add loopback tests.
   - [x] Client to server handshake.
   - [x] Submit/result.
   - [x] Cancel/drop reason.
@@ -46,7 +46,7 @@
 - [x] Map binary WebSocket messages to NNRP frames.
 - [x] Reject text-message protocol paths for NNRP data frames.
 - [x] Implement close frame mapping to NNRP transport close diagnostics.
-- [ ] Add loopback tests.
+- [x] Add loopback tests.
   - [x] Client to server handshake.
   - [x] Submit/result.
   - [x] Progress/partial result.
