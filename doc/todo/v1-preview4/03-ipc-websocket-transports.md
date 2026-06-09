@@ -26,7 +26,7 @@
 - [x] Implement local server listen.
 - [x] Implement framed read/write over IPC streams.
 - [x] Implement graceful close.
-- [ ] Implement cancellation-safe read/write tasks.
+- [x] Implement cancellation-safe read/write tasks.
 - [x] Add loopback tests.
   - [x] Client to server handshake.
   - [x] Submit/result.

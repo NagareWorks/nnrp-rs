@@ -6403,10 +6403,13 @@ mod tests {
                 nnrp_client_close_connection(connection),
                 NnrpFfiStatus::ok()
             );
-            assert_eq!(
-                nnrp_cache_release(operation_lease, &mut result),
-                NnrpFfiStatus::invalid_handle(NnrpHandleKind::CacheLease as u32)
-            );
+            let store = handle_store();
+            assert!(!store.entries.values().any(|entry| matches!(
+                &entry.resource,
+                NnrpFfiResource::CacheLease { owner, .. } if *owner == operation
+            )));
+            drop(store);
+            assert_eq!(operation_lease.kind, NnrpHandleKind::CacheLease as u32);
         }
     }
 

@@ -14,7 +14,13 @@ use nnrp_runtime::{
 use nnrp_transport_provider::{
     TransportProviderDescriptor, TransportProviderKind, TransportProviderRegistry,
 };
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf},
+    sync::{mpsc, oneshot},
+    task::JoinHandle,
+};
+
+const IPC_TASK_CHANNEL_CAPACITY: usize = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IpcEndpoint {
@@ -83,8 +89,10 @@ impl fmt::Display for IpcEndpoint {
 
 #[derive(Debug)]
 pub struct IpcTransport {
-    stream: IpcStream,
-    limits: RuntimeFrameLimits,
+    reader: mpsc::Receiver<Result<RuntimePacket, RuntimeError>>,
+    writer: mpsc::Sender<IpcWriteCommand>,
+    read_task: JoinHandle<()>,
+    write_task: JoinHandle<()>,
 }
 
 impl IpcTransport {
@@ -96,14 +104,26 @@ impl IpcTransport {
         endpoint: &IpcEndpoint,
         limits: RuntimeFrameLimits,
     ) -> Result<Self, RuntimeError> {
-        Ok(Self {
-            stream: IpcStream::connect(endpoint).await?,
-            limits,
-        })
+        Ok(Self::new(IpcStream::connect(endpoint).await?, limits))
     }
 
     fn new(stream: IpcStream, limits: RuntimeFrameLimits) -> Self {
-        Self { stream, limits }
+        let (reader, writer) = tokio::io::split(stream);
+        let (packet_tx, packet_rx) = mpsc::channel(IPC_TASK_CHANNEL_CAPACITY);
+        let (write_tx, write_rx) = mpsc::channel(IPC_TASK_CHANNEL_CAPACITY);
+        Self {
+            reader: packet_rx,
+            writer: write_tx,
+            read_task: spawn_ipc_read_task(reader, limits, packet_tx),
+            write_task: spawn_ipc_write_task(writer, limits, write_rx),
+        }
+    }
+}
+
+impl Drop for IpcTransport {
+    fn drop(&mut self) {
+        self.read_task.abort();
+        self.write_task.abort();
     }
 }
 
@@ -114,15 +134,90 @@ impl FramedTransport for IpcTransport {
     }
 
     async fn read_packet(&mut self) -> Result<RuntimePacket, RuntimeError> {
-        read_packet(&mut self.stream, self.limits).await
+        self.reader
+            .recv()
+            .await
+            .ok_or_else(|| ipc_task_closed("read"))?
     }
 
     async fn write_packet(&mut self, packet: &RuntimePacket) -> Result<(), RuntimeError> {
-        write_packet(&mut self.stream, packet, self.limits).await
+        let (ack, receiver) = oneshot::channel();
+        self.writer
+            .send(IpcWriteCommand::Packet {
+                packet: packet.clone(),
+                ack,
+            })
+            .await
+            .map_err(|_| ipc_task_closed("write"))?;
+        receiver.await.map_err(|_| ipc_task_closed("write"))?
     }
 
     async fn close(&mut self) -> Result<(), RuntimeError> {
-        self.stream.shutdown().await
+        let (ack, receiver) = oneshot::channel();
+        self.writer
+            .send(IpcWriteCommand::Close { ack })
+            .await
+            .map_err(|_| ipc_task_closed("write"))?;
+        receiver.await.map_err(|_| ipc_task_closed("write"))?
+    }
+}
+
+enum IpcWriteCommand {
+    Packet {
+        packet: RuntimePacket,
+        ack: oneshot::Sender<Result<(), RuntimeError>>,
+    },
+    Close {
+        ack: oneshot::Sender<Result<(), RuntimeError>>,
+    },
+}
+
+fn spawn_ipc_read_task(
+    mut reader: ReadHalf<IpcStream>,
+    limits: RuntimeFrameLimits,
+    packets: mpsc::Sender<Result<RuntimePacket, RuntimeError>>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let result = read_packet(&mut reader, limits).await;
+            let should_stop = result.is_err();
+            if packets.send(result).await.is_err() || should_stop {
+                break;
+            }
+        }
+    })
+}
+
+fn spawn_ipc_write_task(
+    mut writer: WriteHalf<IpcStream>,
+    limits: RuntimeFrameLimits,
+    mut commands: mpsc::Receiver<IpcWriteCommand>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(command) = commands.recv().await {
+            match command {
+                IpcWriteCommand::Packet { packet, ack } => {
+                    let result = write_packet(&mut writer, &packet, limits).await;
+                    let should_stop = result.is_err();
+                    let _ = ack.send(result);
+                    if should_stop {
+                        break;
+                    }
+                }
+                IpcWriteCommand::Close { ack } => {
+                    let result = writer.shutdown().await.map_err(Into::into);
+                    let _ = ack.send(result);
+                    break;
+                }
+            }
+        }
+    })
+}
+
+fn ipc_task_closed(direction: &'static str) -> RuntimeError {
+    RuntimeError::TransportClosed {
+        transport: RuntimeTransportKind::Ipc,
+        detail: format!("ipc {direction} task stopped"),
     }
 }
 
@@ -290,21 +385,6 @@ impl IpcStream {
             IpcEndpoint::Unix(path) => connect_unix(path).await,
             IpcEndpoint::NamedPipe(path) => connect_named_pipe(path).await,
         }
-    }
-
-    async fn shutdown(&mut self) -> Result<(), RuntimeError> {
-        #[cfg(unix)]
-        {
-            self.inner.shutdown().await?;
-        }
-        #[cfg(windows)]
-        {
-            match &mut self.inner {
-                PlatformIpcStream::Client(pipe) => pipe.shutdown().await?,
-                PlatformIpcStream::Server(pipe) => pipe.shutdown().await?,
-            }
-        }
-        Ok(())
     }
 }
 
@@ -516,13 +596,15 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use nnrp_core::{
-        BackpressureLevel, FrameSubmitMetadata, InputProfile, PayloadKindBitmap, PressureMetadata,
-        ResultClass, ResultDropReasonMetadata, ResultPushMetadata, SubmitMode, TileIndexMode,
-        STANDARD_PROFILE_TOKEN,
+        BackpressureLevel, CommonHeader, FrameSubmitMetadata, InputProfile, MessageType,
+        PayloadKindBitmap, PressureMetadata, ResultClass, ResultDropReasonMetadata,
+        ResultPushMetadata, SubmitMode, TileIndexMode, STANDARD_PROFILE_TOKEN,
     };
     #[cfg(unix)]
     use nnrp_runtime::{NnrpClientEvent, NnrpResult};
     use nnrp_transport_provider::{RemoteTransportSupport, TransportPolicy};
+    #[cfg(unix)]
+    use tokio::time::{timeout, Duration};
 
     #[test]
     fn ipc_endpoint_parses_platform_schemes() {
@@ -621,6 +703,88 @@ mod tests {
         server_task
             .await
             .map_err(|_| RuntimeError::Internal("ipc raw server task panicked"))??;
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_ipc_read_wait_survives_caller_cancellation() -> Result<(), RuntimeError> {
+        let path = std::env::temp_dir().join(format!(
+            "nnrp-ipc-cancel-read-{}-{}.sock",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let endpoint = IpcEndpoint::unix(path.clone());
+        let listener = IpcProvider::bind_listener(&endpoint).await?;
+
+        let server_task = tokio::spawn(async move {
+            let mut accepted = listener.accept().await?;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            accepted.write_packet(&cancellation_probe_packet()).await?;
+            accepted.close().await
+        });
+
+        let mut client = IpcProvider::connect_transport(&endpoint).await?;
+        let cancelled = timeout(Duration::from_millis(10), client.read_packet()).await;
+        assert!(
+            cancelled.is_err(),
+            "first read wait should time out before the server writes"
+        );
+
+        let packet = timeout(Duration::from_secs(1), client.read_packet())
+            .await
+            .map_err(|_| RuntimeError::Internal("ipc cancellation probe timed out"))??;
+        assert_eq!(packet.body, b"ipc-cancel-safe");
+        client.close().await?;
+
+        server_task
+            .await
+            .map_err(|_| RuntimeError::Internal("ipc cancellation server task panicked"))??;
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_ipc_worker_shutdown_reports_transport_closed() -> Result<(), RuntimeError> {
+        let path = std::env::temp_dir().join(format!(
+            "nnrp-ipc-worker-stop-{}-{}.sock",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let endpoint = IpcEndpoint::unix(path.clone());
+        let listener = IpcProvider::bind_listener(&endpoint).await?;
+
+        let server_task = tokio::spawn(async move {
+            let mut accepted = listener.accept().await?;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            accepted.close().await
+        });
+
+        let mut client = IpcProvider::connect_transport(&endpoint).await?;
+        client.read_task.abort();
+        tokio::task::yield_now().await;
+        assert_ipc_closed(
+            client
+                .read_packet()
+                .await
+                .expect_err("read task is stopped"),
+        );
+
+        client.write_task.abort();
+        tokio::task::yield_now().await;
+        assert_ipc_closed(
+            client
+                .write_packet(&cancellation_probe_packet())
+                .await
+                .expect_err("write task is stopped"),
+        );
+        assert_ipc_closed(client.close().await.expect_err("write task is stopped"));
+
+        server_task
+            .await
+            .map_err(|_| RuntimeError::Internal("ipc worker stop server task panicked"))??;
         let _ = std::fs::remove_file(path);
         Ok(())
     }
@@ -787,6 +951,28 @@ mod tests {
             source_role: 2,
             flags: 0,
             diagnostic_bytes: 0,
+        }
+    }
+
+    #[cfg(unix)]
+    fn cancellation_probe_packet() -> RuntimePacket {
+        RuntimePacket::new(
+            CommonHeader::new(MessageType::Ping, 0, 15),
+            Vec::new(),
+            b"ipc-cancel-safe".to_vec(),
+        )
+        .expect("cancellation probe packet should build")
+    }
+
+    #[cfg(unix)]
+    fn assert_ipc_closed(error: RuntimeError) {
+        match error {
+            RuntimeError::TransportClosed { transport, detail } => {
+                assert_eq!(transport, RuntimeTransportKind::Ipc);
+                assert!(detail.contains("ipc"));
+                assert!(detail.contains("task stopped"));
+            }
+            error => panic!("expected ipc transport closed diagnostic, got {error:?}"),
         }
     }
 }
