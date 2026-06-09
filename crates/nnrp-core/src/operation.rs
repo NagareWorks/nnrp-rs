@@ -137,6 +137,33 @@ impl OperationRegistry {
         Ok(())
     }
 
+    pub fn expire_if_stale(
+        &mut self,
+        operation_id: u64,
+        now_unix_ms: u64,
+    ) -> Result<bool, NnrpError> {
+        let record = self
+            .operations
+            .get_mut(&operation_id)
+            .ok_or(NnrpError::UnknownOperation(operation_id))?;
+        if record.state.is_terminal() {
+            return Ok(false);
+        }
+        if record.schedule.expire_at_unix_ms == 0 || record.schedule.expire_at_unix_ms > now_unix_ms
+        {
+            return Ok(false);
+        }
+        if !record.state.can_transition_to(OperationState::Superseded) {
+            return Err(NnrpError::InvalidOperationTransition {
+                from: record.state,
+                to: OperationState::Superseded,
+            });
+        }
+
+        record.state = OperationState::Superseded;
+        Ok(true)
+    }
+
     pub fn apply_scheduling_update(
         &mut self,
         session_id: u32,
@@ -554,6 +581,61 @@ mod tests {
         assert_eq!(
             registry.operation(1).unwrap().schedule.expire_at_unix_ms,
             60
+        );
+    }
+
+    #[test]
+    fn expires_stale_operations_before_result_delivery() {
+        let mut registry = OperationRegistry::new();
+        registry.register(OperationDescriptor::new(42, 1)).unwrap();
+        registry.register(OperationDescriptor::new(42, 2)).unwrap();
+        registry.register(OperationDescriptor::new(42, 3)).unwrap();
+        registry
+            .apply_scheduling_update(
+                42,
+                MessageType::ExpireAt,
+                SchedulingMetadata {
+                    operation_id: 1,
+                    control_sequence: 9,
+                    priority_class: 0,
+                    priority_delta: 0,
+                    deadline_unix_ms: 200,
+                    flags: 0,
+                },
+            )
+            .unwrap();
+        registry
+            .apply_scheduling_update(
+                42,
+                MessageType::ExpireAt,
+                SchedulingMetadata {
+                    operation_id: 2,
+                    control_sequence: 10,
+                    priority_class: 0,
+                    priority_delta: 0,
+                    deadline_unix_ms: 400,
+                    flags: 0,
+                },
+            )
+            .unwrap();
+        registry.transition(3, OperationState::Running).unwrap();
+        registry.transition(3, OperationState::Completed).unwrap();
+
+        assert_eq!(registry.expire_if_stale(1, 199), Ok(false));
+        assert_eq!(
+            registry.operation(1).unwrap().state,
+            OperationState::Accepted
+        );
+        assert_eq!(registry.expire_if_stale(1, 200), Ok(true));
+        assert_eq!(
+            registry.operation(1).unwrap().state,
+            OperationState::Superseded
+        );
+        assert_eq!(registry.expire_if_stale(2, 200), Ok(false));
+        assert_eq!(registry.expire_if_stale(3, 1_000), Ok(false));
+        assert_eq!(
+            registry.expire_if_stale(99, 1_000),
+            Err(NnrpError::UnknownOperation(99))
         );
     }
 

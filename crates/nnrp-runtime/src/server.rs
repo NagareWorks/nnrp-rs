@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use nnrp_core::{
     validate_control_request_semantics, validate_partial_result_semantics,
@@ -510,6 +511,16 @@ impl NnrpServerSession {
         metadata: ResultPushMetadata,
         body: Vec<u8>,
     ) -> Result<(), RuntimeError> {
+        if self
+            .operations
+            .expire_if_stale(frame_id as u64, current_unix_ms())?
+        {
+            return Err(nnrp_core::NnrpError::InvalidOperationTransition {
+                from: nnrp_core::OperationState::Superseded,
+                to: nnrp_core::OperationState::Completed,
+            }
+            .into());
+        }
         self.operations.complete(frame_id as u64)?;
         let mut header = CommonHeader::new(
             MessageType::ResultPush,
@@ -1083,6 +1094,13 @@ impl NnrpServerSession {
             .lock()
             .map_err(|_| RuntimeError::Internal("server session registry lock poisoned"))
     }
+}
+
+fn current_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
 }
 
 fn require_body_len(

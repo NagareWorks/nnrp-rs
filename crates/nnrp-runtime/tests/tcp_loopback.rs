@@ -1,3 +1,4 @@
+use nnrp_core::NnrpError;
 use nnrp_core::{
     BackpressureLevel, CacheInvalidateMetadata, CacheInvalidateScope, CacheMissMetadata,
     CacheMissReason, CacheObjectId, CacheObjectKind, CacheReferenceMetadata, CacheReuseScope,
@@ -677,6 +678,54 @@ async fn server_registry_tracks_resume_enabled_sessions() -> Result<(), RuntimeE
 
     resumed.close().await?;
     initial.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn tcp_loopback_suppresses_expired_final_results() -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        let submit = session.receive_submit().await?;
+        let expire = session.receive_scheduling_update().await?;
+        assert_eq!(expire.message_type, MessageType::ExpireAt);
+        assert_eq!(expire.metadata.operation_id, submit.frame_id as u64);
+
+        let error = session
+            .send_result(submit.frame_id, token_result(), b"expired".to_vec())
+            .await
+            .expect_err("expired operation should reject final result delivery");
+        assert!(matches!(
+            error,
+            RuntimeError::Protocol(NnrpError::InvalidOperationTransition {
+                from: OperationState::Superseded,
+                to: OperationState::Completed,
+            })
+        ));
+        assert_eq!(
+            session
+                .operations()
+                .operation(submit.frame_id as u64)
+                .expect("operation should be registered")
+                .state,
+            OperationState::Superseded
+        );
+
+        let close = session.receive_close().await?;
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let mut session = client.open_session().await?;
+    let frame_id = session
+        .submit_nowait(token_submit(), b"prompt".to_vec())
+        .await?;
+    session.expire_at(frame_id as u64, 1).await?;
+    session.close().await?;
     server_task.await.expect("server task should join")?;
     Ok(())
 }
