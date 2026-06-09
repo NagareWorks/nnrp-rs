@@ -51,5 +51,5 @@
 
 - [x] Keep dry-run plan generation in conformance CI.
 - [ ] Add local reference endpoint tests for each concrete transport crate.
-- [ ] Add negative target tests for unsupported modes and transports.
+- [x] Add negative target tests for unsupported modes and transports.
 - [ ] Add matrix coverage for TCP, QUIC, IPC, and WebSocket reference endpoints.

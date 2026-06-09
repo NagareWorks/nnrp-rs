@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 
 pub const WIRE_DRY_RUN_REPORT_SCHEMA: &str =
     "https://raw.githubusercontent.com/NagareWorks/nnrp-conformance/main/schemas/wire-dry-run-results.schema.json";
+const WIRE_TRANSPORTS: &[&str] = &["tcp", "quic", "ipc", "websocket"];
+const WIRE_SCENARIO_MODES: &[&str] = &["suite-as-client", "suite-as-server", "suite-as-proxy"];
+const WIRE_TARGET_ENDPOINT_MODES: &[&str] = &["client", "server"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WireRunnerArguments {
@@ -112,6 +115,16 @@ pub fn build_wire_execution_plan(
             .get("required_transport")
             .and_then(Value::as_str)
             .unwrap_or("any");
+        validate_wire_transport(
+            required_transport,
+            &format!("scenario '{id}' required_transport"),
+            true,
+        )?;
+        let mode = case
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or("suite-as-client");
+        validate_wire_scenario_mode(mode, &format!("scenario '{id}' mode"))?;
         let required_capabilities = string_array_field(case.get("required_capabilities"))
             .map_err(|error| format!("scenario '{id}' {error}"))?;
         let missing_capabilities: Vec<&str> = required_capabilities
@@ -138,7 +151,7 @@ pub fn build_wire_execution_plan(
 
         planned_cases.push(json!({
             "id": id,
-            "mode": case.get("mode").and_then(Value::as_str).unwrap_or("suite-as-client"),
+            "mode": mode,
             "required_transport": required_transport,
             "required_capabilities": required_capabilities,
             "status": if runnable { "ready" } else { "skipped" },
@@ -225,6 +238,12 @@ fn target_endpoint_transports(target_manifest: &Value) -> Result<BTreeSet<String
             .ok_or_else(|| {
                 "target endpoint field 'transport' must be a non-empty string".to_string()
             })?;
+        validate_wire_transport(transport, "target endpoint transport", false)?;
+        let mode = endpoint
+            .get("mode")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "target endpoint field 'mode' must be a non-empty string".to_string())?;
+        validate_wire_target_endpoint_mode(mode, "target endpoint mode")?;
         transports.insert(transport.to_string());
     }
     Ok(transports)
@@ -284,6 +303,39 @@ fn string_array_field(value: Option<&Value>) -> Result<Vec<&str>, String> {
                 .ok_or_else(|| "field entries must be non-empty strings".to_string())
         })
         .collect()
+}
+
+fn validate_wire_transport(value: &str, label: &str, allow_any: bool) -> Result<(), String> {
+    if (allow_any && value == "any") || WIRE_TRANSPORTS.contains(&value) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{label} '{value}' must be one of {}",
+            if allow_any {
+                "any, tcp, quic, ipc, websocket"
+            } else {
+                "tcp, quic, ipc, websocket"
+            }
+        ))
+    }
+}
+
+fn validate_wire_scenario_mode(value: &str, label: &str) -> Result<(), String> {
+    if WIRE_SCENARIO_MODES.contains(&value) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{label} '{value}' must be one of suite-as-client, suite-as-server, suite-as-proxy"
+        ))
+    }
+}
+
+fn validate_wire_target_endpoint_mode(value: &str, label: &str) -> Result<(), String> {
+    if WIRE_TARGET_ENDPOINT_MODES.contains(&value) {
+        Ok(())
+    } else {
+        Err(format!("{label} '{value}' must be one of client, server"))
+    }
 }
 
 fn read_json_file(path: &Path, label: &str) -> Result<Value, String> {
@@ -412,6 +464,60 @@ mod tests {
             build_wire_execution_plan(&suite_manifest(), &target_manifest(), &["missing"])
                 .unwrap_err(),
             "selected wire scenario id 'missing' is not in the suite manifest"
+        );
+    }
+
+    #[test]
+    fn wire_execution_plan_rejects_unknown_suite_modes_and_transports() {
+        let suite = json!({
+            "protocol_version": "nnrp-1-preview4",
+            "scenarios": [{
+                "id": "wire.invalid.mode",
+                "mode": "sdk-adapter",
+                "required_transport": "ipc"
+            }]
+        });
+        assert_eq!(
+            build_wire_execution_plan(&suite, &target_manifest(), &[]).unwrap_err(),
+            "scenario 'wire.invalid.mode' mode 'sdk-adapter' must be one of suite-as-client, suite-as-server, suite-as-proxy"
+        );
+
+        let suite = json!({
+            "protocol_version": "nnrp-1-preview4",
+            "scenarios": [{
+                "id": "wire.invalid.transport",
+                "mode": "suite-as-client",
+                "required_transport": "named-pipe"
+            }]
+        });
+        assert_eq!(
+            build_wire_execution_plan(&suite, &target_manifest(), &[]).unwrap_err(),
+            "scenario 'wire.invalid.transport' required_transport 'named-pipe' must be one of any, tcp, quic, ipc, websocket"
+        );
+    }
+
+    #[test]
+    fn wire_execution_plan_rejects_unknown_target_endpoint_modes_and_transports() {
+        let target = json!({
+            "target_name": "bad-target-mode",
+            "protocol_version": "nnrp-1-preview4",
+            "endpoints": [{"transport": "ipc", "mode": "adapter", "uri": "nnrp+ipc://runtime.sock"}],
+            "capabilities": ["control.cancel_abort"]
+        });
+        assert_eq!(
+            build_wire_execution_plan(&suite_manifest(), &target, &[]).unwrap_err(),
+            "target endpoint mode 'adapter' must be one of client, server"
+        );
+
+        let target = json!({
+            "target_name": "bad-target-transport",
+            "protocol_version": "nnrp-1-preview4",
+            "endpoints": [{"transport": "stdio", "mode": "client", "uri": "stdio://runtime"}],
+            "capabilities": ["control.cancel_abort"]
+        });
+        assert_eq!(
+            build_wire_execution_plan(&suite_manifest(), &target, &[]).unwrap_err(),
+            "target endpoint transport 'stdio' must be one of tcp, quic, ipc, websocket"
         );
     }
 
