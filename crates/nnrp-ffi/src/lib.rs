@@ -5198,7 +5198,7 @@ mod tests {
             assert_eq!(
                 nnrp_client_connect(
                     NnrpClientConnectRequest {
-                        connection_id: 91_431,
+                        connection_id: 92_431,
                         generation: 1,
                         transport_id: test_transport_id(),
                     },
@@ -5211,7 +5211,7 @@ mod tests {
                 nnrp_client_open_session(
                     NnrpSessionOpenRequest {
                         connection,
-                        requested_session_id: 91_432,
+                        requested_session_id: 92_432,
                         generation: 1,
                         profile_id: 2,
                         schema_id: 0x1001,
@@ -5227,7 +5227,7 @@ mod tests {
             let mut result = empty_poll_result();
             let request = NnrpClientSubmitResultRequest {
                 session,
-                operation_id: 91_433,
+                operation_id: 92_433,
                 frame_id: 59,
                 submit_payload: NnrpBufferView::empty(),
                 result_payload: NnrpBufferView::empty(),
@@ -5240,7 +5240,7 @@ mod tests {
             let status = nnrp_client_submit_result(request, &mut operation, &mut result);
             assert_eq!(status.status_code, NnrpFfiStatusCode::WouldBlock as u32);
             assert_eq!(operation.kind, NnrpHandleKind::Operation as u32);
-            assert_eq!(operation.id, 91_433);
+            assert_eq!(operation.id, 92_433);
             assert_eq!(result.has_event, 0);
             assert_eq!(
                 nnrp_client_submit_result(
@@ -5254,7 +5254,7 @@ mod tests {
                 NnrpFfiStatus::invalid_argument(12)
             );
             let invalid_payload_request = NnrpClientSubmitResultRequest {
-                operation_id: 91_434,
+                operation_id: 92_434,
                 result_payload: NnrpBufferView {
                     ptr: ptr::null(),
                     len: 1,
@@ -5276,7 +5276,7 @@ mod tests {
             assert_eq!(
                 nnrp_client_submit_result_compact(
                     NnrpClientSubmitResultRequest {
-                        operation_id: 91_435,
+                        operation_id: 92_435,
                         result_payload: NnrpBufferView {
                             ptr: ptr::null(),
                             len: 1,
@@ -5302,8 +5302,8 @@ mod tests {
             assert_eq!(
                 nnrp_client_submit_result_compact(
                     NnrpClientSubmitResultRequest {
-                        session: NnrpHandle::new(NnrpHandleKind::Operation, 91_436, 1),
-                        operation_id: 91_436,
+                        session: NnrpHandle::new(NnrpHandleKind::Operation, 92_436, 1),
+                        operation_id: 92_436,
                         ..request
                     },
                     &mut compact_result
@@ -5317,7 +5317,7 @@ mod tests {
             assert_eq!(compact_result.has_result, 0);
             let status = nnrp_client_submit_result_compact(
                 NnrpClientSubmitResultRequest {
-                    operation_id: 91_437,
+                    operation_id: 92_437,
                     max_events: 1,
                     ..request
                 },
@@ -5330,12 +5330,12 @@ mod tests {
             );
             assert_eq!(compact_result.has_result, 0);
             assert_eq!(compact_result.result_state, NNRP_RESULT_STATE_NONE);
-            let invalid_session = NnrpHandle::new(NnrpHandleKind::Session, 91_438, 1);
+            let invalid_session = NnrpHandle::new(NnrpHandleKind::Session, 92_438, 1);
             assert_eq!(
                 poll_matching_operation_compact_result(
                     invalid_session,
-                    NnrpHandle::new(NnrpHandleKind::Operation, 91_438, 1),
-                    91_438,
+                    NnrpHandle::new(NnrpHandleKind::Operation, 92_438, 1),
+                    92_438,
                     62,
                     NnrpBufferView::empty(),
                     1,
