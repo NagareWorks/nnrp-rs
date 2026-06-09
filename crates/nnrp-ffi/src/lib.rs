@@ -5,8 +5,11 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use nnrp_core::{
     should_replay_frame_after_migration, token_delta_schema_descriptor,
     validate_migration_recovery, validate_session_recovery_ack, validate_session_recovery_request,
-    CacheLease, CacheLeaseOwnerScope, CacheObjectId, CacheObjectKind, CacheValidationFailure,
-    MessageType, NnrpError, ProtocolVersion, ResultHintMetadata, SchemaDescriptorHeader,
+    CacheLease, CacheLeaseOwnerScope, CacheMissMetadata, CacheMissReason, CacheObjectId,
+    CacheObjectKind, CacheReferenceMetadata, CacheReuseScope, CacheValidationFailure,
+    MemoryLocationHint, MessageType, NnrpError, ObjectDeltaMetadata, ObjectDescriptorMetadata,
+    ObjectReferenceMetadata, ObjectReleaseMetadata, ObjectReleaseReason, OwnershipHint,
+    ProtocolVersion, ResultHintMetadata, RuntimeObjectKind, RuntimeRole, SchemaDescriptorHeader,
     SchemaRegistry, SchemaRegistryAction, SchemaRegistryFailure, SessionMigrateAckMetadata,
     SessionMigrateMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
     SessionRecoveryOutcome as CoreSessionRecoveryOutcome, TransportId, TypedPayloadDescriptor,
@@ -755,6 +758,264 @@ impl NnrpCacheLeaseResult {
             object_version: lease.object_version,
             lease_id: lease.lease_id,
             expires_at_ms: lease.expires_at_ms(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpRuntimeObjectDescriptor {
+    pub object_id: u64,
+    pub object_kind: u16,
+    pub producer_role: u8,
+    pub consumer_role: u8,
+    pub session_id: u32,
+    pub byte_size: u64,
+    pub compute_cost_units: u32,
+    pub memory_location_hint: u16,
+    pub ownership_hint: u16,
+    pub lifetime_hint_ms: u32,
+    pub metadata_bytes: u32,
+}
+
+impl NnrpRuntimeObjectDescriptor {
+    pub fn to_core(self) -> Result<ObjectDescriptorMetadata, NnrpFfiStatus> {
+        Ok(ObjectDescriptorMetadata {
+            object_id: self.object_id,
+            object_kind: RuntimeObjectKind::try_from_u16(self.object_kind)
+                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
+            producer_role: RuntimeRole::try_from_u8(self.producer_role)
+                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
+            consumer_role: RuntimeRole::try_from_u8(self.consumer_role)
+                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
+            session_id: self.session_id,
+            byte_size: self.byte_size,
+            compute_cost_units: self.compute_cost_units,
+            memory_location_hint: MemoryLocationHint::try_from_u16(self.memory_location_hint)
+                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
+            ownership_hint: OwnershipHint::try_from_u16(self.ownership_hint)
+                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
+            lifetime_hint_ms: self.lifetime_hint_ms,
+            metadata_bytes: self.metadata_bytes,
+        })
+    }
+}
+
+impl From<ObjectDescriptorMetadata> for NnrpRuntimeObjectDescriptor {
+    fn from(value: ObjectDescriptorMetadata) -> Self {
+        Self {
+            object_id: value.object_id,
+            object_kind: value.object_kind as u16,
+            producer_role: value.producer_role as u8,
+            consumer_role: value.consumer_role as u8,
+            session_id: value.session_id,
+            byte_size: value.byte_size,
+            compute_cost_units: value.compute_cost_units,
+            memory_location_hint: value.memory_location_hint as u16,
+            ownership_hint: value.ownership_hint as u16,
+            lifetime_hint_ms: value.lifetime_hint_ms,
+            metadata_bytes: value.metadata_bytes,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpObjectReferenceDescriptor {
+    pub object_id: u64,
+    pub operation_id: u64,
+    pub object_version: u64,
+    pub offset: u64,
+    pub length: u64,
+    pub flags: u32,
+    pub metadata_bytes: u32,
+}
+
+impl From<ObjectReferenceMetadata> for NnrpObjectReferenceDescriptor {
+    fn from(value: ObjectReferenceMetadata) -> Self {
+        Self {
+            object_id: value.object_id,
+            operation_id: value.operation_id,
+            object_version: value.object_version,
+            offset: value.offset,
+            length: value.length,
+            flags: value.flags,
+            metadata_bytes: value.metadata_bytes,
+        }
+    }
+}
+
+impl From<NnrpObjectReferenceDescriptor> for ObjectReferenceMetadata {
+    fn from(value: NnrpObjectReferenceDescriptor) -> Self {
+        Self {
+            object_id: value.object_id,
+            operation_id: value.operation_id,
+            object_version: value.object_version,
+            offset: value.offset,
+            length: value.length,
+            flags: value.flags,
+            metadata_bytes: value.metadata_bytes,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpObjectReleaseDescriptor {
+    pub object_id: u64,
+    pub operation_id: u64,
+    pub release_reason: u16,
+    pub source_role: u8,
+    pub flags: u8,
+    pub diagnostic_bytes: u32,
+}
+
+impl NnrpObjectReleaseDescriptor {
+    pub fn to_core(self) -> Result<ObjectReleaseMetadata, NnrpFfiStatus> {
+        Ok(ObjectReleaseMetadata {
+            object_id: self.object_id,
+            operation_id: self.operation_id,
+            release_reason: ObjectReleaseReason::try_from_u16(self.release_reason)
+                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
+            source_role: RuntimeRole::try_from_u8(self.source_role)
+                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
+            flags: self.flags,
+            diagnostic_bytes: self.diagnostic_bytes,
+        })
+    }
+}
+
+impl From<ObjectReleaseMetadata> for NnrpObjectReleaseDescriptor {
+    fn from(value: ObjectReleaseMetadata) -> Self {
+        Self {
+            object_id: value.object_id,
+            operation_id: value.operation_id,
+            release_reason: value.release_reason as u16,
+            source_role: value.source_role as u8,
+            flags: value.flags,
+            diagnostic_bytes: value.diagnostic_bytes,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpObjectDeltaDescriptor {
+    pub object_id: u64,
+    pub delta_sequence: u64,
+    pub region_offset: u64,
+    pub region_bytes: u32,
+    pub delta_bytes: u32,
+    pub flags: u32,
+    pub metadata_bytes: u32,
+}
+
+impl From<ObjectDeltaMetadata> for NnrpObjectDeltaDescriptor {
+    fn from(value: ObjectDeltaMetadata) -> Self {
+        Self {
+            object_id: value.object_id,
+            delta_sequence: value.delta_sequence,
+            region_offset: value.region_offset,
+            region_bytes: value.region_bytes,
+            delta_bytes: value.delta_bytes,
+            flags: value.flags,
+            metadata_bytes: value.metadata_bytes,
+        }
+    }
+}
+
+impl From<NnrpObjectDeltaDescriptor> for ObjectDeltaMetadata {
+    fn from(value: NnrpObjectDeltaDescriptor) -> Self {
+        Self {
+            object_id: value.object_id,
+            delta_sequence: value.delta_sequence,
+            region_offset: value.region_offset,
+            region_bytes: value.region_bytes,
+            delta_bytes: value.delta_bytes,
+            flags: value.flags,
+            metadata_bytes: value.metadata_bytes,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpCacheReferenceDescriptor {
+    pub cache_key_hi: u64,
+    pub cache_key_lo: u64,
+    pub profile_id: u16,
+    pub reuse_scope: u16,
+    pub lease_id: u64,
+    pub producer_trace_id: u64,
+    pub expiration_hint_ms: u32,
+    pub metadata_bytes: u32,
+    pub flags: u32,
+}
+
+impl NnrpCacheReferenceDescriptor {
+    pub fn to_core(self) -> Result<CacheReferenceMetadata, NnrpFfiStatus> {
+        Ok(CacheReferenceMetadata {
+            cache_key_hi: self.cache_key_hi,
+            cache_key_lo: self.cache_key_lo,
+            profile_id: self.profile_id,
+            reuse_scope: CacheReuseScope::try_from_u16(self.reuse_scope)
+                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
+            lease_id: self.lease_id,
+            producer_trace_id: self.producer_trace_id,
+            expiration_hint_ms: self.expiration_hint_ms,
+            metadata_bytes: self.metadata_bytes,
+            flags: self.flags,
+        })
+    }
+}
+
+impl From<CacheReferenceMetadata> for NnrpCacheReferenceDescriptor {
+    fn from(value: CacheReferenceMetadata) -> Self {
+        Self {
+            cache_key_hi: value.cache_key_hi,
+            cache_key_lo: value.cache_key_lo,
+            profile_id: value.profile_id,
+            reuse_scope: value.reuse_scope as u16,
+            lease_id: value.lease_id,
+            producer_trace_id: value.producer_trace_id,
+            expiration_hint_ms: value.expiration_hint_ms,
+            metadata_bytes: value.metadata_bytes,
+            flags: value.flags,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpCacheMissDescriptor {
+    pub cache_key_hi: u64,
+    pub cache_key_lo: u64,
+    pub miss_reason: u16,
+    pub profile_id: u16,
+    pub diagnostic_bytes: u32,
+}
+
+impl NnrpCacheMissDescriptor {
+    pub fn to_core(self) -> Result<CacheMissMetadata, NnrpFfiStatus> {
+        Ok(CacheMissMetadata {
+            cache_key_hi: self.cache_key_hi,
+            cache_key_lo: self.cache_key_lo,
+            miss_reason: CacheMissReason::try_from_u16(self.miss_reason)
+                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
+            profile_id: self.profile_id,
+            diagnostic_bytes: self.diagnostic_bytes,
+        })
+    }
+}
+
+impl From<CacheMissMetadata> for NnrpCacheMissDescriptor {
+    fn from(value: CacheMissMetadata) -> Self {
+        Self {
+            cache_key_hi: value.cache_key_hi,
+            cache_key_lo: value.cache_key_lo,
+            miss_reason: value.miss_reason as u16,
+            profile_id: value.profile_id,
+            diagnostic_bytes: value.diagnostic_bytes,
         }
     }
 }
@@ -3307,6 +3568,128 @@ mod tests {
         assert_ne!(
             capabilities.feature_flags & NNRP_RUNTIME_FEATURE_PREVIEW4_OBJECT_CACHE_EVENTS,
             0
+        );
+    }
+
+    #[test]
+    fn ffi_preview4_object_descriptors_round_trip_core_layouts() {
+        let object = ObjectDescriptorMetadata {
+            object_id: 1,
+            object_kind: RuntimeObjectKind::Tensor,
+            producer_role: RuntimeRole::Runtime,
+            consumer_role: RuntimeRole::Client,
+            session_id: 2,
+            byte_size: 4096,
+            compute_cost_units: 7,
+            memory_location_hint: MemoryLocationHint::DeviceMemory,
+            ownership_hint: OwnershipHint::Borrowed,
+            lifetime_hint_ms: 500,
+            metadata_bytes: 12,
+        };
+        let ffi_object: NnrpRuntimeObjectDescriptor = object.into();
+        assert_eq!(ffi_object.to_core().unwrap(), object);
+
+        let reference = ObjectReferenceMetadata {
+            object_id: 1,
+            operation_id: 3,
+            object_version: 4,
+            offset: 8,
+            length: 16,
+            flags: 0x07,
+            metadata_bytes: 20,
+        };
+        let ffi_reference: NnrpObjectReferenceDescriptor = reference.into();
+        assert_eq!(ObjectReferenceMetadata::from(ffi_reference), reference);
+
+        let release = ObjectReleaseMetadata {
+            object_id: 1,
+            operation_id: 3,
+            release_reason: ObjectReleaseReason::Cancelled,
+            source_role: RuntimeRole::Scheduler,
+            flags: 0x03,
+            diagnostic_bytes: 8,
+        };
+        let ffi_release: NnrpObjectReleaseDescriptor = release.into();
+        assert_eq!(ffi_release.to_core().unwrap(), release);
+
+        let delta = ObjectDeltaMetadata {
+            object_id: 1,
+            delta_sequence: 2,
+            region_offset: 64,
+            region_bytes: 32,
+            delta_bytes: 16,
+            flags: 0x07,
+            metadata_bytes: 4,
+        };
+        let ffi_delta: NnrpObjectDeltaDescriptor = delta.into();
+        assert_eq!(ObjectDeltaMetadata::from(ffi_delta), delta);
+
+        let cache_ref = CacheReferenceMetadata {
+            cache_key_hi: 0x1122,
+            cache_key_lo: 0x3344,
+            profile_id: 3,
+            reuse_scope: CacheReuseScope::Session,
+            lease_id: 5,
+            producer_trace_id: 6,
+            expiration_hint_ms: 700,
+            metadata_bytes: 24,
+            flags: 0x03,
+        };
+        let ffi_cache_ref: NnrpCacheReferenceDescriptor = cache_ref.into();
+        assert_eq!(ffi_cache_ref.to_core().unwrap(), cache_ref);
+
+        let miss = CacheMissMetadata {
+            cache_key_hi: 0x1122,
+            cache_key_lo: 0x3344,
+            miss_reason: CacheMissReason::SchemaMismatch,
+            profile_id: 3,
+            diagnostic_bytes: 9,
+        };
+        let ffi_miss: NnrpCacheMissDescriptor = miss.into();
+        assert_eq!(ffi_miss.to_core().unwrap(), miss);
+    }
+
+    #[test]
+    fn ffi_preview4_object_descriptors_reject_unknown_registry_values() {
+        let bad_object = NnrpRuntimeObjectDescriptor {
+            object_id: 1,
+            object_kind: 0x000d,
+            producer_role: RuntimeRole::Runtime as u8,
+            consumer_role: RuntimeRole::Client as u8,
+            session_id: 2,
+            byte_size: 4096,
+            compute_cost_units: 7,
+            memory_location_hint: MemoryLocationHint::DeviceMemory as u16,
+            ownership_hint: OwnershipHint::Borrowed as u16,
+            lifetime_hint_ms: 500,
+            metadata_bytes: 12,
+        };
+        assert_eq!(
+            bad_object.to_core(),
+            Err(NnrpFfiStatus {
+                status_code: NnrpFfiStatusCode::ProtocolError as u32,
+                error_family: NnrpErrorFamily::Transport as u32,
+                protocol_error_code: 0,
+                detail_code: 0,
+            })
+        );
+
+        let bad_release = NnrpObjectReleaseDescriptor {
+            object_id: 1,
+            operation_id: 2,
+            release_reason: ObjectReleaseReason::Cancelled as u16,
+            source_role: 0x08,
+            flags: 0,
+            diagnostic_bytes: 0,
+        };
+        assert_eq!(
+            bad_release.to_core(),
+            Err(NnrpFfiStatus {
+                status_code: NnrpFfiStatusCode::ProtocolError as u32,
+                error_family: NnrpErrorFamily::Transport as u32,
+                protocol_error_code: 0,
+                detail_code: 0,
+            })
         );
     }
 

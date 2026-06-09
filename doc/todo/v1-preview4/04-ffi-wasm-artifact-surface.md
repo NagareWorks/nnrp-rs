@@ -18,7 +18,7 @@
   - [ ] Complete partial result.
   - [ ] Drop stale result.
 - [ ] Add C ABI error mapping for preview4 families.
-- [ ] Add ABI version feature flags for runtime control and runtime object support.
+- [x] Add ABI version feature flags for runtime control and runtime object support.
 
 ## FFI Object Surface
 
