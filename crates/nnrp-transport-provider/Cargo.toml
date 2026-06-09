@@ -17,6 +17,8 @@ categories.workspace = true
 default = ["tcp"]
 tcp = []
 quic = []
+ipc = []
+websocket = []
 native-loader = []
 wasm = []
 

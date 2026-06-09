@@ -176,6 +176,8 @@ pub enum TransportId {
     Unspecified = 0,
     Quic = 1,
     Tcp = 2,
+    Ipc = 3,
+    WebSocket = 4,
 }
 
 impl TransportId {
@@ -184,6 +186,8 @@ impl TransportId {
             0 => Ok(Self::Unspecified),
             1 => Ok(Self::Quic),
             2 => Ok(Self::Tcp),
+            3 => Ok(Self::Ipc),
+            4 => Ok(Self::WebSocket),
             _ => Err(NnrpError::UnknownEnumValue {
                 enum_name: "transport_id",
                 value: value as u64,
@@ -3140,9 +3144,11 @@ mod tests {
         for value in 0..=5 {
             assert!(SessionPatchRejectReason::try_from_u16(value).is_ok());
         }
-        for value in 0..=2 {
+        for value in 0..=4 {
             assert!(TransportId::try_from_u32(value).is_ok());
         }
+        assert_eq!(TransportId::try_from_u32(3), Ok(TransportId::Ipc));
+        assert_eq!(TransportId::try_from_u32(4), Ok(TransportId::WebSocket));
 
         assert!(ResultHintBudgetPolicy::try_from_u32(99).is_err());
         assert!(ResultHintCongestionState::try_from_u32(99).is_err());

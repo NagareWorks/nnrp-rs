@@ -26,8 +26,15 @@ pub const NNRP_FFI_ABI_PATCH: u16 = 0;
 
 pub const NNRP_TRANSPORT_SLOT_QUIC: u32 = 0x0000_0001;
 pub const NNRP_TRANSPORT_SLOT_TCP: u32 = 0x0000_0002;
+pub const NNRP_TRANSPORT_SLOT_IPC: u32 = 0x0000_0004;
+pub const NNRP_TRANSPORT_SLOT_WEBSOCKET: u32 = 0x0000_0008;
 
-#[cfg(not(any(feature = "transport-tcp", feature = "transport-quic")))]
+#[cfg(not(any(
+    feature = "transport-tcp",
+    feature = "transport-quic",
+    feature = "transport-ipc",
+    feature = "transport-websocket"
+)))]
 compile_error!("nnrp-ffi must be built with at least one transport feature enabled.");
 
 pub const NNRP_RUNTIME_FEATURE_PROTOCOL_CORE: u64 = 0x0000_0000_0000_0001;
@@ -156,6 +163,8 @@ const fn transport_slot_bit(transport_id: TransportId) -> u32 {
     match transport_id {
         TransportId::Quic => NNRP_TRANSPORT_SLOT_QUIC,
         TransportId::Tcp => NNRP_TRANSPORT_SLOT_TCP,
+        TransportId::Ipc => NNRP_TRANSPORT_SLOT_IPC,
+        TransportId::WebSocket => NNRP_TRANSPORT_SLOT_WEBSOCKET,
         TransportId::Unspecified => 0,
     }
 }
@@ -1844,6 +1853,12 @@ const fn enabled_transport_slots() -> u32 {
     if cfg!(feature = "transport-tcp") {
         slots |= transport_slot_bit(TransportId::Tcp);
     }
+    if cfg!(feature = "transport-ipc") {
+        slots |= transport_slot_bit(TransportId::Ipc);
+    }
+    if cfg!(feature = "transport-websocket") {
+        slots |= transport_slot_bit(TransportId::WebSocket);
+    }
     slots
 }
 
@@ -1851,6 +1866,8 @@ fn transport_id_enabled(transport_id: u32) -> bool {
     match TransportId::try_from_u32(transport_id) {
         Ok(TransportId::Quic) => cfg!(feature = "transport-quic"),
         Ok(TransportId::Tcp) => cfg!(feature = "transport-tcp"),
+        Ok(TransportId::Ipc) => cfg!(feature = "transport-ipc"),
+        Ok(TransportId::WebSocket) => cfg!(feature = "transport-websocket"),
         Ok(TransportId::Unspecified) | Err(_) => false,
     }
 }
@@ -4005,6 +4022,22 @@ mod tests {
             transport_slot_bit(TransportId::Tcp),
             NNRP_TRANSPORT_SLOT_TCP
         );
+        assert_eq!(
+            transport_slot_bit(TransportId::Ipc),
+            NNRP_TRANSPORT_SLOT_IPC
+        );
+        assert_eq!(
+            transport_slot_bit(TransportId::WebSocket),
+            NNRP_TRANSPORT_SLOT_WEBSOCKET
+        );
+        assert_eq!(
+            enabled_transport_slots() & NNRP_TRANSPORT_SLOT_IPC != 0,
+            cfg!(feature = "transport-ipc")
+        );
+        assert_eq!(
+            enabled_transport_slots() & NNRP_TRANSPORT_SLOT_WEBSOCKET != 0,
+            cfg!(feature = "transport-websocket")
+        );
         assert_ne!(
             capabilities.feature_flags & NNRP_RUNTIME_FEATURE_PROTOCOL_CORE,
             0
@@ -4394,6 +4427,14 @@ mod tests {
         assert_eq!(
             transport_id_enabled(TransportId::Quic as u32),
             cfg!(feature = "transport-quic")
+        );
+        assert_eq!(
+            transport_id_enabled(TransportId::Ipc as u32),
+            cfg!(feature = "transport-ipc")
+        );
+        assert_eq!(
+            transport_id_enabled(TransportId::WebSocket as u32),
+            cfg!(feature = "transport-websocket")
         );
         assert!(!transport_id_enabled(TransportId::Unspecified as u32));
         assert!(!transport_id_enabled(99));

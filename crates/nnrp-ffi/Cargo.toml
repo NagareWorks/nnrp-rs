@@ -20,6 +20,8 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 default = ["transport-tcp", "transport-quic"]
 transport-tcp = []
 transport-quic = []
+transport-ipc = []
+transport-websocket = []
 
 [dependencies]
 nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.3.8" }

@@ -41,6 +41,8 @@ impl Default for RuntimeFrameLimits {
 pub enum RuntimeTransportKind {
     Tcp,
     Quic,
+    Ipc,
+    WebSocket,
 }
 
 impl RuntimeTransportKind {
@@ -48,6 +50,8 @@ impl RuntimeTransportKind {
         match self {
             Self::Tcp => nnrp_core::TransportId::Tcp,
             Self::Quic => nnrp_core::TransportId::Quic,
+            Self::Ipc => nnrp_core::TransportId::Ipc,
+            Self::WebSocket => nnrp_core::TransportId::WebSocket,
         }
     }
 }
@@ -182,5 +186,22 @@ impl FramedListener for TcpFramedListener {
     async fn accept(&self) -> Result<BoxedFramedTransport, RuntimeError> {
         let (stream, _) = self.listener.accept().await?;
         Ok(Box::new(TcpTransport::new_with_limits(stream, self.limits)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nnrp_core::TransportId;
+
+    #[test]
+    fn runtime_transport_kinds_map_to_frozen_transport_ids() {
+        assert_eq!(RuntimeTransportKind::Tcp.transport_id(), TransportId::Tcp);
+        assert_eq!(RuntimeTransportKind::Quic.transport_id(), TransportId::Quic);
+        assert_eq!(RuntimeTransportKind::Ipc.transport_id(), TransportId::Ipc);
+        assert_eq!(
+            RuntimeTransportKind::WebSocket.transport_id(),
+            TransportId::WebSocket
+        );
     }
 }

@@ -8,18 +8,26 @@ pub enum TransportPolicy {
     Auto,
     PreferQuic,
     PreferTcp,
+    PreferIpc,
+    PreferWebSocket,
     ForceQuic,
     ForceTcp,
+    ForceIpc,
+    ForceWebSocket,
 }
 
 impl TransportPolicy {
     pub fn allows(self, transport_id: TransportId) -> bool {
         match self {
-            Self::Auto | Self::PreferQuic | Self::PreferTcp => {
-                is_selectable_transport(transport_id)
-            }
+            Self::Auto
+            | Self::PreferQuic
+            | Self::PreferTcp
+            | Self::PreferIpc
+            | Self::PreferWebSocket => is_selectable_transport(transport_id),
             Self::ForceQuic => transport_id == TransportId::Quic,
             Self::ForceTcp => transport_id == TransportId::Tcp,
+            Self::ForceIpc => transport_id == TransportId::Ipc,
+            Self::ForceWebSocket => transport_id == TransportId::WebSocket,
         }
     }
 
@@ -27,10 +35,18 @@ impl TransportPolicy {
         match (self, transport_id) {
             (Self::PreferQuic | Self::ForceQuic, TransportId::Quic) => 0,
             (Self::PreferTcp | Self::ForceTcp, TransportId::Tcp) => 0,
+            (Self::PreferIpc | Self::ForceIpc, TransportId::Ipc) => 0,
+            (Self::PreferWebSocket | Self::ForceWebSocket, TransportId::WebSocket) => 0,
             (Self::PreferQuic, TransportId::Tcp) => 1,
+            (Self::PreferQuic, TransportId::Ipc | TransportId::WebSocket) => 2,
             (Self::PreferTcp, TransportId::Quic) => 1,
-            (Self::Auto, TransportId::Quic) => 0,
-            (Self::Auto, TransportId::Tcp) => 1,
+            (Self::PreferTcp, TransportId::Ipc | TransportId::WebSocket) => 2,
+            (Self::PreferIpc, TransportId::Tcp | TransportId::Quic | TransportId::WebSocket) => 1,
+            (Self::PreferWebSocket, TransportId::Tcp | TransportId::Quic | TransportId::Ipc) => 1,
+            (Self::Auto, TransportId::Ipc) => 0,
+            (Self::Auto, TransportId::Quic) => 1,
+            (Self::Auto, TransportId::Tcp) => 2,
+            (Self::Auto, TransportId::WebSocket) => 3,
             _ => u8::MAX,
         }
     }
@@ -47,6 +63,8 @@ pub enum TransportProviderKind {
 pub struct ProviderFeatureSet {
     pub tcp: bool,
     pub quic: bool,
+    pub ipc: bool,
+    pub websocket: bool,
     pub native_loader: bool,
     pub wasm: bool,
 }
@@ -55,6 +73,8 @@ pub const fn compile_time_provider_features() -> ProviderFeatureSet {
     ProviderFeatureSet {
         tcp: cfg!(feature = "tcp"),
         quic: cfg!(feature = "quic"),
+        ipc: cfg!(feature = "ipc"),
+        websocket: cfg!(feature = "websocket"),
         native_loader: cfg!(feature = "native-loader"),
         wasm: cfg!(feature = "wasm"),
     }
@@ -535,7 +555,10 @@ fn transport_selection_error<T>(
 ) -> Result<T, TransportSelectionError> {
     if matches!(
         policy,
-        TransportPolicy::ForceQuic | TransportPolicy::ForceTcp
+        TransportPolicy::ForceQuic
+            | TransportPolicy::ForceTcp
+            | TransportPolicy::ForceIpc
+            | TransportPolicy::ForceWebSocket
     ) {
         Err(TransportSelectionError::ForcedTransportUnavailable {
             transport_id: forced_transport(policy),
@@ -560,12 +583,17 @@ fn forced_transport(policy: TransportPolicy) -> TransportId {
     match policy {
         TransportPolicy::ForceQuic => TransportId::Quic,
         TransportPolicy::ForceTcp => TransportId::Tcp,
+        TransportPolicy::ForceIpc => TransportId::Ipc,
+        TransportPolicy::ForceWebSocket => TransportId::WebSocket,
         _ => TransportId::Unspecified,
     }
 }
 
 fn is_selectable_transport(transport_id: TransportId) -> bool {
-    matches!(transport_id, TransportId::Quic | TransportId::Tcp)
+    matches!(
+        transport_id,
+        TransportId::Quic | TransportId::Tcp | TransportId::Ipc | TransportId::WebSocket
+    )
 }
 
 #[cfg(test)]
@@ -676,10 +704,68 @@ mod tests {
             ProviderFeatureSet {
                 tcp: cfg!(feature = "tcp"),
                 quic: cfg!(feature = "quic"),
+                ipc: cfg!(feature = "ipc"),
+                websocket: cfg!(feature = "websocket"),
                 native_loader: cfg!(feature = "native-loader"),
                 wasm: cfg!(feature = "wasm"),
             }
         );
+    }
+
+    #[test]
+    fn registry_orders_ipc_and_websocket_without_treating_them_as_flags() {
+        let registry = TransportProviderRegistry::new()
+            .with_provider(available("tcp", TransportId::Tcp))
+            .with_provider(available("quic", TransportId::Quic))
+            .with_provider(available("ipc", TransportId::Ipc))
+            .with_provider(available("websocket", TransportId::WebSocket));
+        let remote = RemoteTransportSupport::new([
+            TransportId::Tcp,
+            TransportId::Quic,
+            TransportId::Ipc,
+            TransportId::WebSocket,
+        ]);
+
+        let auto = registry
+            .select(&remote, TransportPolicy::Auto)
+            .expect("auto should prefer ipc when it is available");
+        assert_eq!(auto.selected.transport_id, TransportId::Ipc);
+
+        let websocket = registry
+            .select(&remote, TransportPolicy::PreferWebSocket)
+            .expect("prefer websocket should select websocket");
+        assert_eq!(websocket.selected.transport_id, TransportId::WebSocket);
+
+        let ipc = registry
+            .select(&remote, TransportPolicy::PreferIpc)
+            .expect("prefer ipc should select ipc");
+        assert_eq!(ipc.selected.transport_id, TransportId::Ipc);
+
+        let forced = registry
+            .select(
+                &RemoteTransportSupport::new([TransportId::Tcp]),
+                TransportPolicy::ForceIpc,
+            )
+            .expect_err("force ipc should fail when remote lacks ipc");
+        assert!(matches!(
+            forced,
+            TransportSelectionError::ForcedTransportUnavailable {
+                transport_id: TransportId::Ipc
+            }
+        ));
+
+        let forced_websocket = registry
+            .select(
+                &RemoteTransportSupport::new([TransportId::Tcp]),
+                TransportPolicy::ForceWebSocket,
+            )
+            .expect_err("force websocket should fail when remote lacks websocket");
+        assert!(matches!(
+            forced_websocket,
+            TransportSelectionError::ForcedTransportUnavailable {
+                transport_id: TransportId::WebSocket
+            }
+        ));
     }
 
     #[test]

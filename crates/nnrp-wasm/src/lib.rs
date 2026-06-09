@@ -249,6 +249,8 @@ const fn transport_enabled(transport_id: TransportId) -> bool {
     match transport_id {
         TransportId::Quic => cfg!(feature = "transport-quic"),
         TransportId::Tcp => cfg!(feature = "transport-tcp"),
+        TransportId::Ipc => cfg!(feature = "transport-ipc"),
+        TransportId::WebSocket => cfg!(feature = "transport-websocket"),
         TransportId::Unspecified => false,
     }
 }
@@ -258,8 +260,12 @@ fn parse_policy(value: &str) -> Result<TransportPolicy, JsValue> {
         "auto" => Ok(TransportPolicy::Auto),
         "prefer_quic" => Ok(TransportPolicy::PreferQuic),
         "prefer_tcp" => Ok(TransportPolicy::PreferTcp),
+        "prefer_ipc" => Ok(TransportPolicy::PreferIpc),
+        "prefer_websocket" => Ok(TransportPolicy::PreferWebSocket),
         "force_quic" => Ok(TransportPolicy::ForceQuic),
         "force_tcp" => Ok(TransportPolicy::ForceTcp),
+        "force_ipc" => Ok(TransportPolicy::ForceIpc),
+        "force_websocket" => Ok(TransportPolicy::ForceWebSocket),
         other => Err(js_error(&format!("unknown transport policy: {other}"))),
     }
 }
@@ -386,11 +392,36 @@ mod tests {
             r#"{"name":"tcp","version":"0.0.0","transport_id":2,"kind":"plugin","available":true}"#;
         let bad_transport =
             r#"{"name":"tcp","version":"0.0.0","transport_id":99,"kind":"wasm","available":true}"#;
+        let ipc =
+            r#"{"name":"ipc","version":"0.0.0","transport_id":3,"kind":"wasm","available":true}"#;
+        let websocket = r#"{"name":"websocket","version":"0.0.0","transport_id":4,"kind":"wasm","available":true}"#;
 
         assert!(score_provider_probe_json(tcp, "sticky", "[]").is_err());
         assert!(score_provider_probe_json(unspecified, "auto", "[]").is_err());
         assert!(score_provider_probe_json(bad_kind, "force_tcp", "[]").is_err());
         assert!(score_provider_probe_json(bad_transport, "force_tcp", "[]").is_err());
+        assert!(score_provider_probe_json(ipc, "force_ipc", "[]").is_err());
+        assert!(score_provider_probe_json(websocket, "force_websocket", "[]").is_err());
+    }
+
+    #[test]
+    fn wasm_accepts_new_transport_policy_names() {
+        assert_eq!(
+            parse_policy("prefer_ipc").unwrap(),
+            TransportPolicy::PreferIpc
+        );
+        assert_eq!(
+            parse_policy("prefer_websocket").unwrap(),
+            TransportPolicy::PreferWebSocket
+        );
+        assert_eq!(
+            parse_policy("force_ipc").unwrap(),
+            TransportPolicy::ForceIpc
+        );
+        assert_eq!(
+            parse_policy("force_websocket").unwrap(),
+            TransportPolicy::ForceWebSocket
+        );
     }
 
     #[cfg(all(feature = "transport-tcp", not(feature = "transport-quic")))]
