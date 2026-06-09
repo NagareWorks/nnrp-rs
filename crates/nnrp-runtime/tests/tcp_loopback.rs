@@ -312,6 +312,74 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
 }
 
 #[tokio::test]
+async fn tcp_loopback_preserves_partial_result_order_with_interleaving() -> Result<(), RuntimeError>
+{
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        let first = session.receive_submit().await?;
+        let second = session.receive_submit().await?;
+
+        session
+            .send_partial_result(
+                partial_result_sequence(first.frame_id as u64, 1, 7),
+                b"op1-one".to_vec(),
+            )
+            .await?;
+        session
+            .send_partial_result(
+                partial_result_sequence(second.frame_id as u64, 1, 7),
+                b"op2-one".to_vec(),
+            )
+            .await?;
+        session
+            .send_partial_result(
+                partial_result_sequence(first.frame_id as u64, 2, 7),
+                b"op1-two".to_vec(),
+            )
+            .await?;
+
+        let close = session.receive_close().await?;
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let mut session = client.open_session().await?;
+    let first_frame_id = session
+        .submit_nowait(token_submit(), b"first".to_vec())
+        .await?;
+    let second_frame_id = session
+        .submit_nowait(token_submit(), b"second".to_vec())
+        .await?;
+
+    assert_partial_result_event(
+        session.await_event().await?,
+        first_frame_id as u64,
+        1,
+        b"op1-one",
+    );
+    assert_partial_result_event(
+        session.await_event().await?,
+        second_frame_id as u64,
+        1,
+        b"op2-one",
+    );
+    assert_partial_result_event(
+        session.await_event().await?,
+        first_frame_id as u64,
+        2,
+        b"op1-two",
+    );
+
+    session.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), RuntimeError> {
     let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
     let addr = server.local_addr()?;
@@ -2163,13 +2231,40 @@ fn soft_backpressure() -> PressureMetadata {
 }
 
 fn partial_result(operation_id: u64) -> PartialResultMetadata {
+    partial_result_sequence(operation_id, 1, 7)
+}
+
+fn partial_result_sequence(
+    operation_id: u64,
+    result_sequence: u64,
+    body_bytes: u32,
+) -> PartialResultMetadata {
     PartialResultMetadata {
         operation_id,
-        result_sequence: 1,
+        result_sequence,
         object_id: 0,
         delta_sequence: 0,
-        body_bytes: 7,
+        body_bytes,
         flags: 0,
+    }
+}
+
+fn assert_partial_result_event(
+    event: NnrpClientEvent,
+    operation_id: u64,
+    result_sequence: u64,
+    body: &[u8],
+) {
+    match event {
+        NnrpClientEvent::PartialResult {
+            metadata,
+            body: actual_body,
+        } => {
+            assert_eq!(metadata.operation_id, operation_id);
+            assert_eq!(metadata.result_sequence, result_sequence);
+            assert_eq!(actual_body, body);
+        }
+        event => panic!("expected partial result, got {event:?}"),
     }
 }
 

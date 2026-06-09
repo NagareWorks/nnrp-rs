@@ -57,15 +57,15 @@
   - [x] Cooperative cancellation.
   - [x] Hard abort.
   - [x] Late result suppression.
-- [ ] Route priority and deadline changes into scheduler metadata.
+- [x] Route priority and deadline changes into scheduler metadata.
   - [x] Update priority without reopening the session.
   - [x] Persist priority, deadline, and expire-at metadata in the operation registry.
   - [x] Expire stale work before final result delivery.
   - [x] Emit `RESULT_DROP_REASON` when stale work is discarded.
   - [x] Expose typed `RESULT_DROP_REASON` send/read APIs for host-controlled discard paths.
-- [ ] Route progress and partial results through event queues.
-  - [ ] Preserve order within one operation.
-  - [ ] Allow interleaving across operations.
+- [x] Route progress and partial results through event queues.
+  - [x] Preserve order within one operation.
+  - [x] Allow interleaving across operations.
   - [x] Support host polling for `PARTIAL_RESULT`.
 - [ ] Route backpressure and credit changes through transport/provider state.
   - [ ] Apply send window changes.
