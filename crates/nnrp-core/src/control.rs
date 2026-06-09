@@ -1212,6 +1212,19 @@ pub struct TraceContextMetadata {
     pub body_bytes: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TraceContextIds {
+    pub trace_id: u64,
+    pub span_id: u64,
+    pub parent_span_id: u64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct TraceContextDecodeError {
+    pub trace: Option<TraceContextIds>,
+    pub error: NnrpError,
+}
+
 impl TraceContextMetadata {
     pub fn parse(source: &[u8]) -> Result<Self, NnrpError> {
         require_len(source, TRACE_CONTEXT_METADATA_LEN)?;
@@ -1254,6 +1267,20 @@ impl TraceContextMetadata {
             "trace_context.body_bytes",
         )?;
         Ok((metadata, body))
+    }
+
+    pub fn parse_with_body_and_error_context(
+        source: &[u8],
+    ) -> Result<(Self, &[u8]), TraceContextDecodeError> {
+        Self::parse_with_body(source)
+            .and_then(|(metadata, body)| {
+                validate_trace_context_semantics(&metadata)?;
+                Ok((metadata, body))
+            })
+            .map_err(|error| TraceContextDecodeError {
+                trace: trace_context_ids_from_source(source),
+                error,
+            })
     }
 
     pub fn to_vec_with_body(&self, body: &[u8]) -> Result<Vec<u8>, NnrpError> {
@@ -1860,6 +1887,17 @@ fn split_declared_tail<'a>(
     let actual_tail_len = source.len() - fixed_len;
     require_declared_len(field, declared_tail_len, actual_tail_len)?;
     Ok(&source[fixed_len..])
+}
+
+fn trace_context_ids_from_source(source: &[u8]) -> Option<TraceContextIds> {
+    if source.len() < 24 {
+        return None;
+    }
+    Some(TraceContextIds {
+        trace_id: read_u64(source, 0),
+        span_id: read_u64(source, 8),
+        parent_span_id: read_u64(source, 16),
+    })
 }
 
 fn require_nonzero(rule: &'static str, value: u32) -> Result<(), NnrpError> {
@@ -2621,6 +2659,84 @@ mod tests {
                 field: "trace_context.body_bytes",
                 declared: 2,
                 actual: 0
+            })
+        );
+    }
+
+    #[test]
+    fn trace_context_decode_error_preserves_trace_ids_when_present() {
+        let trace = TraceContextMetadata {
+            trace_id: 101,
+            span_id: 102,
+            parent_span_id: 103,
+            stage_code: 6,
+            flags: TRACE_CONTEXT_FLAGS_KNOWN_MASK | 0x8000,
+            body_bytes: 0,
+        };
+        let trace_bytes = trace.to_bytes();
+        assert_eq!(
+            trace_bytes,
+            Err(NnrpError::ReservedBitsSet {
+                value: TRACE_CONTEXT_FLAGS_KNOWN_MASK as u64 | 0x8000,
+                allowed: TRACE_CONTEXT_FLAGS_KNOWN_MASK as u64
+            })
+        );
+
+        let mut raw = [0u8; TRACE_CONTEXT_METADATA_LEN];
+        write_u64(&mut raw, 0, trace.trace_id);
+        write_u64(&mut raw, 8, trace.span_id);
+        write_u64(&mut raw, 16, trace.parent_span_id);
+        write_u16(&mut raw, 24, trace.stage_code);
+        write_u16(&mut raw, 26, trace.flags);
+        assert_eq!(
+            TraceContextMetadata::parse_with_body_and_error_context(&raw),
+            Err(TraceContextDecodeError {
+                trace: Some(TraceContextIds {
+                    trace_id: 101,
+                    span_id: 102,
+                    parent_span_id: 103
+                }),
+                error: NnrpError::ReservedBitsSet {
+                    value: TRACE_CONTEXT_FLAGS_KNOWN_MASK as u64 | 0x8000,
+                    allowed: TRACE_CONTEXT_FLAGS_KNOWN_MASK as u64
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn trace_context_decode_error_preserves_trace_ids_for_semantic_errors() {
+        let trace = TraceContextMetadata {
+            trace_id: 0,
+            span_id: 202,
+            parent_span_id: 203,
+            stage_code: 6,
+            flags: TRACE_CONTEXT_FLAGS_KNOWN_MASK,
+            body_bytes: 1,
+        };
+        let trace_bytes = trace.to_vec_with_body(&[7]).unwrap();
+        assert_eq!(
+            TraceContextMetadata::parse_with_body_and_error_context(&trace_bytes),
+            Err(TraceContextDecodeError {
+                trace: Some(TraceContextIds {
+                    trace_id: 0,
+                    span_id: 202,
+                    parent_span_id: 203
+                }),
+                error: NnrpError::InvalidProtocolCombination {
+                    rule: "TRACE_CONTEXT requires non-zero trace_id and span_id"
+                }
+            })
+        );
+
+        assert_eq!(
+            TraceContextMetadata::parse_with_body_and_error_context(&[0u8; 23]),
+            Err(TraceContextDecodeError {
+                trace: None,
+                error: NnrpError::SourceTooShort {
+                    expected: TRACE_CONTEXT_METADATA_LEN,
+                    actual: 23
+                }
             })
         );
     }

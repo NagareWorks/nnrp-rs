@@ -44,10 +44,10 @@
   - [x] Validate variable metadata lengths.
   - [x] Reject unknown required fields.
   - [x] Preserve declared optional extension fields for diagnostics.
-- [ ] Add decoding helpers for every control frame family.
+- [x] Add decoding helpers for every control frame family.
   - [x] Decode without heap allocation where fixed layout is enough.
   - [x] Surface typed declared-length errors instead of generic decode failures.
-  - [ ] Preserve trace identifiers through decode errors when present.
+  - [x] Preserve trace identifiers through decode errors when present.
 - [x] Add roundtrip tests for every frame family.
 - [x] Add negative tests for malformed operation IDs, deadlines, credits, and trace metadata.
 
