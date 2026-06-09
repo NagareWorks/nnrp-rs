@@ -56,10 +56,10 @@
 
 ## WASM And Browser Boundary
 
-- [ ] Expose shared WebSocket frame codec hooks for `nnrp-wasm`.
-- [ ] Keep browser WebSocket API as an I/O substrate.
-- [ ] Keep NNRP framing, control semantics, and diagnostics in Rust/WASM-owned logic.
-- [ ] Add WASM tests or generated fixtures for browser WebSocket frame mapping.
+- [x] Expose shared WebSocket frame codec hooks for `nnrp-wasm`.
+- [x] Keep browser WebSocket API as an I/O substrate.
+- [x] Keep NNRP framing, control semantics, and diagnostics in Rust/WASM-owned logic.
+- [x] Add WASM tests or generated fixtures for browser WebSocket frame mapping.
 
 ## Packaging
 

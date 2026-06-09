@@ -1,4 +1,7 @@
-use nnrp_core::{ProtocolVersion, TransportId};
+use nnrp_core::{
+    CommonHeader, HeaderFlags, MessageType, NnrpError, ProtocolVersion, TransportId,
+    COMMON_HEADER_LEN,
+};
 use nnrp_transport_provider::{
     select_transport_with_probe, ProbeSample, RemoteTransportSupport, TransportPolicy,
     TransportProviderDescriptor, TransportProviderKind,
@@ -53,6 +56,35 @@ pub fn score_provider_probe_json(
         .map_err(|error| js_error(&error.to_string()))
 }
 
+#[wasm_bindgen(js_name = encodeWebSocketBinaryFrameJson)]
+pub fn encode_websocket_binary_frame_json(
+    header_json: &str,
+    metadata: &[u8],
+    body: &[u8],
+) -> Result<Vec<u8>, JsValue> {
+    let input = serde_json::from_str::<WasmFrameHeaderInput>(header_json)
+        .map_err(|error| js_error(&error.to_string()))?;
+    let header = header_from_input(input, metadata.len(), body.len())?;
+    let mut frame = Vec::with_capacity(COMMON_HEADER_LEN + metadata.len() + body.len());
+    frame.extend_from_slice(&header.to_bytes().map_err(js_nnrp_error)?);
+    frame.extend_from_slice(metadata);
+    frame.extend_from_slice(body);
+    Ok(frame)
+}
+
+#[wasm_bindgen(js_name = decodeWebSocketBinaryFrameJson)]
+pub fn decode_websocket_binary_frame_json(frame: &[u8]) -> Result<String, JsValue> {
+    let (header, metadata, body) = CommonHeader::parse_packet(frame).map_err(js_nnrp_error)?;
+    let output = WasmFrameOutput {
+        header: WasmFrameHeaderOutput::from(header),
+        metadata_offset: COMMON_HEADER_LEN,
+        metadata_len: metadata.len(),
+        body_offset: COMMON_HEADER_LEN + metadata.len(),
+        body_len: body.len(),
+    };
+    serde_json::to_string(&output).map_err(|error| js_error(&error.to_string()))
+}
+
 #[derive(Debug, Deserialize)]
 struct WasmProviderInput {
     name: String,
@@ -73,6 +105,61 @@ struct WasmProbeSampleInput {
     bytes_received: u64,
     timed_out: Option<bool>,
     failed: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WasmFrameHeaderInput {
+    message_type: u8,
+    flags: Option<u32>,
+    session_id: Option<u32>,
+    frame_id: Option<u32>,
+    view_id: Option<u16>,
+    route_id: Option<u16>,
+    trace_id: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct WasmFrameOutput {
+    header: WasmFrameHeaderOutput,
+    metadata_offset: usize,
+    metadata_len: usize,
+    body_offset: usize,
+    body_len: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct WasmFrameHeaderOutput {
+    version_major: u8,
+    wire_format: u8,
+    message_type: u8,
+    header_len: u8,
+    flags: u32,
+    meta_len: u32,
+    body_len: u32,
+    session_id: u32,
+    frame_id: u32,
+    view_id: u16,
+    route_id: u16,
+    trace_id: u64,
+}
+
+impl From<CommonHeader> for WasmFrameHeaderOutput {
+    fn from(value: CommonHeader) -> Self {
+        Self {
+            version_major: value.version_major,
+            wire_format: value.wire_format,
+            message_type: value.message_type as u8,
+            header_len: value.header_len,
+            flags: value.flags.0,
+            meta_len: value.meta_len,
+            body_len: value.body_len,
+            session_id: value.session_id,
+            frame_id: value.frame_id,
+            view_id: value.view_id,
+            route_id: value.route_id,
+            trace_id: value.trace_id,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -255,6 +342,28 @@ const fn transport_enabled(transport_id: TransportId) -> bool {
     }
 }
 
+fn header_from_input(
+    input: WasmFrameHeaderInput,
+    metadata_len: usize,
+    body_len: usize,
+) -> Result<CommonHeader, JsValue> {
+    let metadata_len =
+        u32::try_from(metadata_len).map_err(|_| js_error("metadata length exceeds u32"))?;
+    let body_len = u32::try_from(body_len).map_err(|_| js_error("body length exceeds u32"))?;
+    let mut header = CommonHeader::new(
+        MessageType::try_from_u8(input.message_type).map_err(js_nnrp_error)?,
+        metadata_len,
+        body_len,
+    );
+    header.flags = HeaderFlags(input.flags.unwrap_or(HeaderFlags::NONE.0));
+    header.session_id = input.session_id.unwrap_or(0);
+    header.frame_id = input.frame_id.unwrap_or(0);
+    header.view_id = input.view_id.unwrap_or(0);
+    header.route_id = input.route_id.unwrap_or(0);
+    header.trace_id = input.trace_id.unwrap_or(0);
+    Ok(header)
+}
+
 fn parse_policy(value: &str) -> Result<TransportPolicy, JsValue> {
     match value {
         "auto" => Ok(TransportPolicy::Auto),
@@ -287,6 +396,10 @@ fn provider_kind_name(kind: TransportProviderKind) -> &'static str {
     }
 }
 
+fn js_nnrp_error(error: NnrpError) -> JsValue {
+    js_error(&error.to_string())
+}
+
 fn js_error(message: &str) -> JsValue {
     #[cfg(target_arch = "wasm32")]
     {
@@ -310,6 +423,51 @@ mod tests {
             nnrp_wasm_wire_format(),
             ProtocolVersion::CURRENT.wire_format
         );
+    }
+
+    #[test]
+    fn wasm_websocket_binary_frame_codec_round_trips_offsets() {
+        let header = format!(
+            r#"{{"message_type":{},"session_id":7,"frame_id":9,"view_id":2,"route_id":3,"trace_id":123}}"#,
+            MessageType::FrameSubmit as u8
+        );
+        let metadata = [1_u8, 2, 3, 4];
+        let body = [5_u8, 6, 7];
+
+        let frame = encode_websocket_binary_frame_json(&header, &metadata, &body)
+            .expect("frame should encode");
+        let decoded = decode_websocket_binary_frame_json(&frame).expect("frame should decode");
+        let decoded = serde_json::from_str::<serde_json::Value>(&decoded).unwrap();
+
+        assert_eq!(
+            decoded["header"]["message_type"],
+            MessageType::FrameSubmit as u8
+        );
+        assert_eq!(decoded["header"]["session_id"], 7);
+        assert_eq!(decoded["header"]["frame_id"], 9);
+        assert_eq!(decoded["header"]["view_id"], 2);
+        assert_eq!(decoded["header"]["route_id"], 3);
+        assert_eq!(decoded["header"]["trace_id"], 123);
+        assert_eq!(decoded["metadata_offset"], COMMON_HEADER_LEN);
+        assert_eq!(decoded["metadata_len"], metadata.len());
+        assert_eq!(decoded["body_offset"], COMMON_HEADER_LEN + metadata.len());
+        assert_eq!(decoded["body_len"], body.len());
+        assert_eq!(
+            &frame[COMMON_HEADER_LEN..COMMON_HEADER_LEN + metadata.len()],
+            metadata
+        );
+        assert_eq!(&frame[COMMON_HEADER_LEN + metadata.len()..], body);
+    }
+
+    #[test]
+    fn wasm_websocket_binary_frame_codec_rejects_malformed_frames() {
+        let header = format!(r#"{{"message_type":{}}}"#, MessageType::Ping as u8);
+        let mut frame = encode_websocket_binary_frame_json(&header, &[1, 2], &[3, 4])
+            .expect("frame should encode");
+        frame.pop();
+
+        assert!(decode_websocket_binary_frame_json(&frame).is_err());
+        assert!(encode_websocket_binary_frame_json(r#"{"message_type":255}"#, &[], &[]).is_err());
     }
 
     #[cfg(all(feature = "transport-tcp", feature = "transport-quic"))]
