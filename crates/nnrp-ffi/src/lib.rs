@@ -5,16 +5,19 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use nnrp_core::{
     should_replay_frame_after_migration, token_delta_schema_descriptor,
     validate_migration_recovery, validate_session_recovery_ack, validate_session_recovery_request,
-    CacheLease, CacheLeaseOwnerScope, CacheMissMetadata, CacheMissReason, CacheObjectId,
-    CacheObjectKind, CacheReferenceMetadata, CacheReuseScope, CacheValidationFailure,
+    BudgetMetadata, CacheLease, CacheLeaseOwnerScope, CacheMissMetadata, CacheMissReason,
+    CacheObjectId, CacheObjectKind, CacheReferenceMetadata, CacheReuseScope,
+    CacheValidationFailure, CapabilityMetadata, ControlRequestMetadata, ErrorScope,
     MemoryLocationHint, MessageType, NnrpError, ObjectDeltaMetadata, ObjectDescriptorMetadata,
     ObjectReferenceMetadata, ObjectReleaseMetadata, ObjectReleaseReason, OwnershipHint,
-    ProtocolVersion, ResultHintMetadata, RuntimeObjectKind, RuntimeRole, SchemaDescriptorHeader,
+    PartialResultMetadata, PressureMetadata, ProgressMetadata, ProtocolVersion,
+    RecoverableErrorMetadata, ResultDropReasonMetadata, ResultHintMetadata, RetryAfterMetadata,
+    RouteHintMetadata, RuntimeObjectKind, RuntimeRole, SchedulingMetadata, SchemaDescriptorHeader,
     SchemaRegistry, SchemaRegistryAction, SchemaRegistryFailure, SessionMigrateAckMetadata,
     SessionMigrateMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
-    SessionRecoveryOutcome as CoreSessionRecoveryOutcome, TransportId, TypedPayloadDescriptor,
-    SESSION_ERROR_NONE, SESSION_ERROR_PROFILE_UNSUPPORTED, SESSION_ERROR_RESUME_REJECTED,
-    SESSION_ERROR_SCHEMA_UNSUPPORTED, SESSION_FLAG_ALLOW_RESUME,
+    SessionRecoveryOutcome as CoreSessionRecoveryOutcome, SupersedeMetadata, TraceContextMetadata,
+    TransportId, TypedPayloadDescriptor, SESSION_ERROR_NONE, SESSION_ERROR_PROFILE_UNSUPPORTED,
+    SESSION_ERROR_RESUME_REJECTED, SESSION_ERROR_SCHEMA_UNSUPPORTED, SESSION_FLAG_ALLOW_RESUME,
 };
 
 pub const NNRP_FFI_ABI_MAJOR: u16 = 1;
@@ -1015,6 +1018,515 @@ impl From<CacheMissMetadata> for NnrpCacheMissDescriptor {
             cache_key_lo: value.cache_key_lo,
             miss_reason: value.miss_reason as u16,
             profile_id: value.profile_id,
+            diagnostic_bytes: value.diagnostic_bytes,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpControlRequestDescriptor {
+    pub operation_id: u64,
+    pub control_sequence: u64,
+    pub reason_code: u16,
+    pub source_role: u8,
+    pub flags: u8,
+    pub diagnostic_bytes: u32,
+}
+
+impl From<ControlRequestMetadata> for NnrpControlRequestDescriptor {
+    fn from(value: ControlRequestMetadata) -> Self {
+        Self {
+            operation_id: value.operation_id,
+            control_sequence: value.control_sequence,
+            reason_code: value.reason_code,
+            source_role: value.source_role,
+            flags: value.flags,
+            diagnostic_bytes: value.diagnostic_bytes,
+        }
+    }
+}
+
+impl From<NnrpControlRequestDescriptor> for ControlRequestMetadata {
+    fn from(value: NnrpControlRequestDescriptor) -> Self {
+        Self {
+            operation_id: value.operation_id,
+            control_sequence: value.control_sequence,
+            reason_code: value.reason_code,
+            source_role: value.source_role,
+            flags: value.flags,
+            diagnostic_bytes: value.diagnostic_bytes,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpSchedulingDescriptor {
+    pub operation_id: u64,
+    pub control_sequence: u64,
+    pub priority_class: u16,
+    pub priority_delta: i16,
+    pub deadline_unix_ms: u64,
+    pub flags: u32,
+}
+
+impl From<SchedulingMetadata> for NnrpSchedulingDescriptor {
+    fn from(value: SchedulingMetadata) -> Self {
+        Self {
+            operation_id: value.operation_id,
+            control_sequence: value.control_sequence,
+            priority_class: value.priority_class,
+            priority_delta: value.priority_delta,
+            deadline_unix_ms: value.deadline_unix_ms,
+            flags: value.flags,
+        }
+    }
+}
+
+impl From<NnrpSchedulingDescriptor> for SchedulingMetadata {
+    fn from(value: NnrpSchedulingDescriptor) -> Self {
+        Self {
+            operation_id: value.operation_id,
+            control_sequence: value.control_sequence,
+            priority_class: value.priority_class,
+            priority_delta: value.priority_delta,
+            deadline_unix_ms: value.deadline_unix_ms,
+            flags: value.flags,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpSupersedeDescriptor {
+    pub old_operation_id: u64,
+    pub new_operation_id: u64,
+    pub control_sequence: u64,
+    pub drop_reason_code: u16,
+    pub flags: u16,
+    pub diagnostic_bytes: u32,
+}
+
+impl From<SupersedeMetadata> for NnrpSupersedeDescriptor {
+    fn from(value: SupersedeMetadata) -> Self {
+        Self {
+            old_operation_id: value.old_operation_id,
+            new_operation_id: value.new_operation_id,
+            control_sequence: value.control_sequence,
+            drop_reason_code: value.drop_reason_code,
+            flags: value.flags,
+            diagnostic_bytes: value.diagnostic_bytes,
+        }
+    }
+}
+
+impl From<NnrpSupersedeDescriptor> for SupersedeMetadata {
+    fn from(value: NnrpSupersedeDescriptor) -> Self {
+        Self {
+            old_operation_id: value.old_operation_id,
+            new_operation_id: value.new_operation_id,
+            control_sequence: value.control_sequence,
+            drop_reason_code: value.drop_reason_code,
+            flags: value.flags,
+            diagnostic_bytes: value.diagnostic_bytes,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpBudgetDescriptor {
+    pub operation_id: u64,
+    pub compute_budget_units: u64,
+    pub memory_budget_bytes: u64,
+    pub bandwidth_budget_bytes: u64,
+    pub token_budget: u32,
+    pub flags: u32,
+}
+
+impl From<BudgetMetadata> for NnrpBudgetDescriptor {
+    fn from(value: BudgetMetadata) -> Self {
+        Self {
+            operation_id: value.operation_id,
+            compute_budget_units: value.compute_budget_units,
+            memory_budget_bytes: value.memory_budget_bytes,
+            bandwidth_budget_bytes: value.bandwidth_budget_bytes,
+            token_budget: value.token_budget,
+            flags: value.flags,
+        }
+    }
+}
+
+impl From<NnrpBudgetDescriptor> for BudgetMetadata {
+    fn from(value: NnrpBudgetDescriptor) -> Self {
+        Self {
+            operation_id: value.operation_id,
+            compute_budget_units: value.compute_budget_units,
+            memory_budget_bytes: value.memory_budget_bytes,
+            bandwidth_budget_bytes: value.bandwidth_budget_bytes,
+            token_budget: value.token_budget,
+            flags: value.flags,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpProgressDescriptor {
+    pub operation_id: u64,
+    pub progress_sequence: u64,
+    pub stage_code: u16,
+    pub percent_x100: u16,
+    pub object_id: u64,
+    pub body_bytes: u32,
+}
+
+impl From<ProgressMetadata> for NnrpProgressDescriptor {
+    fn from(value: ProgressMetadata) -> Self {
+        Self {
+            operation_id: value.operation_id,
+            progress_sequence: value.progress_sequence,
+            stage_code: value.stage_code,
+            percent_x100: value.percent_x100,
+            object_id: value.object_id,
+            body_bytes: value.body_bytes,
+        }
+    }
+}
+
+impl From<NnrpProgressDescriptor> for ProgressMetadata {
+    fn from(value: NnrpProgressDescriptor) -> Self {
+        Self {
+            operation_id: value.operation_id,
+            progress_sequence: value.progress_sequence,
+            stage_code: value.stage_code,
+            percent_x100: value.percent_x100,
+            object_id: value.object_id,
+            body_bytes: value.body_bytes,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpPartialResultDescriptor {
+    pub operation_id: u64,
+    pub result_sequence: u64,
+    pub object_id: u64,
+    pub delta_sequence: u64,
+    pub body_bytes: u32,
+    pub flags: u32,
+}
+
+impl From<PartialResultMetadata> for NnrpPartialResultDescriptor {
+    fn from(value: PartialResultMetadata) -> Self {
+        Self {
+            operation_id: value.operation_id,
+            result_sequence: value.result_sequence,
+            object_id: value.object_id,
+            delta_sequence: value.delta_sequence,
+            body_bytes: value.body_bytes,
+            flags: value.flags,
+        }
+    }
+}
+
+impl From<NnrpPartialResultDescriptor> for PartialResultMetadata {
+    fn from(value: NnrpPartialResultDescriptor) -> Self {
+        Self {
+            operation_id: value.operation_id,
+            result_sequence: value.result_sequence,
+            object_id: value.object_id,
+            delta_sequence: value.delta_sequence,
+            body_bytes: value.body_bytes,
+            flags: value.flags,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpPressureDescriptor {
+    pub scope_id: u64,
+    pub credit_window: u64,
+    pub pressure_level: u16,
+    pub pressure_reason: u16,
+    pub retry_after_ms: u32,
+    pub flags: u32,
+}
+
+impl From<PressureMetadata> for NnrpPressureDescriptor {
+    fn from(value: PressureMetadata) -> Self {
+        Self {
+            scope_id: value.scope_id,
+            credit_window: value.credit_window,
+            pressure_level: value.pressure_level,
+            pressure_reason: value.pressure_reason,
+            retry_after_ms: value.retry_after_ms,
+            flags: value.flags,
+        }
+    }
+}
+
+impl From<NnrpPressureDescriptor> for PressureMetadata {
+    fn from(value: NnrpPressureDescriptor) -> Self {
+        Self {
+            scope_id: value.scope_id,
+            credit_window: value.credit_window,
+            pressure_level: value.pressure_level,
+            pressure_reason: value.pressure_reason,
+            retry_after_ms: value.retry_after_ms,
+            flags: value.flags,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpCapabilityDescriptor {
+    pub profile_id: u16,
+    pub capability_count: u16,
+    pub cost_model_id: u16,
+    pub preference_rank: u16,
+    pub limit_bytes: u64,
+    pub limit_units: u64,
+    pub body_bytes: u32,
+    pub flags: u32,
+}
+
+impl From<CapabilityMetadata> for NnrpCapabilityDescriptor {
+    fn from(value: CapabilityMetadata) -> Self {
+        Self {
+            profile_id: value.profile_id,
+            capability_count: value.capability_count,
+            cost_model_id: value.cost_model_id,
+            preference_rank: value.preference_rank,
+            limit_bytes: value.limit_bytes,
+            limit_units: value.limit_units,
+            body_bytes: value.body_bytes,
+            flags: value.flags,
+        }
+    }
+}
+
+impl From<NnrpCapabilityDescriptor> for CapabilityMetadata {
+    fn from(value: NnrpCapabilityDescriptor) -> Self {
+        Self {
+            profile_id: value.profile_id,
+            capability_count: value.capability_count,
+            cost_model_id: value.cost_model_id,
+            preference_rank: value.preference_rank,
+            limit_bytes: value.limit_bytes,
+            limit_units: value.limit_units,
+            body_bytes: value.body_bytes,
+            flags: value.flags,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpRouteHintDescriptor {
+    pub operation_id: u64,
+    pub route_id: u32,
+    pub executor_class: u16,
+    pub affinity_class: u16,
+    pub deadline_unix_ms: u64,
+    pub body_bytes: u32,
+    pub flags: u32,
+}
+
+impl From<RouteHintMetadata> for NnrpRouteHintDescriptor {
+    fn from(value: RouteHintMetadata) -> Self {
+        Self {
+            operation_id: value.operation_id,
+            route_id: value.route_id,
+            executor_class: value.executor_class,
+            affinity_class: value.affinity_class,
+            deadline_unix_ms: value.deadline_unix_ms,
+            body_bytes: value.body_bytes,
+            flags: value.flags,
+        }
+    }
+}
+
+impl From<NnrpRouteHintDescriptor> for RouteHintMetadata {
+    fn from(value: NnrpRouteHintDescriptor) -> Self {
+        Self {
+            operation_id: value.operation_id,
+            route_id: value.route_id,
+            executor_class: value.executor_class,
+            affinity_class: value.affinity_class,
+            deadline_unix_ms: value.deadline_unix_ms,
+            body_bytes: value.body_bytes,
+            flags: value.flags,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpTraceContextDescriptor {
+    pub trace_id: u64,
+    pub span_id: u64,
+    pub parent_span_id: u64,
+    pub stage_code: u16,
+    pub flags: u16,
+    pub body_bytes: u32,
+}
+
+impl From<TraceContextMetadata> for NnrpTraceContextDescriptor {
+    fn from(value: TraceContextMetadata) -> Self {
+        Self {
+            trace_id: value.trace_id,
+            span_id: value.span_id,
+            parent_span_id: value.parent_span_id,
+            stage_code: value.stage_code,
+            flags: value.flags,
+            body_bytes: value.body_bytes,
+        }
+    }
+}
+
+impl From<NnrpTraceContextDescriptor> for TraceContextMetadata {
+    fn from(value: NnrpTraceContextDescriptor) -> Self {
+        Self {
+            trace_id: value.trace_id,
+            span_id: value.span_id,
+            parent_span_id: value.parent_span_id,
+            stage_code: value.stage_code,
+            flags: value.flags,
+            body_bytes: value.body_bytes,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpResultDropReasonDescriptor {
+    pub operation_id: u64,
+    pub result_sequence: u64,
+    pub drop_reason_code: u16,
+    pub source_role: u8,
+    pub flags: u8,
+    pub diagnostic_bytes: u32,
+}
+
+impl From<ResultDropReasonMetadata> for NnrpResultDropReasonDescriptor {
+    fn from(value: ResultDropReasonMetadata) -> Self {
+        Self {
+            operation_id: value.operation_id,
+            result_sequence: value.result_sequence,
+            drop_reason_code: value.drop_reason_code,
+            source_role: value.source_role,
+            flags: value.flags,
+            diagnostic_bytes: value.diagnostic_bytes,
+        }
+    }
+}
+
+impl From<NnrpResultDropReasonDescriptor> for ResultDropReasonMetadata {
+    fn from(value: NnrpResultDropReasonDescriptor) -> Self {
+        Self {
+            operation_id: value.operation_id,
+            result_sequence: value.result_sequence,
+            drop_reason_code: value.drop_reason_code,
+            source_role: value.source_role,
+            flags: value.flags,
+            diagnostic_bytes: value.diagnostic_bytes,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpRecoverableErrorDescriptor {
+    pub error_code: u32,
+    pub error_scope: u32,
+    pub recovery_action: u16,
+    pub source_role: u8,
+    pub flags: u8,
+    pub retry_after_ms: u32,
+    pub related_session_id: u32,
+    pub related_frame_id: u32,
+    pub related_view_id: u32,
+    pub diagnostic_bytes: u32,
+}
+
+impl NnrpRecoverableErrorDescriptor {
+    pub fn to_core(self) -> Result<RecoverableErrorMetadata, NnrpFfiStatus> {
+        Ok(RecoverableErrorMetadata {
+            error_code: self.error_code,
+            error_scope: ErrorScope::try_from_u32(self.error_scope)
+                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
+            recovery_action: self.recovery_action,
+            source_role: self.source_role,
+            flags: self.flags,
+            retry_after_ms: self.retry_after_ms,
+            related_session_id: self.related_session_id,
+            related_frame_id: self.related_frame_id,
+            related_view_id: self.related_view_id,
+            diagnostic_bytes: self.diagnostic_bytes,
+        })
+    }
+}
+
+impl From<RecoverableErrorMetadata> for NnrpRecoverableErrorDescriptor {
+    fn from(value: RecoverableErrorMetadata) -> Self {
+        Self {
+            error_code: value.error_code,
+            error_scope: value.error_scope as u32,
+            recovery_action: value.recovery_action,
+            source_role: value.source_role,
+            flags: value.flags,
+            retry_after_ms: value.retry_after_ms,
+            related_session_id: value.related_session_id,
+            related_frame_id: value.related_frame_id,
+            related_view_id: value.related_view_id,
+            diagnostic_bytes: value.diagnostic_bytes,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpRetryAfterDescriptor {
+    pub scope_id: u64,
+    pub control_sequence: u64,
+    pub retry_after_ms: u32,
+    pub jitter_ms: u32,
+    pub reason_code: u16,
+    pub source_role: u8,
+    pub flags: u8,
+    pub diagnostic_bytes: u32,
+}
+
+impl From<RetryAfterMetadata> for NnrpRetryAfterDescriptor {
+    fn from(value: RetryAfterMetadata) -> Self {
+        Self {
+            scope_id: value.scope_id,
+            control_sequence: value.control_sequence,
+            retry_after_ms: value.retry_after_ms,
+            jitter_ms: value.jitter_ms,
+            reason_code: value.reason_code,
+            source_role: value.source_role,
+            flags: value.flags,
+            diagnostic_bytes: value.diagnostic_bytes,
+        }
+    }
+}
+
+impl From<NnrpRetryAfterDescriptor> for RetryAfterMetadata {
+    fn from(value: NnrpRetryAfterDescriptor) -> Self {
+        Self {
+            scope_id: value.scope_id,
+            control_sequence: value.control_sequence,
+            retry_after_ms: value.retry_after_ms,
+            jitter_ms: value.jitter_ms,
+            reason_code: value.reason_code,
+            source_role: value.source_role,
+            flags: value.flags,
             diagnostic_bytes: value.diagnostic_bytes,
         }
     }
@@ -3684,6 +4196,186 @@ mod tests {
         };
         assert_eq!(
             bad_release.to_core(),
+            Err(NnrpFfiStatus {
+                status_code: NnrpFfiStatusCode::ProtocolError as u32,
+                error_family: NnrpErrorFamily::Transport as u32,
+                protocol_error_code: 0,
+                detail_code: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn ffi_preview4_control_descriptors_round_trip_core_layouts() {
+        let control = ControlRequestMetadata {
+            operation_id: 11,
+            control_sequence: 12,
+            reason_code: 3,
+            source_role: RuntimeRole::Scheduler as u8,
+            flags: 1,
+            diagnostic_bytes: 4,
+        };
+        let ffi_control: NnrpControlRequestDescriptor = control.into();
+        assert_eq!(ControlRequestMetadata::from(ffi_control), control);
+
+        let scheduling = SchedulingMetadata {
+            operation_id: 11,
+            control_sequence: 12,
+            priority_class: 2,
+            priority_delta: -4,
+            deadline_unix_ms: 99,
+            flags: 1,
+        };
+        let ffi_scheduling: NnrpSchedulingDescriptor = scheduling.into();
+        assert_eq!(SchedulingMetadata::from(ffi_scheduling), scheduling);
+
+        let supersede = SupersedeMetadata {
+            old_operation_id: 11,
+            new_operation_id: 12,
+            control_sequence: 13,
+            drop_reason_code: 4,
+            flags: 1,
+            diagnostic_bytes: 5,
+        };
+        let ffi_supersede: NnrpSupersedeDescriptor = supersede.into();
+        assert_eq!(SupersedeMetadata::from(ffi_supersede), supersede);
+
+        let budget = BudgetMetadata {
+            operation_id: 11,
+            compute_budget_units: 12,
+            memory_budget_bytes: 13,
+            bandwidth_budget_bytes: 14,
+            token_budget: 15,
+            flags: 1,
+        };
+        let ffi_budget: NnrpBudgetDescriptor = budget.into();
+        assert_eq!(BudgetMetadata::from(ffi_budget), budget);
+
+        let progress = ProgressMetadata {
+            operation_id: 11,
+            progress_sequence: 12,
+            stage_code: 3,
+            percent_x100: 2500,
+            object_id: 14,
+            body_bytes: 15,
+        };
+        let ffi_progress: NnrpProgressDescriptor = progress.into();
+        assert_eq!(ProgressMetadata::from(ffi_progress), progress);
+
+        let partial = PartialResultMetadata {
+            operation_id: 11,
+            result_sequence: 12,
+            object_id: 13,
+            delta_sequence: 14,
+            body_bytes: 15,
+            flags: 1,
+        };
+        let ffi_partial: NnrpPartialResultDescriptor = partial.into();
+        assert_eq!(PartialResultMetadata::from(ffi_partial), partial);
+
+        let pressure = PressureMetadata {
+            scope_id: 11,
+            credit_window: 12,
+            pressure_level: 2,
+            pressure_reason: 3,
+            retry_after_ms: 4,
+            flags: 1,
+        };
+        let ffi_pressure: NnrpPressureDescriptor = pressure.into();
+        assert_eq!(PressureMetadata::from(ffi_pressure), pressure);
+
+        let capability = CapabilityMetadata {
+            profile_id: 1,
+            capability_count: 2,
+            cost_model_id: 3,
+            preference_rank: 4,
+            limit_bytes: 5,
+            limit_units: 6,
+            body_bytes: 7,
+            flags: 1,
+        };
+        let ffi_capability: NnrpCapabilityDescriptor = capability.into();
+        assert_eq!(CapabilityMetadata::from(ffi_capability), capability);
+
+        let route = RouteHintMetadata {
+            operation_id: 11,
+            route_id: 12,
+            executor_class: 3,
+            affinity_class: 4,
+            deadline_unix_ms: 15,
+            body_bytes: 6,
+            flags: 1,
+        };
+        let ffi_route: NnrpRouteHintDescriptor = route.into();
+        assert_eq!(RouteHintMetadata::from(ffi_route), route);
+
+        let trace = TraceContextMetadata {
+            trace_id: 11,
+            span_id: 12,
+            parent_span_id: 13,
+            stage_code: 4,
+            flags: 1,
+            body_bytes: 5,
+        };
+        let ffi_trace: NnrpTraceContextDescriptor = trace.into();
+        assert_eq!(TraceContextMetadata::from(ffi_trace), trace);
+
+        let drop_reason = ResultDropReasonMetadata {
+            operation_id: 11,
+            result_sequence: 12,
+            drop_reason_code: 3,
+            source_role: RuntimeRole::Runtime as u8,
+            flags: 1,
+            diagnostic_bytes: 4,
+        };
+        let ffi_drop_reason: NnrpResultDropReasonDescriptor = drop_reason.into();
+        assert_eq!(ResultDropReasonMetadata::from(ffi_drop_reason), drop_reason);
+
+        let recoverable = RecoverableErrorMetadata {
+            error_code: 1,
+            error_scope: ErrorScope::Frame,
+            recovery_action: 2,
+            source_role: RuntimeRole::Runtime as u8,
+            flags: 1,
+            retry_after_ms: 3,
+            related_session_id: 4,
+            related_frame_id: 5,
+            related_view_id: 6,
+            diagnostic_bytes: 7,
+        };
+        let ffi_recoverable: NnrpRecoverableErrorDescriptor = recoverable.into();
+        assert_eq!(ffi_recoverable.to_core().unwrap(), recoverable);
+
+        let retry = RetryAfterMetadata {
+            scope_id: 11,
+            control_sequence: 12,
+            retry_after_ms: 3,
+            jitter_ms: 4,
+            reason_code: 5,
+            source_role: RuntimeRole::Runtime as u8,
+            flags: 1,
+            diagnostic_bytes: 6,
+        };
+        let ffi_retry: NnrpRetryAfterDescriptor = retry.into();
+        assert_eq!(RetryAfterMetadata::from(ffi_retry), retry);
+    }
+
+    #[test]
+    fn ffi_preview4_control_descriptors_reject_unknown_error_scope() {
+        let bad = NnrpRecoverableErrorDescriptor {
+            error_code: 1,
+            error_scope: 99,
+            recovery_action: 2,
+            source_role: RuntimeRole::Runtime as u8,
+            flags: 0,
+            retry_after_ms: 3,
+            related_session_id: 4,
+            related_frame_id: 5,
+            related_view_id: 6,
+            diagnostic_bytes: 7,
+        };
+        assert_eq!(
+            bad.to_core(),
             Err(NnrpFfiStatus {
                 status_code: NnrpFfiStatusCode::ProtocolError as u32,
                 error_family: NnrpErrorFamily::Transport as u32,

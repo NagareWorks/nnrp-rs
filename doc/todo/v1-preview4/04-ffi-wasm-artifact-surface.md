@@ -2,15 +2,15 @@
 
 ## FFI Control Surface
 
-- [ ] Add C ABI structs for preview4 control requests.
-  - [ ] Cancel/abort.
-  - [ ] Priority/deadline.
-  - [ ] Progress/partial result.
-  - [ ] Backpressure/credit.
-  - [ ] Capability negotiation.
-  - [ ] Route/execution hint.
-  - [ ] Trace context.
-  - [ ] Result drop reason.
+- [x] Add C ABI structs for preview4 control requests.
+  - [x] Cancel/abort.
+  - [x] Priority/deadline.
+  - [x] Progress/partial result.
+  - [x] Backpressure/credit.
+  - [x] Capability negotiation.
+  - [x] Route/execution hint.
+  - [x] Trace context.
+  - [x] Result drop reason.
 - [ ] Add coarse C ABI calls for hot paths.
   - [ ] Submit with object references.
   - [ ] Submit with control metadata.
