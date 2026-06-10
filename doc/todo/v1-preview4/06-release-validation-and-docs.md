@@ -13,7 +13,7 @@
 - [ ] Run workspace clippy with warnings denied.
 - [ ] Run workspace tests.
 - [ ] Run conformance preview2, preview3, and preview4 baseline validation.
-- [ ] Run wire conformance dry-run.
+- [x] Run wire conformance dry-run.
 - [ ] Run transport loopback tests.
   - [ ] TCP.
   - [ ] QUIC.

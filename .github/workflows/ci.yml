@@ -274,6 +274,14 @@ jobs:
             --plan $env:NNRP_CONFORMANCE_ADAPTER_PLAN
             --output $env:NNRP_CONFORMANCE_ADAPTER_RESULTS
 
+      - name: Run preview4 wire conformance dry-run
+        shell: bash
+        run: |
+          cargo run -p nnrp-conformance --bin nnrp-conformance-wire -- \
+            --suite nnrp-conformance-action/wire-conformance/nnrp-1-preview4/manifest.json \
+            --target nnrp-conformance-action/docs/examples/wire-conformance-target.sample.json \
+            --output target/wire-conformance/preview4-dry-run.json
+
   required-checks:
     needs:
       - content-policy

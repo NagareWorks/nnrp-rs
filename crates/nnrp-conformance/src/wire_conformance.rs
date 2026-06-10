@@ -6,8 +6,7 @@ use std::path::{Path, PathBuf};
 pub const WIRE_DRY_RUN_REPORT_SCHEMA: &str =
     "https://raw.githubusercontent.com/NagareWorks/nnrp-conformance/main/schemas/wire-dry-run-results.schema.json";
 const WIRE_TRANSPORTS: &[&str] = &["tcp", "quic", "ipc", "websocket"];
-const WIRE_SCENARIO_MODES: &[&str] = &["suite-as-client", "suite-as-server", "suite-as-proxy"];
-const WIRE_TARGET_ENDPOINT_MODES: &[&str] = &["client", "server"];
+const WIRE_SCENARIO_MODES: &[&str] = &["suite_as_client", "suite_as_server", "suite_as_proxy"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WireRunnerArguments {
@@ -55,7 +54,7 @@ pub fn write_wire_dry_run_report(
     output_path: &Path,
     selected_case_ids: &[String],
 ) -> Result<(), String> {
-    let suite_manifest = read_json_file(suite_manifest_path, "wire suite manifest")?;
+    let suite_manifest = read_expanded_suite_manifest(suite_manifest_path)?;
     let target_manifest = read_json_file(target_manifest_path, "wire target manifest")?;
     let selected: Vec<&str> = selected_case_ids.iter().map(String::as_str).collect();
     let plan = build_wire_execution_plan(&suite_manifest, &target_manifest, &selected)?;
@@ -95,7 +94,8 @@ pub fn build_wire_execution_plan(
         ));
     }
 
-    let endpoints = target_endpoint_transports(target_manifest)?;
+    let target_modes = target_modes(target_manifest)?;
+    let target_transports = target_transports(target_manifest)?;
     let capabilities = target_capabilities(target_manifest)?;
     let selected = selected_ids_or_all(scenarios, selected_case_ids)?;
 
@@ -111,19 +111,17 @@ pub fn build_wire_execution_plan(
             continue;
         }
 
-        let required_transport = case
-            .get("required_transport")
+        let transport = case
+            .get("transport")
             .and_then(Value::as_str)
-            .unwrap_or("any");
-        validate_wire_transport(
-            required_transport,
-            &format!("scenario '{id}' required_transport"),
-            true,
-        )?;
+            .ok_or_else(|| {
+                format!("scenario '{id}' field 'transport' must be a non-empty string")
+            })?;
+        validate_wire_transport(transport, &format!("scenario '{id}' transport"))?;
         let mode = case
             .get("mode")
             .and_then(Value::as_str)
-            .unwrap_or("suite-as-client");
+            .ok_or_else(|| format!("scenario '{id}' field 'mode' must be a non-empty string"))?;
         validate_wire_scenario_mode(mode, &format!("scenario '{id}' mode"))?;
         let required_capabilities = string_array_field(case.get("required_capabilities"))
             .map_err(|error| format!("scenario '{id}' {error}"))?;
@@ -133,12 +131,15 @@ pub fn build_wire_execution_plan(
             .filter(|capability| !capabilities.contains(*capability))
             .collect();
 
-        let unsupported_transport =
-            required_transport != "any" && !endpoints.contains(required_transport);
-        let runnable = !unsupported_transport && missing_capabilities.is_empty();
-        let skip_reason = if unsupported_transport {
+        let unsupported_mode = !target_modes.contains(mode);
+        let unsupported_transport = !target_transports.contains(transport);
+        let runnable =
+            !unsupported_mode && !unsupported_transport && missing_capabilities.is_empty();
+        let skip_reason = if unsupported_mode {
+            Some(format!("target does not claim required mode '{mode}'"))
+        } else if unsupported_transport {
             Some(format!(
-                "target does not claim required transport '{required_transport}'"
+                "target does not claim required transport '{transport}'"
             ))
         } else if !missing_capabilities.is_empty() {
             Some(format!(
@@ -152,7 +153,7 @@ pub fn build_wire_execution_plan(
         planned_cases.push(json!({
             "id": id,
             "mode": mode,
-            "required_transport": required_transport,
+            "transport": transport,
             "required_capabilities": required_capabilities,
             "status": if runnable { "ready" } else { "skipped" },
             "skip_reason": skip_reason,
@@ -225,32 +226,37 @@ fn required_array<'a>(value: &'a Value, field: &str) -> Result<&'a Vec<Value>, S
         .ok_or_else(|| format!("field '{field}' must be an array"))
 }
 
-fn target_endpoint_transports(target_manifest: &Value) -> Result<BTreeSet<String>, String> {
-    let endpoints = required_array(target_manifest, "endpoints")?;
+fn target_modes(target_manifest: &Value) -> Result<BTreeSet<String>, String> {
+    let wire_conformance = required_object(target_manifest, "wire_conformance")?;
+    let modes = string_array_field(wire_conformance.get("modes"))?;
+    let mut declared_modes = BTreeSet::new();
+    for mode in modes {
+        validate_wire_scenario_mode(mode, "target wire_conformance mode")?;
+        declared_modes.insert(mode.to_string());
+    }
+    Ok(declared_modes)
+}
+
+fn target_transports(target_manifest: &Value) -> Result<BTreeSet<String>, String> {
+    let wire_conformance = required_object(target_manifest, "wire_conformance")?;
+    let transport_entries = required_array_value(wire_conformance, "transports")?;
     let mut transports = BTreeSet::new();
-    for endpoint in endpoints {
-        let endpoint = endpoint
+    for entry in transport_entries {
+        let entry = entry
             .as_object()
-            .ok_or_else(|| "target endpoints must be JSON objects".to_string())?;
-        let transport = endpoint
-            .get("transport")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                "target endpoint field 'transport' must be a non-empty string".to_string()
-            })?;
-        validate_wire_transport(transport, "target endpoint transport", false)?;
-        let mode = endpoint
-            .get("mode")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "target endpoint field 'mode' must be a non-empty string".to_string())?;
-        validate_wire_target_endpoint_mode(mode, "target endpoint mode")?;
+            .ok_or_else(|| "target wire_conformance transports must be JSON objects".to_string())?;
+        let transport = entry.get("name").and_then(Value::as_str).ok_or_else(|| {
+            "target wire_conformance transport field 'name' must be a non-empty string".to_string()
+        })?;
+        validate_wire_transport(transport, "target wire_conformance transport")?;
         transports.insert(transport.to_string());
     }
     Ok(transports)
 }
 
 fn target_capabilities(target_manifest: &Value) -> Result<BTreeSet<String>, String> {
-    let capabilities = string_array_field(target_manifest.get("capabilities"))?;
+    let wire_conformance = required_object(target_manifest, "wire_conformance")?;
+    let capabilities = string_array_field(wire_conformance.get("capabilities"))?;
     Ok(capabilities
         .into_iter()
         .map(str::to_string)
@@ -305,17 +311,13 @@ fn string_array_field(value: Option<&Value>) -> Result<Vec<&str>, String> {
         .collect()
 }
 
-fn validate_wire_transport(value: &str, label: &str, allow_any: bool) -> Result<(), String> {
-    if (allow_any && value == "any") || WIRE_TRANSPORTS.contains(&value) {
+fn validate_wire_transport(value: &str, label: &str) -> Result<(), String> {
+    if WIRE_TRANSPORTS.contains(&value) {
         Ok(())
     } else {
         Err(format!(
             "{label} '{value}' must be one of {}",
-            if allow_any {
-                "any, tcp, quic, ipc, websocket"
-            } else {
-                "tcp, quic, ipc, websocket"
-            }
+            "tcp, quic, ipc, websocket"
         ))
     }
 }
@@ -325,16 +327,8 @@ fn validate_wire_scenario_mode(value: &str, label: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "{label} '{value}' must be one of suite-as-client, suite-as-server, suite-as-proxy"
+            "{label} '{value}' must be one of suite_as_client, suite_as_server, suite_as_proxy"
         ))
-    }
-}
-
-fn validate_wire_target_endpoint_mode(value: &str, label: &str) -> Result<(), String> {
-    if WIRE_TARGET_ENDPOINT_MODES.contains(&value) {
-        Ok(())
-    } else {
-        Err(format!("{label} '{value}' must be one of client, server"))
     }
 }
 
@@ -343,6 +337,62 @@ fn read_json_file(path: &Path, label: &str) -> Result<Value, String> {
         .map_err(|error| format!("failed to read {label} '{}': {error}", path.display()))?;
     serde_json::from_str(&content)
         .map_err(|error| format!("{label} '{}' must be valid JSON: {error}", path.display()))
+}
+
+fn read_expanded_suite_manifest(path: &Path) -> Result<Value, String> {
+    let mut suite_manifest = read_json_file(path, "wire suite manifest")?;
+    if suite_manifest.get("scenarios").is_some() {
+        return Ok(suite_manifest);
+    }
+
+    let protocol_version = required_string(&suite_manifest, "protocol_version")?.to_string();
+    let manifest_entries = required_array(&suite_manifest, "scenario_manifests")?;
+    let suite_root = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut scenarios = Vec::new();
+    for entry in manifest_entries {
+        let relative_path = entry
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                "wire suite scenario_manifests entries must be non-empty strings".to_string()
+            })?;
+        let scenario_path = suite_root.join(relative_path);
+        let scenario_manifest = read_json_file(&scenario_path, "wire scenario manifest")?;
+        let scenario_protocol = required_string(&scenario_manifest, "protocol_version")?;
+        if scenario_protocol != protocol_version {
+            return Err(format!(
+                "wire scenario manifest '{}' protocol_version '{scenario_protocol}' does not match suite protocol_version '{protocol_version}'",
+                scenario_path.display()
+            ));
+        }
+        scenarios.extend(
+            required_array(&scenario_manifest, "scenarios")?
+                .iter()
+                .cloned(),
+        );
+    }
+    suite_manifest["scenarios"] = Value::Array(scenarios);
+    Ok(suite_manifest)
+}
+
+fn required_object<'a>(
+    value: &'a Value,
+    field: &str,
+) -> Result<&'a serde_json::Map<String, Value>, String> {
+    value
+        .get(field)
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("field '{field}' must be an object"))
+}
+
+fn required_array_value<'a>(
+    value: &'a serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<&'a Vec<Value>, String> {
+    value
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("field '{field}' must be an array"))
 }
 
 fn next_path(iter: &mut impl Iterator<Item = String>, flag: &str) -> Result<PathBuf, String> {
@@ -364,7 +414,7 @@ fn wire_usage() -> String {
 mod tests {
     use super::{
         build_wire_dry_run_report, build_wire_execution_plan, parse_wire_arguments,
-        write_wire_dry_run_report,
+        read_expanded_suite_manifest, write_wire_dry_run_report,
     };
     use serde_json::json;
     use std::fs;
@@ -376,14 +426,14 @@ mod tests {
             "scenarios": [
                 {
                     "id": "wire.cancel.ipc",
-                    "mode": "suite-as-client",
-                    "required_transport": "ipc",
+                    "mode": "suite_as_client",
+                    "transport": "ipc",
                     "required_capabilities": ["control.cancel_abort"]
                 },
                 {
                     "id": "wire.progress.websocket",
-                    "mode": "suite-as-server",
-                    "required_transport": "websocket",
+                    "mode": "suite_as_server",
+                    "transport": "websocket",
                     "required_capabilities": ["control.progress_partial", "control.credit_backpressure"]
                 }
             ]
@@ -394,15 +444,22 @@ mod tests {
         json!({
             "target_name": "reference-rs",
             "protocol_version": "nnrp-1-preview4",
-            "endpoints": [
-                {"transport": "ipc", "mode": "client", "uri": "nnrp+ipc://runtime.sock"},
-                {"transport": "websocket", "mode": "server", "uri": "ws://127.0.0.1:0/nnrp"}
-            ],
-            "capabilities": [
-                "control.cancel_abort",
-                "control.progress_partial",
-                "control.credit_backpressure"
-            ]
+            "wire_conformance": {
+                "modes": ["suite_as_client", "suite_as_server", "suite_as_proxy"],
+                "transports": [
+                    {"name": "ipc", "endpoint": "npipe://reference-rs", "tls": false},
+                    {"name": "websocket", "endpoint": "ws://127.0.0.1:0/nnrp", "tls": false}
+                ],
+                "capabilities": [
+                    "control.cancel_abort",
+                    "control.progress_partial",
+                    "control.credit_backpressure"
+                ],
+                "limits": {
+                    "max_frame_bytes": 16777216,
+                    "max_in_flight": 256
+                }
+            }
         })
     }
 
@@ -427,8 +484,15 @@ mod tests {
         let target = json!({
             "target_name": "partial",
             "protocol_version": "nnrp-1-preview4",
-            "endpoints": [{"transport": "ipc", "mode": "client", "uri": "nnrp+ipc://runtime.sock"}],
-            "capabilities": ["control.cancel_abort"]
+            "wire_conformance": {
+                "modes": ["suite_as_client", "suite_as_server"],
+                "transports": [{"name": "ipc", "endpoint": "npipe://partial", "tls": false}],
+                "capabilities": ["control.cancel_abort"],
+                "limits": {
+                    "max_frame_bytes": 16777216,
+                    "max_in_flight": 256
+                }
+            }
         });
         let plan = build_wire_execution_plan(&suite_manifest(), &target, &[]).expect("plan");
         let cases = plan["cases"].as_array().expect("cases");
@@ -441,12 +505,51 @@ mod tests {
     }
 
     #[test]
+    fn wire_execution_plan_skips_missing_target_modes() {
+        let target = json!({
+            "target_name": "client-only",
+            "protocol_version": "nnrp-1-preview4",
+            "wire_conformance": {
+                "modes": ["suite_as_client"],
+                "transports": [
+                    {"name": "ipc", "endpoint": "npipe://client-only", "tls": false},
+                    {"name": "websocket", "endpoint": "ws://127.0.0.1:0/nnrp", "tls": false}
+                ],
+                "capabilities": [
+                    "control.cancel_abort",
+                    "control.progress_partial",
+                    "control.credit_backpressure"
+                ],
+                "limits": {
+                    "max_frame_bytes": 16777216,
+                    "max_in_flight": 256
+                }
+            }
+        });
+        let plan = build_wire_execution_plan(&suite_manifest(), &target, &[]).expect("plan");
+        let cases = plan["cases"].as_array().expect("cases");
+        assert_eq!(cases[0]["status"], "ready");
+        assert_eq!(cases[1]["status"], "skipped");
+        assert!(cases[1]["skip_reason"]
+            .as_str()
+            .expect("skip reason")
+            .contains("required mode 'suite_as_server'"));
+    }
+
+    #[test]
     fn wire_dry_run_report_keeps_ready_and_skipped_outcomes_explicit() {
         let target = json!({
             "target_name": "partial",
             "protocol_version": "nnrp-1-preview4",
-            "endpoints": [{"transport": "ipc", "mode": "client", "uri": "nnrp+ipc://runtime.sock"}],
-            "capabilities": ["control.cancel_abort"]
+            "wire_conformance": {
+                "modes": ["suite_as_client", "suite_as_server"],
+                "transports": [{"name": "ipc", "endpoint": "npipe://partial", "tls": false}],
+                "capabilities": ["control.cancel_abort"],
+                "limits": {
+                    "max_frame_bytes": 16777216,
+                    "max_in_flight": 256
+                }
+            }
         });
         let plan = build_wire_execution_plan(&suite_manifest(), &target, &[]).expect("plan");
         let report = build_wire_dry_run_report(&plan).expect("report");
@@ -474,25 +577,25 @@ mod tests {
             "scenarios": [{
                 "id": "wire.invalid.mode",
                 "mode": "sdk-adapter",
-                "required_transport": "ipc"
+                "transport": "ipc"
             }]
         });
         assert_eq!(
             build_wire_execution_plan(&suite, &target_manifest(), &[]).unwrap_err(),
-            "scenario 'wire.invalid.mode' mode 'sdk-adapter' must be one of suite-as-client, suite-as-server, suite-as-proxy"
+            "scenario 'wire.invalid.mode' mode 'sdk-adapter' must be one of suite_as_client, suite_as_server, suite_as_proxy"
         );
 
         let suite = json!({
             "protocol_version": "nnrp-1-preview4",
             "scenarios": [{
                 "id": "wire.invalid.transport",
-                "mode": "suite-as-client",
-                "required_transport": "named-pipe"
+                "mode": "suite_as_client",
+                "transport": "named-pipe"
             }]
         });
         assert_eq!(
             build_wire_execution_plan(&suite, &target_manifest(), &[]).unwrap_err(),
-            "scenario 'wire.invalid.transport' required_transport 'named-pipe' must be one of any, tcp, quic, ipc, websocket"
+            "scenario 'wire.invalid.transport' transport 'named-pipe' must be one of tcp, quic, ipc, websocket"
         );
     }
 
@@ -501,23 +604,88 @@ mod tests {
         let target = json!({
             "target_name": "bad-target-mode",
             "protocol_version": "nnrp-1-preview4",
-            "endpoints": [{"transport": "ipc", "mode": "adapter", "uri": "nnrp+ipc://runtime.sock"}],
-            "capabilities": ["control.cancel_abort"]
+            "wire_conformance": {
+                "modes": ["adapter"],
+                "transports": [{"name": "ipc", "endpoint": "npipe://bad-target-mode", "tls": false}],
+                "capabilities": ["control.cancel_abort"],
+                "limits": {
+                    "max_frame_bytes": 16777216,
+                    "max_in_flight": 256
+                }
+            }
         });
         assert_eq!(
             build_wire_execution_plan(&suite_manifest(), &target, &[]).unwrap_err(),
-            "target endpoint mode 'adapter' must be one of client, server"
+            "target wire_conformance mode 'adapter' must be one of suite_as_client, suite_as_server, suite_as_proxy"
         );
 
         let target = json!({
             "target_name": "bad-target-transport",
             "protocol_version": "nnrp-1-preview4",
-            "endpoints": [{"transport": "stdio", "mode": "client", "uri": "stdio://runtime"}],
-            "capabilities": ["control.cancel_abort"]
+            "wire_conformance": {
+                "modes": ["suite_as_client"],
+                "transports": [{"name": "stdio", "endpoint": "stdio://runtime", "tls": false}],
+                "capabilities": ["control.cancel_abort"],
+                "limits": {
+                    "max_frame_bytes": 16777216,
+                    "max_in_flight": 256
+                }
+            }
         });
         assert_eq!(
             build_wire_execution_plan(&suite_manifest(), &target, &[]).unwrap_err(),
-            "target endpoint transport 'stdio' must be one of tcp, quic, ipc, websocket"
+            "target wire_conformance transport 'stdio' must be one of tcp, quic, ipc, websocket"
+        );
+    }
+
+    #[test]
+    fn wire_execution_plan_rejects_missing_scenario_fields_and_malformed_target_transports() {
+        let suite = json!({
+            "protocol_version": "nnrp-1-preview4",
+            "scenarios": [{
+                "id": "wire.missing.transport",
+                "mode": "suite_as_client"
+            }]
+        });
+        assert_eq!(
+            build_wire_execution_plan(&suite, &target_manifest(), &[]).unwrap_err(),
+            "scenario 'wire.missing.transport' field 'transport' must be a non-empty string"
+        );
+
+        let target = json!({
+            "target_name": "bad-transport-entry",
+            "protocol_version": "nnrp-1-preview4",
+            "wire_conformance": {
+                "modes": ["suite_as_client"],
+                "transports": ["ipc"],
+                "capabilities": ["control.cancel_abort"],
+                "limits": {
+                    "max_frame_bytes": 16777216,
+                    "max_in_flight": 256
+                }
+            }
+        });
+        assert_eq!(
+            build_wire_execution_plan(&suite_manifest(), &target, &[]).unwrap_err(),
+            "target wire_conformance transports must be JSON objects"
+        );
+
+        let target = json!({
+            "target_name": "bad-transport-name",
+            "protocol_version": "nnrp-1-preview4",
+            "wire_conformance": {
+                "modes": ["suite_as_client"],
+                "transports": [{"endpoint": "npipe://bad-transport-name", "tls": false}],
+                "capabilities": ["control.cancel_abort"],
+                "limits": {
+                    "max_frame_bytes": 16777216,
+                    "max_in_flight": 256
+                }
+            }
+        });
+        assert_eq!(
+            build_wire_execution_plan(&suite_manifest(), &target, &[]).unwrap_err(),
+            "target wire_conformance transport field 'name' must be a non-empty string"
         );
     }
 
@@ -585,6 +753,97 @@ mod tests {
                 .expect("report json");
         assert_eq!(report["mode"], "dry-run");
         assert_eq!(report["results"][0]["id"], "wire.cancel.ipc");
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn wire_writer_expands_formal_suite_scenario_manifests() {
+        let root = temp_dir("nnrp-wire-formal-suite");
+        let cases_dir = root.join("cases");
+        let suite_path = root.join("manifest.json");
+        let scenario_path = cases_dir.join("runtime-control-e2e.json");
+        let target_path = root.join("target.json");
+        let output_path = root.join("results.json");
+        fs::create_dir_all(&cases_dir).expect("cases dir");
+        fs::write(
+            &suite_path,
+            serde_json::to_vec(&json!({
+                "protocol_version": "nnrp-1-preview4",
+                "scenario_manifests": ["cases/runtime-control-e2e.json"]
+            }))
+            .expect("suite json"),
+        )
+        .expect("write suite");
+        fs::write(
+            &scenario_path,
+            serde_json::to_vec(&suite_manifest()).expect("scenario json"),
+        )
+        .expect("write scenario");
+        fs::write(
+            &target_path,
+            serde_json::to_vec(&target_manifest()).expect("target json"),
+        )
+        .expect("write target");
+
+        let expanded = read_expanded_suite_manifest(&suite_path).expect("expanded suite");
+        assert_eq!(
+            expanded["scenarios"].as_array().expect("scenarios").len(),
+            2
+        );
+
+        write_wire_dry_run_report(&suite_path, &target_path, &output_path, &[])
+            .expect("write report");
+        let report: serde_json::Value =
+            serde_json::from_slice(&fs::read(&output_path).expect("read report"))
+                .expect("report json");
+        assert_eq!(report["results"].as_array().expect("results").len(), 2);
+        assert_eq!(report["results"][0]["id"], "wire.cancel.ipc");
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn wire_suite_expansion_rejects_bad_manifest_entries_and_protocol_mismatch() {
+        let root = temp_dir("nnrp-wire-formal-suite-errors");
+        let cases_dir = root.join("cases");
+        let suite_path = root.join("manifest.json");
+        let scenario_path = cases_dir.join("bad.json");
+        fs::create_dir_all(&cases_dir).expect("cases dir");
+        fs::write(
+            &suite_path,
+            serde_json::to_vec(&json!({
+                "protocol_version": "nnrp-1-preview4",
+                "scenario_manifests": [""]
+            }))
+            .expect("suite json"),
+        )
+        .expect("write suite");
+        assert_eq!(
+            read_expanded_suite_manifest(&suite_path).unwrap_err(),
+            "wire suite scenario_manifests entries must be non-empty strings"
+        );
+
+        fs::write(
+            &suite_path,
+            serde_json::to_vec(&json!({
+                "protocol_version": "nnrp-1-preview4",
+                "scenario_manifests": ["cases/bad.json"]
+            }))
+            .expect("suite json"),
+        )
+        .expect("write suite");
+        fs::write(
+            &scenario_path,
+            serde_json::to_vec(&json!({
+                "protocol_version": "nnrp-1-preview3",
+                "scenarios": []
+            }))
+            .expect("scenario json"),
+        )
+        .expect("write scenario");
+        let error = read_expanded_suite_manifest(&suite_path).unwrap_err();
+        assert!(error.contains("protocol_version 'nnrp-1-preview3' does not match"));
 
         fs::remove_dir_all(root).expect("cleanup");
     }
