@@ -14,7 +14,7 @@
 - [ ] Implement suite-as-client mode.
   - [x] TCP endpoint.
   - [ ] QUIC endpoint.
-  - [ ] IPC endpoint.
+  - [x] IPC endpoint.
   - [x] WebSocket endpoint.
 - [ ] Implement suite-as-server mode.
   - [ ] TCP listener.

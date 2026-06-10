@@ -3,9 +3,10 @@ use nnrp_core::{
     SubmitMode, TileIndexMode, STANDARD_PROFILE_TOKEN,
 };
 use nnrp_runtime::{NnrpClient, NnrpClientConfig, NnrpServer, NnrpServerConfig, RuntimeError};
+use nnrp_transport_ipc::{IpcEndpoint, IpcProvider};
 use nnrp_transport_websocket::{WebSocketEndpoint, WebSocketProvider};
 use serde_json::{json, Value};
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const REQUEST_BODY: &[u8] = b"wire-reference-request";
 const RESPONSE_BODY: &[u8] = b"wire-reference-result";
@@ -13,6 +14,7 @@ const RESPONSE_BODY: &[u8] = b"wire-reference-result";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReferenceTransport {
     Tcp,
+    Ipc,
     WebSocket,
 }
 
@@ -20,6 +22,7 @@ impl ReferenceTransport {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Tcp => "tcp",
+            Self::Ipc => "ipc",
             Self::WebSocket => "websocket",
         }
     }
@@ -30,6 +33,7 @@ pub async fn run_suite_as_client_reference(
 ) -> Result<Value, RuntimeError> {
     match transport {
         ReferenceTransport::Tcp => run_tcp_suite_as_client_reference().await,
+        ReferenceTransport::Ipc => run_ipc_suite_as_client_reference().await,
         ReferenceTransport::WebSocket => run_websocket_suite_as_client_reference().await,
     }
 }
@@ -48,6 +52,21 @@ async fn run_tcp_suite_as_client_reference() -> Result<Value, RuntimeError> {
     Ok(report)
 }
 
+async fn run_ipc_suite_as_client_reference() -> Result<Value, RuntimeError> {
+    let started = Instant::now();
+    let endpoint = unique_ipc_endpoint();
+    let server = IpcProvider::bind(&endpoint, NnrpServerConfig::default()).await?;
+    let server_task = tokio::spawn(reference_server_task(server));
+
+    let client = connect_ipc_client_with_retry(&endpoint).await?;
+    let report = run_reference_client(ReferenceTransport::Ipc, started, client).await?;
+    server_task
+        .await
+        .map_err(|_| RuntimeError::Internal("wire reference IPC server task panicked"))??;
+    cleanup_ipc_endpoint(&endpoint);
+    Ok(report)
+}
+
 async fn run_websocket_suite_as_client_reference() -> Result<Value, RuntimeError> {
     let started = Instant::now();
     let server = WebSocketProvider::bind("127.0.0.1:0", NnrpServerConfig::default()).await?;
@@ -60,6 +79,22 @@ async fn run_websocket_suite_as_client_reference() -> Result<Value, RuntimeError
         .await
         .map_err(|_| RuntimeError::Internal("wire reference WebSocket server task panicked"))??;
     Ok(report)
+}
+
+async fn connect_ipc_client_with_retry(endpoint: &IpcEndpoint) -> Result<NnrpClient, RuntimeError> {
+    let mut last_error = None;
+    for _ in 0..25 {
+        match IpcProvider::connect(endpoint, NnrpClientConfig::default()).await {
+            Ok(client) => return Ok(client),
+            Err(error) => {
+                last_error = Some(error);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    }
+    Err(last_error.unwrap_or(RuntimeError::UnsupportedTransport(
+        "wire reference IPC endpoint did not accept connections",
+    )))
 }
 
 async fn reference_server_task(server: NnrpServer) -> Result<(), RuntimeError> {
@@ -76,6 +111,41 @@ async fn reference_server_task(server: NnrpServer) -> Result<(), RuntimeError> {
     let close = session.receive_close().await?;
     session.ack_close(&close).await?;
     session.close().await
+}
+
+fn unique_ipc_endpoint() -> IpcEndpoint {
+    #[cfg(unix)]
+    {
+        IpcEndpoint::unix(std::env::temp_dir().join(format!(
+            "nnrp-wire-reference-{}-{}.sock",
+            std::process::id(),
+            unique_suffix()
+        )))
+    }
+    #[cfg(windows)]
+    {
+        IpcEndpoint::named_pipe(format!(
+            "nnrp-wire-reference-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ))
+    }
+}
+
+fn cleanup_ipc_endpoint(endpoint: &IpcEndpoint) {
+    #[cfg(unix)]
+    if let Some(path) = endpoint.as_unix_path() {
+        let _ = std::fs::remove_file(path);
+    }
+    #[cfg(not(unix))]
+    let _ = endpoint;
+}
+
+fn unique_suffix() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be after UNIX epoch")
+        .as_nanos()
 }
 
 async fn run_reference_client(
@@ -194,6 +264,24 @@ mod tests {
             .await
             .expect("TCP reference endpoint should run");
         assert_reference_report(&report, "tcp");
+    }
+
+    #[tokio::test]
+    async fn suite_as_client_reference_runs_ipc_endpoint() {
+        let report = run_suite_as_client_reference(ReferenceTransport::Ipc)
+            .await
+            .expect("IPC reference endpoint should run");
+        assert_reference_report(&report, "ipc");
+    }
+
+    #[tokio::test]
+    async fn ipc_reference_reports_unavailable_endpoint() {
+        let endpoint = super::unique_ipc_endpoint();
+        let error = super::connect_ipc_client_with_retry(&endpoint)
+            .await
+            .expect_err("unbound IPC endpoint should fail");
+        assert!(!error.to_string().is_empty());
+        super::cleanup_ipc_endpoint(&endpoint);
     }
 
     #[tokio::test]
