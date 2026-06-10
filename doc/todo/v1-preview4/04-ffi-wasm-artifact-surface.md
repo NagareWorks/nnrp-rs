@@ -31,13 +31,13 @@
 
 ## WASM Surface
 
-- [ ] Add TypeScript-visible runtime control structures.
-- [ ] Add TypeScript-visible runtime object structures.
+- [x] Add TypeScript-visible runtime control structures.
+- [x] Add TypeScript-visible runtime object structures.
 - [ ] Add WASM event polling batch calls.
 - [x] Add WASM helpers for browser WebSocket binary frame mapping.
 - [x] Keep browser APIs aligned with native role package semantics.
 - [x] Keep TCP, QUIC, and IPC transport implementations out of browser WASM packages.
-- [ ] Keep browser WASM output focused on Rust-owned framing, control, runtime-object, and WebSocket substrate helpers.
+- [x] Keep browser WASM output focused on Rust-owned framing, control, runtime-object, and WebSocket substrate helpers.
 - [ ] Add wasm-bindgen tests for encode/decode and event batching.
 
 ## Artifact Packaging
