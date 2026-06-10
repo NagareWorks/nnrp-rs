@@ -134,6 +134,14 @@ cargo llvm-cov --workspace --lcov --output-path target\llvm-cov\lcov.info
 
 The current project rule is 90%+ total line coverage and 90%+ incremental line coverage for every commit.
 
+Preview4 release validation can also run the Rust-owned benchmark entrypoint:
+
+```powershell
+cargo run -p nnrp-conformance --bin nnrp-preview4-benchmarks -- --iterations 100000 --transport-iterations 1000
+```
+
+The benchmark report covers control-frame encode/decode, runtime object declare/ref/release metadata, IPC loopback, and WebSocket loopback.
+
 ## Documentation
 
 - Protocol and SDK docs: <https://nagareworks.github.io/nnrp-doc/>

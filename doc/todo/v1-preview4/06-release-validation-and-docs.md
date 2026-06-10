@@ -25,10 +25,10 @@
 ## Benchmark Gates
 
 - [ ] Preserve preview3 coarse FFI benchmark baselines.
-- [ ] Add preview4 control-frame hot path benchmarks.
-- [ ] Add runtime object declare/ref/release benchmarks.
-- [ ] Add IPC loopback benchmark.
-- [ ] Add WebSocket loopback benchmark.
+- [x] Add preview4 control-frame hot path benchmarks.
+- [x] Add runtime object declare/ref/release benchmarks.
+- [x] Add IPC loopback benchmark.
+- [x] Add WebSocket loopback benchmark.
 - [ ] Compare Python cffi API hot path with the preview4 artifact set.
 - [ ] Compare JavaScript native transport and browser WASM hot paths with the preview4 artifact set.
 

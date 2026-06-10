@@ -39,3 +39,13 @@ Release CI inspects native and WASM manifests and rejects artifacts that collaps
 ## Wire Conformance
 
 `nnrp-conformance-wire` consumes preview4 suite and target manifests to produce direct wire-level dry-run results. The suite can target TCP, QUIC, IPC, and WebSocket endpoints without routing through an SDK adapter.
+
+## Benchmarks
+
+Rust owns a repeatable Preview4 benchmark entrypoint:
+
+```bash
+cargo run -p nnrp-conformance --bin nnrp-preview4-benchmarks -- --iterations 100000 --transport-iterations 1000
+```
+
+The JSON report includes control-frame hot-path encode/decode, runtime object declare/ref/release metadata, IPC loopback, and WebSocket loopback cases. Downstream SDK benchmark comparisons should use this Rust report as the artifact-set baseline for Python cffi and JavaScript native/WASM hot paths.
