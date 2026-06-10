@@ -4,24 +4,24 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use nnrp_core::{
     should_replay_frame_after_migration, token_delta_schema_descriptor,
-    validate_migration_recovery, validate_session_recovery_ack, validate_session_recovery_request,
-    BudgetMetadata, CacheLease, CacheLeaseOwnerScope, CacheMissMetadata, CacheMissReason,
-    CacheObjectId, CacheObjectKind, CacheReferenceMetadata, CacheReuseScope,
-    CacheValidationFailure, CapabilityMetadata, ControlRequestMetadata, ErrorScope,
-    MemoryLocationHint, MessageType, NnrpError, ObjectDeltaMetadata, ObjectDescriptorMetadata,
-    ObjectReferenceMetadata, ObjectReleaseMetadata, ObjectReleaseReason, OwnershipHint,
-    PartialResultMetadata, PressureMetadata, ProgressMetadata, ProtocolVersion,
-    RecoverableErrorMetadata, ResultDropReasonMetadata, ResultHintMetadata, RetryAfterMetadata,
-    RouteHintMetadata, RuntimeObjectKind, RuntimeRole, SchedulingMetadata, SchemaDescriptorHeader,
-    SchemaRegistry, SchemaRegistryAction, SchemaRegistryFailure, SessionMigrateAckMetadata,
-    SessionMigrateMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
+    validate_migration_recovery, validate_partial_result_semantics, validate_progress_semantics,
+    validate_session_recovery_ack, validate_session_recovery_request, BudgetMetadata, CacheLease,
+    CacheLeaseOwnerScope, CacheMissMetadata, CacheMissReason, CacheObjectId, CacheObjectKind,
+    CacheReferenceMetadata, CacheReuseScope, CacheValidationFailure, CapabilityMetadata,
+    ControlRequestMetadata, ErrorScope, MemoryLocationHint, MessageType, NnrpError,
+    ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata, ObjectReleaseMetadata,
+    ObjectReleaseReason, OwnershipHint, PartialResultMetadata, PressureMetadata, ProgressMetadata,
+    ProtocolVersion, RecoverableErrorMetadata, ResultDropReasonMetadata, ResultHintMetadata,
+    RetryAfterMetadata, RouteHintMetadata, RuntimeObjectKind, RuntimeRole, SchedulingMetadata,
+    SchemaDescriptorHeader, SchemaRegistry, SchemaRegistryAction, SchemaRegistryFailure,
+    SessionMigrateAckMetadata, SessionMigrateMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
     SessionRecoveryOutcome as CoreSessionRecoveryOutcome, SupersedeMetadata, TraceContextMetadata,
     TransportId, TypedPayloadDescriptor, SESSION_ERROR_NONE, SESSION_ERROR_PROFILE_UNSUPPORTED,
     SESSION_ERROR_RESUME_REJECTED, SESSION_ERROR_SCHEMA_UNSUPPORTED, SESSION_FLAG_ALLOW_RESUME,
 };
 
 pub const NNRP_FFI_ABI_MAJOR: u16 = 1;
-pub const NNRP_FFI_ABI_MINOR: u16 = 9;
+pub const NNRP_FFI_ABI_MINOR: u16 = 10;
 pub const NNRP_FFI_ABI_PATCH: u16 = 0;
 
 pub const NNRP_TRANSPORT_SLOT_QUIC: u32 = 0x0000_0001;
@@ -266,6 +266,10 @@ impl NnrpFfiStatus {
                 ffi_error_family_for_named_field(field).unwrap_or(NnrpErrorFamily::Transport),
                 0,
             ),
+            NnrpError::DeclaredLengthMismatch { field, .. } => Self::protocol(
+                ffi_error_family_for_named_field(field).unwrap_or(NnrpErrorFamily::Transport),
+                0,
+            ),
             NnrpError::ReservedBitsSet { .. }
             | NnrpError::UnsupportedWireFormat(_)
             | NnrpError::UnsupportedVersionMajor(_)
@@ -273,7 +277,6 @@ impl NnrpFfiStatus {
             | NnrpError::InvalidMagic
             | NnrpError::InvalidHeaderLength(_)
             | NnrpError::PacketLengthMismatch { .. }
-            | NnrpError::DeclaredLengthMismatch { .. }
             | NnrpError::MessageLengthOverflow => Self {
                 status_code: NnrpFfiStatusCode::ProtocolError as u32,
                 error_family: NnrpErrorFamily::Transport as u32,
@@ -1962,6 +1965,27 @@ pub struct NnrpClientSubmitResultBatchRequest {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpClientRuntimeObjectLoopRequest {
+    pub session: NnrpHandle,
+    pub operation_id: u64,
+    pub frame_id: u32,
+    pub submit_payload: NnrpBufferView,
+    pub object_descriptor: NnrpRuntimeObjectDescriptor,
+    pub object_metadata: NnrpBufferView,
+    pub cache_reference: NnrpCacheReferenceDescriptor,
+    pub cache_reference_metadata: NnrpBufferView,
+    pub progress: NnrpProgressDescriptor,
+    pub progress_body: NnrpBufferView,
+    pub partial_result: NnrpPartialResultDescriptor,
+    pub partial_body: NnrpBufferView,
+    pub object_release: NnrpObjectReleaseDescriptor,
+    pub release_diagnostics: NnrpBufferView,
+    pub result_payload: NnrpBufferView,
+    pub max_events: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NnrpServerFlowUpdateRequest {
     pub session: NnrpHandle,
     pub frame_id: u32,
@@ -2385,6 +2409,21 @@ pub unsafe extern "C" fn nnrp_client_submit_result_compact_batch(
     nnrp_client_submit_result_compact_batch_impl(request, out_last_result, out_completed)
 }
 
+#[no_mangle]
+/// # Safety
+///
+/// All buffer views in `request` must remain readable for their declared
+/// lengths for the duration of the call. `out_result` must point to one
+/// caller-owned writable `NnrpCompactResult`. This helper validates the
+/// runtime-object declare/cache/progress/partial-result/release metadata and
+/// then executes the compact submit/result path in one ABI call.
+pub unsafe extern "C" fn nnrp_client_submit_runtime_object_loop_compact(
+    request: NnrpClientRuntimeObjectLoopRequest,
+    out_result: *mut NnrpCompactResult,
+) -> NnrpFfiStatus {
+    nnrp_client_submit_runtime_object_loop_compact_impl(request, out_result)
+}
+
 unsafe fn nnrp_client_submit_result_impl(
     request: NnrpClientSubmitResultRequest,
     out_operation: *mut NnrpHandle,
@@ -2515,6 +2554,76 @@ unsafe fn nnrp_client_submit_result_compact_batch_impl(
     *out_completed = completed;
     *out_last_result = last;
     NnrpFfiStatus::ok()
+}
+
+unsafe fn nnrp_client_submit_runtime_object_loop_compact_impl(
+    request: NnrpClientRuntimeObjectLoopRequest,
+    out_result: *mut NnrpCompactResult,
+) -> NnrpFfiStatus {
+    if out_result.is_null() {
+        return NnrpFfiStatus::invalid_argument(58);
+    }
+    if let Err(status) = validate_runtime_object_loop_request(request) {
+        *out_result = NnrpCompactResult::none(status);
+        return status;
+    }
+
+    nnrp_client_submit_result_compact_impl(
+        NnrpClientSubmitResultRequest {
+            session: request.session,
+            operation_id: request.operation_id,
+            frame_id: request.frame_id,
+            submit_payload: request.submit_payload,
+            result_payload: request.result_payload,
+            max_events: request.max_events,
+        },
+        out_result,
+    )
+}
+
+unsafe fn validate_runtime_object_loop_request(
+    request: NnrpClientRuntimeObjectLoopRequest,
+) -> Result<(), NnrpFfiStatus> {
+    request.submit_payload.validate()?;
+    request.object_metadata.validate()?;
+    request.cache_reference_metadata.validate()?;
+    request.progress_body.validate()?;
+    request.partial_body.validate()?;
+    request.release_diagnostics.validate()?;
+    request.result_payload.validate()?;
+
+    request
+        .object_descriptor
+        .to_core()?
+        .to_vec_with_extension(ffi_read_slice(request.object_metadata))
+        .map_err(|error| NnrpFfiStatus::from_core_error(&error))?;
+    request
+        .cache_reference
+        .to_core()?
+        .to_vec_with_extension(ffi_read_slice(request.cache_reference_metadata))
+        .map_err(|error| NnrpFfiStatus::from_core_error(&error))?;
+
+    let progress = ProgressMetadata::from(request.progress);
+    validate_progress_semantics(&progress)
+        .map_err(|error| NnrpFfiStatus::from_core_error(&error))?;
+    progress
+        .to_vec_with_body(ffi_read_slice(request.progress_body))
+        .map_err(|error| NnrpFfiStatus::from_core_error(&error))?;
+
+    let partial_result = PartialResultMetadata::from(request.partial_result);
+    validate_partial_result_semantics(&partial_result)
+        .map_err(|error| NnrpFfiStatus::from_core_error(&error))?;
+    partial_result
+        .to_vec_with_body(ffi_read_slice(request.partial_body))
+        .map_err(|error| NnrpFfiStatus::from_core_error(&error))?;
+
+    request
+        .object_release
+        .to_core()?
+        .to_vec_with_diagnostics(ffi_read_slice(request.release_diagnostics))
+        .map_err(|error| NnrpFfiStatus::from_core_error(&error))?;
+
+    Ok(())
 }
 
 #[no_mangle]
@@ -5579,6 +5688,271 @@ mod tests {
                 ),
                 NnrpFfiStatus::invalid_argument(126)
             );
+        }
+    }
+
+    #[test]
+    fn ffi_client_runtime_object_loop_compact_coalesces_metadata_validation_and_result() {
+        unsafe {
+            let mut connection = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_connect(
+                    NnrpClientConnectRequest {
+                        connection_id: 91_650,
+                        generation: 1,
+                        transport_id: test_transport_id(),
+                    },
+                    &mut connection
+                ),
+                NnrpFfiStatus::ok()
+            );
+            let mut session = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_open_session(
+                    NnrpSessionOpenRequest {
+                        connection,
+                        requested_session_id: 91_651,
+                        generation: 1,
+                        profile_id: 2,
+                        schema_id: 0x1001,
+                        schema_version: 3,
+                    },
+                    &mut session
+                ),
+                NnrpFfiStatus::ok()
+            );
+            drain_events(connection);
+
+            let submit_payload = [1u8, 2, 3];
+            let object_metadata = [0xa1u8, 0xa2];
+            let cache_metadata = [0xb1u8, 0xb2, 0xb3];
+            let progress_body = [0xc1u8];
+            let partial_body = [0xd1u8, 0xd2];
+            let release_diagnostics = [0xe1u8];
+            let result_payload = [4u8, 5, 6, 7];
+            let mut result = NnrpCompactResult::none(NnrpFfiStatus::ok());
+            assert_eq!(
+                nnrp_client_submit_runtime_object_loop_compact(
+                    NnrpClientRuntimeObjectLoopRequest {
+                        session,
+                        operation_id: 91_652,
+                        frame_id: 70,
+                        submit_payload: NnrpBufferView {
+                            ptr: submit_payload.as_ptr(),
+                            len: submit_payload.len(),
+                        },
+                        object_descriptor: NnrpRuntimeObjectDescriptor {
+                            object_id: 91_653,
+                            object_kind: RuntimeObjectKind::Tensor as u16,
+                            producer_role: RuntimeRole::Server as u8,
+                            consumer_role: RuntimeRole::Client as u8,
+                            session_id: 91_651,
+                            byte_size: 4096,
+                            compute_cost_units: 17,
+                            memory_location_hint: MemoryLocationHint::DeviceMemory as u16,
+                            ownership_hint: OwnershipHint::Borrowed as u16,
+                            lifetime_hint_ms: 250,
+                            metadata_bytes: object_metadata.len() as u32,
+                        },
+                        object_metadata: NnrpBufferView {
+                            ptr: object_metadata.as_ptr(),
+                            len: object_metadata.len(),
+                        },
+                        cache_reference: NnrpCacheReferenceDescriptor {
+                            cache_key_hi: 0xaaa,
+                            cache_key_lo: 0xbbb,
+                            profile_id: 2,
+                            reuse_scope: CacheReuseScope::Session as u16,
+                            lease_id: 91_654,
+                            producer_trace_id: 91_655,
+                            expiration_hint_ms: 1_000,
+                            metadata_bytes: cache_metadata.len() as u32,
+                            flags: 0,
+                        },
+                        cache_reference_metadata: NnrpBufferView {
+                            ptr: cache_metadata.as_ptr(),
+                            len: cache_metadata.len(),
+                        },
+                        progress: NnrpProgressDescriptor {
+                            operation_id: 91_652,
+                            progress_sequence: 1,
+                            stage_code: 2,
+                            percent_x100: 5_000,
+                            object_id: 91_653,
+                            body_bytes: progress_body.len() as u32,
+                        },
+                        progress_body: NnrpBufferView {
+                            ptr: progress_body.as_ptr(),
+                            len: progress_body.len(),
+                        },
+                        partial_result: NnrpPartialResultDescriptor {
+                            operation_id: 91_652,
+                            result_sequence: 1,
+                            object_id: 91_653,
+                            delta_sequence: 1,
+                            body_bytes: partial_body.len() as u32,
+                            flags: 0x0000_0002,
+                        },
+                        partial_body: NnrpBufferView {
+                            ptr: partial_body.as_ptr(),
+                            len: partial_body.len(),
+                        },
+                        object_release: NnrpObjectReleaseDescriptor {
+                            object_id: 91_653,
+                            operation_id: 91_652,
+                            release_reason: ObjectReleaseReason::Completed as u16,
+                            source_role: RuntimeRole::Server as u8,
+                            flags: 0,
+                            diagnostic_bytes: release_diagnostics.len() as u32,
+                        },
+                        release_diagnostics: NnrpBufferView {
+                            ptr: release_diagnostics.as_ptr(),
+                            len: release_diagnostics.len(),
+                        },
+                        result_payload: NnrpBufferView {
+                            ptr: result_payload.as_ptr(),
+                            len: result_payload.len(),
+                        },
+                        max_events: 2,
+                    },
+                    &mut result
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(result.status, NnrpFfiStatus::ok());
+            assert_eq!(result.has_result, 1);
+            assert_eq!(result.event_kind, NnrpEventKind::ResultPushed as u32);
+            assert_eq!(result.result_state, NNRP_RESULT_STATE_COMPLETED);
+            assert_eq!(result.operation.kind, NnrpHandleKind::Operation as u32);
+            assert_eq!(result.operation.id, 91_652);
+            assert_eq!(result.operation_id, 91_652);
+            assert_eq!(result.frame_id, 70);
+            assert_eq!(result.payload.len, result_payload.len());
+            assert_eq!(
+                core::slice::from_raw_parts(result.payload.ptr, result.payload.len),
+                result_payload
+            );
+        }
+    }
+
+    #[test]
+    fn ffi_client_runtime_object_loop_compact_rejects_declared_length_mismatch() {
+        unsafe {
+            let mut connection = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_connect(
+                    NnrpClientConnectRequest {
+                        connection_id: 91_656,
+                        generation: 1,
+                        transport_id: test_transport_id(),
+                    },
+                    &mut connection
+                ),
+                NnrpFfiStatus::ok()
+            );
+            let mut session = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_open_session(
+                    NnrpSessionOpenRequest {
+                        connection,
+                        requested_session_id: 91_657,
+                        generation: 1,
+                        profile_id: 2,
+                        schema_id: 0x1001,
+                        schema_version: 3,
+                    },
+                    &mut session
+                ),
+                NnrpFfiStatus::ok()
+            );
+            drain_events(connection);
+
+            let payload = [1u8];
+            let mut result = NnrpCompactResult::none(NnrpFfiStatus::ok());
+            let status = nnrp_client_submit_runtime_object_loop_compact(
+                NnrpClientRuntimeObjectLoopRequest {
+                    session,
+                    operation_id: 91_658,
+                    frame_id: 71,
+                    submit_payload: NnrpBufferView {
+                        ptr: payload.as_ptr(),
+                        len: payload.len(),
+                    },
+                    object_descriptor: NnrpRuntimeObjectDescriptor {
+                        object_id: 91_659,
+                        object_kind: RuntimeObjectKind::Tensor as u16,
+                        producer_role: RuntimeRole::Server as u8,
+                        consumer_role: RuntimeRole::Client as u8,
+                        session_id: 91_657,
+                        byte_size: 64,
+                        compute_cost_units: 1,
+                        memory_location_hint: MemoryLocationHint::DeviceMemory as u16,
+                        ownership_hint: OwnershipHint::Borrowed as u16,
+                        lifetime_hint_ms: 250,
+                        metadata_bytes: 2,
+                    },
+                    object_metadata: NnrpBufferView {
+                        ptr: payload.as_ptr(),
+                        len: payload.len(),
+                    },
+                    cache_reference: NnrpCacheReferenceDescriptor {
+                        cache_key_hi: 1,
+                        cache_key_lo: 2,
+                        profile_id: 2,
+                        reuse_scope: CacheReuseScope::Session as u16,
+                        lease_id: 0,
+                        producer_trace_id: 0,
+                        expiration_hint_ms: 1_000,
+                        metadata_bytes: 0,
+                        flags: 0,
+                    },
+                    cache_reference_metadata: NnrpBufferView::empty(),
+                    progress: NnrpProgressDescriptor {
+                        operation_id: 91_658,
+                        progress_sequence: 1,
+                        stage_code: 0,
+                        percent_x100: 1,
+                        object_id: 91_659,
+                        body_bytes: 0,
+                    },
+                    progress_body: NnrpBufferView::empty(),
+                    partial_result: NnrpPartialResultDescriptor {
+                        operation_id: 91_658,
+                        result_sequence: 1,
+                        object_id: 91_659,
+                        delta_sequence: 0,
+                        body_bytes: 0,
+                        flags: 0x0000_0002,
+                    },
+                    partial_body: NnrpBufferView::empty(),
+                    object_release: NnrpObjectReleaseDescriptor {
+                        object_id: 91_659,
+                        operation_id: 91_658,
+                        release_reason: ObjectReleaseReason::Completed as u16,
+                        source_role: RuntimeRole::Server as u8,
+                        flags: 0,
+                        diagnostic_bytes: 0,
+                    },
+                    release_diagnostics: NnrpBufferView::empty(),
+                    result_payload: NnrpBufferView {
+                        ptr: payload.as_ptr(),
+                        len: payload.len(),
+                    },
+                    max_events: 2,
+                },
+                &mut result,
+            );
+            assert_eq!(status.status_code, NnrpFfiStatusCode::ProtocolError as u32);
+            assert_eq!(status.error_family, NnrpErrorFamily::RuntimeObject as u32);
+            assert_eq!(result.status, status);
+            assert_eq!(result.has_result, 0);
+
+            let mut poll = empty_poll_result();
+            assert_eq!(
+                nnrp_client_await_event(connection, &mut poll).status_code,
+                NnrpFfiStatusCode::WouldBlock as u32
+            );
+            assert_eq!(poll.has_event, 0);
         }
     }
 

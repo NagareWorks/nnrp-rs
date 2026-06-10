@@ -66,4 +66,4 @@
 - [x] Define C ABI structs for object delta descriptors.
 - [x] Define C ABI structs for cache reference descriptors.
 - [x] Define release functions for native-owned object metadata buffers.
-- [ ] Keep FFI calls coarse for declare/request/progress/result/release loops.
+- [x] Keep FFI calls coarse for declare/request/progress/result/release loops.
