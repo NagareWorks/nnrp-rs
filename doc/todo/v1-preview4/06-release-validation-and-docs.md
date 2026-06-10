@@ -4,8 +4,8 @@
 
 - [ ] Move Rust workspace version to the preview4 release line in the release-preparation commit.
 - [ ] Keep preview3 release artifacts available for downstream SDKs until they move to preview4.
-- [ ] Add release notes that explain preview4 runtime control, runtime object, IPC, and WebSocket work.
-- [ ] Add downstream SDK maintainer checklist for required artifact and API updates.
+- [x] Add release notes that explain preview4 runtime control, runtime object, IPC, and WebSocket work.
+- [x] Add downstream SDK maintainer checklist for required artifact and API updates.
 
 ## Validation Gates
 
@@ -34,8 +34,8 @@
 
 ## Documentation
 
-- [ ] Update README with preview4 transport and runtime-object scope.
-- [ ] Update native link library documentation for transport-scoped artifacts.
-- [ ] Update browser WASM documentation for WebSocket substrate.
-- [ ] Update conformance usage examples for wire target manifests.
+- [x] Update README with preview4 transport and runtime-object scope.
+- [x] Update native link library documentation for transport-scoped artifacts.
+- [x] Update browser WASM documentation for WebSocket substrate.
+- [x] Update conformance usage examples for wire target manifests.
 - [ ] Keep generated headers and manifests in sync with release artifacts.
