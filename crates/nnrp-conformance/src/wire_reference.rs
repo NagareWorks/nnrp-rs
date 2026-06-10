@@ -1410,7 +1410,7 @@ fn expect_result_drop_reason(
     event: NnrpClientEvent,
 ) -> Result<ResultDropReasonMetadata, RuntimeError> {
     match event {
-        NnrpClientEvent::ResultDropReason(metadata) => Ok(metadata),
+        NnrpClientEvent::ResultDropReason { metadata, .. } => Ok(metadata),
         _ => Err(RuntimeError::UnexpectedMessage(
             "wire reference expected RESULT_DROP_REASON event",
         )),

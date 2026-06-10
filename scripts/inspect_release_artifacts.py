@@ -28,6 +28,19 @@ BROWSER_WASM_SCOPE = {
     "scope": "browser",
     "slots": ["websocket"],
     "features": ["transport-websocket", "wasm-provider"],
+    "exports": [
+        "nnrp_wasm_protocol_major",
+        "nnrp_wasm_wire_format",
+        "selectTransportWithProbeJson",
+        "scoreProviderProbeJson",
+        "encodeWebSocketBinaryFrameJson",
+        "decodeWebSocketBinaryFrameJson",
+        "decodeWebSocketBinaryFrameBatchJson",
+        "encodeRuntimeControlMetadataJson",
+        "decodeRuntimeControlMetadataJson",
+        "encodeRuntimeObjectMetadataJson",
+        "decodeRuntimeObjectMetadataJson",
+    ],
 }
 
 
@@ -132,6 +145,12 @@ def inspect_wasm(wasm_dir: Path) -> None:
             manifest.get("enabled_features"),
             BROWSER_WASM_SCOPE["features"],
             "enabled_features",
+            manifest_path,
+        )
+        require_equal(
+            manifest.get("exports"),
+            BROWSER_WASM_SCOPE["exports"],
+            "exports",
             manifest_path,
         )
 

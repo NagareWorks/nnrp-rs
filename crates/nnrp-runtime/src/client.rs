@@ -119,7 +119,10 @@ pub enum NnrpClientEvent {
     ResultDrop {
         frame_id: u32,
     },
-    ResultDropReason(ResultDropReasonMetadata),
+    ResultDropReason {
+        metadata: ResultDropReasonMetadata,
+        body: Vec<u8>,
+    },
     FlowUpdate(FlowUpdateMetadata),
     Backpressure(PressureMetadata),
     CreditUpdate(PressureMetadata),
@@ -331,7 +334,7 @@ impl NnrpClientSession {
             NnrpClientEvent::ResultDrop { .. } => Err(RuntimeError::UnexpectedMessage(
                 "client expected RESULT_PUSH but received RESULT_DROP",
             )),
-            NnrpClientEvent::ResultDropReason(_) => Err(RuntimeError::UnexpectedMessage(
+            NnrpClientEvent::ResultDropReason { .. } => Err(RuntimeError::UnexpectedMessage(
                 "client expected RESULT_PUSH but received RESULT_DROP_REASON",
             )),
             NnrpClientEvent::FlowUpdate(_) => Err(RuntimeError::UnexpectedMessage(
@@ -396,7 +399,15 @@ impl NnrpClientSession {
                 }
                 let metadata = ResultDropReasonMetadata::parse(&packet.metadata)?;
                 validate_result_drop_reason_semantics(&metadata)?;
-                Ok(NnrpClientEvent::ResultDropReason(metadata))
+                require_body_len(
+                    packet.body.len(),
+                    metadata.diagnostic_bytes as usize,
+                    "client received RESULT_DROP_REASON body length mismatch",
+                )?;
+                Ok(NnrpClientEvent::ResultDropReason {
+                    metadata,
+                    body: packet.body,
+                })
             }
             MessageType::PartialResult => {
                 self.require_session_packet(
@@ -704,14 +715,33 @@ impl NnrpClientSession {
         message_type: MessageType,
         metadata: ControlRequestMetadata,
     ) -> Result<(), RuntimeError> {
+        self.send_control_request_with_diagnostics(message_type, metadata, Vec::new())
+            .await
+    }
+
+    pub async fn send_control_request_with_diagnostics(
+        &mut self,
+        message_type: MessageType,
+        metadata: ControlRequestMetadata,
+        diagnostics: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
         validate_control_request_semantics(message_type, &metadata)?;
-        let mut header = CommonHeader::new(message_type, CONTROL_REQUEST_METADATA_LEN as u32, 0);
+        require_body_len(
+            diagnostics.len(),
+            metadata.diagnostic_bytes as usize,
+            "client runtime control diagnostic body length mismatch",
+        )?;
+        let mut header = CommonHeader::new(
+            message_type,
+            CONTROL_REQUEST_METADATA_LEN as u32,
+            diagnostics.len() as u32,
+        );
         header.session_id = self.session_id;
         self.transport
             .write_packet(&RuntimePacket::new(
                 header,
                 metadata.to_bytes()?.to_vec(),
-                Vec::new(),
+                diagnostics,
             )?)
             .await
     }

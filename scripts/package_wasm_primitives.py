@@ -8,6 +8,19 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PROTOCOL_VERSION = "NNRP/1"
 WASM_ABI_VERSION = "1.0.0"
+WASM_EXPORTS = [
+    "nnrp_wasm_protocol_major",
+    "nnrp_wasm_wire_format",
+    "selectTransportWithProbeJson",
+    "scoreProviderProbeJson",
+    "encodeWebSocketBinaryFrameJson",
+    "decodeWebSocketBinaryFrameJson",
+    "decodeWebSocketBinaryFrameBatchJson",
+    "encodeRuntimeControlMetadataJson",
+    "decodeRuntimeControlMetadataJson",
+    "encodeRuntimeObjectMetadataJson",
+    "decodeRuntimeObjectMetadataJson",
+]
 
 TRANSPORT_SCOPES = {
     "browser": {
@@ -66,14 +79,7 @@ def package_wasm(out_dir: Path, transport_scope: str) -> Path:
         "types": "nnrp_wasm.d.ts",
         "owner": "nnrp-rs",
         "downstream_wrapper": "nnrp-js",
-        "exports": [
-            "nnrp_wasm_protocol_major",
-            "nnrp_wasm_wire_format",
-            "selectTransportWithProbeJson",
-            "scoreProviderProbeJson",
-            "encodeWebSocketBinaryFrameJson",
-            "decodeWebSocketBinaryFrameJson",
-        ],
+        "exports": WASM_EXPORTS,
     }
     (package_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     return package_dir

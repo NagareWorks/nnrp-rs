@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import importlib.util
 import re
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,6 +33,19 @@ BROWSER_WASM_SCOPE = {
     "scope": "browser",
     "features": ["transport-websocket", "wasm-provider"],
     "slots": ["websocket"],
+    "exports": [
+        "nnrp_wasm_protocol_major",
+        "nnrp_wasm_wire_format",
+        "selectTransportWithProbeJson",
+        "scoreProviderProbeJson",
+        "encodeWebSocketBinaryFrameJson",
+        "decodeWebSocketBinaryFrameJson",
+        "decodeWebSocketBinaryFrameBatchJson",
+        "encodeRuntimeControlMetadataJson",
+        "decodeRuntimeControlMetadataJson",
+        "encodeRuntimeObjectMetadataJson",
+        "decodeRuntimeObjectMetadataJson",
+    ],
 }
 
 
@@ -77,10 +91,22 @@ def header_define_int(source: str, name: str) -> int:
     return int(match.group(1), 0)
 
 
+def header_define_string(source: str, name: str) -> str:
+    pattern = rf'#define {re.escape(name)} "([^"]+)"'
+    match = re.search(pattern, source)
+    if match is None:
+        raise SystemExit(f"missing header string define {name}")
+    return match.group(1)
+
+
 def declared_ffi_functions(header: str) -> set[str]:
     return set(re.findall(r"\bNnrpFfiStatus\s+(nnrp_[a-zA-Z0-9_]+)\s*\(", header)) | set(
         re.findall(r"\bNnrpProtocolVersion\s+(nnrp_[a-zA-Z0-9_]+)\s*\(", header)
     ) | set(re.findall(r"\bNnrpRuntimeCapabilities\s+(nnrp_[a-zA-Z0-9_]+)\s*\(", header))
+
+
+def declared_wasm_functions(typescript: str) -> set[str]:
+    return set(re.findall(r"\bexport function\s+([a-zA-Z0-9_]+)\s*\(", typescript))
 
 
 def check_abi_version() -> None:
@@ -102,6 +128,16 @@ def check_abi_version() -> None:
 
     require_equal(header_version, rust_version, "include/nnrp/nnrp_ffi.h ABI version")
     require_equal(script_version, rust_version, "scripts/package_native_artifacts.py ABI version")
+
+
+def check_sdk_version_header() -> None:
+    workspace = tomllib.loads(read_text("Cargo.toml"))
+    header = read_text("include/nnrp/nnrp_version.h")
+    require_equal(
+        header_define_string(header, "NNRP_SDK_VERSION"),
+        workspace["workspace"]["package"]["version"],
+        "include/nnrp/nnrp_version.h SDK version",
+    )
 
 
 def check_transport_slots() -> None:
@@ -143,6 +179,7 @@ def check_native_manifests() -> None:
 def check_wasm_manifest() -> None:
     wasm = load_script(ROOT / "scripts" / "package_wasm_primitives.py")
     inspector = load_script(ROOT / "scripts" / "inspect_release_artifacts.py")
+    declarations = declared_wasm_functions(read_text("crates/nnrp-wasm/pkg/nnrp_wasm.d.ts"))
 
     packaged = wasm.TRANSPORT_SCOPES.get(BROWSER_WASM_SCOPE["scope"])
     if packaged is None:
@@ -151,6 +188,7 @@ def check_wasm_manifest() -> None:
     require_equal(packaged["artifact"], BROWSER_WASM_SCOPE["artifact"], "browser WASM artifact")
     require_equal(packaged["features"], BROWSER_WASM_SCOPE["features"], "browser WASM features")
     require_equal(packaged["slots"], BROWSER_WASM_SCOPE["slots"], "browser WASM slots")
+    require_equal(wasm.WASM_EXPORTS, BROWSER_WASM_SCOPE["exports"], "browser WASM exports")
     require_equal(
         inspector.BROWSER_WASM_SCOPE["package"],
         BROWSER_WASM_SCOPE["package"],
@@ -171,6 +209,17 @@ def check_wasm_manifest() -> None:
         BROWSER_WASM_SCOPE["slots"],
         "browser WASM inspector slots",
     )
+    require_equal(
+        inspector.BROWSER_WASM_SCOPE["exports"],
+        BROWSER_WASM_SCOPE["exports"],
+        "browser WASM inspector exports",
+    )
+    missing = sorted(set(BROWSER_WASM_SCOPE["exports"]) - declarations)
+    if missing:
+        raise SystemExit(
+            "browser WASM manifest expects functions missing from TypeScript declarations: "
+            + ", ".join(missing)
+        )
 
 
 def check_expected_exports_are_declared() -> None:
@@ -187,6 +236,7 @@ def check_expected_exports_are_declared() -> None:
 
 def main() -> None:
     check_abi_version()
+    check_sdk_version_header()
     check_transport_slots()
     check_native_manifests()
     check_wasm_manifest()

@@ -831,9 +831,13 @@ mod tests {
             event => panic!("expected backpressure event, got {event:?}"),
         }
         match session.await_event().await? {
-            NnrpClientEvent::ResultDropReason(reason) => {
+            NnrpClientEvent::ResultDropReason {
+                metadata: reason,
+                body,
+            } => {
                 assert_eq!(reason.operation_id, frame_id as u64);
                 assert_eq!(reason.drop_reason_code, 7);
+                assert!(body.is_empty());
             }
             event => panic!("expected result drop reason event, got {event:?}"),
         }

@@ -112,7 +112,10 @@ impl FramedTransport for WebSocketTransport {
                         "websocket stream closed before an NNRP binary frame",
                     ))?;
             match message {
-                Message::Binary(bytes) => return packet_from_binary(bytes.as_ref(), self.limits),
+                Message::Binary(bytes) => {
+                    self.limits.validate_packet_len(bytes.len())?;
+                    return packet_from_binary(bytes.as_ref(), self.limits);
+                }
                 Message::Text(_) => {
                     return Err(RuntimeError::UnexpectedMessage(
                         "websocket text messages are not valid NNRP data frames",
@@ -420,6 +423,38 @@ mod tests {
             .map_err(|_| RuntimeError::Internal("websocket text server task panicked"))?
             .expect_err("text messages should be rejected");
         assert!(matches!(error, RuntimeError::UnexpectedMessage(_)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn websocket_rejects_oversized_binary_messages_before_header_parse(
+    ) -> Result<(), RuntimeError> {
+        let listener =
+            WebSocketFramedListener::bind_with_limits("127.0.0.1:0", RuntimeFrameLimits::new(8))
+                .await?;
+        let endpoint = WebSocketEndpoint::ws(format!("ws://{}", listener.local_addr()?))?;
+        let server_task = tokio::spawn(async move {
+            let mut accepted = listener.accept().await?;
+            accepted.read_packet().await
+        });
+
+        let (mut client, _) = connect_async(endpoint.as_str()).await.map_err(runtime_ws)?;
+        client
+            .send(Message::Binary(vec![0; 9].into()))
+            .await
+            .map_err(runtime_ws)?;
+
+        let error = server_task
+            .await
+            .map_err(|_| RuntimeError::Internal("websocket oversized server task panicked"))?
+            .expect_err("oversized binary messages should be rejected before parsing");
+        assert!(matches!(
+            error,
+            RuntimeError::FrameTooLarge {
+                declared: 9,
+                max: 8
+            }
+        ));
         Ok(())
     }
 

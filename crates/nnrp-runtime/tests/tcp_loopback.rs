@@ -2,13 +2,14 @@ use nnrp_core::NnrpError;
 use nnrp_core::{
     BackpressureLevel, CacheInvalidateMetadata, CacheInvalidateScope, CacheMissMetadata,
     CacheMissReason, CacheObjectId, CacheObjectKind, CacheReferenceMetadata, CacheReuseScope,
-    CapabilityMetadata, CommonHeader, FlowScopeKind, FlowUpdateMetadata, FlowUpdateReason,
-    FrameSubmitMetadata, InFlightPolicy, InputProfile, MemoryLocationHint, MessageType,
-    ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata, ObjectReleaseMetadata,
-    ObjectReleaseReason, OperationState, OwnershipHint, PartialResultMetadata, PayloadKindBitmap,
-    PressureMetadata, ProgressMetadata, ResultClass, ResultDropReasonMetadata, ResultPushMetadata,
-    RouteHintMetadata, RuntimeObjectKind, RuntimeRole, SchemaRegistry, SessionCloseMetadata,
-    SessionCloseReason, SessionMigrateAckMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
+    CapabilityMetadata, CommonHeader, ControlRequestMetadata, FlowScopeKind, FlowUpdateMetadata,
+    FlowUpdateReason, FrameSubmitMetadata, InFlightPolicy, InputProfile, MemoryLocationHint,
+    MessageType, ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata,
+    ObjectReleaseMetadata, ObjectReleaseReason, OperationState, OwnershipHint,
+    PartialResultMetadata, PayloadKindBitmap, PressureMetadata, ProgressMetadata, ResultClass,
+    ResultDropReasonMetadata, ResultPushMetadata, RouteHintMetadata, RuntimeObjectKind,
+    RuntimeRole, SchemaRegistry, SessionCloseMetadata, SessionCloseReason,
+    SessionMigrateAckMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
     SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata, SessionPatchRejectReason,
     SessionPriorityClass, SessionStatus, SubmitMode, TileIndexMode, TransportId,
     FLOW_UPDATE_FLAG_CREDIT_VALID, RESULT_DROP_REASON_DEADLINE_EXPIRED, RESULT_PUSH_METADATA_LEN,
@@ -255,6 +256,7 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
         let control = session.receive_runtime_control().await?;
         assert_eq!(control.message_type, MessageType::Cancel);
         assert_eq!(control.metadata.operation_id, submit.frame_id as u64);
+        assert_eq!(control.body, b"late");
         assert_eq!(
             session
                 .operations()
@@ -284,6 +286,7 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
         let abort = session.receive_runtime_control().await?;
         assert_eq!(abort.message_type, MessageType::Abort);
         assert_eq!(abort.metadata.operation_id, abort_submit.frame_id as u64);
+        assert!(abort.body.is_empty());
         assert_eq!(
             session
                 .operations()
@@ -310,7 +313,20 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
         .await?;
     session.send_credit_update(credit_update()).await?;
     assert_eq!(session.pressure_state().inbound_credit_window, 9);
-    session.cancel_operation(frame_id as u64, 7).await?;
+    session
+        .send_control_request_with_diagnostics(
+            MessageType::Cancel,
+            ControlRequestMetadata {
+                operation_id: frame_id as u64,
+                control_sequence: frame_id as u64,
+                reason_code: 7,
+                source_role: RuntimeRole::Client as u8,
+                flags: 0,
+                diagnostic_bytes: 4,
+            },
+            b"late".to_vec(),
+        )
+        .await?;
 
     match session.await_event().await? {
         NnrpClientEvent::Backpressure(pressure) => {
@@ -341,9 +357,13 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
         event => panic!("expected partial result, got {event:?}"),
     }
     match session.await_event().await? {
-        NnrpClientEvent::ResultDropReason(reason) => {
+        NnrpClientEvent::ResultDropReason {
+            metadata: reason,
+            body,
+        } => {
             assert_eq!(reason.operation_id, frame_id as u64);
             assert_eq!(reason.drop_reason_code, 7);
+            assert!(body.is_empty());
         }
         event => panic!("expected drop reason, got {event:?}"),
     }
@@ -598,6 +618,7 @@ async fn tcp_loopback_releases_objects_after_cancel_and_reports_cache_miss(
         let operation_id = submit.frame_id as u64;
         let control = session.receive_runtime_control().await?;
         assert_eq!(control.message_type, MessageType::Cancel);
+        assert!(control.body.is_empty());
         session
             .send_object_release(
                 object_release(operation_id, ObjectReleaseReason::Cancelled, 6),
@@ -894,11 +915,15 @@ async fn tcp_loopback_suppresses_expired_final_results() -> Result<(), RuntimeEr
         .await?;
     session.expire_at(frame_id as u64, 1).await?;
     match session.await_event().await? {
-        NnrpClientEvent::ResultDropReason(reason) => {
+        NnrpClientEvent::ResultDropReason {
+            metadata: reason,
+            body,
+        } => {
             assert_eq!(reason.operation_id, frame_id as u64);
             assert_eq!(reason.result_sequence, frame_id as u64);
             assert_eq!(reason.drop_reason_code, RESULT_DROP_REASON_DEADLINE_EXPIRED);
             assert_eq!(reason.source_role, RuntimeRole::Server as u8);
+            assert!(body.is_empty());
         }
         event => panic!("expected stale result drop reason, got {event:?}"),
     }
@@ -1142,6 +1167,21 @@ async fn client_preview4_control_event_reader_rejects_malformed_packets() -> Res
     for packet in [
         control_event_packet(
             MessageType::ResultDropReason,
+            1,
+            ResultDropReasonMetadata {
+                operation_id: 1,
+                result_sequence: 1,
+                drop_reason_code: 7,
+                source_role: RuntimeRole::Server as u8,
+                flags: 0,
+                diagnostic_bytes: 1,
+            }
+            .to_bytes()?
+            .to_vec(),
+            Vec::new(),
+        )?,
+        control_event_packet(
+            MessageType::ResultDropReason,
             2,
             drop_reason(1).to_bytes()?.to_vec(),
             Vec::new(),
@@ -1209,6 +1249,38 @@ async fn client_preview4_control_event_reader_rejects_malformed_packets() -> Res
         ));
         session.close_transport().await?;
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn client_preview4_result_drop_reason_preserves_diagnostic_body() -> Result<(), RuntimeError>
+{
+    let metadata = ResultDropReasonMetadata {
+        operation_id: 1,
+        result_sequence: 1,
+        drop_reason_code: 7,
+        source_role: RuntimeRole::Server as u8,
+        flags: 0,
+        diagnostic_bytes: 4,
+    };
+    let mut session = scripted_client_session(control_event_packet(
+        MessageType::ResultDropReason,
+        1,
+        metadata.to_bytes()?.to_vec(),
+        b"drop".to_vec(),
+    )?)
+    .await?;
+    match session.await_event().await? {
+        NnrpClientEvent::ResultDropReason {
+            metadata: actual,
+            body,
+        } => {
+            assert_eq!(actual, metadata);
+            assert_eq!(body, b"drop");
+        }
+        event => panic!("expected RESULT_DROP_REASON, got {event:?}"),
+    }
+    session.close_transport().await?;
     Ok(())
 }
 
@@ -1352,6 +1424,22 @@ async fn server_preview4_control_readers_and_senders_reject_mismatches() -> Resu
         server_receive_runtime_control_error(control_event_packet(
             MessageType::Cancel,
             1,
+            nnrp_core::ControlRequestMetadata {
+                operation_id: 1,
+                control_sequence: 1,
+                reason_code: 7,
+                source_role: 1,
+                flags: 0,
+                diagnostic_bytes: 1,
+            }
+            .to_bytes()?
+            .to_vec(),
+            Vec::new(),
+        )?)
+        .await,
+        server_receive_runtime_control_error(control_event_packet(
+            MessageType::Cancel,
+            1,
             vec![0],
             Vec::new(),
         )?)
@@ -1428,6 +1516,19 @@ async fn server_preview4_control_readers_and_senders_reject_mismatches() -> Resu
                     source_role: 2,
                     flags: 0,
                     diagnostic_bytes: 0,
+                })
+                .await
+        })
+        .await,
+        server_send_control_error(|mut session| async move {
+            session
+                .send_result_drop_reason(nnrp_core::ResultDropReasonMetadata {
+                    operation_id: 1,
+                    result_sequence: 1,
+                    drop_reason_code: 7,
+                    source_role: RuntimeRole::Server as u8,
+                    flags: 0,
+                    diagnostic_bytes: 1,
                 })
                 .await
         })

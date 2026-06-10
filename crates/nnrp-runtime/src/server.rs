@@ -220,10 +220,11 @@ pub struct NnrpMigration {
     pub metadata: SessionMigrateMetadata,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NnrpRuntimeControl {
     pub message_type: MessageType,
     pub metadata: ControlRequestMetadata,
+    pub body: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -627,11 +628,25 @@ impl NnrpServerSession {
         &mut self,
         metadata: ResultDropReasonMetadata,
     ) -> Result<(), RuntimeError> {
+        self.send_result_drop_reason_with_diagnostics(metadata, Vec::new())
+            .await
+    }
+
+    pub async fn send_result_drop_reason_with_diagnostics(
+        &mut self,
+        metadata: ResultDropReasonMetadata,
+        diagnostics: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
         validate_result_drop_reason_semantics(&metadata)?;
+        require_body_len(
+            diagnostics.len(),
+            metadata.diagnostic_bytes as usize,
+            "server RESULT_DROP_REASON diagnostic body length mismatch",
+        )?;
         let mut header = CommonHeader::new(
             MessageType::ResultDropReason,
             RESULT_DROP_REASON_METADATA_LEN as u32,
-            0,
+            diagnostics.len() as u32,
         );
         header.session_id = self.session_id;
         header.frame_id = metadata.operation_id as u32;
@@ -639,7 +654,7 @@ impl NnrpServerSession {
             .write_packet(&RuntimePacket::new(
                 header,
                 metadata.to_bytes()?.to_vec(),
-                Vec::new(),
+                diagnostics,
             )?)
             .await
     }
@@ -920,7 +935,7 @@ impl NnrpServerSession {
             ));
         }
         self.require_session_packet(&packet, "server received control for another session")?;
-        if packet.metadata.len() != CONTROL_REQUEST_METADATA_LEN || !packet.body.is_empty() {
+        if packet.metadata.len() != CONTROL_REQUEST_METADATA_LEN {
             return Err(RuntimeError::UnexpectedMessage(
                 "server received malformed runtime control lengths",
             ));
@@ -928,6 +943,11 @@ impl NnrpServerSession {
 
         let metadata = ControlRequestMetadata::parse(&packet.metadata)?;
         validate_control_request_semantics(packet.header.message_type, &metadata)?;
+        require_body_len(
+            packet.body.len(),
+            metadata.diagnostic_bytes as usize,
+            "server received runtime control diagnostic body length mismatch",
+        )?;
         match packet.header.message_type {
             MessageType::Cancel => {
                 self.operations.cancel(OperationCancelRequest {
@@ -944,6 +964,7 @@ impl NnrpServerSession {
         Ok(NnrpRuntimeControl {
             message_type: packet.header.message_type,
             metadata,
+            body: packet.body,
         })
     }
 
