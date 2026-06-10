@@ -10,7 +10,7 @@ Preview4 moves NNRP from token-stream transport substitution toward runtime obje
 - [x] [03 - IPC and WebSocket transports](03-ipc-websocket-transports.md)
 - [x] [04 - FFI and WASM artifact surface](04-ffi-wasm-artifact-surface.md)
 - [x] [05 - Wire conformance runner](05-wire-conformance-runner.md)
-- [ ] [06 - Release validation and docs](06-release-validation-and-docs.md)
+- [x] [06 - Release validation and docs](06-release-validation-and-docs.md)
 
 ## Coordination Rules
 

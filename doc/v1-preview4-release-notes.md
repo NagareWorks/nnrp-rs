@@ -36,6 +36,8 @@ Native artifacts are transport-scoped. Release packages emit one native package 
 
 Release CI inspects native and WASM manifests and rejects artifacts that collapse transport ownership boundaries.
 
+Preview4 does not replace Preview3 artifacts in place. Downstream SDKs that still pin Preview3 should keep using the existing Preview3 tags and release assets until their Preview4 package and benchmark work lands.
+
 ## Wire Conformance
 
 `nnrp-conformance-wire` consumes preview4 suite and target manifests to produce direct wire-level dry-run results. The suite can target TCP, QUIC, IPC, and WebSocket endpoints without routing through an SDK adapter.

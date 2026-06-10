@@ -1,15 +1,26 @@
 use nnrp_core::{
     BackpressureLevel, BodyRegionPrelude, CacheAckMetadata, CacheInvalidateMetadata,
     CacheObjectKind, CachePutMetadata, CommonHeader, FlowScopeKind, FlowUpdateMetadata,
-    FlowUpdateReason, FrameSubmitMetadata, MessageType, ObjectReferenceBlock,
-    ObjectReferenceRegion, PayloadKindBitmap, ResultHintMetadata, ResultPushMetadata,
-    SessionPatchAckMetadata, SubmitMode, TypedPayloadDescriptor, TypedPayloadRegion,
-    CACHE_ACK_METADATA_LEN, CACHE_INVALIDATE_METADATA_LEN, CACHE_PUT_METADATA_LEN,
-    CLIENT_HELLO_METADATA_LEN, FLOW_UPDATE_FLAG_CREDIT_VALID, FLOW_UPDATE_FLAG_RETRY_AFTER_VALID,
-    FRAME_SUBMIT_METADATA_LEN, OBJECT_REFERENCE_BLOCK_LEN, PAYLOAD_KIND_KNOWN_MASK,
-    RESULT_PUSH_METADATA_LEN, SESSION_PATCH_ACK_METADATA_LEN, STANDARD_PROFILE_TOKEN,
+    FlowUpdateReason, FrameSubmitMetadata, InputProfile, MessageType, ObjectReferenceBlock,
+    ObjectReferenceRegion, PayloadKindBitmap, ResultClass, ResultHintMetadata, ResultPushMetadata,
+    SessionPatchAckMetadata, SubmitMode, TileIndexMode, TransportId, TransportProbeAckMetadata,
+    TransportProbeMetadata, TypedPayloadDescriptor, TypedPayloadRegion, CACHE_ACK_METADATA_LEN,
+    CACHE_INVALIDATE_METADATA_LEN, CACHE_PUT_METADATA_LEN, CLIENT_HELLO_METADATA_LEN,
+    FLOW_UPDATE_FLAG_CREDIT_VALID, FLOW_UPDATE_FLAG_RETRY_AFTER_VALID, FRAME_SUBMIT_METADATA_LEN,
+    OBJECT_REFERENCE_BLOCK_LEN, PAYLOAD_KIND_KNOWN_MASK, RESULT_PUSH_METADATA_LEN,
+    SESSION_PATCH_ACK_METADATA_LEN, STANDARD_PROFILE_TOKEN,
 };
 use nnrp_core::{ClientHelloMetadata, ResultHintReason};
+use nnrp_runtime::{NnrpClient, NnrpClientConfig, NnrpServerConfig, RuntimeError};
+use nnrp_transport_provider::{
+    select_transport_with_probe, ProbeSample, RemoteTransportSupport, TransportPolicy,
+    TransportProviderDescriptor, TransportProviderKind,
+};
+use nnrp_transport_quic::{
+    quic_client_config, quic_server_config, QuicClientEndpointConfig, QuicProvider,
+    QuicServerEndpointConfig,
+};
+use nnrp_transport_tcp::TcpProvider;
 
 pub fn execute_nnrp1_baseline_case(case_id: &str) -> Option<Result<(), String>> {
     let result = match case_id {
@@ -27,8 +38,14 @@ pub fn execute_nnrp1_baseline_case(case_id: &str) -> Option<Result<(), String>> 
         "l1.flow_update.metadata.validation" => l1_flow_update_validation(),
         "l1.result_hint.metadata.validation" => l1_result_hint_validation(),
         "l1.cache.lifecycle.roundtrip" => l1_cache_lifecycle_roundtrip(),
+        "l1.transport_probe.metadata.roundtrip" => l1_transport_probe_roundtrip(),
         "l1.frame_submit.message.parse_emit" => l1_frame_submit_parse_emit(),
         "l1.result_push.message.parse_emit" => l1_result_push_parse_emit(),
+        "l1.result_push.object_reference.resolve" => l1_result_push_object_reference_resolve(),
+        "l1.typed_payload.region.pack" => l1_typed_payload_region_pack(),
+        "l3.transport.probe.selection" => l3_transport_probe_selection(),
+        "l3.transport.tcp.session_smoke" => l3_transport_tcp_session_smoke(),
+        "l3.transport.quic.session_smoke" => l3_transport_quic_session_smoke(),
         _ => return None,
     };
     Some(result)
@@ -214,6 +231,30 @@ fn l1_cache_lifecycle_roundtrip() -> Result<(), String> {
     )
 }
 
+fn l1_transport_probe_roundtrip() -> Result<(), String> {
+    let probe = TransportProbeMetadata {
+        probe_id: 7,
+        probe_payload_bytes: 1_200,
+        client_send_ts_us: 100_000,
+    };
+    let parsed =
+        TransportProbeMetadata::parse(&probe.to_bytes().map_err(to_string)?).map_err(to_string)?;
+    if parsed != probe {
+        return Err("TRANSPORT_PROBE metadata did not round-trip".to_string());
+    }
+
+    let ack = TransportProbeAckMetadata {
+        probe_id: 7,
+        server_recv_ts_us: 100_800,
+    };
+    let parsed =
+        TransportProbeAckMetadata::parse(&ack.to_bytes().map_err(to_string)?).map_err(to_string)?;
+    if parsed != ack {
+        return Err("TRANSPORT_PROBE_ACK metadata did not round-trip".to_string());
+    }
+    Ok(())
+}
+
 fn l1_frame_submit_parse_emit() -> Result<(), String> {
     let metadata = FrameSubmitMetadata::parse(&hex_to_bytes("80026801200020005400020001020000640070170700000000000000c000000000000000000000000000000000000000000000000205ff0003000000290000001100000002000000")).map_err(to_string)?;
     validate_submit_object_reference(metadata.submit_mode, metadata.object_ref_mask)?;
@@ -254,6 +295,223 @@ fn l1_result_push_parse_emit() -> Result<(), String> {
     ObjectReferenceRegion::from_blocks(vec![cache_ref])
         .validate_resolved_or_cache_miss(|block| block.cache_namespace == 7, 21, 303, 0)
         .map_err(|error| format!("unexpected cache miss error: {error:?}"))
+}
+
+fn l1_result_push_object_reference_resolve() -> Result<(), String> {
+    let cache_ref = ObjectReferenceBlock {
+        object_kind: CacheObjectKind::TileIndexBlock,
+        ref_flags: 0,
+        cache_namespace: 7,
+        cache_key_hi: 0x1122_3344,
+        cache_key_lo: 0x5566_7788,
+    };
+    let region = ObjectReferenceRegion::from_blocks(vec![cache_ref]);
+    region
+        .validate_resolved_or_cache_miss(|block| block.cache_namespace == 7, 21, 303, 0)
+        .map_err(|error| format!("resolved cache-backed reference was rejected: {error:?}"))?;
+
+    let miss = region
+        .validate_resolved_or_cache_miss(|_| false, 21, 303, 0)
+        .expect_err("unresolved cache-backed reference should return cache miss metadata");
+    if miss.error_code != nnrp_core::CACHE_ERROR_MISS {
+        return Err("object-reference cache miss returned the wrong error code".to_string());
+    }
+    Ok(())
+}
+
+fn l1_typed_payload_region_pack() -> Result<(), String> {
+    validate_baseline_typed_payload_region(
+        PayloadKindBitmap::TOKEN_CHUNK | PayloadKindBitmap::STRUCTURED_EVENT,
+        2,
+        &[
+            descriptor(PayloadKindBitmap::TOKEN_CHUNK as u8, 0, 3),
+            descriptor(PayloadKindBitmap::STRUCTURED_EVENT as u8, 3, 5),
+        ]
+        .concat(),
+        b"tokevent",
+    )
+}
+
+fn l3_transport_probe_selection() -> Result<(), String> {
+    let providers = [
+        TransportProviderDescriptor::available(
+            TcpProvider::NAME,
+            "1.0.0-preview.4",
+            TransportId::Tcp,
+            TransportProviderKind::PureRust,
+        ),
+        TransportProviderDescriptor::available(
+            "nnrp-quic-native",
+            "1.0.0-preview.4",
+            TransportId::Quic,
+            TransportProviderKind::NativeDynamic,
+        ),
+    ];
+    let remote = RemoteTransportSupport::new([TransportId::Tcp, TransportId::Quic]);
+    let samples = [
+        ProbeSample::success(TransportId::Tcp, TcpProvider::NAME, 10_000, 1_500, 512, 512),
+        ProbeSample::success(TransportId::Quic, "nnrp-quic-native", 10_000, 800, 512, 512),
+    ];
+    let selection =
+        select_transport_with_probe(&providers, &remote, TransportPolicy::Auto, &samples)
+            .map_err(|error| error.to_string())?;
+    if selection.selected.transport_id != TransportId::Quic {
+        return Err("transport probe did not prefer the lower-latency QUIC sample".to_string());
+    }
+
+    let fallback_samples = [
+        ProbeSample::success(TransportId::Tcp, TcpProvider::NAME, 10_000, 900, 512, 512),
+        ProbeSample::failure(TransportId::Quic, "nnrp-quic-native", 10_000, true),
+    ];
+    let fallback = select_transport_with_probe(
+        &providers,
+        &remote,
+        TransportPolicy::PreferQuic,
+        &fallback_samples,
+    )
+    .map_err(|error| error.to_string())?;
+    if fallback.selected.transport_id != TransportId::Tcp {
+        return Err("transport probe did not fall back to TCP after QUIC failure".to_string());
+    }
+    Ok(())
+}
+
+fn l3_transport_tcp_session_smoke() -> Result<(), String> {
+    run_tokio_smoke(tcp_session_smoke())
+}
+
+fn l3_transport_quic_session_smoke() -> Result<(), String> {
+    run_tokio_smoke(quic_session_smoke())
+}
+
+fn run_tokio_smoke(
+    future: impl std::future::Future<Output = Result<(), RuntimeError>>,
+) -> Result<(), String> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?
+        .block_on(future)
+        .map_err(|error| error.to_string())
+}
+
+async fn tcp_session_smoke() -> Result<(), RuntimeError> {
+    let server =
+        nnrp_runtime::NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        let submit = session.receive_submit().await?;
+        session
+            .send_result(submit.frame_id, token_result(), b"delta".to_vec())
+            .await?;
+        let close = session.receive_close().await?;
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let mut session = client.open_session().await?;
+    let frame_id = session.submit(token_submit(), b"prompt".to_vec()).await?;
+    let result = session.await_result().await?;
+    if result.frame_id != frame_id || result.body != b"delta" {
+        return Err(RuntimeError::UnexpectedMessage(
+            "TCP smoke result did not preserve frame id and body",
+        ));
+    }
+    session.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+async fn quic_session_smoke() -> Result<(), RuntimeError> {
+    let (endpoint_config, certificate) =
+        QuicServerEndpointConfig::self_signed_localhost("127.0.0.1:0".parse().unwrap())?;
+    let server = QuicProvider::bind(
+        endpoint_config,
+        quic_server_config(NnrpServerConfig::default()),
+    )
+    .await?;
+    let addr = server.local_addr()?;
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        let submit = session.receive_submit().await?;
+        session
+            .send_result(submit.frame_id, token_result(), b"delta".to_vec())
+            .await?;
+        let close = session.receive_close().await?;
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let endpoint_config =
+        QuicClientEndpointConfig::localhost_with_root_certificate(certificate.certificate_der);
+    let client = QuicProvider::connect_addr(
+        addr,
+        endpoint_config,
+        quic_client_config(NnrpClientConfig::default()),
+    )
+    .await?;
+    let mut session = client.open_session().await?;
+    let frame_id = session.submit(token_submit(), b"prompt".to_vec()).await?;
+    let result = session.await_result().await?;
+    if result.frame_id != frame_id || result.body != b"delta" {
+        return Err(RuntimeError::UnexpectedMessage(
+            "QUIC smoke result did not preserve frame id and body",
+        ));
+    }
+    session.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+fn token_submit() -> FrameSubmitMetadata {
+    FrameSubmitMetadata {
+        src_width: 0,
+        src_height: 0,
+        tile_width: 0,
+        tile_height: 0,
+        tile_count: 0,
+        section_count: 0,
+        frame_class: 0,
+        input_profile: InputProfile::Unspecified,
+        tile_index_mode: TileIndexMode::DenseRange,
+        latency_budget_ms: 0,
+        target_fps_x100: 0,
+        retry_of_frame: 0,
+        tile_base_id: 0,
+        camera_bytes: 0,
+        tile_index_bytes: 0,
+        submit_mode: SubmitMode::Inline,
+        budget_policy: 0,
+        loss_tolerance_policy: 0,
+        payload_frame_count: 1,
+        object_ref_mask: 0,
+        dependency_frame_id: 0,
+        payload_kind_bitmap: PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),
+    }
+}
+
+fn token_result() -> ResultPushMetadata {
+    ResultPushMetadata {
+        status_code: 0,
+        result_flags: 0,
+        section_count: 0,
+        tile_count: 0,
+        active_profile_id: STANDARD_PROFILE_TOKEN,
+        inference_ms: 1,
+        queue_ms: 0,
+        server_total_ms: 1,
+        tile_base_id: 0,
+        tile_index_bytes: 0,
+        result_class: ResultClass::Complete,
+        applied_budget_policy: 0,
+        reused_frame_id: 0,
+        covered_tile_count: 0,
+        dropped_tile_count: 0,
+        payload_kind_bitmap: PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),
+        payload_frame_count: 1,
+    }
 }
 
 fn validate_submit_object_reference(
@@ -416,6 +674,17 @@ fn validate_baseline_typed_payload_region(
     Ok(())
 }
 
+fn descriptor(payload_kind: u8, offset: u32, length: u32) -> Vec<u8> {
+    let descriptor = BaselineTypedPayloadDescriptor {
+        payload_kind: u32::from(payload_kind),
+        descriptor_flags: 0,
+        profile_id: STANDARD_PROFILE_TOKEN,
+        payload_offset: offset,
+        payload_length: length,
+    };
+    descriptor.to_bytes()
+}
+
 fn hex_to_bytes(hex: &str) -> Vec<u8> {
     assert_eq!(hex.len() % 2, 0);
     (0..hex.len())
@@ -439,17 +708,6 @@ fn to_string(error: nnrp_core::NnrpError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn descriptor(payload_kind: u8, offset: u32, length: u32) -> Vec<u8> {
-        let descriptor = BaselineTypedPayloadDescriptor {
-            payload_kind: u32::from(payload_kind),
-            descriptor_flags: 0,
-            profile_id: STANDARD_PROFILE_TOKEN,
-            payload_offset: offset,
-            payload_length: length,
-        };
-        descriptor.to_bytes()
-    }
 
     #[test]
     fn baseline_typed_payload_descriptor_round_trips() {
@@ -523,5 +781,19 @@ mod tests {
         )
         .expect_err("descriptor coverage must be exact")
         .contains("exactly covered"));
+    }
+
+    #[test]
+    fn preview2_optional_baseline_cases_execute() {
+        for case_id in [
+            "l1.transport_probe.metadata.roundtrip",
+            "l1.result_push.object_reference.resolve",
+            "l1.typed_payload.region.pack",
+            "l3.transport.probe.selection",
+            "l3.transport.tcp.session_smoke",
+            "l3.transport.quic.session_smoke",
+        ] {
+            assert_eq!(execute_nnrp1_baseline_case(case_id), Some(Ok(())));
+        }
     }
 }

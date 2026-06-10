@@ -16,6 +16,7 @@ Downstream SDKs should consume Preview4 as a protocol and artifact boundary upda
 - Reject artifacts whose `transport_scope` does not match the SDK package.
 - Reject artifacts whose `transport_slots` contains transports outside the package boundary.
 - Keep native calls coarse around session, control, object, progress, result, and release hot paths.
+- Keep SDKs pinned to Preview3 release assets until their Preview4 transport package split and benchmark gates are complete.
 
 ## Browser WASM
 

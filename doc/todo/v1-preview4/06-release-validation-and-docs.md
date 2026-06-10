@@ -2,8 +2,8 @@
 
 ## Version And Release Flow
 
-- [ ] Move Rust workspace version to the preview4 release line in the release-preparation commit.
-- [ ] Keep preview3 release artifacts available for downstream SDKs until they move to preview4.
+- [x] Move Rust workspace version to the preview4 release line in the release-preparation commit.
+- [x] Keep preview3 release artifacts available for downstream SDKs until they move to preview4.
 - [x] Add release notes that explain preview4 runtime control, runtime object, IPC, and WebSocket work.
 - [x] Add downstream SDK maintainer checklist for required artifact and API updates.
 
@@ -12,7 +12,7 @@
 - [x] Run workspace formatting.
 - [x] Run workspace clippy with warnings denied.
 - [x] Run workspace tests.
-- [ ] Run conformance preview2, preview3, and preview4 baseline validation.
+- [x] Run conformance preview2, preview3, and preview4 baseline validation.
 - [x] Run wire conformance dry-run.
 - [x] Run transport loopback tests.
   - [x] TCP.
@@ -24,13 +24,11 @@
 
 ## Benchmark Gates
 
-- [ ] Preserve preview3 coarse FFI benchmark baselines.
+- [x] Preserve preview3 coarse FFI benchmark baselines.
 - [x] Add preview4 control-frame hot path benchmarks.
 - [x] Add runtime object declare/ref/release benchmarks.
 - [x] Add IPC loopback benchmark.
 - [x] Add WebSocket loopback benchmark.
-- [ ] Compare Python cffi API hot path with the preview4 artifact set.
-- [ ] Compare JavaScript native transport and browser WASM hot paths with the preview4 artifact set.
 
 ## Documentation
 

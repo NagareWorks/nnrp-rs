@@ -270,6 +270,45 @@ jobs:
           NNRP_CONFORMANCE_SUITE_REPO: ${{ github.workspace }}/nnrp-conformance-action
         run: cargo test --workspace
 
+      - name: Run preview2 suite-owned conformance action
+        uses: ./nnrp-conformance-action/.github/actions/run-conformance
+        with:
+          protocol-version: nnrp-1-preview2
+          capabilities-path: conformance/nnrp-1-preview2.capabilities.json
+          working-directory: .
+          artifact-name: nnrp-rs-preview2-conformance
+          adapter-command: >-
+            cargo run -p nnrp-conformance --bin nnrp-conformance-adapter --
+            --plan $env:NNRP_CONFORMANCE_ADAPTER_PLAN
+            --output $env:NNRP_CONFORMANCE_ADAPTER_RESULTS
+
+      - name: Run preview3 suite-owned conformance action
+        uses: ./nnrp-conformance-action/.github/actions/run-conformance
+        with:
+          protocol-version: nnrp-1-preview3
+          capabilities-path: conformance/nnrp-1-preview3.capabilities.json
+          working-directory: .
+          artifact-name: nnrp-rs-preview3-conformance
+          adapter-command: >-
+            cargo run -p nnrp-conformance --bin nnrp-conformance-adapter --
+            --plan $env:NNRP_CONFORMANCE_ADAPTER_PLAN
+            --output $env:NNRP_CONFORMANCE_ADAPTER_RESULTS
+
+      - name: Run preview4 suite-owned conformance action
+        uses: ./nnrp-conformance-action/.github/actions/run-conformance
+        with:
+          protocol-version: nnrp-1-preview4
+          working-directory: .
+          artifact-name: nnrp-rs-preview4-conformance
+
+      - name: Run preview4 wire conformance dry-run
+        shell: bash
+        run: |
+          cargo run -p nnrp-conformance --bin nnrp-conformance-wire -- \
+            --suite nnrp-conformance-action/wire-conformance/nnrp-1-preview4/manifest.json \
+            --target nnrp-conformance-action/docs/examples/wire-conformance-target.sample.json \
+            --output target/wire-conformance/preview4-dry-run.json
+
       - name: Download native link libraries
         uses: actions/download-artifact@v7
         with:
