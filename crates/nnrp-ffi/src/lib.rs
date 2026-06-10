@@ -21,7 +21,7 @@ use nnrp_core::{
 };
 
 pub const NNRP_FFI_ABI_MAJOR: u16 = 1;
-pub const NNRP_FFI_ABI_MINOR: u16 = 7;
+pub const NNRP_FFI_ABI_MINOR: u16 = 8;
 pub const NNRP_FFI_ABI_PATCH: u16 = 0;
 
 pub const NNRP_TRANSPORT_SLOT_QUIC: u32 = 0x0000_0001;
@@ -3294,21 +3294,30 @@ unsafe fn nnrp_buffer_acquire_copy_impl(
     }
     let bytes = ffi_read_slice(source).to_vec();
     let mut store = handle_store();
-    let id = next_handle_id(&store, NnrpHandleKind::Buffer);
+    let (handle, view) = match insert_owned_buffer(&mut store, bytes) {
+        Ok(result) => result,
+        Err(status) => return status,
+    };
+    *out_buffer = handle;
+    *out_view = view;
+    NnrpFfiStatus::ok()
+}
+
+fn insert_owned_buffer(
+    store: &mut NnrpFfiHandleStore,
+    bytes: Vec<u8>,
+) -> Result<(NnrpHandle, NnrpBufferView), NnrpFfiStatus> {
+    let id = next_handle_id(store, NnrpHandleKind::Buffer);
     let handle = NnrpHandle::new(NnrpHandleKind::Buffer, id, 1);
-    if let Err(status) = store.insert(handle, NnrpFfiResource::Buffer { bytes }) {
-        return status;
-    }
+    store.insert(handle, NnrpFfiResource::Buffer { bytes })?;
     let view = match store.get(handle, NnrpHandleKind::Buffer) {
         Ok(NnrpFfiResource::Buffer { bytes }) => NnrpBufferView {
             ptr: bytes.as_ptr(),
             len: bytes.len(),
         },
-        _ => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Buffer as u32),
+        _ => return Err(NnrpFfiStatus::invalid_handle(NnrpHandleKind::Buffer as u32)),
     };
-    *out_buffer = handle;
-    *out_view = view;
-    NnrpFfiStatus::ok()
+    Ok((handle, view))
 }
 
 #[no_mangle]
@@ -3476,6 +3485,39 @@ unsafe fn nnrp_object_descriptor_view_impl(
 #[no_mangle]
 /// # Safety
 ///
+/// `out_buffer` and `out_view` must be either null or valid writable pointers
+/// to one value each.
+#[rustfmt::skip]
+pub unsafe extern "C" fn nnrp_object_descriptor_metadata_snapshot(handle: NnrpHandle, out_buffer: *mut NnrpHandle, out_view: *mut NnrpBufferView) -> NnrpFfiStatus {
+    nnrp_object_descriptor_metadata_snapshot_impl(handle, out_buffer, out_view)
+}
+
+unsafe fn nnrp_object_descriptor_metadata_snapshot_impl(
+    handle: NnrpHandle,
+    out_buffer: *mut NnrpHandle,
+    out_view: *mut NnrpBufferView,
+) -> NnrpFfiStatus {
+    if out_buffer.is_null() || out_view.is_null() {
+        return NnrpFfiStatus::invalid_argument(56);
+    }
+    let mut store = handle_store();
+    let metadata = match store.get(handle, NnrpHandleKind::ObjectDescriptor) {
+        Ok(NnrpFfiResource::ObjectDescriptor { metadata, .. }) => metadata.clone(),
+        Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::ObjectDescriptor as u32),
+        Err(status) => return status,
+    };
+    let (buffer, view) = match insert_owned_buffer(&mut store, metadata) {
+        Ok(result) => result,
+        Err(status) => return status,
+    };
+    *out_buffer = buffer;
+    *out_view = view;
+    NnrpFfiStatus::ok()
+}
+
+#[no_mangle]
+/// # Safety
+///
 /// The descriptor handle is copied by value. This function does not dereference
 /// caller-provided pointers.
 #[rustfmt::skip]
@@ -3575,6 +3617,41 @@ unsafe fn nnrp_cache_reference_descriptor_view_impl(
         Ok(_) => NnrpFfiStatus::invalid_handle(NnrpHandleKind::CacheReferenceDescriptor as u32),
         Err(status) => status,
     }
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `out_buffer` and `out_view` must be either null or valid writable pointers
+/// to one value each.
+#[rustfmt::skip]
+pub unsafe extern "C" fn nnrp_cache_reference_descriptor_metadata_snapshot(handle: NnrpHandle, out_buffer: *mut NnrpHandle, out_view: *mut NnrpBufferView) -> NnrpFfiStatus {
+    nnrp_cache_reference_descriptor_metadata_snapshot_impl(handle, out_buffer, out_view)
+}
+
+unsafe fn nnrp_cache_reference_descriptor_metadata_snapshot_impl(
+    handle: NnrpHandle,
+    out_buffer: *mut NnrpHandle,
+    out_view: *mut NnrpBufferView,
+) -> NnrpFfiStatus {
+    if out_buffer.is_null() || out_view.is_null() {
+        return NnrpFfiStatus::invalid_argument(57);
+    }
+    let mut store = handle_store();
+    let metadata = match store.get(handle, NnrpHandleKind::CacheReferenceDescriptor) {
+        Ok(NnrpFfiResource::CacheReferenceDescriptor { metadata, .. }) => metadata.clone(),
+        Ok(_) => {
+            return NnrpFfiStatus::invalid_handle(NnrpHandleKind::CacheReferenceDescriptor as u32)
+        }
+        Err(status) => return status,
+    };
+    let (buffer, view) = match insert_owned_buffer(&mut store, metadata) {
+        Ok(result) => result,
+        Err(status) => return status,
+    };
+    *out_buffer = buffer;
+    *out_view = view;
+    NnrpFfiStatus::ok()
 }
 
 #[no_mangle]
@@ -6555,6 +6632,157 @@ mod tests {
                     core::ptr::null_mut(),
                 ),
                 NnrpFfiStatus::invalid_argument(55)
+            );
+        }
+    }
+
+    #[test]
+    fn ffi_descriptor_metadata_snapshots_outlive_descriptor_handles() {
+        unsafe {
+            let object_metadata = br#"{"object":"snapshot-target"}"#;
+            let object_descriptor = NnrpRuntimeObjectDescriptor {
+                object_id: 91,
+                object_kind: RuntimeObjectKind::Tensor as u16,
+                producer_role: RuntimeRole::Server as u8,
+                consumer_role: RuntimeRole::Client as u8,
+                session_id: 7,
+                byte_size: 8192,
+                compute_cost_units: 8,
+                memory_location_hint: MemoryLocationHint::DeviceMemory as u16,
+                ownership_hint: OwnershipHint::ProducerOwned as u16,
+                lifetime_hint_ms: 333,
+                metadata_bytes: object_metadata.len() as u32,
+            };
+            let mut object_handle = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_object_descriptor_create(
+                    object_descriptor,
+                    NnrpBufferView {
+                        ptr: object_metadata.as_ptr(),
+                        len: object_metadata.len(),
+                    },
+                    &mut object_handle,
+                ),
+                NnrpFfiStatus::ok()
+            );
+
+            let mut object_snapshot = NnrpHandle::invalid();
+            let mut object_snapshot_view = NnrpBufferView::empty();
+            assert_eq!(
+                nnrp_object_descriptor_metadata_snapshot(
+                    object_handle,
+                    &mut object_snapshot,
+                    &mut object_snapshot_view,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(object_snapshot.kind, NnrpHandleKind::Buffer as u32);
+            assert_eq!(ffi_read_slice(object_snapshot_view), object_metadata);
+            assert_eq!(
+                nnrp_object_descriptor_release(object_handle),
+                NnrpFfiStatus::ok()
+            );
+
+            let mut object_buffer_view = NnrpBufferView::empty();
+            assert_eq!(
+                nnrp_buffer_view(object_snapshot, &mut object_buffer_view),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(ffi_read_slice(object_buffer_view), object_metadata);
+            assert_eq!(nnrp_buffer_release(object_snapshot), NnrpFfiStatus::ok());
+            assert_eq!(
+                nnrp_buffer_view(object_snapshot, &mut object_buffer_view),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Buffer as u32)
+            );
+
+            let cache_metadata = br#"{"cache":"snapshot-ref"}"#;
+            let cache_descriptor = NnrpCacheReferenceDescriptor {
+                cache_key_hi: 3,
+                cache_key_lo: 4,
+                profile_id: 0x1001,
+                reuse_scope: CacheReuseScope::Operation as u16,
+                lease_id: 66,
+                producer_trace_id: 77,
+                expiration_hint_ms: 2_000,
+                metadata_bytes: cache_metadata.len() as u32,
+                flags: 0,
+            };
+            let mut cache_handle = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_cache_reference_descriptor_create(
+                    cache_descriptor,
+                    NnrpBufferView {
+                        ptr: cache_metadata.as_ptr(),
+                        len: cache_metadata.len(),
+                    },
+                    &mut cache_handle,
+                ),
+                NnrpFfiStatus::ok()
+            );
+
+            let mut cache_snapshot = NnrpHandle::invalid();
+            let mut cache_snapshot_view = NnrpBufferView::empty();
+            assert_eq!(
+                nnrp_cache_reference_descriptor_metadata_snapshot(
+                    cache_handle,
+                    &mut cache_snapshot,
+                    &mut cache_snapshot_view,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(cache_snapshot.kind, NnrpHandleKind::Buffer as u32);
+            assert_eq!(ffi_read_slice(cache_snapshot_view), cache_metadata);
+            assert_eq!(
+                nnrp_cache_reference_descriptor_release(cache_handle),
+                NnrpFfiStatus::ok()
+            );
+
+            let mut cache_buffer_view = NnrpBufferView::empty();
+            assert_eq!(
+                nnrp_buffer_view(cache_snapshot, &mut cache_buffer_view),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(ffi_read_slice(cache_buffer_view), cache_metadata);
+            assert_eq!(nnrp_buffer_release(cache_snapshot), NnrpFfiStatus::ok());
+        }
+    }
+
+    #[test]
+    fn ffi_descriptor_metadata_snapshots_reject_invalid_inputs() {
+        unsafe {
+            let mut snapshot = NnrpHandle::invalid();
+            let mut snapshot_view = NnrpBufferView::empty();
+            assert_eq!(
+                nnrp_object_descriptor_metadata_snapshot(
+                    NnrpHandle::invalid(),
+                    &mut snapshot,
+                    &mut snapshot_view,
+                ),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::ObjectDescriptor as u32)
+            );
+            assert_eq!(
+                nnrp_object_descriptor_metadata_snapshot(
+                    NnrpHandle::invalid(),
+                    core::ptr::null_mut(),
+                    &mut snapshot_view,
+                ),
+                NnrpFfiStatus::invalid_argument(56)
+            );
+            assert_eq!(
+                nnrp_cache_reference_descriptor_metadata_snapshot(
+                    NnrpHandle::invalid(),
+                    &mut snapshot,
+                    &mut snapshot_view,
+                ),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::CacheReferenceDescriptor as u32)
+            );
+            assert_eq!(
+                nnrp_cache_reference_descriptor_metadata_snapshot(
+                    NnrpHandle::invalid(),
+                    &mut snapshot,
+                    core::ptr::null_mut(),
+                ),
+                NnrpFfiStatus::invalid_argument(57)
             );
         }
     }

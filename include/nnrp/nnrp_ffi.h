@@ -14,7 +14,7 @@ typedef struct NnrpProtocolVersion {
 } NnrpProtocolVersion;
 
 #define NNRP_FFI_ABI_MAJOR 1
-#define NNRP_FFI_ABI_MINOR 7
+#define NNRP_FFI_ABI_MINOR 8
 #define NNRP_FFI_ABI_PATCH 0
 
 #define NNRP_TRANSPORT_SLOT_QUIC 0x00000001u
@@ -407,9 +407,11 @@ NnrpFfiStatus nnrp_object_metadata_buffer_view(NnrpHandle buffer, NnrpBufferView
 NnrpFfiStatus nnrp_object_metadata_buffer_release(NnrpHandle buffer);
 NnrpFfiStatus nnrp_object_descriptor_create(NnrpRuntimeObjectDescriptor descriptor, NnrpBufferView metadata, NnrpHandle *out_handle);
 NnrpFfiStatus nnrp_object_descriptor_view(NnrpHandle handle, NnrpRuntimeObjectDescriptor *out_descriptor, NnrpBufferView *out_metadata);
+NnrpFfiStatus nnrp_object_descriptor_metadata_snapshot(NnrpHandle handle, NnrpHandle *out_buffer, NnrpBufferView *out_view);
 NnrpFfiStatus nnrp_object_descriptor_release(NnrpHandle handle);
 NnrpFfiStatus nnrp_cache_reference_descriptor_create(NnrpCacheReferenceDescriptor descriptor, NnrpBufferView metadata, NnrpHandle *out_handle);
 NnrpFfiStatus nnrp_cache_reference_descriptor_view(NnrpHandle handle, NnrpCacheReferenceDescriptor *out_descriptor, NnrpBufferView *out_metadata);
+NnrpFfiStatus nnrp_cache_reference_descriptor_metadata_snapshot(NnrpHandle handle, NnrpHandle *out_buffer, NnrpBufferView *out_view);
 NnrpFfiStatus nnrp_cache_reference_descriptor_release(NnrpHandle handle);
 NnrpFfiStatus nnrp_cache_query(NnrpCacheLeaseRequest request, NnrpCacheLeaseResult *out_result);
 NnrpFfiStatus nnrp_cache_touch(NnrpCacheLeaseRequest request, NnrpCacheLeaseResult *out_result);

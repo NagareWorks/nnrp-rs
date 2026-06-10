@@ -26,7 +26,7 @@
 - [x] Add cache reference descriptor handle types.
 - [x] Add native-owned metadata buffer release functions.
 - [x] Add borrowed view rules for object descriptors.
-- [ ] Add copied snapshot rules for SDKs that cannot preserve borrow lifetimes.
+- [x] Add copied snapshot rules for SDKs that cannot preserve borrow lifetimes.
 - [x] Add tests for handle ownership and release order.
 
 ## WASM Surface
