@@ -21,7 +21,7 @@ use nnrp_core::{
 };
 
 pub const NNRP_FFI_ABI_MAJOR: u16 = 1;
-pub const NNRP_FFI_ABI_MINOR: u16 = 6;
+pub const NNRP_FFI_ABI_MINOR: u16 = 7;
 pub const NNRP_FFI_ABI_PATCH: u16 = 0;
 
 pub const NNRP_TRANSPORT_SLOT_QUIC: u32 = 0x0000_0001;
@@ -3347,6 +3347,37 @@ fn nnrp_buffer_release_impl(buffer: NnrpHandle) -> NnrpFfiStatus {
 #[no_mangle]
 /// # Safety
 ///
+/// `source` must remain readable for `source.len` bytes for the duration of
+/// the call. `out_buffer` and `out_view` must be either null or valid writable
+/// pointers to one value each.
+#[rustfmt::skip]
+pub unsafe extern "C" fn nnrp_object_metadata_buffer_acquire_copy(source: NnrpBufferView, out_buffer: *mut NnrpHandle, out_view: *mut NnrpBufferView) -> NnrpFfiStatus {
+    nnrp_buffer_acquire_copy_impl(source, out_buffer, out_view)
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `out_view` must be either null or a valid writable pointer to one
+/// `NnrpBufferView`.
+#[rustfmt::skip]
+pub unsafe extern "C" fn nnrp_object_metadata_buffer_view(buffer: NnrpHandle, out_view: *mut NnrpBufferView) -> NnrpFfiStatus {
+    nnrp_buffer_view_impl(buffer, out_view)
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// The buffer handle is copied by value. This function does not dereference
+/// caller-provided pointers.
+#[rustfmt::skip]
+pub unsafe extern "C" fn nnrp_object_metadata_buffer_release(buffer: NnrpHandle) -> NnrpFfiStatus {
+    nnrp_buffer_release_impl(buffer)
+}
+
+#[no_mangle]
+/// # Safety
+///
 /// `out_result` must be either null or a valid writable pointer to one
 /// `NnrpCacheLeaseResult`.
 #[rustfmt::skip]
@@ -6067,6 +6098,47 @@ mod tests {
             assert_eq!(nnrp_buffer_release(buffer), NnrpFfiStatus::ok());
             assert_eq!(
                 nnrp_buffer_view(buffer, &mut second_view),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Buffer as u32)
+            );
+        }
+    }
+
+    #[test]
+    fn ffi_object_metadata_buffer_aliases_use_owned_buffer_lifecycle() {
+        unsafe {
+            let metadata = br#"{"object":"tile-cache","version":2}"#;
+            let mut buffer = NnrpHandle::invalid();
+            let mut view = NnrpBufferView::empty();
+            assert_eq!(
+                nnrp_object_metadata_buffer_acquire_copy(
+                    NnrpBufferView {
+                        ptr: metadata.as_ptr(),
+                        len: metadata.len(),
+                    },
+                    &mut buffer,
+                    &mut view,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(buffer.kind, NnrpHandleKind::Buffer as u32);
+            assert_eq!(ffi_read_slice(view), metadata);
+
+            let mut object_view = NnrpBufferView::empty();
+            assert_eq!(
+                nnrp_object_metadata_buffer_view(buffer, &mut object_view),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(ffi_read_slice(object_view), metadata);
+            assert_eq!(
+                nnrp_object_metadata_buffer_release(buffer),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(
+                nnrp_buffer_view(buffer, &mut object_view),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Buffer as u32)
+            );
+            assert_eq!(
+                nnrp_object_metadata_buffer_release(buffer),
                 NnrpFfiStatus::invalid_handle(NnrpHandleKind::Buffer as u32)
             );
         }

@@ -14,7 +14,7 @@ typedef struct NnrpProtocolVersion {
 } NnrpProtocolVersion;
 
 #define NNRP_FFI_ABI_MAJOR 1
-#define NNRP_FFI_ABI_MINOR 6
+#define NNRP_FFI_ABI_MINOR 7
 #define NNRP_FFI_ABI_PATCH 0
 
 #define NNRP_TRANSPORT_SLOT_QUIC 0x00000001u
@@ -400,6 +400,9 @@ NnrpFfiStatus nnrp_migration_should_replay_frame(NnrpBufferView session_migrate_
 NnrpFfiStatus nnrp_buffer_acquire_copy(NnrpBufferView source, NnrpHandle *out_buffer, NnrpBufferView *out_view);
 NnrpFfiStatus nnrp_buffer_view(NnrpHandle buffer, NnrpBufferView *out_view);
 NnrpFfiStatus nnrp_buffer_release(NnrpHandle buffer);
+NnrpFfiStatus nnrp_object_metadata_buffer_acquire_copy(NnrpBufferView source, NnrpHandle *out_buffer, NnrpBufferView *out_view);
+NnrpFfiStatus nnrp_object_metadata_buffer_view(NnrpHandle buffer, NnrpBufferView *out_view);
+NnrpFfiStatus nnrp_object_metadata_buffer_release(NnrpHandle buffer);
 NnrpFfiStatus nnrp_cache_query(NnrpCacheLeaseRequest request, NnrpCacheLeaseResult *out_result);
 NnrpFfiStatus nnrp_cache_touch(NnrpCacheLeaseRequest request, NnrpCacheLeaseResult *out_result);
 NnrpFfiStatus nnrp_cache_prefetch(NnrpHandle owner, const NnrpCacheObjectId *objects, uintptr_t object_count, uint64_t now_ms, uint32_t ttl_ms, NnrpCacheLeaseResult *out_results);

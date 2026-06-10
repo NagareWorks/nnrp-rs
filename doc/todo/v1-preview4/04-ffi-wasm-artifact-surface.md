@@ -24,7 +24,7 @@
 
 - [ ] Add object descriptor handle types.
 - [ ] Add cache reference descriptor handle types.
-- [ ] Add native-owned metadata buffer release functions.
+- [x] Add native-owned metadata buffer release functions.
 - [ ] Add borrowed view rules for object descriptors.
 - [ ] Add copied snapshot rules for SDKs that cannot preserve borrow lifetimes.
 - [ ] Add tests for handle ownership and release order.
