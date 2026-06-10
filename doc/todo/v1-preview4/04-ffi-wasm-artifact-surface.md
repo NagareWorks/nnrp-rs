@@ -38,7 +38,7 @@
 - [x] Keep browser APIs aligned with native role package semantics.
 - [x] Keep TCP, QUIC, and IPC transport implementations out of browser WASM packages.
 - [x] Keep browser WASM output focused on Rust-owned framing, control, runtime-object, and WebSocket substrate helpers.
-- [ ] Add wasm-bindgen tests for encode/decode and event batching.
+- [x] Add wasm-bindgen tests for encode/decode and event batching.
 
 ## Artifact Packaging
 

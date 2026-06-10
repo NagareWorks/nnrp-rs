@@ -215,6 +215,21 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
+      - name: Install wasm-bindgen test runner
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.122
+
+      - name: Run wasm-bindgen tests
+        shell: bash
+        run: |
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner \
+            cargo test -p nnrp-wasm \
+            --target wasm32-unknown-unknown \
+            --test wasm_bindgen_smoke \
+            --no-default-features \
+            --features transport-websocket,wasm-provider
+
       - name: Build and package WASM primitives
         run: python scripts/package_wasm_primitives.py --out artifacts/wasm
 
