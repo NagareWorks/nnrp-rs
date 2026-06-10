@@ -21,7 +21,7 @@ use nnrp_core::{
 };
 
 pub const NNRP_FFI_ABI_MAJOR: u16 = 1;
-pub const NNRP_FFI_ABI_MINOR: u16 = 8;
+pub const NNRP_FFI_ABI_MINOR: u16 = 9;
 pub const NNRP_FFI_ABI_PATCH: u16 = 0;
 
 pub const NNRP_TRANSPORT_SLOT_QUIC: u32 = 0x0000_0001;
@@ -197,6 +197,8 @@ pub enum NnrpErrorFamily {
     Transport = 4,
     Lifecycle = 5,
     Operation = 6,
+    Control = 7,
+    RuntimeObject = 8,
     Internal = 0xffff,
 }
 
@@ -256,9 +258,15 @@ impl NnrpFfiStatus {
                 protocol_error_code: 0,
                 detail_code: 0,
             },
-            NnrpError::UnknownEnumValue { .. }
-            | NnrpError::ReservedBitsSet { .. }
-            | NnrpError::NonZeroReservedField { .. }
+            NnrpError::UnknownEnumValue { enum_name, .. } => Self::protocol(
+                ffi_error_family_for_enum(enum_name).unwrap_or(NnrpErrorFamily::Transport),
+                0,
+            ),
+            NnrpError::NonZeroReservedField { field } => Self::protocol(
+                ffi_error_family_for_named_field(field).unwrap_or(NnrpErrorFamily::Transport),
+                0,
+            ),
+            NnrpError::ReservedBitsSet { .. }
             | NnrpError::UnsupportedWireFormat(_)
             | NnrpError::UnsupportedVersionMajor(_)
             | NnrpError::UnknownMessageType(_)
@@ -289,6 +297,57 @@ impl NnrpFfiStatus {
             },
         }
     }
+}
+
+fn ffi_error_family_for_enum(enum_name: &str) -> Option<NnrpErrorFamily> {
+    match enum_name {
+        "result_hint_budget_policy"
+        | "result_hint_congestion_state"
+        | "result_hint_reason"
+        | "session_patch_ack_status"
+        | "session_patch_reject_reason"
+        | "error_scope"
+        | "pressure_level" => Some(NnrpErrorFamily::Control),
+        "runtime_object_kind"
+        | "runtime_role"
+        | "memory_location_hint"
+        | "ownership_hint"
+        | "object_release_reason"
+        | "cache_reuse_scope"
+        | "cache_miss_reason" => Some(NnrpErrorFamily::RuntimeObject),
+        "cache_object_kind" | "cache_ack_status" | "cache_invalidate_scope" => {
+            Some(NnrpErrorFamily::Cache)
+        }
+        "transport_id" => Some(NnrpErrorFamily::Transport),
+        _ => None,
+    }
+}
+
+fn ffi_error_family_for_named_field(field: &str) -> Option<NnrpErrorFamily> {
+    if field.starts_with("control_")
+        || field.starts_with("result_hint")
+        || field.starts_with("session_patch")
+        || field.starts_with("scheduling")
+        || field.starts_with("partial_result")
+        || field.starts_with("pressure")
+        || field.starts_with("capability")
+        || field.starts_with("route_hint")
+        || field.starts_with("trace_context")
+        || field.starts_with("drop_reason")
+        || field.starts_with("supersede")
+    {
+        return Some(NnrpErrorFamily::Control);
+    }
+    if field.starts_with("object_")
+        || field.starts_with("cache_reference")
+        || field.starts_with("cache_miss")
+    {
+        return Some(NnrpErrorFamily::RuntimeObject);
+    }
+    if field.starts_with("cache_") {
+        return Some(NnrpErrorFamily::Cache);
+    }
+    None
 }
 
 #[repr(C)]
@@ -4545,7 +4604,7 @@ mod tests {
             bad_object.to_core(),
             Err(NnrpFfiStatus {
                 status_code: NnrpFfiStatusCode::ProtocolError as u32,
-                error_family: NnrpErrorFamily::Transport as u32,
+                error_family: NnrpErrorFamily::RuntimeObject as u32,
                 protocol_error_code: 0,
                 detail_code: 0,
             })
@@ -4563,7 +4622,7 @@ mod tests {
             bad_release.to_core(),
             Err(NnrpFfiStatus {
                 status_code: NnrpFfiStatusCode::ProtocolError as u32,
-                error_family: NnrpErrorFamily::Transport as u32,
+                error_family: NnrpErrorFamily::RuntimeObject as u32,
                 protocol_error_code: 0,
                 detail_code: 0,
             })
@@ -4743,7 +4802,7 @@ mod tests {
             bad.to_core(),
             Err(NnrpFfiStatus {
                 status_code: NnrpFfiStatusCode::ProtocolError as u32,
-                error_family: NnrpErrorFamily::Transport as u32,
+                error_family: NnrpErrorFamily::Control as u32,
                 protocol_error_code: 0,
                 detail_code: 0,
             })
@@ -8462,6 +8521,44 @@ mod tests {
             })
             .error_family,
             NnrpErrorFamily::Transport as u32
+        );
+        assert_eq!(
+            NnrpFfiStatus::from_core_error(&NnrpError::UnknownEnumValue {
+                enum_name: "error_scope",
+                value: 99
+            })
+            .error_family,
+            NnrpErrorFamily::Control as u32
+        );
+        assert_eq!(
+            NnrpFfiStatus::from_core_error(&NnrpError::UnknownEnumValue {
+                enum_name: "runtime_object_kind",
+                value: 99
+            })
+            .error_family,
+            NnrpErrorFamily::RuntimeObject as u32
+        );
+        assert_eq!(
+            NnrpFfiStatus::from_core_error(&NnrpError::UnknownEnumValue {
+                enum_name: "cache_object_kind",
+                value: 99
+            })
+            .error_family,
+            NnrpErrorFamily::Cache as u32
+        );
+        assert_eq!(
+            NnrpFfiStatus::from_core_error(&NnrpError::NonZeroReservedField {
+                field: "control_request.reserved"
+            })
+            .error_family,
+            NnrpErrorFamily::Control as u32
+        );
+        assert_eq!(
+            NnrpFfiStatus::from_core_error(&NnrpError::NonZeroReservedField {
+                field: "object_descriptor.reserved"
+            })
+            .error_family,
+            NnrpErrorFamily::RuntimeObject as u32
         );
     }
 

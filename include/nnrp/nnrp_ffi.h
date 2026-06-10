@@ -14,7 +14,7 @@ typedef struct NnrpProtocolVersion {
 } NnrpProtocolVersion;
 
 #define NNRP_FFI_ABI_MAJOR 1
-#define NNRP_FFI_ABI_MINOR 8
+#define NNRP_FFI_ABI_MINOR 9
 #define NNRP_FFI_ABI_PATCH 0
 
 #define NNRP_TRANSPORT_SLOT_QUIC 0x00000001u
@@ -98,6 +98,8 @@ typedef enum NnrpErrorFamily {
   NNRP_ERROR_FAMILY_TRANSPORT = 4,
   NNRP_ERROR_FAMILY_LIFECYCLE = 5,
   NNRP_ERROR_FAMILY_OPERATION = 6,
+  NNRP_ERROR_FAMILY_CONTROL = 7,
+  NNRP_ERROR_FAMILY_RUNTIME_OBJECT = 8,
   NNRP_ERROR_FAMILY_INTERNAL = 0xffff
 } NnrpErrorFamily;
 
