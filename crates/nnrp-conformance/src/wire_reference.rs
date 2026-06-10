@@ -1541,6 +1541,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn suite_as_client_reference_executes_preview4_scenarios_across_transport_matrix() {
+        for transport in [
+            ReferenceTransport::Tcp,
+            ReferenceTransport::Quic,
+            ReferenceTransport::Ipc,
+            ReferenceTransport::WebSocket,
+        ] {
+            for scenario in [
+                WireReferenceScenario::CancelAbort,
+                WireReferenceScenario::PriorityDeadline,
+                WireReferenceScenario::ProgressBackpressure,
+                WireReferenceScenario::CapabilityRouteCache,
+            ] {
+                let report = run_suite_as_client_scenario_reference(transport, scenario)
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "{} {} scenario should run: {error}",
+                            transport.as_str(),
+                            scenario.as_str()
+                        )
+                    });
+                assert_scenario_report(
+                    &report,
+                    transport.as_str(),
+                    scenario.as_str(),
+                    scenario_required_frames(scenario),
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn suite_as_server_reference_runs_tcp_listener() {
         let report = run_suite_as_server_reference(ReferenceTransport::Tcp)
             .await
@@ -1654,6 +1687,50 @@ mod tests {
         assert_eq!(report["status"], "passed");
         assert_eq!(report["terminal_state"], "success");
         assert!(report["timing"]["elapsed_us"].as_u64().is_some());
+    }
+
+    fn scenario_required_frames(scenario: WireReferenceScenario) -> &'static [&'static str] {
+        match scenario {
+            WireReferenceScenario::BasicLoopback => REQUIRED_LOOPBACK_FRAMES,
+            WireReferenceScenario::CancelAbort => &[
+                "SESSION_OPEN",
+                "FRAME_SUBMIT",
+                "CANCEL",
+                "RESULT_DROP_REASON",
+                "EXPIRE_AT",
+                "ABORT",
+                "BACKPRESSURE",
+                "SESSION_CLOSE",
+            ],
+            WireReferenceScenario::PriorityDeadline => &[
+                "SESSION_OPEN",
+                "FRAME_SUBMIT",
+                "PRIORITY_UPDATE",
+                "DEADLINE",
+                "RESULT_PUSH",
+                "SESSION_CLOSE",
+            ],
+            WireReferenceScenario::ProgressBackpressure => &[
+                "SESSION_OPEN",
+                "FRAME_SUBMIT",
+                "CREDIT_UPDATE",
+                "BACKPRESSURE",
+                "PROGRESS",
+                "PARTIAL_RESULT",
+                "RESULT_PUSH",
+                "SESSION_CLOSE",
+            ],
+            WireReferenceScenario::CapabilityRouteCache => &[
+                "SESSION_OPEN",
+                "FRAME_SUBMIT",
+                "CAPABILITY_NEGOTIATION",
+                "ROUTE_HINT",
+                "CACHE_REFERENCE",
+                "CACHE_INVALIDATE",
+                "RESULT_PUSH",
+                "SESSION_CLOSE",
+            ],
+        }
     }
 
     #[test]
