@@ -1722,6 +1722,7 @@ pub enum NnrpEventKind {
     Control = 9,
     Error = 10,
     ResultHint = 11,
+    PartialResult = 12,
 }
 
 #[repr(C)]
@@ -1900,6 +1901,24 @@ pub struct NnrpServerReceiveSubmitRequest {
 pub struct NnrpServerSendResultRequest {
     pub operation: NnrpHandle,
     pub payload: NnrpBufferView,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpServerSendPartialResultRequest {
+    pub operation: NnrpHandle,
+    pub partial_result: NnrpPartialResultDescriptor,
+    pub partial_body: NnrpBufferView,
+    pub max_events: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpServerDropStaleResultRequest {
+    pub operation: NnrpHandle,
+    pub drop_reason: NnrpResultDropReasonDescriptor,
+    pub diagnostics: NnrpBufferView,
+    pub max_events: usize,
 }
 
 #[repr(C)]
@@ -3337,6 +3356,63 @@ unsafe fn poll_matching_operation_result(
     (*out_result).status
 }
 
+unsafe fn poll_matching_operation_event_from_scope(
+    scope: OperationEventScope,
+    operation: NnrpHandle,
+    operation_id: u64,
+    event_kind: NnrpEventKind,
+    payload: NnrpBufferView,
+    max_events: usize,
+    out_result: *mut NnrpPollResult,
+) -> NnrpFfiStatus {
+    let mut store = handle_store();
+    let mut seen_events = 0usize;
+    while max_events == 0 || seen_events < max_events {
+        match store.poll_event(scope.connection) {
+            Ok(Some(mut event)) => {
+                seen_events += 1;
+                if event.kind == event_kind as u32
+                    && event.session == scope.session
+                    && event.operation.id == operation.id
+                    && event.operation.generation == operation.generation
+                    && (event.operation.id == operation_id || event.frame_id == scope.frame_id)
+                {
+                    event.payload = payload;
+                    *out_result = NnrpPollResult {
+                        status: NnrpFfiStatus::ok(),
+                        has_event: 1,
+                        event,
+                    };
+                    return NnrpFfiStatus::ok();
+                }
+            }
+            Ok(None) => {
+                let status = NnrpFfiStatus {
+                    status_code: NnrpFfiStatusCode::WouldBlock as u32,
+                    error_family: NnrpErrorFamily::None as u32,
+                    protocol_error_code: 0,
+                    detail_code: 0,
+                };
+                *out_result = poll_result_none(status);
+                return status;
+            }
+            Err(status) => {
+                *out_result = poll_result_none(status);
+                return status;
+            }
+        }
+    }
+
+    let status = NnrpFfiStatus {
+        status_code: NnrpFfiStatusCode::WouldBlock as u32,
+        error_family: NnrpErrorFamily::None as u32,
+        protocol_error_code: 0,
+        detail_code: 0,
+    };
+    *out_result = poll_result_none(status);
+    status
+}
+
 unsafe fn poll_matching_control_event(
     handle: NnrpHandle,
     event_kind: NnrpEventKind,
@@ -4416,11 +4492,160 @@ pub unsafe extern "C" fn nnrp_server_send_result(
     push_operation_event(request.operation, NnrpEventKind::ResultPushed, false)
 }
 
+#[no_mangle]
+/// # Safety
+///
+/// `request.partial_body` must remain readable for `partial_body.len` bytes for
+/// the duration of the call. `out_result` must point to one caller-owned
+/// writable `NnrpPollResult`. The returned event payload aliases the
+/// caller-owned partial body view.
+pub unsafe extern "C" fn nnrp_server_send_partial_result(
+    request: NnrpServerSendPartialResultRequest,
+    out_result: *mut NnrpPollResult,
+) -> NnrpFfiStatus {
+    nnrp_server_send_partial_result_impl(request, out_result)
+}
+
+unsafe fn nnrp_server_send_partial_result_impl(
+    request: NnrpServerSendPartialResultRequest,
+    out_result: *mut NnrpPollResult,
+) -> NnrpFfiStatus {
+    if out_result.is_null() {
+        return NnrpFfiStatus::invalid_argument(132);
+    }
+    if let Err(status) = request.partial_body.validate() {
+        *out_result = poll_result_none(status);
+        return status;
+    }
+
+    let metadata = PartialResultMetadata::from(request.partial_result);
+    if metadata.operation_id != request.operation.id {
+        let status = NnrpFfiStatus::invalid_argument(133);
+        *out_result = poll_result_none(status);
+        return status;
+    }
+    if let Err(error) = validate_partial_result_semantics(&metadata) {
+        let status = NnrpFfiStatus::from_core_error(&error);
+        *out_result = poll_result_none(status);
+        return status;
+    }
+    if let Err(error) = metadata.to_vec_with_body(ffi_read_slice(request.partial_body)) {
+        let status = NnrpFfiStatus::from_core_error(&error);
+        *out_result = poll_result_none(status);
+        return status;
+    }
+
+    let scope = match push_operation_event_with_scope(
+        request.operation,
+        NnrpEventKind::PartialResult,
+        false,
+    ) {
+        Ok(scope) => scope,
+        Err(status) => {
+            *out_result = poll_result_none(status);
+            return status;
+        }
+    };
+
+    poll_matching_operation_event_from_scope(
+        scope,
+        request.operation,
+        metadata.operation_id,
+        NnrpEventKind::PartialResult,
+        request.partial_body,
+        request.max_events,
+        out_result,
+    )
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `request.diagnostics` must remain readable for `diagnostics.len` bytes for
+/// the duration of the call. `out_result` must point to one caller-owned
+/// writable `NnrpPollResult`. The returned event payload aliases the
+/// caller-owned diagnostics view.
+pub unsafe extern "C" fn nnrp_server_drop_stale_result(
+    request: NnrpServerDropStaleResultRequest,
+    out_result: *mut NnrpPollResult,
+) -> NnrpFfiStatus {
+    nnrp_server_drop_stale_result_impl(request, out_result)
+}
+
+unsafe fn nnrp_server_drop_stale_result_impl(
+    request: NnrpServerDropStaleResultRequest,
+    out_result: *mut NnrpPollResult,
+) -> NnrpFfiStatus {
+    if out_result.is_null() {
+        return NnrpFfiStatus::invalid_argument(134);
+    }
+    if let Err(status) = request.diagnostics.validate() {
+        *out_result = poll_result_none(status);
+        return status;
+    }
+
+    let metadata = ResultDropReasonMetadata::from(request.drop_reason);
+    if metadata.operation_id != request.operation.id {
+        let status = NnrpFfiStatus::invalid_argument(135);
+        *out_result = poll_result_none(status);
+        return status;
+    }
+    if let Err(error) = validate_result_drop_reason_semantics(&metadata) {
+        let status = NnrpFfiStatus::from_core_error(&error);
+        *out_result = poll_result_none(status);
+        return status;
+    }
+    if let Err(error) = metadata.to_vec_with_diagnostics(ffi_read_slice(request.diagnostics)) {
+        let status = NnrpFfiStatus::from_core_error(&error);
+        *out_result = poll_result_none(status);
+        return status;
+    }
+
+    let scope = match push_operation_event_with_scope(
+        request.operation,
+        NnrpEventKind::ResultDropped,
+        true,
+    ) {
+        Ok(scope) => scope,
+        Err(status) => {
+            *out_result = poll_result_none(status);
+            return status;
+        }
+    };
+
+    poll_matching_operation_event_from_scope(
+        scope,
+        request.operation,
+        metadata.operation_id,
+        NnrpEventKind::ResultDropped,
+        request.diagnostics,
+        request.max_events,
+        out_result,
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OperationEventScope {
+    connection: NnrpHandle,
+    session: NnrpHandle,
+    frame_id: u32,
+}
+
 fn push_operation_event(
     operation: NnrpHandle,
     event_kind: NnrpEventKind,
     remove_operation: bool,
 ) -> NnrpFfiStatus {
+    push_operation_event_with_scope(operation, event_kind, remove_operation)
+        .map(|_| NnrpFfiStatus::ok())
+        .unwrap_or_else(|status| status)
+}
+
+fn push_operation_event_with_scope(
+    operation: NnrpHandle,
+    event_kind: NnrpEventKind,
+    remove_operation: bool,
+) -> Result<OperationEventScope, NnrpFfiStatus> {
     let mut store = handle_store();
     let (connection, session, frame_id) = match store.get(operation, NnrpHandleKind::Operation) {
         Ok(NnrpFfiResource::Operation {
@@ -4431,12 +4656,20 @@ fn push_operation_event(
                 Ok(NnrpFfiResource::Session { connection, .. }) => {
                     (*connection, *session, *frame_id)
                 }
-                Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32),
-                Err(status) => return status,
+                Ok(_) => {
+                    return Err(NnrpFfiStatus::invalid_handle(
+                        NnrpHandleKind::Session as u32,
+                    ))
+                }
+                Err(status) => return Err(status),
             }
         }
-        Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Operation as u32),
-        Err(status) => return status,
+        Ok(_) => {
+            return Err(NnrpFfiStatus::invalid_handle(
+                NnrpHandleKind::Operation as u32,
+            ))
+        }
+        Err(status) => return Err(status),
     };
     if remove_operation {
         store.entries.remove(&(operation.kind, operation.id));
@@ -4448,7 +4681,11 @@ fn push_operation_event(
         operation,
         frame_id,
     });
-    NnrpFfiStatus::ok()
+    Ok(OperationEventScope {
+        connection,
+        session,
+        frame_id,
+    })
 }
 
 #[no_mangle]
@@ -9327,6 +9564,564 @@ mod tests {
                 NnrpFfiStatus::ok()
             );
             assert_eq!(result.event.kind, NnrpEventKind::SessionClosed as u32);
+        }
+    }
+
+    #[test]
+    fn ffi_server_hot_path_helpers_emit_partial_and_stale_drop_events() {
+        unsafe {
+            let mut server = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_server_bind(
+                    NnrpServerBindRequest {
+                        server_id: 92_101,
+                        generation: 1,
+                        transport_id: test_transport_id(),
+                    },
+                    &mut server,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            let mut session = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_server_accept(
+                    NnrpServerAcceptRequest {
+                        server,
+                        session_id: 92_102,
+                        generation: 1,
+                        profile_id: 2,
+                        schema_id: 0x1001,
+                        schema_version: 3,
+                    },
+                    &mut session,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            drain_events(server);
+
+            let submit_payload = [1u8, 2, 3];
+            let mut partial_operation = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_server_receive_submit(
+                    NnrpServerReceiveSubmitRequest {
+                        session,
+                        operation_id: 92_103,
+                        frame_id: 77,
+                        payload: NnrpBufferView {
+                            ptr: submit_payload.as_ptr(),
+                            len: submit_payload.len(),
+                        },
+                    },
+                    &mut partial_operation,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            drain_events(server);
+
+            let partial_body = [0xa1u8, 0xa2, 0xa3];
+            let mut result = empty_poll_result();
+            assert_eq!(
+                nnrp_server_send_partial_result(
+                    NnrpServerSendPartialResultRequest {
+                        operation: partial_operation,
+                        partial_result: NnrpPartialResultDescriptor {
+                            operation_id: 92_103,
+                            result_sequence: 1,
+                            object_id: 92_104,
+                            delta_sequence: 1,
+                            body_bytes: partial_body.len() as u32,
+                            flags: nnrp_core::PARTIAL_RESULT_FLAGS_KNOWN_MASK,
+                        },
+                        partial_body: NnrpBufferView {
+                            ptr: partial_body.as_ptr(),
+                            len: partial_body.len(),
+                        },
+                        max_events: 1,
+                    },
+                    &mut result,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(result.has_event, 1);
+            assert_eq!(result.event.kind, NnrpEventKind::PartialResult as u32);
+            assert_eq!(result.event.operation, partial_operation);
+            assert_eq!(result.event.frame_id, 77);
+            assert_eq!(result.event.payload.len, partial_body.len());
+            assert_eq!(
+                core::slice::from_raw_parts(result.event.payload.ptr, result.event.payload.len),
+                partial_body
+            );
+
+            let result_payload = [9u8, 8, 7];
+            assert_eq!(
+                nnrp_server_send_result(NnrpServerSendResultRequest {
+                    operation: partial_operation,
+                    payload: NnrpBufferView {
+                        ptr: result_payload.as_ptr(),
+                        len: result_payload.len(),
+                    },
+                }),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(
+                nnrp_client_await_event(server, &mut result),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(result.event.kind, NnrpEventKind::ResultPushed as u32);
+
+            let mut stale_operation = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_server_receive_submit(
+                    NnrpServerReceiveSubmitRequest {
+                        session,
+                        operation_id: 92_105,
+                        frame_id: 78,
+                        payload: NnrpBufferView {
+                            ptr: submit_payload.as_ptr(),
+                            len: submit_payload.len(),
+                        },
+                    },
+                    &mut stale_operation,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            drain_events(server);
+
+            let diagnostics = [0xd1u8, 0xd2];
+            assert_eq!(
+                nnrp_server_drop_stale_result(
+                    NnrpServerDropStaleResultRequest {
+                        operation: stale_operation,
+                        drop_reason: NnrpResultDropReasonDescriptor {
+                            operation_id: 92_105,
+                            result_sequence: 2,
+                            drop_reason_code: nnrp_core::RESULT_DROP_REASON_DEADLINE_EXPIRED,
+                            source_role: RuntimeRole::Server as u8,
+                            flags: nnrp_core::RESULT_DROP_FLAGS_KNOWN_MASK,
+                            diagnostic_bytes: diagnostics.len() as u32,
+                        },
+                        diagnostics: NnrpBufferView {
+                            ptr: diagnostics.as_ptr(),
+                            len: diagnostics.len(),
+                        },
+                        max_events: 1,
+                    },
+                    &mut result,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(result.has_event, 1);
+            assert_eq!(result.event.kind, NnrpEventKind::ResultDropped as u32);
+            assert_eq!(result.event.operation, stale_operation);
+            assert_eq!(result.event.frame_id, 78);
+            assert_eq!(result.event.payload.len, diagnostics.len());
+            assert_eq!(
+                core::slice::from_raw_parts(result.event.payload.ptr, result.event.payload.len),
+                diagnostics
+            );
+            assert_eq!(
+                nnrp_server_send_result(NnrpServerSendResultRequest {
+                    operation: stale_operation,
+                    payload: NnrpBufferView {
+                        ptr: result_payload.as_ptr(),
+                        len: result_payload.len(),
+                    },
+                }),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Operation as u32)
+            );
+
+            let invalid_partial_body = [0xeeu8];
+            assert_eq!(
+                nnrp_server_send_partial_result(
+                    NnrpServerSendPartialResultRequest {
+                        operation: stale_operation,
+                        partial_result: NnrpPartialResultDescriptor {
+                            operation_id: 92_999,
+                            result_sequence: 1,
+                            object_id: 92_104,
+                            delta_sequence: 1,
+                            body_bytes: invalid_partial_body.len() as u32,
+                            flags: nnrp_core::PARTIAL_RESULT_FLAGS_KNOWN_MASK,
+                        },
+                        partial_body: NnrpBufferView {
+                            ptr: invalid_partial_body.as_ptr(),
+                            len: invalid_partial_body.len(),
+                        },
+                        max_events: 1,
+                    },
+                    &mut result,
+                ),
+                NnrpFfiStatus::invalid_argument(133)
+            );
+        }
+    }
+
+    #[test]
+    fn ffi_server_hot_path_helpers_cover_partial_and_drop_error_paths() {
+        unsafe {
+            let mut server = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_server_bind(
+                    NnrpServerBindRequest {
+                        server_id: 92_201,
+                        generation: 1,
+                        transport_id: test_transport_id(),
+                    },
+                    &mut server,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            let mut session = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_server_accept(
+                    NnrpServerAcceptRequest {
+                        server,
+                        session_id: 92_202,
+                        generation: 1,
+                        profile_id: 2,
+                        schema_id: 0x1001,
+                        schema_version: 3,
+                    },
+                    &mut session,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            let submit_payload = [1u8];
+            let mut operation = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_server_receive_submit(
+                    NnrpServerReceiveSubmitRequest {
+                        session,
+                        operation_id: 92_203,
+                        frame_id: 79,
+                        payload: NnrpBufferView {
+                            ptr: submit_payload.as_ptr(),
+                            len: submit_payload.len(),
+                        },
+                    },
+                    &mut operation,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            drain_events(server);
+
+            let partial_body = [0x11u8, 0x12];
+            let valid_partial = NnrpPartialResultDescriptor {
+                operation_id: 92_203,
+                result_sequence: 1,
+                object_id: 92_204,
+                delta_sequence: 1,
+                body_bytes: partial_body.len() as u32,
+                flags: nnrp_core::PARTIAL_RESULT_FLAGS_KNOWN_MASK,
+            };
+            let mut result = empty_poll_result();
+            assert_eq!(
+                nnrp_server_send_partial_result(
+                    NnrpServerSendPartialResultRequest {
+                        operation,
+                        partial_result: valid_partial,
+                        partial_body: NnrpBufferView {
+                            ptr: partial_body.as_ptr(),
+                            len: partial_body.len(),
+                        },
+                        max_events: 1,
+                    },
+                    core::ptr::null_mut(),
+                ),
+                NnrpFfiStatus::invalid_argument(132)
+            );
+            assert_eq!(
+                nnrp_server_send_partial_result(
+                    NnrpServerSendPartialResultRequest {
+                        operation,
+                        partial_result: valid_partial,
+                        partial_body: NnrpBufferView {
+                            ptr: core::ptr::null(),
+                            len: 1,
+                        },
+                        max_events: 1,
+                    },
+                    &mut result,
+                ),
+                NnrpFfiStatus::invalid_argument(1)
+            );
+            assert_eq!(result.has_event, 0);
+            assert_eq!(
+                nnrp_server_send_partial_result(
+                    NnrpServerSendPartialResultRequest {
+                        operation,
+                        partial_result: NnrpPartialResultDescriptor {
+                            operation_id: 92_999,
+                            ..valid_partial
+                        },
+                        partial_body: NnrpBufferView {
+                            ptr: partial_body.as_ptr(),
+                            len: partial_body.len(),
+                        },
+                        max_events: 1,
+                    },
+                    &mut result,
+                ),
+                NnrpFfiStatus::invalid_argument(133)
+            );
+            assert_ne!(
+                nnrp_server_send_partial_result(
+                    NnrpServerSendPartialResultRequest {
+                        operation,
+                        partial_result: NnrpPartialResultDescriptor {
+                            object_id: 0,
+                            ..valid_partial
+                        },
+                        partial_body: NnrpBufferView {
+                            ptr: partial_body.as_ptr(),
+                            len: partial_body.len(),
+                        },
+                        max_events: 1,
+                    },
+                    &mut result,
+                )
+                .status_code,
+                NnrpFfiStatusCode::Ok as u32
+            );
+            assert_ne!(
+                nnrp_server_send_partial_result(
+                    NnrpServerSendPartialResultRequest {
+                        operation,
+                        partial_result: NnrpPartialResultDescriptor {
+                            body_bytes: (partial_body.len() + 1) as u32,
+                            ..valid_partial
+                        },
+                        partial_body: NnrpBufferView {
+                            ptr: partial_body.as_ptr(),
+                            len: partial_body.len(),
+                        },
+                        max_events: 1,
+                    },
+                    &mut result,
+                )
+                .status_code,
+                NnrpFfiStatusCode::Ok as u32
+            );
+            assert_eq!(
+                nnrp_server_send_partial_result(
+                    NnrpServerSendPartialResultRequest {
+                        operation: NnrpHandle::new(NnrpHandleKind::Operation, 92_888, 1),
+                        partial_result: NnrpPartialResultDescriptor {
+                            operation_id: 92_888,
+                            ..valid_partial
+                        },
+                        partial_body: NnrpBufferView {
+                            ptr: partial_body.as_ptr(),
+                            len: partial_body.len(),
+                        },
+                        max_events: 1,
+                    },
+                    &mut result,
+                ),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Operation as u32)
+            );
+
+            let diagnostics = [0x21u8, 0x22];
+            let valid_drop = NnrpResultDropReasonDescriptor {
+                operation_id: 92_203,
+                result_sequence: 1,
+                drop_reason_code: nnrp_core::RESULT_DROP_REASON_DEADLINE_EXPIRED,
+                source_role: RuntimeRole::Server as u8,
+                flags: nnrp_core::RESULT_DROP_FLAGS_KNOWN_MASK,
+                diagnostic_bytes: diagnostics.len() as u32,
+            };
+            assert_eq!(
+                nnrp_server_drop_stale_result(
+                    NnrpServerDropStaleResultRequest {
+                        operation,
+                        drop_reason: valid_drop,
+                        diagnostics: NnrpBufferView {
+                            ptr: diagnostics.as_ptr(),
+                            len: diagnostics.len(),
+                        },
+                        max_events: 1,
+                    },
+                    core::ptr::null_mut(),
+                ),
+                NnrpFfiStatus::invalid_argument(134)
+            );
+            assert_eq!(
+                nnrp_server_drop_stale_result(
+                    NnrpServerDropStaleResultRequest {
+                        operation,
+                        drop_reason: valid_drop,
+                        diagnostics: NnrpBufferView {
+                            ptr: core::ptr::null(),
+                            len: 1,
+                        },
+                        max_events: 1,
+                    },
+                    &mut result,
+                ),
+                NnrpFfiStatus::invalid_argument(1)
+            );
+            assert_eq!(
+                nnrp_server_drop_stale_result(
+                    NnrpServerDropStaleResultRequest {
+                        operation,
+                        drop_reason: NnrpResultDropReasonDescriptor {
+                            operation_id: 92_999,
+                            ..valid_drop
+                        },
+                        diagnostics: NnrpBufferView {
+                            ptr: diagnostics.as_ptr(),
+                            len: diagnostics.len(),
+                        },
+                        max_events: 1,
+                    },
+                    &mut result,
+                ),
+                NnrpFfiStatus::invalid_argument(135)
+            );
+            assert_ne!(
+                nnrp_server_drop_stale_result(
+                    NnrpServerDropStaleResultRequest {
+                        operation,
+                        drop_reason: NnrpResultDropReasonDescriptor {
+                            drop_reason_code: 0,
+                            ..valid_drop
+                        },
+                        diagnostics: NnrpBufferView {
+                            ptr: diagnostics.as_ptr(),
+                            len: diagnostics.len(),
+                        },
+                        max_events: 1,
+                    },
+                    &mut result,
+                )
+                .status_code,
+                NnrpFfiStatusCode::Ok as u32
+            );
+            assert_ne!(
+                nnrp_server_drop_stale_result(
+                    NnrpServerDropStaleResultRequest {
+                        operation,
+                        drop_reason: NnrpResultDropReasonDescriptor {
+                            diagnostic_bytes: (diagnostics.len() + 1) as u32,
+                            ..valid_drop
+                        },
+                        diagnostics: NnrpBufferView {
+                            ptr: diagnostics.as_ptr(),
+                            len: diagnostics.len(),
+                        },
+                        max_events: 1,
+                    },
+                    &mut result,
+                )
+                .status_code,
+                NnrpFfiStatusCode::Ok as u32
+            );
+        }
+    }
+
+    #[test]
+    fn ffi_operation_event_polling_covers_empty_invalid_and_limited_paths() {
+        unsafe {
+            let mut server = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_server_bind(
+                    NnrpServerBindRequest {
+                        server_id: 92_301,
+                        generation: 1,
+                        transport_id: test_transport_id(),
+                    },
+                    &mut server,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            let mut session = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_server_accept(
+                    NnrpServerAcceptRequest {
+                        server,
+                        session_id: 92_302,
+                        generation: 1,
+                        profile_id: 2,
+                        schema_id: 0x1001,
+                        schema_version: 3,
+                    },
+                    &mut session,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            let mut operation = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_server_receive_submit(
+                    NnrpServerReceiveSubmitRequest {
+                        session,
+                        operation_id: 92_303,
+                        frame_id: 80,
+                        payload: NnrpBufferView::empty(),
+                    },
+                    &mut operation,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            drain_events(server);
+
+            let scope = OperationEventScope {
+                connection: server,
+                session,
+                frame_id: 80,
+            };
+            let mut result = empty_poll_result();
+            assert_eq!(
+                poll_matching_operation_event_from_scope(
+                    scope,
+                    operation,
+                    operation.id,
+                    NnrpEventKind::PartialResult,
+                    NnrpBufferView::empty(),
+                    1,
+                    &mut result,
+                )
+                .status_code,
+                NnrpFfiStatusCode::WouldBlock as u32
+            );
+            assert_eq!(result.has_event, 0);
+
+            assert_eq!(
+                nnrp_server_send_flow_update(NnrpServerFlowUpdateRequest {
+                    session,
+                    frame_id: 80,
+                }),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(
+                poll_matching_operation_event_from_scope(
+                    scope,
+                    operation,
+                    operation.id,
+                    NnrpEventKind::PartialResult,
+                    NnrpBufferView::empty(),
+                    1,
+                    &mut result,
+                )
+                .status_code,
+                NnrpFfiStatusCode::WouldBlock as u32
+            );
+
+            assert_eq!(
+                poll_matching_operation_event_from_scope(
+                    OperationEventScope {
+                        connection: NnrpHandle::new(NnrpHandleKind::Connection, 92_999, 1),
+                        session,
+                        frame_id: 80,
+                    },
+                    operation,
+                    operation.id,
+                    NnrpEventKind::PartialResult,
+                    NnrpBufferView::empty(),
+                    1,
+                    &mut result,
+                ),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Connection as u32)
+            );
         }
     }
 

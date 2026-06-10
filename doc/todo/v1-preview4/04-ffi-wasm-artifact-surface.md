@@ -11,12 +11,12 @@
   - [x] Route/execution hint.
   - [x] Trace context.
   - [x] Result drop reason.
-- [ ] Add coarse C ABI calls for hot paths.
+- [x] Add coarse C ABI calls for hot paths.
   - [x] Submit with object references.
   - [x] Submit with control metadata.
   - [x] Poll batch events.
-  - [ ] Complete partial result.
-  - [ ] Drop stale result.
+  - [x] Complete partial result.
+  - [x] Drop stale result.
 - [x] Add C ABI error mapping for preview4 families.
 - [x] Add ABI version feature flags for runtime control and runtime object support.
 
