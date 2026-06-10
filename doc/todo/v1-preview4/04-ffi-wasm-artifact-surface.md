@@ -12,9 +12,9 @@
   - [x] Trace context.
   - [x] Result drop reason.
 - [ ] Add coarse C ABI calls for hot paths.
-  - [ ] Submit with object references.
+  - [x] Submit with object references.
   - [ ] Submit with control metadata.
-  - [ ] Poll batch events.
+  - [x] Poll batch events.
   - [ ] Complete partial result.
   - [ ] Drop stale result.
 - [x] Add C ABI error mapping for preview4 families.
