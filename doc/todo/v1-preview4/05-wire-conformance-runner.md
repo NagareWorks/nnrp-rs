@@ -40,11 +40,11 @@
 
 ## Result Validation
 
-- [ ] Record observed frames with direction and timestamp.
-- [ ] Validate expected terminal state.
-- [ ] Validate required frame presence.
-- [ ] Validate result drop reason when expected.
-- [ ] Validate trace context propagation when expected.
+- [x] Record observed frames with direction and timestamp.
+- [x] Validate expected terminal state.
+- [x] Validate required frame presence.
+- [x] Validate result drop reason when expected.
+- [x] Validate trace context propagation when expected.
 - [x] Preserve skipped outcomes when a target does not claim the required transport or capability.
 
 ## CI Integration

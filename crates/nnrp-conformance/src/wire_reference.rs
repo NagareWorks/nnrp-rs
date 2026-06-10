@@ -9,7 +9,7 @@ use nnrp_transport_quic::{
     QuicServerEndpointConfig,
 };
 use nnrp_transport_websocket::{WebSocketEndpoint, WebSocketProvider};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const REQUEST_BODY: &[u8] = b"wire-reference-request";
@@ -21,6 +21,41 @@ pub enum ReferenceTransport {
     Ipc,
     Quic,
     WebSocket,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WireTraceExpectation {
+    pub trace_id: u64,
+    pub span_id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireReportExpectation<'a> {
+    pub terminal_state: &'a str,
+    pub required_frames: &'a [&'a str],
+    pub result_drop_reason_code: Option<u64>,
+    pub trace_context: Option<WireTraceExpectation>,
+}
+
+impl<'a> WireReportExpectation<'a> {
+    pub fn success(required_frames: &'a [&'a str]) -> Self {
+        Self {
+            terminal_state: "success",
+            required_frames,
+            result_drop_reason_code: None,
+            trace_context: None,
+        }
+    }
+
+    pub fn with_result_drop_reason_code(mut self, drop_reason_code: u64) -> Self {
+        self.result_drop_reason_code = Some(drop_reason_code);
+        self
+    }
+
+    pub fn with_trace_context(mut self, trace_context: WireTraceExpectation) -> Self {
+        self.trace_context = Some(trace_context);
+        self
+    }
 }
 
 impl ReferenceTransport {
@@ -54,6 +89,112 @@ pub async fn run_suite_as_server_reference(
         ReferenceTransport::Quic => run_quic_suite_as_server_reference().await,
         ReferenceTransport::WebSocket => run_websocket_suite_as_server_reference().await,
     }
+}
+
+pub fn validate_wire_reference_report(
+    report: &Value,
+    expectation: &WireReportExpectation<'_>,
+) -> Result<(), String> {
+    let terminal_state = report
+        .get("terminal_state")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "wire reference report must contain terminal_state".to_string())?;
+    if terminal_state != expectation.terminal_state {
+        return Err(format!(
+            "wire reference terminal_state '{terminal_state}' did not match expected '{}'",
+            expectation.terminal_state
+        ));
+    }
+
+    let frames = report
+        .get("frames")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "wire reference report must contain frames".to_string())?;
+    let mut last_timestamp = None;
+    for (index, frame) in frames.iter().enumerate() {
+        frame
+            .get("direction")
+            .and_then(Value::as_str)
+            .filter(|direction| !direction.is_empty())
+            .ok_or_else(|| format!("wire frame {index} must contain direction"))?;
+        let timestamp_us = frame
+            .get("timestamp_us")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("wire frame {index} must contain timestamp_us"))?;
+        if let Some(last_timestamp) = last_timestamp {
+            if timestamp_us < last_timestamp {
+                return Err(format!(
+                    "wire frame {index} timestamp_us regressed from {last_timestamp} to {timestamp_us}"
+                ));
+            }
+        }
+        last_timestamp = Some(timestamp_us);
+    }
+
+    for required in expectation.required_frames {
+        if !frames.iter().any(|frame| {
+            frame
+                .get("message_type")
+                .and_then(Value::as_str)
+                .is_some_and(|message_type| message_type == *required)
+        }) {
+            return Err(format!(
+                "wire reference report did not contain required frame '{required}'"
+            ));
+        }
+    }
+
+    if let Some(expected_drop_reason) = expectation.result_drop_reason_code {
+        let drop_reason = frames
+            .iter()
+            .find(|frame| {
+                frame
+                    .get("message_type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|message_type| message_type == "RESULT_DROP_REASON")
+            })
+            .and_then(|frame| frame.get("drop_reason_code"))
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                "wire reference report did not contain expected RESULT_DROP_REASON frame"
+                    .to_string()
+            })?;
+        if drop_reason != expected_drop_reason {
+            return Err(format!(
+                "wire reference RESULT_DROP_REASON code {drop_reason} did not match expected {expected_drop_reason}"
+            ));
+        }
+    }
+
+    if let Some(expected_trace) = expectation.trace_context {
+        let trace = frames
+            .iter()
+            .find(|frame| {
+                frame
+                    .get("message_type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|message_type| message_type == "TRACE_CONTEXT")
+            })
+            .ok_or_else(|| {
+                "wire reference report did not contain expected TRACE_CONTEXT frame".to_string()
+            })?;
+        let trace_id = trace
+            .get("trace_id")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "TRACE_CONTEXT frame must contain trace_id".to_string())?;
+        let span_id = trace
+            .get("span_id")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "TRACE_CONTEXT frame must contain span_id".to_string())?;
+        if trace_id != expected_trace.trace_id || span_id != expected_trace.span_id {
+            return Err(format!(
+                "TRACE_CONTEXT ({trace_id}, {span_id}) did not match expected ({}, {})",
+                expected_trace.trace_id, expected_trace.span_id
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 async fn run_tcp_suite_as_client_reference() -> Result<Value, RuntimeError> {
@@ -262,9 +403,26 @@ async fn run_reference_server(
     started: Instant,
     server: NnrpServer,
 ) -> Result<Value, RuntimeError> {
+    let mut frames = ObservedFrameLog::new(started);
     let mut session = server.accept().await?;
     let session_id = session.session_id();
+    frames.push(
+        "target->suite",
+        "SESSION_OPEN",
+        json!({
+            "session_id": session_id,
+        }),
+    );
     let submit = session.receive_submit().await?;
+    frames.push(
+        "target->suite",
+        "FRAME_SUBMIT",
+        json!({
+            "session_id": session_id,
+            "frame_id": submit.frame_id,
+            "body_bytes": submit.body.len(),
+        }),
+    );
     if submit.body != REQUEST_BODY {
         return Err(RuntimeError::UnexpectedMessage(
             "wire reference suite received unexpected request body",
@@ -273,7 +431,24 @@ async fn run_reference_server(
     session
         .send_result(submit.frame_id, token_result(), RESPONSE_BODY.to_vec())
         .await?;
+    frames.push(
+        "suite->target",
+        "RESULT_PUSH",
+        json!({
+            "session_id": session_id,
+            "frame_id": submit.frame_id,
+            "body_bytes": RESPONSE_BODY.len(),
+            "status_code": 200,
+        }),
+    );
     let close = session.receive_close().await?;
+    frames.push(
+        "target->suite",
+        "SESSION_CLOSE",
+        json!({
+            "session_id": session_id,
+        }),
+    );
     session.ack_close(&close).await?;
     session.close().await?;
 
@@ -286,33 +461,7 @@ async fn run_reference_server(
         "timing": {
             "elapsed_us": started.elapsed().as_micros(),
         },
-        "frames": [
-            {
-                "direction": "target->suite",
-                "message_type": "SESSION_OPEN",
-                "session_id": session_id,
-            },
-            {
-                "direction": "target->suite",
-                "message_type": "FRAME_SUBMIT",
-                "session_id": session_id,
-                "frame_id": submit.frame_id,
-                "body_bytes": submit.body.len(),
-            },
-            {
-                "direction": "suite->target",
-                "message_type": "RESULT_PUSH",
-                "session_id": session_id,
-                "frame_id": submit.frame_id,
-                "body_bytes": RESPONSE_BODY.len(),
-                "status_code": 200,
-            },
-            {
-                "direction": "target->suite",
-                "message_type": "SESSION_CLOSE",
-                "session_id": session_id,
-            }
-        ],
+        "frames": frames.into_frames(),
     }))
 }
 
@@ -356,18 +505,52 @@ async fn run_reference_client(
     started: Instant,
     client: NnrpClient,
 ) -> Result<Value, RuntimeError> {
+    let mut frames = ObservedFrameLog::new(started);
     let mut session = client.open_session().await?;
     let session_id = session.session_id();
+    frames.push(
+        "suite->target",
+        "SESSION_OPEN",
+        json!({
+            "session_id": session_id,
+        }),
+    );
     let frame_id = session
         .submit(token_submit(), REQUEST_BODY.to_vec())
         .await?;
+    frames.push(
+        "suite->target",
+        "FRAME_SUBMIT",
+        json!({
+            "session_id": session_id,
+            "frame_id": frame_id,
+            "body_bytes": REQUEST_BODY.len(),
+        }),
+    );
     let result = session.await_result().await?;
+    frames.push(
+        "target->suite",
+        "RESULT_PUSH",
+        json!({
+            "session_id": session_id,
+            "frame_id": result.frame_id,
+            "body_bytes": result.body.len(),
+            "status_code": result.metadata.status_code,
+        }),
+    );
     if result.body != RESPONSE_BODY {
         return Err(RuntimeError::UnexpectedMessage(
             "wire reference client received unexpected response body",
         ));
     }
     session.close().await?;
+    frames.push(
+        "suite->target",
+        "SESSION_CLOSE",
+        json!({
+            "session_id": session_id,
+        }),
+    );
 
     Ok(json!({
         "mode": "suite-as-client",
@@ -378,34 +561,46 @@ async fn run_reference_client(
         "timing": {
             "elapsed_us": started.elapsed().as_micros(),
         },
-        "frames": [
-            {
-                "direction": "suite->target",
-                "message_type": "SESSION_OPEN",
-                "session_id": session_id,
-            },
-            {
-                "direction": "suite->target",
-                "message_type": "FRAME_SUBMIT",
-                "session_id": session_id,
-                "frame_id": frame_id,
-                "body_bytes": REQUEST_BODY.len(),
-            },
-            {
-                "direction": "target->suite",
-                "message_type": "RESULT_PUSH",
-                "session_id": session_id,
-                "frame_id": result.frame_id,
-                "body_bytes": result.body.len(),
-                "status_code": result.metadata.status_code,
-            },
-            {
-                "direction": "suite->target",
-                "message_type": "SESSION_CLOSE",
-                "session_id": session_id,
-            }
-        ],
+        "frames": frames.into_frames(),
     }))
+}
+
+struct ObservedFrameLog {
+    started: Instant,
+    frames: Vec<Value>,
+}
+
+impl ObservedFrameLog {
+    fn new(started: Instant) -> Self {
+        Self {
+            started,
+            frames: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, direction: &str, message_type: &str, extra: Value) {
+        let mut frame = match extra {
+            Value::Object(map) => map,
+            _ => Map::new(),
+        };
+        frame.insert(
+            "direction".to_string(),
+            Value::String(direction.to_string()),
+        );
+        frame.insert(
+            "message_type".to_string(),
+            Value::String(message_type.to_string()),
+        );
+        frame.insert(
+            "timestamp_us".to_string(),
+            Value::from(self.started.elapsed().as_micros() as u64),
+        );
+        self.frames.push(Value::Object(frame));
+    }
+
+    fn into_frames(self) -> Vec<Value> {
+        self.frames
+    }
 }
 
 fn token_submit() -> FrameSubmitMetadata {
@@ -459,7 +654,19 @@ fn token_result() -> ResultPushMetadata {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_suite_as_client_reference, run_suite_as_server_reference, ReferenceTransport};
+    use super::{
+        run_suite_as_client_reference, run_suite_as_server_reference,
+        validate_wire_reference_report, ReferenceTransport, WireReportExpectation,
+        WireTraceExpectation,
+    };
+    use serde_json::json;
+
+    const REQUIRED_LOOPBACK_FRAMES: &[&str] = &[
+        "SESSION_OPEN",
+        "FRAME_SUBMIT",
+        "RESULT_PUSH",
+        "SESSION_CLOSE",
+    ];
 
     #[tokio::test]
     async fn suite_as_client_reference_runs_tcp_endpoint() {
@@ -536,6 +743,11 @@ mod tests {
     }
 
     fn assert_suite_as_client_report(report: &serde_json::Value, transport: &str) {
+        validate_wire_reference_report(
+            report,
+            &WireReportExpectation::success(REQUIRED_LOOPBACK_FRAMES),
+        )
+        .expect("suite-as-client report should validate");
         assert_eq!(report["mode"], "suite-as-client");
         assert_eq!(report["transport"], transport);
         assert_eq!(report["status"], "passed");
@@ -564,6 +776,11 @@ mod tests {
     }
 
     fn assert_suite_as_server_report(report: &serde_json::Value, transport: &str) {
+        validate_wire_reference_report(
+            report,
+            &WireReportExpectation::success(REQUIRED_LOOPBACK_FRAMES),
+        )
+        .expect("suite-as-server report should validate");
         assert_eq!(report["mode"], "suite-as-server");
         assert_eq!(report["transport"], transport);
         assert_eq!(report["status"], "passed");
@@ -591,5 +808,99 @@ mod tests {
         assert_eq!(frames[2]["direction"], "suite->target");
         assert_eq!(frames[2]["body_bytes"], super::RESPONSE_BODY.len());
         assert_eq!(frames[2]["status_code"], 200);
+    }
+
+    #[test]
+    fn validator_rejects_wrong_terminal_state() {
+        let report = json!({
+            "terminal_state": "failed",
+            "frames": []
+        });
+        let error = validate_wire_reference_report(
+            &report,
+            &WireReportExpectation::success(&["SESSION_OPEN"]),
+        )
+        .expect_err("terminal state should fail");
+        assert!(error.contains("terminal_state 'failed'"));
+    }
+
+    #[test]
+    fn validator_rejects_missing_required_frame() {
+        let report = json!({
+            "terminal_state": "success",
+            "frames": [{
+                "direction": "suite->target",
+                "message_type": "SESSION_OPEN",
+                "timestamp_us": 1
+            }]
+        });
+        let error = validate_wire_reference_report(
+            &report,
+            &WireReportExpectation::success(&["SESSION_OPEN", "RESULT_PUSH"]),
+        )
+        .expect_err("missing frame should fail");
+        assert!(error.contains("required frame 'RESULT_PUSH'"));
+    }
+
+    #[test]
+    fn validator_rejects_unordered_frame_timestamps() {
+        let report = json!({
+            "terminal_state": "success",
+            "frames": [
+                {
+                    "direction": "suite->target",
+                    "message_type": "SESSION_OPEN",
+                    "timestamp_us": 5
+                },
+                {
+                    "direction": "suite->target",
+                    "message_type": "SESSION_CLOSE",
+                    "timestamp_us": 4
+                }
+            ]
+        });
+        let error = validate_wire_reference_report(&report, &WireReportExpectation::success(&[]))
+            .expect_err("timestamp regression should fail");
+        assert!(error.contains("timestamp_us regressed"));
+    }
+
+    #[test]
+    fn validator_checks_expected_drop_reason_and_trace_context() {
+        let report = json!({
+            "terminal_state": "success",
+            "frames": [
+                {
+                    "direction": "target->suite",
+                    "message_type": "TRACE_CONTEXT",
+                    "timestamp_us": 1,
+                    "trace_id": 42,
+                    "span_id": 7
+                },
+                {
+                    "direction": "suite->target",
+                    "message_type": "RESULT_DROP_REASON",
+                    "timestamp_us": 2,
+                    "drop_reason_code": 3
+                }
+            ]
+        });
+        let expectation = WireReportExpectation::success(&["TRACE_CONTEXT", "RESULT_DROP_REASON"])
+            .with_trace_context(WireTraceExpectation {
+                trace_id: 42,
+                span_id: 7,
+            })
+            .with_result_drop_reason_code(3);
+        validate_wire_reference_report(&report, &expectation)
+            .expect("drop reason and trace context should validate");
+
+        let expectation = WireReportExpectation::success(&["TRACE_CONTEXT"]).with_trace_context(
+            WireTraceExpectation {
+                trace_id: 42,
+                span_id: 8,
+            },
+        );
+        let error = validate_wire_reference_report(&report, &expectation)
+            .expect_err("wrong trace context should fail");
+        assert!(error.contains("TRACE_CONTEXT"));
     }
 }
