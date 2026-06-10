@@ -141,6 +141,9 @@ jobs:
       - name: Format check
         run: cargo fmt --all --check
 
+      - name: Release surface sync check
+        run: python scripts/check_release_surface_sync.py
+
       - name: Test
         env:
           NNRP_CONFORMANCE_SUITE_REPO: ${{ github.workspace }}/nnrp-conformance-action

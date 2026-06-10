@@ -38,4 +38,4 @@
 - [x] Update native link library documentation for transport-scoped artifacts.
 - [x] Update browser WASM documentation for WebSocket substrate.
 - [x] Update conformance usage examples for wire target manifests.
-- [ ] Keep generated headers and manifests in sync with release artifacts.
+- [x] Keep generated headers and manifests in sync with release artifacts.
