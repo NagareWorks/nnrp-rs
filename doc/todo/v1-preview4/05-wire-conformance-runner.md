@@ -12,10 +12,10 @@
 ## Direct Endpoint Driver
 
 - [ ] Implement suite-as-client mode.
-  - [ ] TCP endpoint.
+  - [x] TCP endpoint.
   - [ ] QUIC endpoint.
   - [ ] IPC endpoint.
-  - [ ] WebSocket endpoint.
+  - [x] WebSocket endpoint.
 - [ ] Implement suite-as-server mode.
   - [ ] TCP listener.
   - [ ] QUIC listener.

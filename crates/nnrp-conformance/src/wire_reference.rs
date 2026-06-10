@@ -1,0 +1,234 @@
+use nnrp_core::{
+    FrameSubmitMetadata, InputProfile, PayloadKindBitmap, ResultClass, ResultPushMetadata,
+    SubmitMode, TileIndexMode, STANDARD_PROFILE_TOKEN,
+};
+use nnrp_runtime::{NnrpClient, NnrpClientConfig, NnrpServer, NnrpServerConfig, RuntimeError};
+use nnrp_transport_websocket::{WebSocketEndpoint, WebSocketProvider};
+use serde_json::{json, Value};
+use std::time::Instant;
+
+const REQUEST_BODY: &[u8] = b"wire-reference-request";
+const RESPONSE_BODY: &[u8] = b"wire-reference-result";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferenceTransport {
+    Tcp,
+    WebSocket,
+}
+
+impl ReferenceTransport {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tcp => "tcp",
+            Self::WebSocket => "websocket",
+        }
+    }
+}
+
+pub async fn run_suite_as_client_reference(
+    transport: ReferenceTransport,
+) -> Result<Value, RuntimeError> {
+    match transport {
+        ReferenceTransport::Tcp => run_tcp_suite_as_client_reference().await,
+        ReferenceTransport::WebSocket => run_websocket_suite_as_client_reference().await,
+    }
+}
+
+async fn run_tcp_suite_as_client_reference() -> Result<Value, RuntimeError> {
+    let started = Instant::now();
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+    let server_task = tokio::spawn(reference_server_task(server));
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let report = run_reference_client(ReferenceTransport::Tcp, started, client).await?;
+    server_task
+        .await
+        .map_err(|_| RuntimeError::Internal("wire reference TCP server task panicked"))??;
+    Ok(report)
+}
+
+async fn run_websocket_suite_as_client_reference() -> Result<Value, RuntimeError> {
+    let started = Instant::now();
+    let server = WebSocketProvider::bind("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let endpoint = WebSocketEndpoint::ws(format!("ws://{}", server.local_addr()?))?;
+    let server_task = tokio::spawn(reference_server_task(server));
+
+    let client = WebSocketProvider::connect(&endpoint, NnrpClientConfig::default()).await?;
+    let report = run_reference_client(ReferenceTransport::WebSocket, started, client).await?;
+    server_task
+        .await
+        .map_err(|_| RuntimeError::Internal("wire reference WebSocket server task panicked"))??;
+    Ok(report)
+}
+
+async fn reference_server_task(server: NnrpServer) -> Result<(), RuntimeError> {
+    let mut session = server.accept().await?;
+    let submit = session.receive_submit().await?;
+    if submit.body != REQUEST_BODY {
+        return Err(RuntimeError::UnexpectedMessage(
+            "wire reference server received unexpected request body",
+        ));
+    }
+    session
+        .send_result(submit.frame_id, token_result(), RESPONSE_BODY.to_vec())
+        .await?;
+    let close = session.receive_close().await?;
+    session.ack_close(&close).await?;
+    session.close().await
+}
+
+async fn run_reference_client(
+    transport: ReferenceTransport,
+    started: Instant,
+    client: NnrpClient,
+) -> Result<Value, RuntimeError> {
+    let mut session = client.open_session().await?;
+    let session_id = session.session_id();
+    let frame_id = session
+        .submit(token_submit(), REQUEST_BODY.to_vec())
+        .await?;
+    let result = session.await_result().await?;
+    if result.body != RESPONSE_BODY {
+        return Err(RuntimeError::UnexpectedMessage(
+            "wire reference client received unexpected response body",
+        ));
+    }
+    session.close().await?;
+
+    Ok(json!({
+        "mode": "suite-as-client",
+        "transport": transport.as_str(),
+        "target": "nnrp-rs-reference",
+        "status": "passed",
+        "terminal_state": "success",
+        "timing": {
+            "elapsed_us": started.elapsed().as_micros(),
+        },
+        "frames": [
+            {
+                "direction": "suite->target",
+                "message_type": "SESSION_OPEN",
+                "session_id": session_id,
+            },
+            {
+                "direction": "suite->target",
+                "message_type": "FRAME_SUBMIT",
+                "session_id": session_id,
+                "frame_id": frame_id,
+                "body_bytes": REQUEST_BODY.len(),
+            },
+            {
+                "direction": "target->suite",
+                "message_type": "RESULT_PUSH",
+                "session_id": session_id,
+                "frame_id": result.frame_id,
+                "body_bytes": result.body.len(),
+                "status_code": result.metadata.status_code,
+            },
+            {
+                "direction": "suite->target",
+                "message_type": "SESSION_CLOSE",
+                "session_id": session_id,
+            }
+        ],
+    }))
+}
+
+fn token_submit() -> FrameSubmitMetadata {
+    FrameSubmitMetadata {
+        src_width: 0,
+        src_height: 0,
+        tile_width: 0,
+        tile_height: 0,
+        tile_count: 0,
+        section_count: 0,
+        frame_class: 0,
+        input_profile: InputProfile::Unspecified,
+        tile_index_mode: TileIndexMode::DenseRange,
+        latency_budget_ms: 25,
+        target_fps_x100: 0,
+        retry_of_frame: 0,
+        tile_base_id: 0,
+        camera_bytes: 0,
+        tile_index_bytes: 0,
+        submit_mode: SubmitMode::Inline,
+        budget_policy: 0,
+        loss_tolerance_policy: 0,
+        object_ref_mask: 0,
+        dependency_frame_id: 0,
+        payload_kind_bitmap: PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),
+        payload_frame_count: 1,
+    }
+}
+
+fn token_result() -> ResultPushMetadata {
+    ResultPushMetadata {
+        status_code: 200,
+        result_flags: 0,
+        section_count: 0,
+        tile_count: 0,
+        active_profile_id: STANDARD_PROFILE_TOKEN,
+        inference_ms: 1,
+        queue_ms: 0,
+        server_total_ms: 1,
+        tile_base_id: 0,
+        tile_index_bytes: 0,
+        result_class: ResultClass::Complete,
+        applied_budget_policy: 0,
+        reused_frame_id: 0,
+        covered_tile_count: 0,
+        dropped_tile_count: 0,
+        payload_kind_bitmap: PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),
+        payload_frame_count: 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{run_suite_as_client_reference, ReferenceTransport};
+
+    #[tokio::test]
+    async fn suite_as_client_reference_runs_tcp_endpoint() {
+        let report = run_suite_as_client_reference(ReferenceTransport::Tcp)
+            .await
+            .expect("TCP reference endpoint should run");
+        assert_reference_report(&report, "tcp");
+    }
+
+    #[tokio::test]
+    async fn suite_as_client_reference_runs_websocket_endpoint() {
+        let report = run_suite_as_client_reference(ReferenceTransport::WebSocket)
+            .await
+            .expect("WebSocket reference endpoint should run");
+        assert_reference_report(&report, "websocket");
+    }
+
+    fn assert_reference_report(report: &serde_json::Value, transport: &str) {
+        assert_eq!(report["mode"], "suite-as-client");
+        assert_eq!(report["transport"], transport);
+        assert_eq!(report["status"], "passed");
+        assert_eq!(report["terminal_state"], "success");
+        assert!(report["timing"]["elapsed_us"].as_u64().is_some());
+
+        let frames = report["frames"]
+            .as_array()
+            .expect("reference report should contain frames");
+        let message_types = frames
+            .iter()
+            .map(|frame| frame["message_type"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            message_types,
+            vec![
+                "SESSION_OPEN",
+                "FRAME_SUBMIT",
+                "RESULT_PUSH",
+                "SESSION_CLOSE"
+            ]
+        );
+        assert_eq!(frames[1]["body_bytes"], super::REQUEST_BODY.len());
+        assert_eq!(frames[2]["body_bytes"], super::RESPONSE_BODY.len());
+        assert_eq!(frames[2]["status_code"], 200);
+    }
+}
