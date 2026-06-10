@@ -96,6 +96,46 @@ pub fn decode_websocket_binary_frame_json(frame: &[u8]) -> Result<String, JsValu
     serde_json::to_string(&output).map_err(|error| js_error(&error.to_string()))
 }
 
+#[wasm_bindgen(js_name = decodeWebSocketBinaryFrameBatchJson)]
+pub fn decode_websocket_binary_frame_batch_json(
+    frames: &[u8],
+    max_frames: u32,
+) -> Result<String, JsValue> {
+    let mut cursor = 0;
+    let mut outputs = Vec::new();
+
+    while cursor < frames.len() && (max_frames == 0 || outputs.len() < max_frames as usize) {
+        let source = &frames[cursor..];
+        let header = CommonHeader::parse(source).map_err(js_nnrp_error)?;
+        let frame_len = header.packet_len().map_err(js_nnrp_error)?;
+        if source.len() < frame_len {
+            return Err(js_error("incomplete binary frame in batch"));
+        }
+
+        let metadata_offset = cursor + COMMON_HEADER_LEN;
+        let metadata_len = header.meta_len as usize;
+        let body_offset = metadata_offset + metadata_len;
+        let body_len = header.body_len as usize;
+        outputs.push(WasmFrameBatchEntry {
+            frame_offset: cursor,
+            frame_len,
+            header: WasmFrameHeaderOutput::from(header),
+            metadata_offset,
+            metadata_len,
+            body_offset,
+            body_len,
+        });
+        cursor += frame_len;
+    }
+
+    serde_json::to_string(&WasmFrameBatchOutput {
+        frames: outputs,
+        consumed_len: cursor,
+        remaining_len: frames.len() - cursor,
+    })
+    .map_err(|error| js_error(&error.to_string()))
+}
+
 #[wasm_bindgen(js_name = encodeRuntimeControlMetadataJson)]
 pub fn encode_runtime_control_metadata_json(
     message_type: u8,
@@ -395,6 +435,24 @@ struct WasmFrameHeaderInput {
 
 #[derive(Debug, Serialize)]
 struct WasmFrameOutput {
+    header: WasmFrameHeaderOutput,
+    metadata_offset: usize,
+    metadata_len: usize,
+    body_offset: usize,
+    body_len: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct WasmFrameBatchOutput {
+    frames: Vec<WasmFrameBatchEntry>,
+    consumed_len: usize,
+    remaining_len: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct WasmFrameBatchEntry {
+    frame_offset: usize,
+    frame_len: usize,
     header: WasmFrameHeaderOutput,
     metadata_offset: usize,
     metadata_len: usize,
@@ -1495,6 +1553,61 @@ mod tests {
 
         assert!(decode_websocket_binary_frame_json(&frame).is_err());
         assert!(encode_websocket_binary_frame_json(r#"{"message_type":255}"#, &[], &[]).is_err());
+    }
+
+    #[test]
+    fn wasm_websocket_binary_frame_batch_decodes_offsets_and_limit() {
+        let first_header = format!(
+            r#"{{"message_type":{},"session_id":1,"frame_id":10}}"#,
+            MessageType::Progress as u8
+        );
+        let second_header = format!(
+            r#"{{"message_type":{},"session_id":1,"frame_id":11}}"#,
+            MessageType::PartialResult as u8
+        );
+        let first =
+            encode_websocket_binary_frame_json(&first_header, &[1, 2], &[3]).expect("first frame");
+        let second = encode_websocket_binary_frame_json(&second_header, &[4], &[5, 6])
+            .expect("second frame");
+        let mut batch = first.clone();
+        batch.extend_from_slice(&second);
+
+        let decoded = decode_websocket_binary_frame_batch_json(&batch, 0)
+            .expect("batch should decode without a limit");
+        let decoded = serde_json::from_str::<serde_json::Value>(&decoded).unwrap();
+
+        assert_eq!(decoded["frames"].as_array().unwrap().len(), 2);
+        assert_eq!(decoded["frames"][0]["frame_offset"], 0);
+        assert_eq!(decoded["frames"][0]["frame_len"], first.len());
+        assert_eq!(decoded["frames"][0]["metadata_offset"], COMMON_HEADER_LEN);
+        assert_eq!(decoded["frames"][0]["metadata_len"], 2);
+        assert_eq!(decoded["frames"][0]["body_offset"], COMMON_HEADER_LEN + 2);
+        assert_eq!(decoded["frames"][0]["body_len"], 1);
+        assert_eq!(decoded["frames"][1]["frame_offset"], first.len());
+        assert_eq!(
+            decoded["frames"][1]["metadata_offset"],
+            first.len() + COMMON_HEADER_LEN
+        );
+        assert_eq!(decoded["frames"][1]["body_len"], 2);
+        assert_eq!(decoded["consumed_len"], batch.len());
+        assert_eq!(decoded["remaining_len"], 0);
+
+        let limited = decode_websocket_binary_frame_batch_json(&batch, 1)
+            .expect("limited batch should decode");
+        let limited = serde_json::from_str::<serde_json::Value>(&limited).unwrap();
+        assert_eq!(limited["frames"].as_array().unwrap().len(), 1);
+        assert_eq!(limited["consumed_len"], first.len());
+        assert_eq!(limited["remaining_len"], second.len());
+    }
+
+    #[test]
+    fn wasm_websocket_binary_frame_batch_rejects_incomplete_frame() {
+        let header = format!(r#"{{"message_type":{}}}"#, MessageType::Progress as u8);
+        let mut frame = encode_websocket_binary_frame_json(&header, &[1, 2], &[3])
+            .expect("frame should encode");
+        frame.pop();
+
+        assert!(decode_websocket_binary_frame_batch_json(&frame, 0).is_err());
     }
 
     #[test]

@@ -82,6 +82,22 @@ export interface WebSocketFrameOutput {
   body_len: number;
 }
 
+export interface WebSocketFrameBatchEntry {
+  frame_offset: number;
+  frame_len: number;
+  header: WebSocketFrameHeaderOutput;
+  metadata_offset: number;
+  metadata_len: number;
+  body_offset: number;
+  body_len: number;
+}
+
+export interface WebSocketFrameBatchOutput {
+  frames: WebSocketFrameBatchEntry[];
+  consumed_len: number;
+  remaining_len: number;
+}
+
 export interface DecodedMetadata<T> {
   metadata: T;
   tail_offset: number;
@@ -300,6 +316,11 @@ export function encodeWebSocketBinaryFrameJson(
 ): Uint8Array;
 
 export function decodeWebSocketBinaryFrameJson(frame: Uint8Array): string;
+
+export function decodeWebSocketBinaryFrameBatchJson(
+  frames: Uint8Array,
+  maxFrames: number,
+): string;
 
 export function encodeRuntimeControlMetadataJson(
   messageType: number,
