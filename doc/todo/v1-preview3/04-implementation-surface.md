@@ -3,7 +3,7 @@
 ## Scope
 
 1. `04` owns how frozen preview3 semantics are materialized across `nnrp-core`, `nnrp-ffi`, and `nnrp-conformance`.
-2. `04` must not be used to finalize protocol behavior that is still unfrozen in `nnrp-doc`; crate and FFI work here is implementation of frozen semantics, not a substitute for protocol design.
+2. `04` must not be used to finalize protocol behavior that has not been defined in `nnrp-doc`; crate and FFI work here is implementation of documented semantics, not a substitute for protocol design.
 3. `04` is the upstream dependency surface for C#/Python SDK wiring and therefore must keep handle, ABI, and adapter contracts narrower than host-specific convenience APIs.
 
 ## Sub-Shards
