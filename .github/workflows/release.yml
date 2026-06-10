@@ -159,11 +159,13 @@ jobs:
           --package-name ${{ matrix.name }}
           --out artifacts/native
           --skip-symbol-check
-          --transport-scope all
           --transport-scope tcp
           --transport-scope quic
           --transport-scope ipc
           --transport-scope websocket
+
+      - name: Inspect native artifact boundaries
+        run: python scripts/inspect_release_artifacts.py --native-dir artifacts/native
 
       - name: Upload native artifact
         uses: actions/upload-artifact@v6
@@ -279,6 +281,10 @@ jobs:
         run: |
           rustup target add wasm32-unknown-unknown
           python scripts/package_wasm_primitives.py --out artifacts/wasm --transport-scope browser
+
+      - name: Inspect release artifact boundaries
+        run: |
+          python scripts/inspect_release_artifacts.py --native-dir artifacts/native --wasm-dir artifacts/wasm
 
       - name: Bundle release artifacts
         run: |

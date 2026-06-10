@@ -193,6 +193,9 @@ jobs:
       - name: Build and verify native artifact
         run: python scripts/package_native_artifacts.py --out artifacts/native
 
+      - name: Inspect native artifact boundaries
+        run: python scripts/inspect_release_artifacts.py --native-dir artifacts/native
+
       - name: Upload native artifact
         uses: actions/upload-artifact@v6
         with:
@@ -214,6 +217,9 @@ jobs:
 
       - name: Build and package WASM primitives
         run: python scripts/package_wasm_primitives.py --out artifacts/wasm
+
+      - name: Inspect WASM artifact boundaries
+        run: python scripts/inspect_release_artifacts.py --wasm-dir artifacts/wasm
 
       - name: Upload WASM primitives
         uses: actions/upload-artifact@v6

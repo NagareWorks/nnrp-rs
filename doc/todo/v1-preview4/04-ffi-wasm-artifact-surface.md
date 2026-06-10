@@ -52,4 +52,4 @@
   - [x] Runtime object reference codecs.
   - [x] Browser WebSocket substrate helpers.
 - [x] Write manifest fields for transport name, protocol version, ABI version, and enabled features.
-- [ ] Reject release artifacts that collapse all transport behavior into one hidden package.
+- [x] Reject release artifacts that collapse all transport behavior into one hidden package.

@@ -312,7 +312,10 @@ def main() -> None:
         "--transport-scope",
         action="append",
         choices=sorted(TRANSPORT_SCOPES.keys()),
-        help="Transport scope to package. Repeat to package multiple scopes. Defaults to all.",
+        help=(
+            "Transport scope to package. Repeat to package multiple scopes. "
+            "Defaults to transport-scoped release artifacts."
+        ),
     )
     args = parser.parse_args()
 
@@ -325,7 +328,7 @@ def main() -> None:
     library_kind = args.library_kind or target_library_kind
 
     release = not args.debug
-    transport_scopes = args.transport_scope or ["all"]
+    transport_scopes = args.transport_scope or ["tcp", "quic", "ipc", "websocket"]
     for transport_scope in transport_scopes:
         if not args.skip_build:
             build_library(release, args.target, transport_scope)
