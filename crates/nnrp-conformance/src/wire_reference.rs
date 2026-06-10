@@ -45,6 +45,17 @@ pub async fn run_suite_as_client_reference(
     }
 }
 
+pub async fn run_suite_as_server_reference(
+    transport: ReferenceTransport,
+) -> Result<Value, RuntimeError> {
+    match transport {
+        ReferenceTransport::Tcp => run_tcp_suite_as_server_reference().await,
+        ReferenceTransport::Ipc => run_ipc_suite_as_server_reference().await,
+        ReferenceTransport::Quic => run_quic_suite_as_server_reference().await,
+        ReferenceTransport::WebSocket => run_websocket_suite_as_server_reference().await,
+    }
+}
+
 async fn run_tcp_suite_as_client_reference() -> Result<Value, RuntimeError> {
     let started = Instant::now();
     let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
@@ -56,6 +67,22 @@ async fn run_tcp_suite_as_client_reference() -> Result<Value, RuntimeError> {
     server_task
         .await
         .map_err(|_| RuntimeError::Internal("wire reference TCP server task panicked"))??;
+    Ok(report)
+}
+
+async fn run_tcp_suite_as_server_reference() -> Result<Value, RuntimeError> {
+    let started = Instant::now();
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+    let target_task = tokio::spawn(async move {
+        let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+        target_client_task(client).await
+    });
+
+    let report = run_reference_server(ReferenceTransport::Tcp, started, server).await?;
+    target_task
+        .await
+        .map_err(|_| RuntimeError::Internal("wire reference TCP target task panicked"))??;
     Ok(report)
 }
 
@@ -89,6 +116,38 @@ async fn run_quic_suite_as_client_reference() -> Result<Value, RuntimeError> {
     Ok(report)
 }
 
+async fn run_quic_suite_as_server_reference() -> Result<Value, RuntimeError> {
+    let started = Instant::now();
+    let (server_endpoint, certificate) = QuicServerEndpointConfig::self_signed_localhost(
+        "127.0.0.1:0"
+            .parse()
+            .expect("loopback QUIC bind address should be a valid socket address"),
+    )?;
+    let server = QuicProvider::bind(
+        server_endpoint,
+        quic_server_config(NnrpServerConfig::default()),
+    )
+    .await?;
+    let addr = server.local_addr()?;
+    let target_task = tokio::spawn(async move {
+        let client_endpoint =
+            QuicClientEndpointConfig::localhost_with_root_certificate(certificate.certificate_der);
+        let client = QuicProvider::connect_addr(
+            addr,
+            client_endpoint,
+            quic_client_config(NnrpClientConfig::default()),
+        )
+        .await?;
+        target_client_task(client).await
+    });
+
+    let report = run_reference_server(ReferenceTransport::Quic, started, server).await?;
+    target_task
+        .await
+        .map_err(|_| RuntimeError::Internal("wire reference QUIC target task panicked"))??;
+    Ok(report)
+}
+
 async fn run_ipc_suite_as_client_reference() -> Result<Value, RuntimeError> {
     let started = Instant::now();
     let endpoint = unique_ipc_endpoint();
@@ -104,6 +163,24 @@ async fn run_ipc_suite_as_client_reference() -> Result<Value, RuntimeError> {
     Ok(report)
 }
 
+async fn run_ipc_suite_as_server_reference() -> Result<Value, RuntimeError> {
+    let started = Instant::now();
+    let endpoint = unique_ipc_endpoint();
+    let server = IpcProvider::bind(&endpoint, NnrpServerConfig::default()).await?;
+    let target_endpoint = endpoint.clone();
+    let target_task = tokio::spawn(async move {
+        let client = connect_ipc_client_with_retry(&target_endpoint).await?;
+        target_client_task(client).await
+    });
+
+    let report = run_reference_server(ReferenceTransport::Ipc, started, server).await?;
+    target_task
+        .await
+        .map_err(|_| RuntimeError::Internal("wire reference IPC target task panicked"))??;
+    cleanup_ipc_endpoint(&endpoint);
+    Ok(report)
+}
+
 async fn run_websocket_suite_as_client_reference() -> Result<Value, RuntimeError> {
     let started = Instant::now();
     let server = WebSocketProvider::bind("127.0.0.1:0", NnrpServerConfig::default()).await?;
@@ -115,6 +192,22 @@ async fn run_websocket_suite_as_client_reference() -> Result<Value, RuntimeError
     server_task
         .await
         .map_err(|_| RuntimeError::Internal("wire reference WebSocket server task panicked"))??;
+    Ok(report)
+}
+
+async fn run_websocket_suite_as_server_reference() -> Result<Value, RuntimeError> {
+    let started = Instant::now();
+    let server = WebSocketProvider::bind("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let endpoint = WebSocketEndpoint::ws(format!("ws://{}", server.local_addr()?))?;
+    let target_task = tokio::spawn(async move {
+        let client = WebSocketProvider::connect(&endpoint, NnrpClientConfig::default()).await?;
+        target_client_task(client).await
+    });
+
+    let report = run_reference_server(ReferenceTransport::WebSocket, started, server).await?;
+    target_task
+        .await
+        .map_err(|_| RuntimeError::Internal("wire reference WebSocket target task panicked"))??;
     Ok(report)
 }
 
@@ -148,6 +241,79 @@ async fn reference_server_task(server: NnrpServer) -> Result<(), RuntimeError> {
     let close = session.receive_close().await?;
     session.ack_close(&close).await?;
     session.close().await
+}
+
+async fn target_client_task(client: NnrpClient) -> Result<(), RuntimeError> {
+    let mut session = client.open_session().await?;
+    let frame_id = session
+        .submit(token_submit(), REQUEST_BODY.to_vec())
+        .await?;
+    let result = session.await_result().await?;
+    if result.frame_id != frame_id || result.body != RESPONSE_BODY {
+        return Err(RuntimeError::UnexpectedMessage(
+            "wire reference target received unexpected response",
+        ));
+    }
+    session.close().await
+}
+
+async fn run_reference_server(
+    transport: ReferenceTransport,
+    started: Instant,
+    server: NnrpServer,
+) -> Result<Value, RuntimeError> {
+    let mut session = server.accept().await?;
+    let session_id = session.session_id();
+    let submit = session.receive_submit().await?;
+    if submit.body != REQUEST_BODY {
+        return Err(RuntimeError::UnexpectedMessage(
+            "wire reference suite received unexpected request body",
+        ));
+    }
+    session
+        .send_result(submit.frame_id, token_result(), RESPONSE_BODY.to_vec())
+        .await?;
+    let close = session.receive_close().await?;
+    session.ack_close(&close).await?;
+    session.close().await?;
+
+    Ok(json!({
+        "mode": "suite-as-server",
+        "transport": transport.as_str(),
+        "target": "nnrp-rs-reference",
+        "status": "passed",
+        "terminal_state": "success",
+        "timing": {
+            "elapsed_us": started.elapsed().as_micros(),
+        },
+        "frames": [
+            {
+                "direction": "target->suite",
+                "message_type": "SESSION_OPEN",
+                "session_id": session_id,
+            },
+            {
+                "direction": "target->suite",
+                "message_type": "FRAME_SUBMIT",
+                "session_id": session_id,
+                "frame_id": submit.frame_id,
+                "body_bytes": submit.body.len(),
+            },
+            {
+                "direction": "suite->target",
+                "message_type": "RESULT_PUSH",
+                "session_id": session_id,
+                "frame_id": submit.frame_id,
+                "body_bytes": RESPONSE_BODY.len(),
+                "status_code": 200,
+            },
+            {
+                "direction": "target->suite",
+                "message_type": "SESSION_CLOSE",
+                "session_id": session_id,
+            }
+        ],
+    }))
 }
 
 fn unique_ipc_endpoint() -> IpcEndpoint {
@@ -293,14 +459,14 @@ fn token_result() -> ResultPushMetadata {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_suite_as_client_reference, ReferenceTransport};
+    use super::{run_suite_as_client_reference, run_suite_as_server_reference, ReferenceTransport};
 
     #[tokio::test]
     async fn suite_as_client_reference_runs_tcp_endpoint() {
         let report = run_suite_as_client_reference(ReferenceTransport::Tcp)
             .await
             .expect("TCP reference endpoint should run");
-        assert_reference_report(&report, "tcp");
+        assert_suite_as_client_report(&report, "tcp");
     }
 
     #[tokio::test]
@@ -308,7 +474,7 @@ mod tests {
         let report = run_suite_as_client_reference(ReferenceTransport::Ipc)
             .await
             .expect("IPC reference endpoint should run");
-        assert_reference_report(&report, "ipc");
+        assert_suite_as_client_report(&report, "ipc");
     }
 
     #[tokio::test]
@@ -326,7 +492,7 @@ mod tests {
         let report = run_suite_as_client_reference(ReferenceTransport::Quic)
             .await
             .expect("QUIC reference endpoint should run");
-        assert_reference_report(&report, "quic");
+        assert_suite_as_client_report(&report, "quic");
     }
 
     #[tokio::test]
@@ -334,10 +500,42 @@ mod tests {
         let report = run_suite_as_client_reference(ReferenceTransport::WebSocket)
             .await
             .expect("WebSocket reference endpoint should run");
-        assert_reference_report(&report, "websocket");
+        assert_suite_as_client_report(&report, "websocket");
     }
 
-    fn assert_reference_report(report: &serde_json::Value, transport: &str) {
+    #[tokio::test]
+    async fn suite_as_server_reference_runs_tcp_listener() {
+        let report = run_suite_as_server_reference(ReferenceTransport::Tcp)
+            .await
+            .expect("TCP reference listener should run");
+        assert_suite_as_server_report(&report, "tcp");
+    }
+
+    #[tokio::test]
+    async fn suite_as_server_reference_runs_ipc_listener() {
+        let report = run_suite_as_server_reference(ReferenceTransport::Ipc)
+            .await
+            .expect("IPC reference listener should run");
+        assert_suite_as_server_report(&report, "ipc");
+    }
+
+    #[tokio::test]
+    async fn suite_as_server_reference_runs_quic_listener() {
+        let report = run_suite_as_server_reference(ReferenceTransport::Quic)
+            .await
+            .expect("QUIC reference listener should run");
+        assert_suite_as_server_report(&report, "quic");
+    }
+
+    #[tokio::test]
+    async fn suite_as_server_reference_runs_websocket_listener() {
+        let report = run_suite_as_server_reference(ReferenceTransport::WebSocket)
+            .await
+            .expect("WebSocket reference listener should run");
+        assert_suite_as_server_report(&report, "websocket");
+    }
+
+    fn assert_suite_as_client_report(report: &serde_json::Value, transport: &str) {
         assert_eq!(report["mode"], "suite-as-client");
         assert_eq!(report["transport"], transport);
         assert_eq!(report["status"], "passed");
@@ -361,6 +559,36 @@ mod tests {
             ]
         );
         assert_eq!(frames[1]["body_bytes"], super::REQUEST_BODY.len());
+        assert_eq!(frames[2]["body_bytes"], super::RESPONSE_BODY.len());
+        assert_eq!(frames[2]["status_code"], 200);
+    }
+
+    fn assert_suite_as_server_report(report: &serde_json::Value, transport: &str) {
+        assert_eq!(report["mode"], "suite-as-server");
+        assert_eq!(report["transport"], transport);
+        assert_eq!(report["status"], "passed");
+        assert_eq!(report["terminal_state"], "success");
+        assert!(report["timing"]["elapsed_us"].as_u64().is_some());
+
+        let frames = report["frames"]
+            .as_array()
+            .expect("reference report should contain frames");
+        let message_types = frames
+            .iter()
+            .map(|frame| frame["message_type"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            message_types,
+            vec![
+                "SESSION_OPEN",
+                "FRAME_SUBMIT",
+                "RESULT_PUSH",
+                "SESSION_CLOSE"
+            ]
+        );
+        assert_eq!(frames[1]["direction"], "target->suite");
+        assert_eq!(frames[1]["body_bytes"], super::REQUEST_BODY.len());
+        assert_eq!(frames[2]["direction"], "suite->target");
         assert_eq!(frames[2]["body_bytes"], super::RESPONSE_BODY.len());
         assert_eq!(frames[2]["status_code"], 200);
     }

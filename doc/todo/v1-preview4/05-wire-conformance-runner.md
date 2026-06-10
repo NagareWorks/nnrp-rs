@@ -16,11 +16,11 @@
   - [x] QUIC endpoint.
   - [x] IPC endpoint.
   - [x] WebSocket endpoint.
-- [ ] Implement suite-as-server mode.
-  - [ ] TCP listener.
-  - [ ] QUIC listener.
-  - [ ] IPC listener.
-  - [ ] WebSocket listener.
+- [x] Implement suite-as-server mode.
+  - [x] TCP listener.
+  - [x] QUIC listener.
+  - [x] IPC listener.
+  - [x] WebSocket listener.
 - [ ] Implement suite-as-proxy mode.
   - [ ] Bidirectional frame forwarding.
   - [ ] Frame injection.
