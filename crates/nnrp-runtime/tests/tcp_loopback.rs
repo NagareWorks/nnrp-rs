@@ -1,23 +1,30 @@
+use nnrp_core::NnrpError;
 use nnrp_core::{
-    BackpressureLevel, CacheObjectId, CacheObjectKind, CommonHeader, FlowScopeKind,
-    FlowUpdateMetadata, FlowUpdateReason, FrameSubmitMetadata, InFlightPolicy, InputProfile,
-    MessageType, OperationState, PayloadKindBitmap, ResultClass, ResultPushMetadata,
-    SchemaRegistry, SessionCloseMetadata, SessionCloseReason, SessionMigrateAckMetadata,
-    SessionOpenAckMetadata, SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchAckStatus,
-    SessionPatchMetadata, SessionPatchRejectReason, SessionPriorityClass, SessionStatus,
-    SubmitMode, TileIndexMode, TransportId, FLOW_UPDATE_FLAG_CREDIT_VALID,
-    RESULT_PUSH_METADATA_LEN, SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE,
-    SESSION_OPEN_ACK_METADATA_LEN, SESSION_OPEN_METADATA_LEN, STANDARD_PROFILE_TOKEN,
-    TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
+    BackpressureLevel, CacheInvalidateMetadata, CacheInvalidateScope, CacheMissMetadata,
+    CacheMissReason, CacheObjectId, CacheObjectKind, CacheReferenceMetadata, CacheReuseScope,
+    CapabilityMetadata, CommonHeader, FlowScopeKind, FlowUpdateMetadata, FlowUpdateReason,
+    FrameSubmitMetadata, InFlightPolicy, InputProfile, MemoryLocationHint, MessageType,
+    ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata, ObjectReleaseMetadata,
+    ObjectReleaseReason, OperationState, OwnershipHint, PartialResultMetadata, PayloadKindBitmap,
+    PressureMetadata, ProgressMetadata, ResultClass, ResultDropReasonMetadata, ResultPushMetadata,
+    RouteHintMetadata, RuntimeObjectKind, RuntimeRole, SchemaRegistry, SessionCloseMetadata,
+    SessionCloseReason, SessionMigrateAckMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
+    SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata, SessionPatchRejectReason,
+    SessionPriorityClass, SessionStatus, SubmitMode, TileIndexMode, TransportId,
+    FLOW_UPDATE_FLAG_CREDIT_VALID, RESULT_DROP_REASON_DEADLINE_EXPIRED, RESULT_PUSH_METADATA_LEN,
+    SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE, SESSION_OPEN_ACK_METADATA_LEN,
+    SESSION_OPEN_METADATA_LEN, STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID,
+    TOKEN_DELTA_SCHEMA_VERSION,
 };
 use nnrp_runtime::{
     BoxedFramedTransport, FramedListener, FramedTransport, NnrpClient, NnrpClientConfig,
-    NnrpClientEvent, NnrpServer, NnrpServerConfig, NnrpServerPolicy, RuntimeError, RuntimePacket,
-    RuntimeTransportKind, TcpFramedListener, TcpTransport,
+    NnrpClientEvent, NnrpServer, NnrpServerConfig, NnrpServerPolicy, RuntimeError,
+    RuntimeFrameLimits, RuntimePacket, RuntimeTransportKind, TcpFramedListener, TcpTransport,
 };
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use tokio::net::TcpListener;
+use tokio::io::AsyncWriteExt;
+use tokio::net::{TcpListener, TcpStream};
 
 #[tokio::test]
 async fn tcp_loopback_opens_matching_client_and_server_sessions() -> Result<(), RuntimeError> {
@@ -52,6 +59,38 @@ async fn tcp_loopback_opens_matching_client_and_server_sessions() -> Result<(), 
 }
 
 #[tokio::test]
+async fn tcp_transport_rejects_oversized_declared_packet_before_body_read(
+) -> Result<(), RuntimeError> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let client_task = tokio::spawn(async move {
+        let mut stream = TcpStream::connect(addr).await?;
+        let oversized_body_len = (RuntimeFrameLimits::DEFAULT_MAX_PACKET_BYTES
+            - nnrp_core::COMMON_HEADER_LEN
+            + 1) as u32;
+        let header = CommonHeader::new(MessageType::ResultPush, 0, oversized_body_len);
+        stream.write_all(&header.to_bytes()?).await?;
+        Ok::<_, RuntimeError>(())
+    });
+
+    let (stream, _) = listener.accept().await?;
+    let mut transport = TcpTransport::new(stream);
+    let error = transport
+        .read_packet()
+        .await
+        .expect_err("oversized declared packet should be rejected before body read");
+    assert!(matches!(
+        error,
+        RuntimeError::FrameTooLarge {
+            declared,
+            max: RuntimeFrameLimits::DEFAULT_MAX_PACKET_BYTES,
+        } if declared == RuntimeFrameLimits::DEFAULT_MAX_PACKET_BYTES + 1
+    ));
+    client_task.await.expect("client task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn tcp_loopback_submits_frame_receives_result_and_closes() -> Result<(), RuntimeError> {
     let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
     let addr = server.local_addr()?;
@@ -69,6 +108,14 @@ async fn tcp_loopback_submits_frame_receives_result_and_closes() -> Result<(), R
         session
             .send_result(submit.frame_id, token_result(), b"delta".to_vec())
             .await?;
+        assert_eq!(
+            session
+                .operations()
+                .operation(submit.frame_id as u64)
+                .expect("operation should be registered")
+                .state,
+            OperationState::Completed
+        );
         let close = session.receive_close().await?;
         assert_eq!(close.last_operation_id, 1);
         session.ack_close(&close).await?;
@@ -110,6 +157,12 @@ async fn tcp_loopback_handles_cancel_drop_flow_and_patch() -> Result<(), Runtime
                 .state,
             OperationState::Cancelled
         );
+        assert!(matches!(
+            session
+                .send_result(submit.frame_id, token_result(), b"late".to_vec())
+                .await,
+            Err(RuntimeError::Protocol(_))
+        ));
 
         let patch = session.receive_patch().await?;
         assert_eq!(patch.patch_mask, 1);
@@ -143,6 +196,445 @@ async fn tcp_loopback_handles_cancel_drop_flow_and_patch() -> Result<(), Runtime
     match session.await_event().await? {
         NnrpClientEvent::ResultDrop { frame_id: dropped } => assert_eq!(dropped, frame_id),
         event => panic!("expected result drop, got {event:?}"),
+    }
+
+    session.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        let submit = session.receive_submit().await?;
+        assert_eq!(submit.frame_id, 1);
+
+        let priority = session.receive_scheduling_update().await?;
+        assert_eq!(priority.message_type, MessageType::PriorityUpdate);
+        assert_eq!(priority.metadata.operation_id, submit.frame_id as u64);
+        let schedule = session
+            .operations()
+            .operation(submit.frame_id as u64)
+            .expect("operation should be registered")
+            .schedule;
+        assert_eq!(schedule.priority_class, 1);
+        assert_eq!(schedule.priority_delta, -2);
+
+        let deadline = session.receive_scheduling_update().await?;
+        assert_eq!(deadline.message_type, MessageType::Deadline);
+        assert_eq!(deadline.metadata.deadline_unix_ms, 1_800_000_000_000);
+        let schedule = session
+            .operations()
+            .operation(submit.frame_id as u64)
+            .expect("operation should be registered")
+            .schedule;
+        assert_eq!(schedule.deadline_unix_ms, 1_800_000_000_000);
+
+        let credit = session.receive_pressure_update().await?;
+        assert_eq!(credit.message_type, MessageType::CreditUpdate);
+        assert_eq!(credit.metadata.credit_window, 9);
+        assert_eq!(session.pressure_state().outbound_credit_window, 9);
+
+        session.send_backpressure(soft_backpressure()).await?;
+        assert_eq!(
+            session.pressure_state().local_backpressure_level,
+            BackpressureLevel::Soft as u16
+        );
+        assert_eq!(session.pressure_state().inbound_credit_window, 2);
+        session
+            .send_progress(progress(submit.frame_id as u64), b"stage".to_vec())
+            .await?;
+        session
+            .send_partial_result(partial_result(submit.frame_id as u64), b"partial".to_vec())
+            .await?;
+
+        let control = session.receive_runtime_control().await?;
+        assert_eq!(control.message_type, MessageType::Cancel);
+        assert_eq!(control.metadata.operation_id, submit.frame_id as u64);
+        assert_eq!(
+            session
+                .operations()
+                .operation(submit.frame_id as u64)
+                .expect("operation should be registered")
+                .state,
+            OperationState::Cancelled
+        );
+        session
+            .send_result_drop_reason(drop_reason(submit.frame_id as u64))
+            .await?;
+
+        let abort_submit = session.receive_submit().await?;
+        assert_eq!(abort_submit.frame_id, 2);
+
+        let expire = session.receive_scheduling_update().await?;
+        assert_eq!(expire.message_type, MessageType::ExpireAt);
+        assert_eq!(expire.metadata.operation_id, abort_submit.frame_id as u64);
+        assert_eq!(expire.metadata.deadline_unix_ms, 1_800_000_000_500);
+        let schedule = session
+            .operations()
+            .operation(abort_submit.frame_id as u64)
+            .expect("operation should be registered")
+            .schedule;
+        assert_eq!(schedule.expire_at_unix_ms, 1_800_000_000_500);
+
+        let abort = session.receive_runtime_control().await?;
+        assert_eq!(abort.message_type, MessageType::Abort);
+        assert_eq!(abort.metadata.operation_id, abort_submit.frame_id as u64);
+        assert_eq!(
+            session
+                .operations()
+                .operation(abort_submit.frame_id as u64)
+                .expect("operation should be registered")
+                .state,
+            OperationState::Failed
+        );
+        session.send_backpressure(soft_backpressure()).await?;
+
+        let close = session.receive_close().await?;
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let mut session = client.open_session().await?;
+    let frame_id = session
+        .submit_nowait(token_submit(), b"prompt".to_vec())
+        .await?;
+    session.update_priority(frame_id as u64, 1, -2).await?;
+    session
+        .update_deadline(frame_id as u64, 1_800_000_000_000)
+        .await?;
+    session.send_credit_update(credit_update()).await?;
+    assert_eq!(session.pressure_state().inbound_credit_window, 9);
+    session.cancel_operation(frame_id as u64, 7).await?;
+
+    match session.await_event().await? {
+        NnrpClientEvent::Backpressure(pressure) => {
+            assert_eq!(pressure.pressure_level, BackpressureLevel::Soft as u16);
+            assert_eq!(pressure.retry_after_ms, 25);
+            assert_eq!(
+                session.pressure_state().remote_backpressure_level,
+                BackpressureLevel::Soft as u16
+            );
+            assert_eq!(session.pressure_state().outbound_credit_window, 2);
+        }
+        event => panic!("expected backpressure, got {event:?}"),
+    }
+    match session.await_event().await? {
+        NnrpClientEvent::Progress { metadata, body } => {
+            assert_eq!(metadata.operation_id, frame_id as u64);
+            assert_eq!(metadata.progress_sequence, 1);
+            assert_eq!(metadata.percent_x100, 2_500);
+            assert_eq!(body, b"stage".to_vec());
+        }
+        event => panic!("expected progress, got {event:?}"),
+    }
+    match session.await_event().await? {
+        NnrpClientEvent::PartialResult { metadata, body } => {
+            assert_eq!(metadata.operation_id, frame_id as u64);
+            assert_eq!(body, b"partial".to_vec());
+        }
+        event => panic!("expected partial result, got {event:?}"),
+    }
+    match session.await_event().await? {
+        NnrpClientEvent::ResultDropReason(reason) => {
+            assert_eq!(reason.operation_id, frame_id as u64);
+            assert_eq!(reason.drop_reason_code, 7);
+        }
+        event => panic!("expected drop reason, got {event:?}"),
+    }
+
+    let abort_frame_id = session
+        .submit_nowait(token_submit(), b"abort-prompt".to_vec())
+        .await?;
+    session
+        .expire_at(abort_frame_id as u64, 1_800_000_000_500)
+        .await?;
+    session.abort_operation(abort_frame_id as u64, 9).await?;
+
+    match session.await_event().await? {
+        NnrpClientEvent::Backpressure(pressure) => {
+            assert_eq!(pressure.pressure_level, BackpressureLevel::Soft as u16);
+            assert_eq!(pressure.retry_after_ms, 25);
+        }
+        event => panic!("expected abort backpressure, got {event:?}"),
+    }
+
+    session.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn tcp_loopback_preserves_partial_result_order_with_interleaving() -> Result<(), RuntimeError>
+{
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        let first = session.receive_submit().await?;
+        let second = session.receive_submit().await?;
+
+        session
+            .send_partial_result(
+                partial_result_sequence(first.frame_id as u64, 1, 7),
+                b"op1-one".to_vec(),
+            )
+            .await?;
+        session
+            .send_partial_result(
+                partial_result_sequence(second.frame_id as u64, 1, 7),
+                b"op2-one".to_vec(),
+            )
+            .await?;
+        session
+            .send_partial_result(
+                partial_result_sequence(first.frame_id as u64, 2, 7),
+                b"op1-two".to_vec(),
+            )
+            .await?;
+
+        let close = session.receive_close().await?;
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let mut session = client.open_session().await?;
+    let first_frame_id = session
+        .submit_nowait(token_submit(), b"first".to_vec())
+        .await?;
+    let second_frame_id = session
+        .submit_nowait(token_submit(), b"second".to_vec())
+        .await?;
+
+    assert_partial_result_event(
+        session.await_event().await?,
+        first_frame_id as u64,
+        1,
+        b"op1-one",
+    );
+    assert_partial_result_event(
+        session.await_event().await?,
+        second_frame_id as u64,
+        1,
+        b"op2-one",
+    );
+    assert_partial_result_event(
+        session.await_event().await?,
+        first_frame_id as u64,
+        2,
+        b"op1-two",
+    );
+
+    session.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        let submit = session.receive_submit().await?;
+        let operation_id = submit.frame_id as u64;
+
+        session
+            .send_capability(
+                MessageType::CapabilityNegotiation,
+                capability_metadata(),
+                b"cap!".to_vec(),
+            )
+            .await?;
+        session
+            .send_route_hint(
+                MessageType::RouteHint,
+                route_hint(operation_id),
+                b"hint".to_vec(),
+            )
+            .await?;
+        session
+            .send_object_declare(object_descriptor(), b"meta".to_vec())
+            .await?;
+        session
+            .send_object_ref(object_reference(operation_id), Vec::new())
+            .await?;
+        session
+            .send_object_delta(object_delta(), b"abcd".to_vec())
+            .await?;
+        session
+            .send_cache_reference(cache_reference(), b"hint".to_vec())
+            .await?;
+        session.send_cache_invalidate(cache_invalidate()).await?;
+        session
+            .send_result(submit.frame_id, token_result(), b"done".to_vec())
+            .await?;
+        session
+            .send_object_release(
+                object_release(operation_id, ObjectReleaseReason::Completed, 0),
+                Vec::new(),
+            )
+            .await?;
+
+        let close = session.receive_close().await?;
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let mut session = client.open_session().await?;
+    let frame_id = session
+        .submit_nowait(token_submit(), b"prompt".to_vec())
+        .await?;
+
+    match session.await_event().await? {
+        NnrpClientEvent::Capability {
+            message_type,
+            metadata,
+            body,
+        } => {
+            assert_eq!(message_type, MessageType::CapabilityNegotiation);
+            assert_eq!(metadata.profile_id, STANDARD_PROFILE_TOKEN);
+            assert_eq!(metadata.capability_count, 2);
+            assert_eq!(metadata.preference_rank, 1);
+            assert_eq!(body, b"cap!".to_vec());
+        }
+        event => panic!("expected capability negotiation, got {event:?}"),
+    }
+    match session.await_event().await? {
+        NnrpClientEvent::RouteHint {
+            message_type,
+            metadata,
+            body,
+        } => {
+            assert_eq!(message_type, MessageType::RouteHint);
+            assert_eq!(metadata.operation_id, frame_id as u64);
+            assert_eq!(metadata.route_id, 92);
+            assert_eq!(metadata.executor_class, 3);
+            assert_eq!(body, b"hint".to_vec());
+        }
+        event => panic!("expected route hint, got {event:?}"),
+    }
+    match session.await_event().await? {
+        NnrpClientEvent::ObjectDeclare { metadata, body } => {
+            assert_eq!(metadata.object_id, 900);
+            assert_eq!(metadata.object_kind, RuntimeObjectKind::ImageTile);
+            assert_eq!(body, b"meta".to_vec());
+        }
+        event => panic!("expected object declaration, got {event:?}"),
+    }
+    match session.await_event().await? {
+        NnrpClientEvent::ObjectRef { metadata, body } => {
+            assert_eq!(metadata.operation_id, frame_id as u64);
+            assert_eq!(metadata.length, 4);
+            assert!(body.is_empty());
+        }
+        event => panic!("expected object reference, got {event:?}"),
+    }
+    match session.await_event().await? {
+        NnrpClientEvent::ObjectDelta { metadata, body } => {
+            assert_eq!(metadata.object_id, 900);
+            assert_eq!(metadata.delta_bytes, 4);
+            assert_eq!(body, b"abcd".to_vec());
+        }
+        event => panic!("expected object delta, got {event:?}"),
+    }
+    match session.await_event().await? {
+        NnrpClientEvent::CacheReference { metadata, body } => {
+            assert_eq!(metadata.cache_key_lo, 0x5678);
+            assert_eq!(metadata.reuse_scope, CacheReuseScope::Session);
+            assert_eq!(body, b"hint".to_vec());
+        }
+        event => panic!("expected cache reference, got {event:?}"),
+    }
+    match session.await_event().await? {
+        NnrpClientEvent::CacheInvalidate(metadata) => {
+            assert_eq!(metadata.invalidate_scope, CacheInvalidateScope::ObjectKey);
+            assert_eq!(metadata.cache_namespace, 42);
+            assert_eq!(metadata.cache_key_hi, 0x1234);
+            assert_eq!(metadata.cache_key_lo, 0x5678);
+            assert_eq!(metadata.reason_code, 77);
+        }
+        event => panic!("expected cache invalidate, got {event:?}"),
+    }
+    match session.await_event().await? {
+        NnrpClientEvent::Result(result) => {
+            assert_eq!(result.frame_id, frame_id);
+            assert_eq!(result.body, b"done".to_vec());
+        }
+        event => panic!("expected result, got {event:?}"),
+    }
+    match session.await_event().await? {
+        NnrpClientEvent::ObjectRelease { metadata, body } => {
+            assert_eq!(metadata.object_id, 900);
+            assert_eq!(metadata.release_reason, ObjectReleaseReason::Completed);
+            assert!(body.is_empty());
+        }
+        event => panic!("expected object release, got {event:?}"),
+    }
+
+    session.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn tcp_loopback_releases_objects_after_cancel_and_reports_cache_miss(
+) -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        let submit = session.receive_submit().await?;
+        let operation_id = submit.frame_id as u64;
+        let control = session.receive_runtime_control().await?;
+        assert_eq!(control.message_type, MessageType::Cancel);
+        session
+            .send_object_release(
+                object_release(operation_id, ObjectReleaseReason::Cancelled, 6),
+                b"cancel".to_vec(),
+            )
+            .await?;
+        session
+            .send_cache_miss(cache_miss(), b"schema".to_vec())
+            .await?;
+
+        let close = session.receive_close().await?;
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let mut session = client.open_session().await?;
+    let frame_id = session
+        .submit_nowait(token_submit(), b"prompt".to_vec())
+        .await?;
+    session.cancel_operation(frame_id as u64, 7).await?;
+
+    match session.await_event().await? {
+        NnrpClientEvent::ObjectRelease { metadata, body } => {
+            assert_eq!(metadata.operation_id, frame_id as u64);
+            assert_eq!(metadata.release_reason, ObjectReleaseReason::Cancelled);
+            assert_eq!(body, b"cancel".to_vec());
+        }
+        event => panic!("expected cancelled object release, got {event:?}"),
+    }
+    match session.await_event().await? {
+        NnrpClientEvent::CacheMiss { metadata, body } => {
+            assert_eq!(metadata.miss_reason, CacheMissReason::SchemaMismatch);
+            assert_eq!(metadata.profile_id, STANDARD_PROFILE_TOKEN);
+            assert_eq!(body, b"schema".to_vec());
+        }
+        event => panic!("expected cache miss, got {event:?}"),
     }
 
     session.close().await?;
@@ -359,6 +851,63 @@ async fn server_registry_tracks_resume_enabled_sessions() -> Result<(), RuntimeE
 }
 
 #[tokio::test]
+async fn tcp_loopback_suppresses_expired_final_results() -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        let submit = session.receive_submit().await?;
+        let expire = session.receive_scheduling_update().await?;
+        assert_eq!(expire.message_type, MessageType::ExpireAt);
+        assert_eq!(expire.metadata.operation_id, submit.frame_id as u64);
+
+        let error = session
+            .send_result(submit.frame_id, token_result(), b"expired".to_vec())
+            .await
+            .expect_err("expired operation should reject final result delivery");
+        assert!(matches!(
+            error,
+            RuntimeError::Protocol(NnrpError::InvalidOperationTransition {
+                from: OperationState::Superseded,
+                to: OperationState::Completed,
+            })
+        ));
+        assert_eq!(
+            session
+                .operations()
+                .operation(submit.frame_id as u64)
+                .expect("operation should be registered")
+                .state,
+            OperationState::Superseded
+        );
+
+        let close = session.receive_close().await?;
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let mut session = client.open_session().await?;
+    let frame_id = session
+        .submit_nowait(token_submit(), b"prompt".to_vec())
+        .await?;
+    session.expire_at(frame_id as u64, 1).await?;
+    match session.await_event().await? {
+        NnrpClientEvent::ResultDropReason(reason) => {
+            assert_eq!(reason.operation_id, frame_id as u64);
+            assert_eq!(reason.result_sequence, frame_id as u64);
+            assert_eq!(reason.drop_reason_code, RESULT_DROP_REASON_DEADLINE_EXPIRED);
+            assert_eq!(reason.source_role, RuntimeRole::Server as u8);
+        }
+        event => panic!("expected stale result drop reason, got {event:?}"),
+    }
+    session.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn tcp_loopback_consumes_transport_migration_recovery() -> Result<(), RuntimeError> {
     let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
     let addr = server.local_addr()?;
@@ -527,6 +1076,453 @@ async fn client_result_and_patch_helpers_reject_control_mismatches() -> Result<(
         client_patch_error(malformed_patch_ack).await,
         RuntimeError::UnexpectedMessage(_)
     ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn client_result_helper_rejects_preview4_control_non_result_events(
+) -> Result<(), RuntimeError> {
+    for packet in [
+        control_event_packet(
+            MessageType::ResultDropReason,
+            1,
+            drop_reason(1).to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        control_event_packet(
+            MessageType::PartialResult,
+            1,
+            partial_result(1).to_bytes()?.to_vec(),
+            b"partial".to_vec(),
+        )?,
+        control_event_packet(
+            MessageType::Backpressure,
+            1,
+            soft_backpressure().to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        control_event_packet(
+            MessageType::CreditUpdate,
+            1,
+            credit_update().to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        object_event_packet(
+            MessageType::CacheInvalidate,
+            1,
+            cache_invalidate().to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        control_event_packet(
+            MessageType::CapabilityNegotiation,
+            1,
+            capability_metadata().to_bytes()?.to_vec(),
+            b"cap!".to_vec(),
+        )?,
+        control_event_packet(
+            MessageType::RouteHint,
+            1,
+            route_hint(1).to_bytes()?.to_vec(),
+            b"hint".to_vec(),
+        )?,
+    ] {
+        let mut session = scripted_client_session(packet).await?;
+        assert!(matches!(
+            session.await_result().await,
+            Err(RuntimeError::UnexpectedMessage(_))
+        ));
+        session.close_transport().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn client_preview4_control_event_reader_rejects_malformed_packets() -> Result<(), RuntimeError>
+{
+    for packet in [
+        control_event_packet(
+            MessageType::ResultDropReason,
+            2,
+            drop_reason(1).to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        control_event_packet(MessageType::ResultDropReason, 1, vec![0], Vec::new())?,
+        control_event_packet(
+            MessageType::PartialResult,
+            2,
+            partial_result(1).to_bytes()?.to_vec(),
+            b"partial".to_vec(),
+        )?,
+        control_event_packet(MessageType::PartialResult, 1, vec![0], Vec::new())?,
+        control_event_packet(
+            MessageType::PartialResult,
+            1,
+            partial_result(1).to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        control_event_packet(
+            MessageType::Progress,
+            2,
+            progress(1).to_bytes()?.to_vec(),
+            b"stage".to_vec(),
+        )?,
+        control_event_packet(MessageType::Progress, 1, vec![0], Vec::new())?,
+        control_event_packet(
+            MessageType::Progress,
+            1,
+            progress(1).to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        control_event_packet(
+            MessageType::Backpressure,
+            2,
+            soft_backpressure().to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        control_event_packet(MessageType::Backpressure, 1, vec![0], Vec::new())?,
+        control_event_packet(
+            MessageType::CreditUpdate,
+            2,
+            credit_update().to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        control_event_packet(MessageType::CreditUpdate, 1, vec![0], Vec::new())?,
+        control_event_packet(MessageType::CapabilityNegotiation, 1, vec![0], Vec::new())?,
+        control_event_packet(
+            MessageType::CapabilityNegotiation,
+            1,
+            capability_metadata().to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        control_event_packet(MessageType::RouteHint, 1, vec![0], Vec::new())?,
+        control_event_packet(
+            MessageType::RouteHint,
+            1,
+            route_hint(1).to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+    ] {
+        let mut session = scripted_client_session(packet).await?;
+        assert!(matches!(
+            session.await_event().await,
+            Err(RuntimeError::UnexpectedMessage(_))
+        ));
+        session.close_transport().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn client_preview4_event_reader_rejects_malformed_object_cache_packets(
+) -> Result<(), RuntimeError> {
+    for packet in [
+        object_event_packet(
+            MessageType::ObjectDeclare,
+            2,
+            object_descriptor().to_bytes()?.to_vec(),
+            b"meta".to_vec(),
+        )?,
+        object_event_packet(MessageType::ObjectDeclare, 1, vec![0], Vec::new())?,
+        object_event_packet(
+            MessageType::ObjectDeclare,
+            1,
+            object_descriptor().to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        object_event_packet(
+            MessageType::ObjectRef,
+            2,
+            object_reference(1).to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        object_event_packet(MessageType::ObjectRef, 1, vec![0], Vec::new())?,
+        object_event_packet(
+            MessageType::ObjectRef,
+            1,
+            object_reference(1).to_bytes()?.to_vec(),
+            b"x".to_vec(),
+        )?,
+        object_event_packet(
+            MessageType::ObjectRelease,
+            2,
+            object_release(1, ObjectReleaseReason::Completed, 0)
+                .to_bytes()?
+                .to_vec(),
+            Vec::new(),
+        )?,
+        object_event_packet(MessageType::ObjectRelease, 1, vec![0], Vec::new())?,
+        object_event_packet(
+            MessageType::ObjectRelease,
+            1,
+            object_release(1, ObjectReleaseReason::Completed, 1)
+                .to_bytes()?
+                .to_vec(),
+            Vec::new(),
+        )?,
+        object_event_packet(
+            MessageType::ObjectDelta,
+            2,
+            object_delta().to_bytes()?.to_vec(),
+            b"abcd".to_vec(),
+        )?,
+        object_event_packet(MessageType::ObjectDelta, 1, vec![0], Vec::new())?,
+        object_event_packet(
+            MessageType::ObjectDelta,
+            1,
+            object_delta().to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        object_event_packet(
+            MessageType::CacheReference,
+            2,
+            cache_reference().to_bytes()?.to_vec(),
+            b"hint".to_vec(),
+        )?,
+        object_event_packet(MessageType::CacheReference, 1, vec![0], Vec::new())?,
+        object_event_packet(
+            MessageType::CacheReference,
+            1,
+            cache_reference().to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        object_event_packet(
+            MessageType::CacheMiss,
+            2,
+            cache_miss().to_bytes()?.to_vec(),
+            b"schema".to_vec(),
+        )?,
+        object_event_packet(MessageType::CacheMiss, 1, vec![0], Vec::new())?,
+        object_event_packet(
+            MessageType::CacheMiss,
+            1,
+            cache_miss().to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        object_event_packet(
+            MessageType::CacheInvalidate,
+            2,
+            cache_invalidate().to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        object_event_packet(MessageType::CacheInvalidate, 1, vec![0], Vec::new())?,
+        object_event_packet(
+            MessageType::CacheInvalidate,
+            1,
+            cache_invalidate().to_bytes()?.to_vec(),
+            b"body".to_vec(),
+        )?,
+    ] {
+        let mut session = scripted_client_session(packet).await?;
+        assert!(matches!(
+            session.await_event().await,
+            Err(RuntimeError::UnexpectedMessage(_))
+        ));
+        session.close_transport().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn server_preview4_control_readers_and_senders_reject_mismatches() -> Result<(), RuntimeError>
+{
+    for err in [
+        server_receive_runtime_control_error(control_event_packet(
+            MessageType::FlowUpdate,
+            1,
+            session_flow_update().to_bytes()?.to_vec(),
+            Vec::new(),
+        )?)
+        .await,
+        server_receive_runtime_control_error(control_event_packet(
+            MessageType::Cancel,
+            2,
+            nnrp_core::ControlRequestMetadata {
+                operation_id: 1,
+                control_sequence: 1,
+                reason_code: 7,
+                source_role: 1,
+                flags: 0,
+                diagnostic_bytes: 0,
+            }
+            .to_bytes()?
+            .to_vec(),
+            Vec::new(),
+        )?)
+        .await,
+        server_receive_runtime_control_error(control_event_packet(
+            MessageType::Cancel,
+            1,
+            vec![0],
+            Vec::new(),
+        )?)
+        .await,
+        server_receive_scheduling_update_error(control_event_packet(
+            MessageType::Cancel,
+            1,
+            nnrp_core::ControlRequestMetadata {
+                operation_id: 1,
+                control_sequence: 1,
+                reason_code: 7,
+                source_role: 1,
+                flags: 0,
+                diagnostic_bytes: 0,
+            }
+            .to_bytes()?
+            .to_vec(),
+            Vec::new(),
+        )?)
+        .await,
+        server_receive_scheduling_update_error(control_event_packet(
+            MessageType::Deadline,
+            1,
+            vec![0],
+            Vec::new(),
+        )?)
+        .await,
+        server_receive_pressure_update_error(control_event_packet(
+            MessageType::Deadline,
+            1,
+            nnrp_core::SchedulingMetadata {
+                operation_id: 1,
+                control_sequence: 1,
+                priority_class: 0,
+                priority_delta: 0,
+                deadline_unix_ms: 100,
+                flags: 0,
+            }
+            .to_bytes()?
+            .to_vec(),
+            Vec::new(),
+        )?)
+        .await,
+        server_receive_pressure_update_error(control_event_packet(
+            MessageType::Backpressure,
+            2,
+            soft_backpressure().to_bytes()?.to_vec(),
+            Vec::new(),
+        )?)
+        .await,
+        server_receive_pressure_update_error(control_event_packet(
+            MessageType::Backpressure,
+            1,
+            vec![0],
+            Vec::new(),
+        )?)
+        .await,
+        server_send_control_error(|mut session| async move {
+            session
+                .send_partial_result(partial_result(1), Vec::new())
+                .await
+        })
+        .await,
+        server_send_control_error(|mut session| async move {
+            session.send_progress(progress(1), Vec::new()).await
+        })
+        .await,
+        server_send_control_error(|mut session| async move {
+            session
+                .send_result_drop_reason(nnrp_core::ResultDropReasonMetadata {
+                    operation_id: 1,
+                    result_sequence: 1,
+                    drop_reason_code: 0,
+                    source_role: 2,
+                    flags: 0,
+                    diagnostic_bytes: 0,
+                })
+                .await
+        })
+        .await,
+        server_send_control_error(|mut session| async move {
+            session
+                .send_backpressure(nnrp_core::PressureMetadata {
+                    scope_id: 1,
+                    credit_window: 1,
+                    pressure_level: 0,
+                    pressure_reason: 0,
+                    retry_after_ms: 0,
+                    flags: 0,
+                })
+                .await
+        })
+        .await,
+        server_send_control_error(|mut session| async move {
+            session
+                .send_capability(MessageType::Cancel, capability_metadata(), b"cap!".to_vec())
+                .await
+        })
+        .await,
+        server_send_control_error(|mut session| async move {
+            session
+                .send_capability(
+                    MessageType::CapabilityNegotiation,
+                    capability_metadata(),
+                    Vec::new(),
+                )
+                .await
+        })
+        .await,
+        server_send_control_error(|mut session| async move {
+            session
+                .send_route_hint(MessageType::Cancel, route_hint(1), b"hint".to_vec())
+                .await
+        })
+        .await,
+        server_send_control_error(|mut session| async move {
+            session
+                .send_route_hint(MessageType::RouteHint, route_hint(1), Vec::new())
+                .await
+        })
+        .await,
+    ] {
+        assert!(matches!(
+            err,
+            RuntimeError::UnexpectedMessage(_) | RuntimeError::Protocol(_)
+        ));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn server_preview4_object_cache_senders_reject_body_mismatches() -> Result<(), RuntimeError> {
+    for err in [
+        server_send_object_error(|mut session| async move {
+            session
+                .send_object_declare(object_descriptor(), Vec::new())
+                .await
+        })
+        .await,
+        server_send_object_error(|mut session| async move {
+            session
+                .send_object_ref(object_reference(1), b"x".to_vec())
+                .await
+        })
+        .await,
+        server_send_object_error(|mut session| async move {
+            session
+                .send_object_release(
+                    object_release(1, ObjectReleaseReason::Completed, 1),
+                    Vec::new(),
+                )
+                .await
+        })
+        .await,
+        server_send_object_error(|mut session| async move {
+            session.send_object_delta(object_delta(), Vec::new()).await
+        })
+        .await,
+        server_send_object_error(|mut session| async move {
+            session
+                .send_cache_reference(cache_reference(), Vec::new())
+                .await
+        })
+        .await,
+        server_send_object_error(|mut session| async move {
+            session.send_cache_miss(cache_miss(), Vec::new()).await
+        })
+        .await,
+    ] {
+        assert!(matches!(err, RuntimeError::UnexpectedMessage(_)));
+    }
     Ok(())
 }
 
@@ -1196,6 +2192,73 @@ async fn server_receive_migrate_error(packet: RuntimePacket) -> RuntimeError {
     .await
 }
 
+async fn server_receive_runtime_control_error(packet: RuntimePacket) -> RuntimeError {
+    server_receive_error(packet, |mut session| async move {
+        session.receive_runtime_control().await.map(|_| ())
+    })
+    .await
+}
+
+async fn server_receive_scheduling_update_error(packet: RuntimePacket) -> RuntimeError {
+    server_receive_error(packet, |mut session| async move {
+        session.receive_scheduling_update().await.map(|_| ())
+    })
+    .await
+}
+
+async fn server_receive_pressure_update_error(packet: RuntimePacket) -> RuntimeError {
+    server_receive_error(packet, |mut session| async move {
+        session.receive_pressure_update().await.map(|_| ())
+    })
+    .await
+}
+
+async fn server_send_control_error<F, Fut>(send: F) -> RuntimeError
+where
+    F: FnOnce(nnrp_runtime::NnrpServerSession) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<(), RuntimeError>> + Send + 'static,
+{
+    let mut header = CommonHeader::new(
+        MessageType::SessionClose,
+        nnrp_core::SESSION_CLOSE_METADATA_LEN as u32,
+        0,
+    );
+    header.session_id = 1;
+    server_receive_error(
+        RuntimePacket::new(
+            header,
+            close_request().to_bytes().unwrap().to_vec(),
+            Vec::new(),
+        )
+        .expect("close packet should build"),
+        send,
+    )
+    .await
+}
+
+async fn server_send_object_error<F, Fut>(send: F) -> RuntimeError
+where
+    F: FnOnce(nnrp_runtime::NnrpServerSession) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<(), RuntimeError>> + Send + 'static,
+{
+    let mut header = CommonHeader::new(
+        MessageType::SessionClose,
+        nnrp_core::SESSION_CLOSE_METADATA_LEN as u32,
+        0,
+    );
+    header.session_id = 1;
+    server_receive_error(
+        RuntimePacket::new(
+            header,
+            close_request().to_bytes().unwrap().to_vec(),
+            Vec::new(),
+        )
+        .expect("close packet should build"),
+        send,
+    )
+    .await
+}
+
 async fn server_send_migrate_ack_error(packet: RuntimePacket) -> RuntimeError {
     server_receive_error(packet, |mut session| async move {
         let migrate = session.receive_migrate().await?;
@@ -1314,6 +2377,224 @@ fn session_flow_update() -> FlowUpdateMetadata {
         credit_epoch: 1,
         flow_flags: FLOW_UPDATE_FLAG_CREDIT_VALID,
     }
+}
+
+fn credit_update() -> PressureMetadata {
+    PressureMetadata {
+        scope_id: 1,
+        credit_window: 9,
+        pressure_level: BackpressureLevel::None as u16,
+        pressure_reason: 0,
+        retry_after_ms: 0,
+        flags: 0,
+    }
+}
+
+fn soft_backpressure() -> PressureMetadata {
+    PressureMetadata {
+        scope_id: 1,
+        credit_window: 2,
+        pressure_level: BackpressureLevel::Soft as u16,
+        pressure_reason: 1,
+        retry_after_ms: 25,
+        flags: 0,
+    }
+}
+
+fn partial_result(operation_id: u64) -> PartialResultMetadata {
+    partial_result_sequence(operation_id, 1, 7)
+}
+
+fn progress(operation_id: u64) -> ProgressMetadata {
+    ProgressMetadata {
+        operation_id,
+        progress_sequence: 1,
+        stage_code: 2,
+        percent_x100: 2_500,
+        object_id: 0,
+        body_bytes: 5,
+    }
+}
+
+fn partial_result_sequence(
+    operation_id: u64,
+    result_sequence: u64,
+    body_bytes: u32,
+) -> PartialResultMetadata {
+    PartialResultMetadata {
+        operation_id,
+        result_sequence,
+        object_id: 0,
+        delta_sequence: 0,
+        body_bytes,
+        flags: 0,
+    }
+}
+
+fn assert_partial_result_event(
+    event: NnrpClientEvent,
+    operation_id: u64,
+    result_sequence: u64,
+    body: &[u8],
+) {
+    match event {
+        NnrpClientEvent::PartialResult {
+            metadata,
+            body: actual_body,
+        } => {
+            assert_eq!(metadata.operation_id, operation_id);
+            assert_eq!(metadata.result_sequence, result_sequence);
+            assert_eq!(actual_body, body);
+        }
+        event => panic!("expected partial result, got {event:?}"),
+    }
+}
+
+fn drop_reason(operation_id: u64) -> ResultDropReasonMetadata {
+    ResultDropReasonMetadata {
+        operation_id,
+        result_sequence: 1,
+        drop_reason_code: 7,
+        source_role: 2,
+        flags: 0,
+        diagnostic_bytes: 0,
+    }
+}
+
+fn capability_metadata() -> CapabilityMetadata {
+    CapabilityMetadata {
+        profile_id: STANDARD_PROFILE_TOKEN,
+        capability_count: 2,
+        cost_model_id: 1,
+        preference_rank: 1,
+        limit_bytes: 4096,
+        limit_units: 8,
+        body_bytes: 4,
+        flags: 0,
+    }
+}
+
+fn route_hint(operation_id: u64) -> RouteHintMetadata {
+    RouteHintMetadata {
+        operation_id,
+        route_id: 92,
+        executor_class: 3,
+        affinity_class: 4,
+        deadline_unix_ms: 1_800_000_000_000,
+        body_bytes: 4,
+        flags: 0,
+    }
+}
+
+fn object_descriptor() -> ObjectDescriptorMetadata {
+    ObjectDescriptorMetadata {
+        object_id: 900,
+        object_kind: RuntimeObjectKind::ImageTile,
+        producer_role: RuntimeRole::Server,
+        consumer_role: RuntimeRole::Client,
+        session_id: 1,
+        byte_size: 4,
+        compute_cost_units: 2,
+        memory_location_hint: MemoryLocationHint::HostMemory,
+        ownership_hint: OwnershipHint::SessionOwned,
+        lifetime_hint_ms: 1_000,
+        metadata_bytes: 4,
+    }
+}
+
+fn object_reference(operation_id: u64) -> ObjectReferenceMetadata {
+    ObjectReferenceMetadata {
+        object_id: 900,
+        operation_id,
+        object_version: 1,
+        offset: 0,
+        length: 4,
+        flags: 0,
+        metadata_bytes: 0,
+    }
+}
+
+fn object_delta() -> ObjectDeltaMetadata {
+    ObjectDeltaMetadata {
+        object_id: 900,
+        delta_sequence: 1,
+        region_offset: 0,
+        region_bytes: 4,
+        delta_bytes: 4,
+        flags: 0,
+        metadata_bytes: 0,
+    }
+}
+
+fn object_release(
+    operation_id: u64,
+    release_reason: ObjectReleaseReason,
+    diagnostic_bytes: u32,
+) -> ObjectReleaseMetadata {
+    ObjectReleaseMetadata {
+        object_id: 900,
+        operation_id,
+        release_reason,
+        source_role: RuntimeRole::Server,
+        flags: 0,
+        diagnostic_bytes,
+    }
+}
+
+fn cache_reference() -> CacheReferenceMetadata {
+    CacheReferenceMetadata {
+        cache_key_hi: 0x1234,
+        cache_key_lo: 0x5678,
+        profile_id: STANDARD_PROFILE_TOKEN,
+        reuse_scope: CacheReuseScope::Session,
+        lease_id: 0,
+        producer_trace_id: 99,
+        expiration_hint_ms: 1_000,
+        metadata_bytes: 4,
+        flags: 0,
+    }
+}
+
+fn cache_miss() -> CacheMissMetadata {
+    CacheMissMetadata {
+        cache_key_hi: 0x1234,
+        cache_key_lo: 0x5678,
+        miss_reason: CacheMissReason::SchemaMismatch,
+        profile_id: STANDARD_PROFILE_TOKEN,
+        diagnostic_bytes: 6,
+    }
+}
+
+fn cache_invalidate() -> CacheInvalidateMetadata {
+    CacheInvalidateMetadata {
+        invalidate_scope: CacheInvalidateScope::ObjectKey,
+        cache_namespace: 42,
+        cache_key_hi: 0x1234,
+        cache_key_lo: 0x5678,
+        reason_code: 77,
+    }
+}
+
+fn control_event_packet(
+    message_type: MessageType,
+    session_id: u32,
+    metadata: Vec<u8>,
+    body: Vec<u8>,
+) -> Result<RuntimePacket, RuntimeError> {
+    let mut header = CommonHeader::new(message_type, metadata.len() as u32, body.len() as u32);
+    header.session_id = session_id;
+    Ok(RuntimePacket::new(header, metadata, body)?)
+}
+
+fn object_event_packet(
+    message_type: MessageType,
+    session_id: u32,
+    metadata: Vec<u8>,
+    body: Vec<u8>,
+) -> Result<RuntimePacket, RuntimeError> {
+    let mut header = CommonHeader::new(message_type, metadata.len() as u32, body.len() as u32);
+    header.session_id = session_id;
+    Ok(RuntimePacket::new(header, metadata, body)?)
 }
 
 fn migration_request() -> nnrp_core::SessionMigrateMetadata {

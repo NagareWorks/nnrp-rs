@@ -68,7 +68,7 @@ the same case IDs and result schema.
 
 ## Retired Preview-Era Assumptions
 
-- Preview compatibility shims must not be restored in `nnrp-rs`; current work is
+- Old-preview shims must not be restored in `nnrp-rs`; current work is
   the `NNRP/1` path.
 - Historical preview1/preview2 behavior that is still part of preview3 is
   inherited explicitly through Rust-owned core modules and conformance fixtures.

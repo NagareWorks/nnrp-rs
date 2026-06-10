@@ -29,7 +29,7 @@
 2. `main` should accept reviewed PRs only after GitHub publication.
 3. If an inherited NNRP/1 item or preview3 extension changes wire shape, lifecycle semantics, error behavior, or descriptor layout, it must land here before Python/C# consume it.
 4. `02` and `03` may not invent protocol semantics beyond the inherited preview1/preview2/current NNRP/1 docs and preview3 protocol contract.
-5. `04` may wire frozen semantics into Rust crates and exports, but it must not use FFI or conformance work as a backdoor to freeze new protocol behavior.
+5. `04` may wire versioned semantics into Rust crates and exports, but it must not use FFI or conformance work as a backdoor to create new protocol behavior.
 
 ## 3. Protocol Coverage Check
 

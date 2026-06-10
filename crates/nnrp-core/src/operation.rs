@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{CancelScope, NnrpError, OperationState};
+use crate::{
+    CancelScope, MessageType, NnrpError, OperationState, SchedulingMetadata,
+    SCHEDULING_FLAG_DISCARD_STALE,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OperationDescriptor {
@@ -25,6 +28,7 @@ impl OperationDescriptor {
 pub struct OperationRecord {
     pub descriptor: OperationDescriptor,
     pub state: OperationState,
+    pub schedule: OperationSchedule,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +36,16 @@ pub struct OperationCancelRequest {
     pub session_id: u32,
     pub operation_id: u64,
     pub cancel_scope: CancelScope,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct OperationSchedule {
+    pub priority_class: u16,
+    pub priority_delta: i16,
+    pub deadline_unix_ms: u64,
+    pub expire_at_unix_ms: u64,
+    pub update_sequence: u64,
+    pub flags: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -75,6 +89,7 @@ impl OperationRegistry {
             OperationRecord {
                 descriptor,
                 state: OperationState::Accepted,
+                schedule: OperationSchedule::default(),
             },
         );
         Ok(())
@@ -98,6 +113,122 @@ impl OperationRegistry {
 
         record.state = next_state;
         Ok(())
+    }
+
+    pub fn complete(&mut self, operation_id: u64) -> Result<(), NnrpError> {
+        let record = self
+            .operations
+            .get_mut(&operation_id)
+            .ok_or(NnrpError::UnknownOperation(operation_id))?;
+        if record.state.is_terminal() {
+            return Err(NnrpError::InvalidOperationTransition {
+                from: record.state,
+                to: OperationState::Completed,
+            });
+        }
+
+        if record.state == OperationState::Accepted {
+            record.state = OperationState::Running;
+        }
+        if !record.state.can_transition_to(OperationState::Completed) {
+            return Err(NnrpError::InvalidOperationTransition {
+                from: record.state,
+                to: OperationState::Completed,
+            });
+        }
+
+        record.state = OperationState::Completed;
+        Ok(())
+    }
+
+    pub fn abort(&mut self, operation_id: u64) -> Result<(), NnrpError> {
+        let record = self
+            .operations
+            .get_mut(&operation_id)
+            .ok_or(NnrpError::UnknownOperation(operation_id))?;
+        if !record.state.can_transition_to(OperationState::Failed) {
+            return Err(NnrpError::InvalidOperationTransition {
+                from: record.state,
+                to: OperationState::Failed,
+            });
+        }
+
+        record.state = OperationState::Failed;
+        Ok(())
+    }
+
+    pub fn expire_if_stale(
+        &mut self,
+        operation_id: u64,
+        now_unix_ms: u64,
+    ) -> Result<Option<OperationSchedule>, NnrpError> {
+        let record = self
+            .operations
+            .get_mut(&operation_id)
+            .ok_or(NnrpError::UnknownOperation(operation_id))?;
+        if record.state.is_terminal() {
+            return Ok(None);
+        }
+        if record.schedule.flags & SCHEDULING_FLAG_DISCARD_STALE == 0
+            || record.schedule.expire_at_unix_ms == 0
+            || record.schedule.expire_at_unix_ms > now_unix_ms
+        {
+            return Ok(None);
+        }
+        if !record.state.can_transition_to(OperationState::Superseded) {
+            return Err(NnrpError::InvalidOperationTransition {
+                from: record.state,
+                to: OperationState::Superseded,
+            });
+        }
+
+        record.state = OperationState::Superseded;
+        Ok(Some(record.schedule))
+    }
+
+    pub fn apply_scheduling_update(
+        &mut self,
+        session_id: u32,
+        message_type: MessageType,
+        metadata: SchedulingMetadata,
+    ) -> Result<OperationSchedule, NnrpError> {
+        let record = self
+            .operations
+            .get_mut(&metadata.operation_id)
+            .ok_or(NnrpError::UnknownOperation(metadata.operation_id))?;
+        if record.descriptor.session_id != session_id {
+            return Err(NnrpError::InvalidOperationRelationship {
+                rule: "scheduling update session_id must match the target operation",
+            });
+        }
+        if record.state.is_terminal() {
+            return Err(NnrpError::InvalidOperationTransition {
+                from: record.state,
+                to: record.state,
+            });
+        }
+
+        record.schedule.update_sequence = metadata.control_sequence;
+        match message_type {
+            MessageType::PriorityUpdate => {
+                record.schedule.priority_class = metadata.priority_class;
+                record.schedule.priority_delta = metadata.priority_delta;
+            }
+            MessageType::Deadline => {
+                record.schedule.deadline_unix_ms = metadata.deadline_unix_ms;
+            }
+            MessageType::ExpireAt => {
+                record.schedule.expire_at_unix_ms = metadata.deadline_unix_ms;
+                record.schedule.flags = metadata.flags;
+            }
+            _ => {
+                return Err(NnrpError::InvalidProtocolCombination {
+                    rule: "scheduling update requires PRIORITY_UPDATE, DEADLINE, or EXPIRE_AT",
+                });
+            }
+        }
+
+        Ok(record.schedule)
     }
 
     pub fn cancel(&mut self, request: OperationCancelRequest) -> Result<Vec<u64>, NnrpError> {
@@ -203,7 +334,10 @@ fn validate_descriptor_shape(descriptor: &OperationDescriptor) -> Result<(), Nnr
 
 #[cfg(test)]
 mod tests {
-    use crate::{CancelScope, NnrpError, OperationState};
+    use crate::{
+        CancelScope, MessageType, NnrpError, OperationState, SchedulingMetadata,
+        SCHEDULING_FLAG_DISCARD_STALE, SCHEDULING_FLAG_EMIT_DROP_REASON,
+    };
 
     use super::{OperationCancelRequest, OperationDescriptor, OperationRegistry};
 
@@ -307,6 +441,60 @@ mod tests {
     }
 
     #[test]
+    fn completes_active_operations_and_rejects_terminal_or_unknown_records() {
+        let mut registry = OperationRegistry::new();
+        registry.register(OperationDescriptor::new(42, 1)).unwrap();
+        registry.register(OperationDescriptor::new(42, 2)).unwrap();
+        registry.register(OperationDescriptor::new(42, 3)).unwrap();
+        registry.transition(2, OperationState::Running).unwrap();
+        registry.transition(2, OperationState::Cancelled).unwrap();
+        registry.transition(3, OperationState::Running).unwrap();
+        registry.transition(3, OperationState::WaitingTool).unwrap();
+
+        assert_eq!(registry.complete(1), Ok(()));
+        assert_eq!(
+            registry.operation(1).unwrap().state,
+            OperationState::Completed
+        );
+        assert_eq!(
+            registry.complete(2),
+            Err(NnrpError::InvalidOperationTransition {
+                from: OperationState::Cancelled,
+                to: OperationState::Completed,
+            })
+        );
+        assert_eq!(
+            registry.complete(3),
+            Err(NnrpError::InvalidOperationTransition {
+                from: OperationState::WaitingTool,
+                to: OperationState::Completed,
+            })
+        );
+        assert_eq!(registry.complete(99), Err(NnrpError::UnknownOperation(99)));
+    }
+
+    #[test]
+    fn aborts_operations_into_failed_terminal_state() {
+        let mut registry = OperationRegistry::new();
+        registry.register(OperationDescriptor::new(42, 1)).unwrap();
+        registry.register(OperationDescriptor::new(42, 2)).unwrap();
+        registry.transition(2, OperationState::Running).unwrap();
+
+        assert_eq!(registry.abort(1), Ok(()));
+        assert_eq!(registry.operation(1).unwrap().state, OperationState::Failed);
+        assert_eq!(registry.abort(2), Ok(()));
+        assert_eq!(registry.operation(2).unwrap().state, OperationState::Failed);
+        assert_eq!(
+            registry.abort(1),
+            Err(NnrpError::InvalidOperationTransition {
+                from: OperationState::Failed,
+                to: OperationState::Failed,
+            })
+        );
+        assert_eq!(registry.abort(99), Err(NnrpError::UnknownOperation(99)));
+    }
+
+    #[test]
     fn cancels_operation_subtree_group_and_session_scopes() {
         let mut registry = OperationRegistry::new();
         registry.register(grouped(1, None, 7)).unwrap();
@@ -389,6 +577,150 @@ mod tests {
         );
     }
 
+    #[test]
+    fn applies_scheduling_updates_to_operation_records() {
+        let mut registry = OperationRegistry::new();
+        registry.register(OperationDescriptor::new(42, 1)).unwrap();
+
+        assert_eq!(
+            registry.apply_scheduling_update(
+                42,
+                MessageType::PriorityUpdate,
+                scheduling(1, 10, 3, -1, 0),
+            ),
+            Ok(super::OperationSchedule {
+                priority_class: 3,
+                priority_delta: -1,
+                update_sequence: 10,
+                ..super::OperationSchedule::default()
+            })
+        );
+
+        assert_eq!(
+            registry.apply_scheduling_update(
+                42,
+                MessageType::Deadline,
+                scheduling(1, 11, 0, 0, 50)
+            ),
+            Ok(super::OperationSchedule {
+                priority_class: 3,
+                priority_delta: -1,
+                deadline_unix_ms: 50,
+                update_sequence: 11,
+                ..super::OperationSchedule::default()
+            })
+        );
+
+        assert_eq!(
+            registry.apply_scheduling_update(
+                42,
+                MessageType::ExpireAt,
+                scheduling(1, 12, 0, 0, 60),
+            ),
+            Ok(super::OperationSchedule {
+                priority_class: 3,
+                priority_delta: -1,
+                deadline_unix_ms: 50,
+                expire_at_unix_ms: 60,
+                update_sequence: 12,
+                ..super::OperationSchedule::default()
+            })
+        );
+        assert_eq!(
+            registry.operation(1).unwrap().schedule.expire_at_unix_ms,
+            60
+        );
+    }
+
+    #[test]
+    fn expires_stale_operations_before_result_delivery() {
+        let mut registry = OperationRegistry::new();
+        registry.register(OperationDescriptor::new(42, 1)).unwrap();
+        registry.register(OperationDescriptor::new(42, 2)).unwrap();
+        registry.register(OperationDescriptor::new(42, 3)).unwrap();
+        registry
+            .apply_scheduling_update(
+                42,
+                MessageType::ExpireAt,
+                SchedulingMetadata {
+                    operation_id: 1,
+                    control_sequence: 9,
+                    priority_class: 0,
+                    priority_delta: 0,
+                    deadline_unix_ms: 200,
+                    flags: SCHEDULING_FLAG_DISCARD_STALE | SCHEDULING_FLAG_EMIT_DROP_REASON,
+                },
+            )
+            .unwrap();
+        registry
+            .apply_scheduling_update(
+                42,
+                MessageType::ExpireAt,
+                SchedulingMetadata {
+                    operation_id: 2,
+                    control_sequence: 10,
+                    priority_class: 0,
+                    priority_delta: 0,
+                    deadline_unix_ms: 400,
+                    flags: 0,
+                },
+            )
+            .unwrap();
+        registry.transition(3, OperationState::Running).unwrap();
+        registry.transition(3, OperationState::Completed).unwrap();
+
+        assert_eq!(registry.expire_if_stale(1, 199), Ok(None));
+        assert_eq!(
+            registry.operation(1).unwrap().state,
+            OperationState::Accepted
+        );
+        assert_eq!(
+            registry.expire_if_stale(1, 200).unwrap().unwrap().flags,
+            SCHEDULING_FLAG_DISCARD_STALE | SCHEDULING_FLAG_EMIT_DROP_REASON
+        );
+        assert_eq!(
+            registry.operation(1).unwrap().state,
+            OperationState::Superseded
+        );
+        assert_eq!(registry.expire_if_stale(2, 500), Ok(None));
+        assert_eq!(
+            registry.operation(2).unwrap().state,
+            OperationState::Accepted
+        );
+        assert_eq!(registry.expire_if_stale(3, 1_000), Ok(None));
+        assert_eq!(
+            registry.expire_if_stale(99, 1_000),
+            Err(NnrpError::UnknownOperation(99))
+        );
+    }
+
+    #[test]
+    fn rejects_scheduling_updates_for_wrong_session_unknown_operation_and_terminal_records() {
+        let mut registry = OperationRegistry::new();
+        registry.register(OperationDescriptor::new(42, 1)).unwrap();
+
+        assert_eq!(
+            registry.apply_scheduling_update(7, MessageType::Deadline, scheduling(1, 1, 0, 0, 5)),
+            Err(NnrpError::InvalidOperationRelationship {
+                rule: "scheduling update session_id must match the target operation"
+            })
+        );
+        assert_eq!(
+            registry.apply_scheduling_update(42, MessageType::Deadline, scheduling(9, 1, 0, 0, 5)),
+            Err(NnrpError::UnknownOperation(9))
+        );
+
+        registry.transition(1, OperationState::Running).unwrap();
+        registry.transition(1, OperationState::Completed).unwrap();
+        assert_eq!(
+            registry.apply_scheduling_update(42, MessageType::Deadline, scheduling(1, 1, 0, 0, 5)),
+            Err(NnrpError::InvalidOperationTransition {
+                from: OperationState::Completed,
+                to: OperationState::Completed,
+            })
+        );
+    }
+
     fn grouped(
         operation_id: u64,
         parent_operation_id: Option<u64>,
@@ -399,6 +731,23 @@ mod tests {
             operation_id,
             parent_operation_id,
             operation_group_id: Some(operation_group_id),
+        }
+    }
+
+    fn scheduling(
+        operation_id: u64,
+        control_sequence: u64,
+        priority_class: u16,
+        priority_delta: i16,
+        deadline_unix_ms: u64,
+    ) -> SchedulingMetadata {
+        SchedulingMetadata {
+            operation_id,
+            control_sequence,
+            flags: 0,
+            priority_class,
+            priority_delta,
+            deadline_unix_ms,
         }
     }
 }

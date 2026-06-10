@@ -70,6 +70,15 @@ pub enum NnrpError {
     )]
     PacketLengthMismatch { declared: usize, actual: usize },
 
+    #[error(
+        "declared field length does not match actual length for {field}: declared {declared}, actual {actual}"
+    )]
+    DeclaredLengthMismatch {
+        field: &'static str,
+        declared: usize,
+        actual: usize,
+    },
+
     #[error("message length overflow")]
     MessageLengthOverflow,
 }

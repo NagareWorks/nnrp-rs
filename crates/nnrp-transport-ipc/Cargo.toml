@@ -1,0 +1,21 @@
+[package]
+name = "nnrp-transport-ipc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "IPC transport provider for NNRP using Unix domain sockets or Windows named pipes."
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/nnrp-transport-ipc"
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.4.0" }
+nnrp-runtime = { path = "../nnrp-runtime", version = "1.0.0-preview.4.0" }
+nnrp-transport-provider = { path = "../nnrp-transport-provider", version = "1.0.0-preview.4.0" }
+tokio.workspace = true

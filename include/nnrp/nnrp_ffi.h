@@ -14,11 +14,13 @@ typedef struct NnrpProtocolVersion {
 } NnrpProtocolVersion;
 
 #define NNRP_FFI_ABI_MAJOR 1
-#define NNRP_FFI_ABI_MINOR 6
+#define NNRP_FFI_ABI_MINOR 11
 #define NNRP_FFI_ABI_PATCH 0
 
 #define NNRP_TRANSPORT_SLOT_QUIC 0x00000001u
 #define NNRP_TRANSPORT_SLOT_TCP 0x00000002u
+#define NNRP_TRANSPORT_SLOT_IPC 0x00000004u
+#define NNRP_TRANSPORT_SLOT_WEBSOCKET 0x00000008u
 
 #define NNRP_RUNTIME_FEATURE_PROTOCOL_CORE 0x0000000000000001ull
 #define NNRP_RUNTIME_FEATURE_CLIENT_API 0x0000000000000002ull
@@ -37,6 +39,8 @@ typedef struct NnrpProtocolVersion {
 #define NNRP_RUNTIME_FEATURE_CLIENT_COMPLETION_HELPERS 0x0000000000004000ull
 #define NNRP_RUNTIME_FEATURE_CLIENT_COARSE_RESULT_HELPERS 0x0000000000008000ull
 #define NNRP_RUNTIME_FEATURE_CLIENT_COMPACT_RESULT_HELPERS 0x0000000000010000ull
+#define NNRP_RUNTIME_FEATURE_PREVIEW4_CONTROL_EVENTS 0x0000000000020000ull
+#define NNRP_RUNTIME_FEATURE_PREVIEW4_OBJECT_CACHE_EVENTS 0x0000000000040000ull
 
 #define NNRP_RESULT_STATE_NONE 0u
 #define NNRP_RESULT_STATE_COMPLETED 1u
@@ -96,6 +100,8 @@ typedef enum NnrpErrorFamily {
   NNRP_ERROR_FAMILY_TRANSPORT = 4,
   NNRP_ERROR_FAMILY_LIFECYCLE = 5,
   NNRP_ERROR_FAMILY_OPERATION = 6,
+  NNRP_ERROR_FAMILY_CONTROL = 7,
+  NNRP_ERROR_FAMILY_RUNTIME_OBJECT = 8,
   NNRP_ERROR_FAMILY_INTERNAL = 0xffff
 } NnrpErrorFamily;
 
@@ -107,7 +113,9 @@ typedef enum NnrpHandleKind {
   NNRP_HANDLE_EVENT_PUMP = 4,
   NNRP_HANDLE_BUFFER = 5,
   NNRP_HANDLE_SCHEMA_REGISTRY = 6,
-  NNRP_HANDLE_CACHE_LEASE = 7
+  NNRP_HANDLE_CACHE_LEASE = 7,
+  NNRP_HANDLE_OBJECT_DESCRIPTOR = 8,
+  NNRP_HANDLE_CACHE_REFERENCE_DESCRIPTOR = 9
 } NnrpHandleKind;
 
 typedef enum NnrpEventKind {
@@ -345,6 +353,106 @@ typedef struct NnrpClientSubmitResultBatchRequest {
   uintptr_t iterations;
 } NnrpClientSubmitResultBatchRequest;
 
+typedef struct NnrpRuntimeObjectDescriptor {
+  uint64_t object_id;
+  uint16_t object_kind;
+  uint8_t producer_role;
+  uint8_t consumer_role;
+  uint32_t session_id;
+  uint64_t byte_size;
+  uint32_t compute_cost_units;
+  uint16_t memory_location_hint;
+  uint16_t ownership_hint;
+  uint32_t lifetime_hint_ms;
+  uint32_t metadata_bytes;
+} NnrpRuntimeObjectDescriptor;
+
+typedef struct NnrpObjectReferenceDescriptor {
+  uint64_t object_id;
+  uint64_t operation_id;
+  uint64_t object_version;
+  uint64_t offset;
+  uint64_t length;
+  uint32_t flags;
+  uint32_t metadata_bytes;
+} NnrpObjectReferenceDescriptor;
+
+typedef struct NnrpObjectReleaseDescriptor {
+  uint64_t object_id;
+  uint64_t operation_id;
+  uint16_t release_reason;
+  uint8_t source_role;
+  uint8_t flags;
+  uint32_t diagnostic_bytes;
+} NnrpObjectReleaseDescriptor;
+
+typedef struct NnrpObjectDeltaDescriptor {
+  uint64_t object_id;
+  uint64_t delta_sequence;
+  uint64_t region_offset;
+  uint32_t region_bytes;
+  uint32_t delta_bytes;
+  uint32_t flags;
+  uint32_t metadata_bytes;
+} NnrpObjectDeltaDescriptor;
+
+typedef struct NnrpCacheReferenceDescriptor {
+  uint64_t cache_key_hi;
+  uint64_t cache_key_lo;
+  uint16_t profile_id;
+  uint16_t reuse_scope;
+  uint64_t lease_id;
+  uint64_t producer_trace_id;
+  uint32_t expiration_hint_ms;
+  uint32_t metadata_bytes;
+  uint32_t flags;
+} NnrpCacheReferenceDescriptor;
+
+typedef struct NnrpCacheMissDescriptor {
+  uint64_t cache_key_hi;
+  uint64_t cache_key_lo;
+  uint16_t miss_reason;
+  uint16_t profile_id;
+  uint32_t diagnostic_bytes;
+} NnrpCacheMissDescriptor;
+
+typedef struct NnrpProgressDescriptor {
+  uint64_t operation_id;
+  uint64_t progress_sequence;
+  uint16_t stage_code;
+  uint16_t percent_x100;
+  uint64_t object_id;
+  uint32_t body_bytes;
+} NnrpProgressDescriptor;
+
+typedef struct NnrpPartialResultDescriptor {
+  uint64_t operation_id;
+  uint64_t result_sequence;
+  uint64_t object_id;
+  uint64_t delta_sequence;
+  uint32_t body_bytes;
+  uint32_t flags;
+} NnrpPartialResultDescriptor;
+
+typedef struct NnrpClientRuntimeObjectLoopRequest {
+  NnrpHandle session;
+  uint64_t operation_id;
+  uint32_t frame_id;
+  NnrpBufferView submit_payload;
+  NnrpRuntimeObjectDescriptor object_descriptor;
+  NnrpBufferView object_metadata;
+  NnrpCacheReferenceDescriptor cache_reference;
+  NnrpBufferView cache_reference_metadata;
+  NnrpProgressDescriptor progress;
+  NnrpBufferView progress_body;
+  NnrpPartialResultDescriptor partial_result;
+  NnrpBufferView partial_body;
+  NnrpObjectReleaseDescriptor object_release;
+  NnrpBufferView release_diagnostics;
+  NnrpBufferView result_payload;
+  uintptr_t max_events;
+} NnrpClientRuntimeObjectLoopRequest;
+
 typedef struct NnrpServerFlowUpdateRequest {
   NnrpHandle session;
   uint32_t frame_id;
@@ -355,6 +463,11 @@ typedef struct NnrpControlRequest {
   uint32_t control_code;
   NnrpBufferView payload;
 } NnrpControlRequest;
+
+typedef struct NnrpClientSubmitControlRequest {
+  NnrpControlRequest control;
+  uintptr_t max_events;
+} NnrpClientSubmitControlRequest;
 
 NnrpProtocolVersion nnrp_current_protocol_version(void);
 NnrpRuntimeCapabilities nnrp_runtime_capabilities(void);
@@ -375,6 +488,8 @@ NnrpFfiStatus nnrp_client_drop_operation(NnrpClientDropOperationRequest request)
 NnrpFfiStatus nnrp_client_submit_result(NnrpClientSubmitResultRequest request, NnrpHandle *out_operation, NnrpPollResult *out_result);
 NnrpFfiStatus nnrp_client_submit_result_compact(NnrpClientSubmitResultRequest request, NnrpCompactResult *out_result);
 NnrpFfiStatus nnrp_client_submit_result_compact_batch(NnrpClientSubmitResultBatchRequest request, NnrpCompactResult *out_last_result, uintptr_t *out_completed);
+NnrpFfiStatus nnrp_client_submit_runtime_object_loop_compact(NnrpClientRuntimeObjectLoopRequest request, NnrpCompactResult *out_result);
+NnrpFfiStatus nnrp_client_submit_control(NnrpClientSubmitControlRequest request, NnrpPollResult *out_result);
 NnrpFfiStatus nnrp_client_send_flow_update(NnrpServerFlowUpdateRequest request);
 NnrpFfiStatus nnrp_client_send_result_hint(NnrpControlRequest request);
 NnrpFfiStatus nnrp_client_await_event(NnrpHandle connection, NnrpPollResult *out_result);
@@ -398,6 +513,17 @@ NnrpFfiStatus nnrp_migration_should_replay_frame(NnrpBufferView session_migrate_
 NnrpFfiStatus nnrp_buffer_acquire_copy(NnrpBufferView source, NnrpHandle *out_buffer, NnrpBufferView *out_view);
 NnrpFfiStatus nnrp_buffer_view(NnrpHandle buffer, NnrpBufferView *out_view);
 NnrpFfiStatus nnrp_buffer_release(NnrpHandle buffer);
+NnrpFfiStatus nnrp_object_metadata_buffer_acquire_copy(NnrpBufferView source, NnrpHandle *out_buffer, NnrpBufferView *out_view);
+NnrpFfiStatus nnrp_object_metadata_buffer_view(NnrpHandle buffer, NnrpBufferView *out_view);
+NnrpFfiStatus nnrp_object_metadata_buffer_release(NnrpHandle buffer);
+NnrpFfiStatus nnrp_object_descriptor_create(NnrpRuntimeObjectDescriptor descriptor, NnrpBufferView metadata, NnrpHandle *out_handle);
+NnrpFfiStatus nnrp_object_descriptor_view(NnrpHandle handle, NnrpRuntimeObjectDescriptor *out_descriptor, NnrpBufferView *out_metadata);
+NnrpFfiStatus nnrp_object_descriptor_metadata_snapshot(NnrpHandle handle, NnrpHandle *out_buffer, NnrpBufferView *out_view);
+NnrpFfiStatus nnrp_object_descriptor_release(NnrpHandle handle);
+NnrpFfiStatus nnrp_cache_reference_descriptor_create(NnrpCacheReferenceDescriptor descriptor, NnrpBufferView metadata, NnrpHandle *out_handle);
+NnrpFfiStatus nnrp_cache_reference_descriptor_view(NnrpHandle handle, NnrpCacheReferenceDescriptor *out_descriptor, NnrpBufferView *out_metadata);
+NnrpFfiStatus nnrp_cache_reference_descriptor_metadata_snapshot(NnrpHandle handle, NnrpHandle *out_buffer, NnrpBufferView *out_view);
+NnrpFfiStatus nnrp_cache_reference_descriptor_release(NnrpHandle handle);
 NnrpFfiStatus nnrp_cache_query(NnrpCacheLeaseRequest request, NnrpCacheLeaseResult *out_result);
 NnrpFfiStatus nnrp_cache_touch(NnrpCacheLeaseRequest request, NnrpCacheLeaseResult *out_result);
 NnrpFfiStatus nnrp_cache_prefetch(NnrpHandle owner, const NnrpCacheObjectId *objects, uintptr_t object_count, uint64_t now_ms, uint32_t ttl_ms, NnrpCacheLeaseResult *out_results);

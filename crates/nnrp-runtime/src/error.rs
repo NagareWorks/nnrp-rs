@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::transport::RuntimeTransportKind;
+
 #[derive(Debug, Error)]
 pub enum RuntimeError {
     #[error("transport I/O failed: {0}")]
@@ -13,6 +15,15 @@ pub enum RuntimeError {
 
     #[error("frame id overflowed")]
     FrameIdOverflow,
+
+    #[error("runtime frame too large: declared {declared} bytes exceeds max {max} bytes")]
+    FrameTooLarge { declared: usize, max: usize },
+
+    #[error("runtime transport {transport:?} closed: {detail}")]
+    TransportClosed {
+        transport: RuntimeTransportKind,
+        detail: String,
+    },
 
     #[error("unexpected runtime message: {0}")]
     UnexpectedMessage(&'static str),

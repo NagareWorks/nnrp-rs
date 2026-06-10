@@ -1,0 +1,55 @@
+# 05 - Wire Conformance Runner
+
+## Plan Consumption
+
+- [x] Consume `wire-conformance/nnrp-1-preview4/manifest.json`.
+- [x] Consume target manifests with TCP, QUIC, IPC, and WebSocket endpoints.
+- [x] Generate execution plans through the shared conformance runner.
+- [x] Expose a CLI dry-run entrypoint for suite and target manifest inputs.
+- [x] Preserve selected scenario IDs exactly in result reports.
+- [x] Write evidence paths for frame logs and timing traces.
+
+## Direct Endpoint Driver
+
+- [x] Implement suite-as-client mode.
+  - [x] TCP endpoint.
+  - [x] QUIC endpoint.
+  - [x] IPC endpoint.
+  - [x] WebSocket endpoint.
+- [x] Implement suite-as-server mode.
+  - [x] TCP listener.
+  - [x] QUIC listener.
+  - [x] IPC listener.
+  - [x] WebSocket listener.
+- [x] Implement suite-as-proxy mode.
+  - [x] Bidirectional frame forwarding.
+  - [x] Frame injection.
+  - [x] Timeout injection.
+  - [x] Close injection.
+  - [x] Backpressure injection.
+  - [x] Frame-order perturbation.
+
+## Scenario Execution
+
+- [x] Execute cancel/abort scenarios.
+- [x] Execute priority/deadline scenarios.
+- [x] Execute progress/backpressure scenarios.
+- [x] Execute capability/route/cache scenarios.
+- [x] Execute IPC-specific cancel scenarios.
+- [x] Execute WebSocket-specific progress/backpressure scenarios.
+
+## Result Validation
+
+- [x] Record observed frames with direction and timestamp.
+- [x] Validate expected terminal state.
+- [x] Validate required frame presence.
+- [x] Validate result drop reason when expected.
+- [x] Validate trace context propagation when expected.
+- [x] Preserve skipped outcomes when a target does not claim the required transport or capability.
+
+## CI Integration
+
+- [x] Keep dry-run plan generation in conformance CI.
+- [x] Add local reference endpoint tests for each concrete transport crate.
+- [x] Add negative target tests for unsupported modes and transports.
+- [x] Add matrix coverage for TCP, QUIC, IPC, and WebSocket reference endpoints.

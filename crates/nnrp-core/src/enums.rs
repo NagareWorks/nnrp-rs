@@ -28,6 +28,32 @@ pub enum MessageType {
     SessionMigrateAck = 0x1c,
     Ping = 0x20,
     Pong = 0x21,
+    Cancel = 0x30,
+    Abort = 0x31,
+    PriorityUpdate = 0x32,
+    Deadline = 0x33,
+    ExpireAt = 0x34,
+    Supersede = 0x35,
+    BudgetUpdate = 0x36,
+    Progress = 0x37,
+    PartialResult = 0x38,
+    Backpressure = 0x39,
+    CreditUpdate = 0x3a,
+    CapabilityNegotiation = 0x3b,
+    DegradeProfile = 0x3c,
+    RouteHint = 0x3d,
+    ExecutionHint = 0x3e,
+    TraceContext = 0x3f,
+    ResultDropReason = 0x40,
+    ObjectDeclare = 0x41,
+    ObjectRef = 0x42,
+    ObjectRelease = 0x43,
+    ObjectPatch = 0x44,
+    ObjectDelta = 0x45,
+    CacheReference = 0x46,
+    CacheMiss = 0x47,
+    ErrorRecoverable = 0x48,
+    RetryAfter = 0x49,
 }
 
 impl MessageType {
@@ -58,6 +84,32 @@ impl MessageType {
             0x1c => Self::SessionMigrateAck,
             0x20 => Self::Ping,
             0x21 => Self::Pong,
+            0x30 => Self::Cancel,
+            0x31 => Self::Abort,
+            0x32 => Self::PriorityUpdate,
+            0x33 => Self::Deadline,
+            0x34 => Self::ExpireAt,
+            0x35 => Self::Supersede,
+            0x36 => Self::BudgetUpdate,
+            0x37 => Self::Progress,
+            0x38 => Self::PartialResult,
+            0x39 => Self::Backpressure,
+            0x3a => Self::CreditUpdate,
+            0x3b => Self::CapabilityNegotiation,
+            0x3c => Self::DegradeProfile,
+            0x3d => Self::RouteHint,
+            0x3e => Self::ExecutionHint,
+            0x3f => Self::TraceContext,
+            0x40 => Self::ResultDropReason,
+            0x41 => Self::ObjectDeclare,
+            0x42 => Self::ObjectRef,
+            0x43 => Self::ObjectRelease,
+            0x44 => Self::ObjectPatch,
+            0x45 => Self::ObjectDelta,
+            0x46 => Self::CacheReference,
+            0x47 => Self::CacheMiss,
+            0x48 => Self::ErrorRecoverable,
+            0x49 => Self::RetryAfter,
             _ => return Err(NnrpError::UnknownMessageType(value)),
         };
 
@@ -254,6 +306,52 @@ impl OperationState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+pub enum ResultTerminalState {
+    Success = 0,
+    Cancelled = 1,
+    Dropped = 2,
+    Error = 3,
+}
+
+impl ResultTerminalState {
+    pub fn try_from_u8(value: u8) -> Result<Self, NnrpError> {
+        match value {
+            0 => Ok(Self::Success),
+            1 => Ok(Self::Cancelled),
+            2 => Ok(Self::Dropped),
+            3 => Ok(Self::Error),
+            _ => Err(NnrpError::UnknownEnumValue {
+                enum_name: "result_terminal_state",
+                value: value as u64,
+            }),
+        }
+    }
+
+    pub fn from_operation_state(state: OperationState) -> Option<Self> {
+        match state {
+            OperationState::Completed => Some(Self::Success),
+            OperationState::Cancelled => Some(Self::Cancelled),
+            OperationState::Superseded => Some(Self::Dropped),
+            OperationState::Failed => Some(Self::Error),
+            OperationState::Accepted
+            | OperationState::Running
+            | OperationState::Partial
+            | OperationState::WaitingTool => None,
+        }
+    }
+
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Cancelled => "cancelled",
+            Self::Dropped => "dropped",
+            Self::Error => "error",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum CancelScope {
     Operation = 0,
     Subtree = 1,
@@ -330,6 +428,7 @@ pub enum BackpressureLevel {
     None = 0,
     Soft = 1,
     Hard = 2,
+    Paused = 3,
 }
 
 impl BackpressureLevel {
@@ -338,6 +437,7 @@ impl BackpressureLevel {
             0 => Ok(Self::None),
             1 => Ok(Self::Soft),
             2 => Ok(Self::Hard),
+            3 => Ok(Self::Paused),
             _ => Err(NnrpError::UnknownEnumValue {
                 enum_name: "backpressure_level",
                 value: value as u64,
@@ -382,8 +482,8 @@ mod tests {
 
     use super::{
         BackpressureLevel, CancelScope, FlowScopeKind, FlowUpdateReason, HeaderFlags,
-        InFlightPolicy, MessageType, OperationState, SessionCloseReason, SessionCloseStatus,
-        SessionPriorityClass, SessionStatus,
+        InFlightPolicy, MessageType, OperationState, ResultTerminalState, SessionCloseReason,
+        SessionCloseStatus, SessionPriorityClass, SessionStatus,
     };
 
     #[test]
@@ -414,6 +514,32 @@ mod tests {
             (0x1c, MessageType::SessionMigrateAck),
             (0x20, MessageType::Ping),
             (0x21, MessageType::Pong),
+            (0x30, MessageType::Cancel),
+            (0x31, MessageType::Abort),
+            (0x32, MessageType::PriorityUpdate),
+            (0x33, MessageType::Deadline),
+            (0x34, MessageType::ExpireAt),
+            (0x35, MessageType::Supersede),
+            (0x36, MessageType::BudgetUpdate),
+            (0x37, MessageType::Progress),
+            (0x38, MessageType::PartialResult),
+            (0x39, MessageType::Backpressure),
+            (0x3a, MessageType::CreditUpdate),
+            (0x3b, MessageType::CapabilityNegotiation),
+            (0x3c, MessageType::DegradeProfile),
+            (0x3d, MessageType::RouteHint),
+            (0x3e, MessageType::ExecutionHint),
+            (0x3f, MessageType::TraceContext),
+            (0x40, MessageType::ResultDropReason),
+            (0x41, MessageType::ObjectDeclare),
+            (0x42, MessageType::ObjectRef),
+            (0x43, MessageType::ObjectRelease),
+            (0x44, MessageType::ObjectPatch),
+            (0x45, MessageType::ObjectDelta),
+            (0x46, MessageType::CacheReference),
+            (0x47, MessageType::CacheMiss),
+            (0x48, MessageType::ErrorRecoverable),
+            (0x49, MessageType::RetryAfter),
         ];
 
         for (wire_value, message_type) in assignments {
@@ -481,7 +607,7 @@ mod tests {
     fn preview3_flow_enums_are_frozen() {
         assert_enum_u8("scope_kind", FlowScopeKind::try_from_u8, 0, 2);
         assert_enum_u8("update_reason", FlowUpdateReason::try_from_u8, 0, 4);
-        assert_enum_u8("backpressure_level", BackpressureLevel::try_from_u8, 0, 2);
+        assert_enum_u8("backpressure_level", BackpressureLevel::try_from_u8, 0, 3);
     }
 
     #[test]
@@ -493,6 +619,49 @@ mod tests {
         assert!(OperationState::WaitingTool.can_transition_to(OperationState::Running));
         assert!(!OperationState::Completed.can_transition_to(OperationState::Running));
         assert!(!OperationState::Accepted.can_transition_to(OperationState::Partial));
+    }
+
+    #[test]
+    fn result_terminal_state_reports_wire_names_from_operation_states() {
+        assert_enum_u8(
+            "result_terminal_state",
+            ResultTerminalState::try_from_u8,
+            0,
+            3,
+        );
+        assert_eq!(
+            ResultTerminalState::try_from_u8(4),
+            Err(NnrpError::UnknownEnumValue {
+                enum_name: "result_terminal_state",
+                value: 4
+            })
+        );
+
+        assert_eq!(
+            ResultTerminalState::from_operation_state(OperationState::Completed),
+            Some(ResultTerminalState::Success)
+        );
+        assert_eq!(
+            ResultTerminalState::from_operation_state(OperationState::Cancelled),
+            Some(ResultTerminalState::Cancelled)
+        );
+        assert_eq!(
+            ResultTerminalState::from_operation_state(OperationState::Superseded),
+            Some(ResultTerminalState::Dropped)
+        );
+        assert_eq!(
+            ResultTerminalState::from_operation_state(OperationState::Failed),
+            Some(ResultTerminalState::Error)
+        );
+        assert_eq!(
+            ResultTerminalState::from_operation_state(OperationState::Running),
+            None
+        );
+
+        assert_eq!(ResultTerminalState::Success.wire_name(), "success");
+        assert_eq!(ResultTerminalState::Cancelled.wire_name(), "cancelled");
+        assert_eq!(ResultTerminalState::Dropped.wire_name(), "dropped");
+        assert_eq!(ResultTerminalState::Error.wire_name(), "error");
     }
 
     fn assert_enum_u8<T: Copy>(
