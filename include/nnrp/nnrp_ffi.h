@@ -14,7 +14,7 @@ typedef struct NnrpProtocolVersion {
 } NnrpProtocolVersion;
 
 #define NNRP_FFI_ABI_MAJOR 1
-#define NNRP_FFI_ABI_MINOR 10
+#define NNRP_FFI_ABI_MINOR 11
 #define NNRP_FFI_ABI_PATCH 0
 
 #define NNRP_TRANSPORT_SLOT_QUIC 0x00000001u
@@ -462,6 +462,11 @@ typedef struct NnrpControlRequest {
   NnrpBufferView payload;
 } NnrpControlRequest;
 
+typedef struct NnrpClientSubmitControlRequest {
+  NnrpControlRequest control;
+  uintptr_t max_events;
+} NnrpClientSubmitControlRequest;
+
 NnrpProtocolVersion nnrp_current_protocol_version(void);
 NnrpRuntimeCapabilities nnrp_runtime_capabilities(void);
 NnrpFfiStatus nnrp_connection_bootstrap(NnrpConnectionBootstrap request, NnrpHandle *out_connection);
@@ -482,6 +487,7 @@ NnrpFfiStatus nnrp_client_submit_result(NnrpClientSubmitResultRequest request, N
 NnrpFfiStatus nnrp_client_submit_result_compact(NnrpClientSubmitResultRequest request, NnrpCompactResult *out_result);
 NnrpFfiStatus nnrp_client_submit_result_compact_batch(NnrpClientSubmitResultBatchRequest request, NnrpCompactResult *out_last_result, uintptr_t *out_completed);
 NnrpFfiStatus nnrp_client_submit_runtime_object_loop_compact(NnrpClientRuntimeObjectLoopRequest request, NnrpCompactResult *out_result);
+NnrpFfiStatus nnrp_client_submit_control(NnrpClientSubmitControlRequest request, NnrpPollResult *out_result);
 NnrpFfiStatus nnrp_client_send_flow_update(NnrpServerFlowUpdateRequest request);
 NnrpFfiStatus nnrp_client_send_result_hint(NnrpControlRequest request);
 NnrpFfiStatus nnrp_client_await_event(NnrpHandle connection, NnrpPollResult *out_result);

@@ -13,7 +13,7 @@
   - [x] Result drop reason.
 - [ ] Add coarse C ABI calls for hot paths.
   - [x] Submit with object references.
-  - [ ] Submit with control metadata.
+  - [x] Submit with control metadata.
   - [x] Poll batch events.
   - [ ] Complete partial result.
   - [ ] Drop stale result.
