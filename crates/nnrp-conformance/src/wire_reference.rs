@@ -1,8 +1,13 @@
 use nnrp_core::{
-    FrameSubmitMetadata, InputProfile, PayloadKindBitmap, ResultClass, ResultPushMetadata,
-    SubmitMode, TileIndexMode, STANDARD_PROFILE_TOKEN,
+    BackpressureLevel, CacheInvalidateMetadata, CacheInvalidateScope, CacheReferenceMetadata,
+    CacheReuseScope, CapabilityMetadata, FrameSubmitMetadata, InputProfile, MessageType,
+    PartialResultMetadata, PayloadKindBitmap, PressureMetadata, ProgressMetadata, ResultClass,
+    ResultDropReasonMetadata, ResultPushMetadata, RouteHintMetadata, SubmitMode, TileIndexMode,
+    RESULT_DROP_REASON_DEADLINE_EXPIRED, STANDARD_PROFILE_TOKEN,
 };
-use nnrp_runtime::{NnrpClient, NnrpClientConfig, NnrpServer, NnrpServerConfig, RuntimeError};
+use nnrp_runtime::{
+    NnrpClient, NnrpClientConfig, NnrpClientEvent, NnrpServer, NnrpServerConfig, RuntimeError,
+};
 use nnrp_transport_ipc::{IpcEndpoint, IpcProvider};
 use nnrp_transport_quic::{
     quic_client_config, quic_server_config, QuicClientEndpointConfig, QuicProvider,
@@ -21,6 +26,15 @@ pub enum ReferenceTransport {
     Ipc,
     Quic,
     WebSocket,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WireReferenceScenario {
+    BasicLoopback,
+    CancelAbort,
+    PriorityDeadline,
+    ProgressBackpressure,
+    CapabilityRouteCache,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +83,18 @@ impl ReferenceTransport {
     }
 }
 
+impl WireReferenceScenario {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BasicLoopback => "basic-loopback",
+            Self::CancelAbort => "cancel-abort",
+            Self::PriorityDeadline => "priority-deadline",
+            Self::ProgressBackpressure => "progress-backpressure",
+            Self::CapabilityRouteCache => "capability-route-cache",
+        }
+    }
+}
+
 pub async fn run_suite_as_client_reference(
     transport: ReferenceTransport,
 ) -> Result<Value, RuntimeError> {
@@ -88,6 +114,23 @@ pub async fn run_suite_as_server_reference(
         ReferenceTransport::Ipc => run_ipc_suite_as_server_reference().await,
         ReferenceTransport::Quic => run_quic_suite_as_server_reference().await,
         ReferenceTransport::WebSocket => run_websocket_suite_as_server_reference().await,
+    }
+}
+
+pub async fn run_suite_as_client_scenario_reference(
+    transport: ReferenceTransport,
+    scenario: WireReferenceScenario,
+) -> Result<Value, RuntimeError> {
+    match scenario {
+        WireReferenceScenario::BasicLoopback => run_suite_as_client_reference(transport).await,
+        _ => match transport {
+            ReferenceTransport::Tcp => run_tcp_suite_as_client_scenario_reference(scenario).await,
+            ReferenceTransport::Ipc => run_ipc_suite_as_client_scenario_reference(scenario).await,
+            ReferenceTransport::Quic => run_quic_suite_as_client_scenario_reference(scenario).await,
+            ReferenceTransport::WebSocket => {
+                run_websocket_suite_as_client_scenario_reference(scenario).await
+            }
+        },
     }
 }
 
@@ -211,6 +254,23 @@ async fn run_tcp_suite_as_client_reference() -> Result<Value, RuntimeError> {
     Ok(report)
 }
 
+async fn run_tcp_suite_as_client_scenario_reference(
+    scenario: WireReferenceScenario,
+) -> Result<Value, RuntimeError> {
+    let started = Instant::now();
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+    let server_task = tokio::spawn(reference_scenario_server_task(server, scenario));
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let report =
+        run_reference_scenario_client(ReferenceTransport::Tcp, scenario, started, client).await?;
+    server_task.await.map_err(|_| {
+        RuntimeError::Internal("wire reference TCP scenario server task panicked")
+    })??;
+    Ok(report)
+}
+
 async fn run_tcp_suite_as_server_reference() -> Result<Value, RuntimeError> {
     let started = Instant::now();
     let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
@@ -254,6 +314,39 @@ async fn run_quic_suite_as_client_reference() -> Result<Value, RuntimeError> {
     server_task
         .await
         .map_err(|_| RuntimeError::Internal("wire reference QUIC server task panicked"))??;
+    Ok(report)
+}
+
+async fn run_quic_suite_as_client_scenario_reference(
+    scenario: WireReferenceScenario,
+) -> Result<Value, RuntimeError> {
+    let started = Instant::now();
+    let (server_endpoint, certificate) = QuicServerEndpointConfig::self_signed_localhost(
+        "127.0.0.1:0"
+            .parse()
+            .expect("loopback QUIC bind address should be a valid socket address"),
+    )?;
+    let server = QuicProvider::bind(
+        server_endpoint,
+        quic_server_config(NnrpServerConfig::default()),
+    )
+    .await?;
+    let addr = server.local_addr()?;
+    let server_task = tokio::spawn(reference_scenario_server_task(server, scenario));
+
+    let client_endpoint =
+        QuicClientEndpointConfig::localhost_with_root_certificate(certificate.certificate_der);
+    let client = QuicProvider::connect_addr(
+        addr,
+        client_endpoint,
+        quic_client_config(NnrpClientConfig::default()),
+    )
+    .await?;
+    let report =
+        run_reference_scenario_client(ReferenceTransport::Quic, scenario, started, client).await?;
+    server_task.await.map_err(|_| {
+        RuntimeError::Internal("wire reference QUIC scenario server task panicked")
+    })??;
     Ok(report)
 }
 
@@ -304,6 +397,24 @@ async fn run_ipc_suite_as_client_reference() -> Result<Value, RuntimeError> {
     Ok(report)
 }
 
+async fn run_ipc_suite_as_client_scenario_reference(
+    scenario: WireReferenceScenario,
+) -> Result<Value, RuntimeError> {
+    let started = Instant::now();
+    let endpoint = unique_ipc_endpoint();
+    let server = IpcProvider::bind(&endpoint, NnrpServerConfig::default()).await?;
+    let server_task = tokio::spawn(reference_scenario_server_task(server, scenario));
+
+    let client = connect_ipc_client_with_retry(&endpoint).await?;
+    let report =
+        run_reference_scenario_client(ReferenceTransport::Ipc, scenario, started, client).await?;
+    server_task.await.map_err(|_| {
+        RuntimeError::Internal("wire reference IPC scenario server task panicked")
+    })??;
+    cleanup_ipc_endpoint(&endpoint);
+    Ok(report)
+}
+
 async fn run_ipc_suite_as_server_reference() -> Result<Value, RuntimeError> {
     let started = Instant::now();
     let endpoint = unique_ipc_endpoint();
@@ -333,6 +444,24 @@ async fn run_websocket_suite_as_client_reference() -> Result<Value, RuntimeError
     server_task
         .await
         .map_err(|_| RuntimeError::Internal("wire reference WebSocket server task panicked"))??;
+    Ok(report)
+}
+
+async fn run_websocket_suite_as_client_scenario_reference(
+    scenario: WireReferenceScenario,
+) -> Result<Value, RuntimeError> {
+    let started = Instant::now();
+    let server = WebSocketProvider::bind("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let endpoint = WebSocketEndpoint::ws(format!("ws://{}", server.local_addr()?))?;
+    let server_task = tokio::spawn(reference_scenario_server_task(server, scenario));
+
+    let client = WebSocketProvider::connect(&endpoint, NnrpClientConfig::default()).await?;
+    let report =
+        run_reference_scenario_client(ReferenceTransport::WebSocket, scenario, started, client)
+            .await?;
+    server_task.await.map_err(|_| {
+        RuntimeError::Internal("wire reference WebSocket scenario server task panicked")
+    })??;
     Ok(report)
 }
 
@@ -565,6 +694,468 @@ async fn run_reference_client(
     }))
 }
 
+async fn reference_scenario_server_task(
+    server: NnrpServer,
+    scenario: WireReferenceScenario,
+) -> Result<(), RuntimeError> {
+    let mut session = server.accept().await?;
+    match scenario {
+        WireReferenceScenario::BasicLoopback => {
+            unreachable!("basic loopback uses reference_server_task")
+        }
+        WireReferenceScenario::CancelAbort => {
+            let submit = session.receive_submit().await?;
+            session.receive_runtime_control().await?;
+            session
+                .send_result_drop_reason(drop_reason(submit.frame_id as u64))
+                .await?;
+
+            let abort_submit = session.receive_submit().await?;
+            session.receive_scheduling_update().await?;
+            session.receive_runtime_control().await?;
+            session.send_backpressure(soft_backpressure()).await?;
+            if abort_submit.body.is_empty() {
+                return Err(RuntimeError::UnexpectedMessage(
+                    "wire reference abort scenario received empty abort request",
+                ));
+            }
+        }
+        WireReferenceScenario::PriorityDeadline => {
+            let submit = session.receive_submit().await?;
+            session.receive_scheduling_update().await?;
+            session.receive_scheduling_update().await?;
+            session
+                .send_result(submit.frame_id, token_result(), RESPONSE_BODY.to_vec())
+                .await?;
+        }
+        WireReferenceScenario::ProgressBackpressure => {
+            let submit = session.receive_submit().await?;
+            session.receive_pressure_update().await?;
+            session.send_backpressure(soft_backpressure()).await?;
+            session
+                .send_progress(progress(submit.frame_id as u64), b"stage".to_vec())
+                .await?;
+            session
+                .send_partial_result(partial_result(submit.frame_id as u64), b"partial".to_vec())
+                .await?;
+            session
+                .send_result(submit.frame_id, token_result(), RESPONSE_BODY.to_vec())
+                .await?;
+        }
+        WireReferenceScenario::CapabilityRouteCache => {
+            let submit = session.receive_submit().await?;
+            let operation_id = submit.frame_id as u64;
+            session
+                .send_capability(
+                    MessageType::CapabilityNegotiation,
+                    capability_metadata(),
+                    b"cap!".to_vec(),
+                )
+                .await?;
+            session
+                .send_route_hint(
+                    MessageType::RouteHint,
+                    route_hint(operation_id),
+                    b"hint".to_vec(),
+                )
+                .await?;
+            session
+                .send_cache_reference(cache_reference(), b"hint".to_vec())
+                .await?;
+            session.send_cache_invalidate(cache_invalidate()).await?;
+            session
+                .send_result(submit.frame_id, token_result(), RESPONSE_BODY.to_vec())
+                .await?;
+        }
+    }
+    let close = session.receive_close().await?;
+    session.ack_close(&close).await?;
+    session.close().await
+}
+
+async fn run_reference_scenario_client(
+    transport: ReferenceTransport,
+    scenario: WireReferenceScenario,
+    started: Instant,
+    client: NnrpClient,
+) -> Result<Value, RuntimeError> {
+    let mut frames = ObservedFrameLog::new(started);
+    let mut session = client.open_session().await?;
+    let session_id = session.session_id();
+    frames.push(
+        "suite->target",
+        "SESSION_OPEN",
+        json!({ "session_id": session_id }),
+    );
+
+    match scenario {
+        WireReferenceScenario::BasicLoopback => {
+            unreachable!("basic loopback uses run_reference_client")
+        }
+        WireReferenceScenario::CancelAbort => {
+            let frame_id = session
+                .submit_nowait(token_submit(), REQUEST_BODY.to_vec())
+                .await?;
+            frames.push(
+                "suite->target",
+                "FRAME_SUBMIT",
+                json!({
+                    "session_id": session_id,
+                    "frame_id": frame_id,
+                    "body_bytes": REQUEST_BODY.len(),
+                }),
+            );
+            session
+                .cancel_operation(frame_id as u64, RESULT_DROP_REASON_DEADLINE_EXPIRED)
+                .await?;
+            frames.push(
+                "suite->target",
+                "CANCEL",
+                json!({
+                    "session_id": session_id,
+                    "operation_id": frame_id,
+                    "reason_code": RESULT_DROP_REASON_DEADLINE_EXPIRED,
+                }),
+            );
+            let drop_reason = expect_result_drop_reason(session.await_event().await?)?;
+            frames.push(
+                "target->suite",
+                "RESULT_DROP_REASON",
+                json!({
+                    "session_id": session_id,
+                    "operation_id": drop_reason.operation_id,
+                    "drop_reason_code": drop_reason.drop_reason_code,
+                }),
+            );
+
+            let abort_frame_id = session
+                .submit_nowait(token_submit(), b"abort-request".to_vec())
+                .await?;
+            frames.push(
+                "suite->target",
+                "FRAME_SUBMIT",
+                json!({
+                    "session_id": session_id,
+                    "frame_id": abort_frame_id,
+                    "body_bytes": "abort-request".len(),
+                }),
+            );
+            session
+                .expire_at(abort_frame_id as u64, 1_800_000_000_500)
+                .await?;
+            frames.push(
+                "suite->target",
+                "EXPIRE_AT",
+                json!({
+                    "session_id": session_id,
+                    "operation_id": abort_frame_id,
+                    "expire_at_unix_ms": 1_800_000_000_500u64,
+                }),
+            );
+            session
+                .abort_operation(abort_frame_id as u64, RESULT_DROP_REASON_DEADLINE_EXPIRED)
+                .await?;
+            frames.push(
+                "suite->target",
+                "ABORT",
+                json!({
+                    "session_id": session_id,
+                    "operation_id": abort_frame_id,
+                    "reason_code": RESULT_DROP_REASON_DEADLINE_EXPIRED,
+                }),
+            );
+            let pressure = expect_backpressure(session.await_event().await?)?;
+            frames.push(
+                "target->suite",
+                "BACKPRESSURE",
+                json!({
+                    "session_id": session_id,
+                    "credit_window": pressure.credit_window,
+                    "pressure_level": pressure.pressure_level,
+                }),
+            );
+        }
+        WireReferenceScenario::PriorityDeadline => {
+            let frame_id = session
+                .submit_nowait(token_submit(), REQUEST_BODY.to_vec())
+                .await?;
+            frames.push(
+                "suite->target",
+                "FRAME_SUBMIT",
+                json!({
+                    "session_id": session_id,
+                    "frame_id": frame_id,
+                    "body_bytes": REQUEST_BODY.len(),
+                }),
+            );
+            session.update_priority(frame_id as u64, 1, -2).await?;
+            frames.push(
+                "suite->target",
+                "PRIORITY_UPDATE",
+                json!({
+                    "session_id": session_id,
+                    "operation_id": frame_id,
+                    "priority_class": 1,
+                    "priority_delta": -2,
+                }),
+            );
+            session
+                .update_deadline(frame_id as u64, 1_800_000_000_000)
+                .await?;
+            frames.push(
+                "suite->target",
+                "DEADLINE",
+                json!({
+                    "session_id": session_id,
+                    "operation_id": frame_id,
+                    "deadline_unix_ms": 1_800_000_000_000u64,
+                }),
+            );
+            let result = session.await_result().await?;
+            frames.push(
+                "target->suite",
+                "RESULT_PUSH",
+                json!({
+                    "session_id": session_id,
+                    "frame_id": result.frame_id,
+                    "body_bytes": result.body.len(),
+                    "status_code": result.metadata.status_code,
+                }),
+            );
+        }
+        WireReferenceScenario::ProgressBackpressure => {
+            let frame_id = session
+                .submit_nowait(token_submit(), REQUEST_BODY.to_vec())
+                .await?;
+            frames.push(
+                "suite->target",
+                "FRAME_SUBMIT",
+                json!({
+                    "session_id": session_id,
+                    "frame_id": frame_id,
+                    "body_bytes": REQUEST_BODY.len(),
+                }),
+            );
+            session.send_credit_update(credit_update()).await?;
+            frames.push(
+                "suite->target",
+                "CREDIT_UPDATE",
+                json!({
+                    "session_id": session_id,
+                    "credit_window": 9,
+                }),
+            );
+            let pressure = expect_backpressure(session.await_event().await?)?;
+            frames.push(
+                "target->suite",
+                "BACKPRESSURE",
+                json!({
+                    "session_id": session_id,
+                    "credit_window": pressure.credit_window,
+                    "pressure_level": pressure.pressure_level,
+                }),
+            );
+            let (progress, progress_body) = expect_progress(session.await_event().await?)?;
+            frames.push(
+                "target->suite",
+                "PROGRESS",
+                json!({
+                    "session_id": session_id,
+                    "operation_id": progress.operation_id,
+                    "progress_sequence": progress.progress_sequence,
+                    "body_bytes": progress_body.len(),
+                }),
+            );
+            let (partial, partial_body) = expect_partial_result(session.await_event().await?)?;
+            frames.push(
+                "target->suite",
+                "PARTIAL_RESULT",
+                json!({
+                    "session_id": session_id,
+                    "operation_id": partial.operation_id,
+                    "result_sequence": partial.result_sequence,
+                    "body_bytes": partial_body.len(),
+                }),
+            );
+            let result = session.await_result().await?;
+            frames.push(
+                "target->suite",
+                "RESULT_PUSH",
+                json!({
+                    "session_id": session_id,
+                    "frame_id": result.frame_id,
+                    "body_bytes": result.body.len(),
+                    "status_code": result.metadata.status_code,
+                }),
+            );
+        }
+        WireReferenceScenario::CapabilityRouteCache => {
+            let frame_id = session
+                .submit_nowait(token_submit(), REQUEST_BODY.to_vec())
+                .await?;
+            frames.push(
+                "suite->target",
+                "FRAME_SUBMIT",
+                json!({
+                    "session_id": session_id,
+                    "frame_id": frame_id,
+                    "body_bytes": REQUEST_BODY.len(),
+                }),
+            );
+            let capability = expect_capability(session.await_event().await?)?;
+            frames.push(
+                "target->suite",
+                "CAPABILITY_NEGOTIATION",
+                json!({
+                    "session_id": session_id,
+                    "profile_id": capability.profile_id,
+                    "capability_count": capability.capability_count,
+                }),
+            );
+            let route = expect_route_hint(session.await_event().await?)?;
+            frames.push(
+                "target->suite",
+                "ROUTE_HINT",
+                json!({
+                    "session_id": session_id,
+                    "operation_id": route.operation_id,
+                    "route_id": route.route_id,
+                }),
+            );
+            let cache_ref = expect_cache_reference(session.await_event().await?)?;
+            frames.push(
+                "target->suite",
+                "CACHE_REFERENCE",
+                json!({
+                    "session_id": session_id,
+                    "cache_key_hi": cache_ref.cache_key_hi,
+                    "cache_key_lo": cache_ref.cache_key_lo,
+                }),
+            );
+            let cache_invalidate = expect_cache_invalidate(session.await_event().await?)?;
+            frames.push(
+                "target->suite",
+                "CACHE_INVALIDATE",
+                json!({
+                    "session_id": session_id,
+                    "cache_key_hi": cache_invalidate.cache_key_hi,
+                    "cache_key_lo": cache_invalidate.cache_key_lo,
+                    "reason_code": cache_invalidate.reason_code,
+                }),
+            );
+            let result = session.await_result().await?;
+            frames.push(
+                "target->suite",
+                "RESULT_PUSH",
+                json!({
+                    "session_id": session_id,
+                    "frame_id": result.frame_id,
+                    "body_bytes": result.body.len(),
+                    "status_code": result.metadata.status_code,
+                }),
+            );
+        }
+    }
+
+    session.close().await?;
+    frames.push(
+        "suite->target",
+        "SESSION_CLOSE",
+        json!({ "session_id": session_id }),
+    );
+
+    Ok(json!({
+        "mode": "suite-as-client",
+        "scenario": scenario.as_str(),
+        "transport": transport.as_str(),
+        "target": "nnrp-rs-reference",
+        "status": "passed",
+        "terminal_state": "success",
+        "timing": {
+            "elapsed_us": started.elapsed().as_micros(),
+        },
+        "frames": frames.into_frames(),
+    }))
+}
+
+fn expect_backpressure(event: NnrpClientEvent) -> Result<PressureMetadata, RuntimeError> {
+    match event {
+        NnrpClientEvent::Backpressure(metadata) => Ok(metadata),
+        _ => Err(RuntimeError::UnexpectedMessage(
+            "wire reference expected BACKPRESSURE event",
+        )),
+    }
+}
+
+fn expect_progress(event: NnrpClientEvent) -> Result<(ProgressMetadata, Vec<u8>), RuntimeError> {
+    match event {
+        NnrpClientEvent::Progress { metadata, body } => Ok((metadata, body)),
+        _ => Err(RuntimeError::UnexpectedMessage(
+            "wire reference expected PROGRESS event",
+        )),
+    }
+}
+
+fn expect_partial_result(
+    event: NnrpClientEvent,
+) -> Result<(PartialResultMetadata, Vec<u8>), RuntimeError> {
+    match event {
+        NnrpClientEvent::PartialResult { metadata, body } => Ok((metadata, body)),
+        _ => Err(RuntimeError::UnexpectedMessage(
+            "wire reference expected PARTIAL_RESULT event",
+        )),
+    }
+}
+
+fn expect_result_drop_reason(
+    event: NnrpClientEvent,
+) -> Result<ResultDropReasonMetadata, RuntimeError> {
+    match event {
+        NnrpClientEvent::ResultDropReason(metadata) => Ok(metadata),
+        _ => Err(RuntimeError::UnexpectedMessage(
+            "wire reference expected RESULT_DROP_REASON event",
+        )),
+    }
+}
+
+fn expect_capability(event: NnrpClientEvent) -> Result<CapabilityMetadata, RuntimeError> {
+    match event {
+        NnrpClientEvent::Capability { metadata, .. } => Ok(metadata),
+        _ => Err(RuntimeError::UnexpectedMessage(
+            "wire reference expected CAPABILITY_NEGOTIATION event",
+        )),
+    }
+}
+
+fn expect_route_hint(event: NnrpClientEvent) -> Result<RouteHintMetadata, RuntimeError> {
+    match event {
+        NnrpClientEvent::RouteHint { metadata, .. } => Ok(metadata),
+        _ => Err(RuntimeError::UnexpectedMessage(
+            "wire reference expected ROUTE_HINT event",
+        )),
+    }
+}
+
+fn expect_cache_reference(event: NnrpClientEvent) -> Result<CacheReferenceMetadata, RuntimeError> {
+    match event {
+        NnrpClientEvent::CacheReference { metadata, .. } => Ok(metadata),
+        _ => Err(RuntimeError::UnexpectedMessage(
+            "wire reference expected CACHE_REFERENCE event",
+        )),
+    }
+}
+
+fn expect_cache_invalidate(
+    event: NnrpClientEvent,
+) -> Result<CacheInvalidateMetadata, RuntimeError> {
+    match event {
+        NnrpClientEvent::CacheInvalidate(metadata) => Ok(metadata),
+        _ => Err(RuntimeError::UnexpectedMessage(
+            "wire reference expected CACHE_INVALIDATE event",
+        )),
+    }
+}
+
 struct ObservedFrameLog {
     started: Instant,
     frames: Vec<Value>,
@@ -652,12 +1243,116 @@ fn token_result() -> ResultPushMetadata {
     }
 }
 
+fn credit_update() -> PressureMetadata {
+    PressureMetadata {
+        scope_id: 1,
+        credit_window: 9,
+        pressure_level: BackpressureLevel::None as u16,
+        pressure_reason: 0,
+        retry_after_ms: 0,
+        flags: 0,
+    }
+}
+
+fn soft_backpressure() -> PressureMetadata {
+    PressureMetadata {
+        scope_id: 1,
+        credit_window: 2,
+        pressure_level: BackpressureLevel::Soft as u16,
+        pressure_reason: 1,
+        retry_after_ms: 25,
+        flags: 0,
+    }
+}
+
+fn progress(operation_id: u64) -> ProgressMetadata {
+    ProgressMetadata {
+        operation_id,
+        progress_sequence: 1,
+        stage_code: 2,
+        percent_x100: 2_500,
+        object_id: 0,
+        body_bytes: 5,
+    }
+}
+
+fn partial_result(operation_id: u64) -> PartialResultMetadata {
+    PartialResultMetadata {
+        operation_id,
+        result_sequence: 1,
+        object_id: 0,
+        delta_sequence: 0,
+        body_bytes: 7,
+        flags: 0,
+    }
+}
+
+fn drop_reason(operation_id: u64) -> ResultDropReasonMetadata {
+    ResultDropReasonMetadata {
+        operation_id,
+        result_sequence: 1,
+        drop_reason_code: 7,
+        source_role: 2,
+        flags: 0,
+        diagnostic_bytes: 0,
+    }
+}
+
+fn capability_metadata() -> CapabilityMetadata {
+    CapabilityMetadata {
+        profile_id: STANDARD_PROFILE_TOKEN,
+        capability_count: 2,
+        cost_model_id: 1,
+        preference_rank: 1,
+        limit_bytes: 4096,
+        limit_units: 8,
+        body_bytes: 4,
+        flags: 0,
+    }
+}
+
+fn route_hint(operation_id: u64) -> RouteHintMetadata {
+    RouteHintMetadata {
+        operation_id,
+        route_id: 92,
+        executor_class: 3,
+        affinity_class: 4,
+        deadline_unix_ms: 1_800_000_000_000,
+        body_bytes: 4,
+        flags: 0,
+    }
+}
+
+fn cache_reference() -> CacheReferenceMetadata {
+    CacheReferenceMetadata {
+        cache_key_hi: 0x1234,
+        cache_key_lo: 0x5678,
+        profile_id: STANDARD_PROFILE_TOKEN,
+        reuse_scope: CacheReuseScope::Session,
+        lease_id: 0,
+        producer_trace_id: 99,
+        expiration_hint_ms: 1_000,
+        metadata_bytes: 4,
+        flags: 0,
+    }
+}
+
+fn cache_invalidate() -> CacheInvalidateMetadata {
+    CacheInvalidateMetadata {
+        invalidate_scope: CacheInvalidateScope::ObjectKey,
+        cache_namespace: 42,
+        cache_key_hi: 0x1234,
+        cache_key_lo: 0x5678,
+        reason_code: 77,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        run_suite_as_client_reference, run_suite_as_server_reference,
-        validate_wire_reference_report, ReferenceTransport, WireReportExpectation,
-        WireTraceExpectation,
+        run_suite_as_client_reference, run_suite_as_client_scenario_reference,
+        run_suite_as_server_reference, validate_wire_reference_report, ReferenceTransport,
+        WireReferenceScenario, WireReportExpectation, WireTraceExpectation,
     };
     use serde_json::json;
 
@@ -708,6 +1403,141 @@ mod tests {
             .await
             .expect("WebSocket reference endpoint should run");
         assert_suite_as_client_report(&report, "websocket");
+    }
+
+    #[tokio::test]
+    async fn suite_as_client_reference_executes_cancel_abort_scenario() {
+        let report = run_suite_as_client_scenario_reference(
+            ReferenceTransport::Tcp,
+            WireReferenceScenario::CancelAbort,
+        )
+        .await
+        .expect("cancel/abort scenario should run");
+        assert_scenario_report(
+            &report,
+            "tcp",
+            "cancel-abort",
+            &[
+                "SESSION_OPEN",
+                "FRAME_SUBMIT",
+                "CANCEL",
+                "RESULT_DROP_REASON",
+                "EXPIRE_AT",
+                "ABORT",
+                "BACKPRESSURE",
+                "SESSION_CLOSE",
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn suite_as_client_reference_executes_priority_deadline_scenario() {
+        let report = run_suite_as_client_scenario_reference(
+            ReferenceTransport::Tcp,
+            WireReferenceScenario::PriorityDeadline,
+        )
+        .await
+        .expect("priority/deadline scenario should run");
+        assert_scenario_report(
+            &report,
+            "tcp",
+            "priority-deadline",
+            &[
+                "SESSION_OPEN",
+                "FRAME_SUBMIT",
+                "PRIORITY_UPDATE",
+                "DEADLINE",
+                "RESULT_PUSH",
+                "SESSION_CLOSE",
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn suite_as_client_reference_executes_progress_backpressure_scenario() {
+        let report = run_suite_as_client_scenario_reference(
+            ReferenceTransport::Tcp,
+            WireReferenceScenario::ProgressBackpressure,
+        )
+        .await
+        .expect("progress/backpressure scenario should run");
+        assert_scenario_report(
+            &report,
+            "tcp",
+            "progress-backpressure",
+            &[
+                "SESSION_OPEN",
+                "FRAME_SUBMIT",
+                "CREDIT_UPDATE",
+                "BACKPRESSURE",
+                "PROGRESS",
+                "PARTIAL_RESULT",
+                "RESULT_PUSH",
+                "SESSION_CLOSE",
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn suite_as_client_reference_executes_capability_route_cache_scenario() {
+        let report = run_suite_as_client_scenario_reference(
+            ReferenceTransport::Tcp,
+            WireReferenceScenario::CapabilityRouteCache,
+        )
+        .await
+        .expect("capability/route/cache scenario should run");
+        assert_scenario_report(
+            &report,
+            "tcp",
+            "capability-route-cache",
+            &[
+                "SESSION_OPEN",
+                "FRAME_SUBMIT",
+                "CAPABILITY_NEGOTIATION",
+                "ROUTE_HINT",
+                "CACHE_REFERENCE",
+                "CACHE_INVALIDATE",
+                "RESULT_PUSH",
+                "SESSION_CLOSE",
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn suite_as_client_reference_executes_ipc_cancel_abort_scenario() {
+        let report = run_suite_as_client_scenario_reference(
+            ReferenceTransport::Ipc,
+            WireReferenceScenario::CancelAbort,
+        )
+        .await
+        .expect("IPC cancel/abort scenario should run");
+        assert_scenario_report(
+            &report,
+            "ipc",
+            "cancel-abort",
+            &["CANCEL", "RESULT_DROP_REASON", "EXPIRE_AT", "ABORT"],
+        );
+    }
+
+    #[tokio::test]
+    async fn suite_as_client_reference_executes_websocket_progress_backpressure_scenario() {
+        let report = run_suite_as_client_scenario_reference(
+            ReferenceTransport::WebSocket,
+            WireReferenceScenario::ProgressBackpressure,
+        )
+        .await
+        .expect("WebSocket progress/backpressure scenario should run");
+        assert_scenario_report(
+            &report,
+            "websocket",
+            "progress-backpressure",
+            &[
+                "CREDIT_UPDATE",
+                "BACKPRESSURE",
+                "PROGRESS",
+                "PARTIAL_RESULT",
+            ],
+        );
     }
 
     #[tokio::test]
@@ -808,6 +1638,22 @@ mod tests {
         assert_eq!(frames[2]["direction"], "suite->target");
         assert_eq!(frames[2]["body_bytes"], super::RESPONSE_BODY.len());
         assert_eq!(frames[2]["status_code"], 200);
+    }
+
+    fn assert_scenario_report(
+        report: &serde_json::Value,
+        transport: &str,
+        scenario: &str,
+        required_frames: &[&str],
+    ) {
+        validate_wire_reference_report(report, &WireReportExpectation::success(required_frames))
+            .expect("scenario report should validate");
+        assert_eq!(report["mode"], "suite-as-client");
+        assert_eq!(report["scenario"], scenario);
+        assert_eq!(report["transport"], transport);
+        assert_eq!(report["status"], "passed");
+        assert_eq!(report["terminal_state"], "success");
+        assert!(report["timing"]["elapsed_us"].as_u64().is_some());
     }
 
     #[test]

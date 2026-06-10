@@ -31,12 +31,12 @@
 
 ## Scenario Execution
 
-- [ ] Execute cancel/abort scenarios.
-- [ ] Execute priority/deadline scenarios.
-- [ ] Execute progress/backpressure scenarios.
-- [ ] Execute capability/route/cache scenarios.
-- [ ] Execute IPC-specific cancel scenarios.
-- [ ] Execute WebSocket-specific progress/backpressure scenarios.
+- [x] Execute cancel/abort scenarios.
+- [x] Execute priority/deadline scenarios.
+- [x] Execute progress/backpressure scenarios.
+- [x] Execute capability/route/cache scenarios.
+- [x] Execute IPC-specific cancel scenarios.
+- [x] Execute WebSocket-specific progress/backpressure scenarios.
 
 ## Result Validation
 
