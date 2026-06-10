@@ -1,12 +1,14 @@
 use nnrp_core::{
     BackpressureLevel, CacheInvalidateMetadata, CacheInvalidateScope, CacheReferenceMetadata,
-    CacheReuseScope, CapabilityMetadata, FrameSubmitMetadata, InputProfile, MessageType,
-    PartialResultMetadata, PayloadKindBitmap, PressureMetadata, ProgressMetadata, ResultClass,
-    ResultDropReasonMetadata, ResultPushMetadata, RouteHintMetadata, SubmitMode, TileIndexMode,
-    RESULT_DROP_REASON_DEADLINE_EXPIRED, STANDARD_PROFILE_TOKEN,
+    CacheReuseScope, CapabilityMetadata, CommonHeader, FrameSubmitMetadata, InputProfile,
+    MessageType, PartialResultMetadata, PayloadKindBitmap, PressureMetadata, ProgressMetadata,
+    ResultClass, ResultDropReasonMetadata, ResultPushMetadata, RouteHintMetadata, SubmitMode,
+    TileIndexMode, PRESSURE_METADATA_LEN, RESULT_DROP_REASON_DEADLINE_EXPIRED,
+    STANDARD_PROFILE_TOKEN,
 };
 use nnrp_runtime::{
-    NnrpClient, NnrpClientConfig, NnrpClientEvent, NnrpServer, NnrpServerConfig, RuntimeError,
+    FramedTransport, NnrpClient, NnrpClientConfig, NnrpClientEvent, NnrpServer, NnrpServerConfig,
+    RuntimeError, RuntimePacket, TcpTransport,
 };
 use nnrp_transport_ipc::{IpcEndpoint, IpcProvider};
 use nnrp_transport_quic::{
@@ -35,6 +37,15 @@ pub enum WireReferenceScenario {
     PriorityDeadline,
     ProgressBackpressure,
     CapabilityRouteCache,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferenceProxyAction {
+    Forward,
+    InjectBackpressure,
+    DelayForward,
+    CloseAfterSubmit,
+    PerturbResultBeforeProgress,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +106,18 @@ impl WireReferenceScenario {
     }
 }
 
+impl ReferenceProxyAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Forward => "forward",
+            Self::InjectBackpressure => "inject-backpressure",
+            Self::DelayForward => "delay-forward",
+            Self::CloseAfterSubmit => "close-after-submit",
+            Self::PerturbResultBeforeProgress => "perturb-result-before-progress",
+        }
+    }
+}
+
 pub async fn run_suite_as_client_reference(
     transport: ReferenceTransport,
 ) -> Result<Value, RuntimeError> {
@@ -132,6 +155,34 @@ pub async fn run_suite_as_client_scenario_reference(
             }
         },
     }
+}
+
+pub async fn run_suite_as_proxy_reference(
+    action: ReferenceProxyAction,
+) -> Result<Value, RuntimeError> {
+    let started = Instant::now();
+    let target = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let target_addr = target.local_addr()?;
+    let target_task = tokio::spawn(reference_proxy_target_server_task(target, action));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let proxy_addr = listener.local_addr()?;
+    let proxy_task = tokio::spawn(reference_tcp_proxy_task(
+        listener,
+        target_addr,
+        started,
+        action,
+    ));
+
+    let client = NnrpClient::connect_tcp(proxy_addr, NnrpClientConfig::default()).await?;
+    run_reference_proxy_client(action, client).await?;
+    let report = proxy_task
+        .await
+        .map_err(|_| RuntimeError::Internal("wire reference TCP proxy task panicked"))??;
+    target_task
+        .await
+        .map_err(|_| RuntimeError::Internal("wire reference proxy target task panicked"))??;
+    Ok(report)
 }
 
 pub fn validate_wire_reference_report(
@@ -1078,6 +1129,254 @@ async fn run_reference_scenario_client(
     }))
 }
 
+async fn reference_tcp_proxy_task(
+    listener: tokio::net::TcpListener,
+    target_addr: std::net::SocketAddr,
+    started: Instant,
+    action: ReferenceProxyAction,
+) -> Result<Value, RuntimeError> {
+    let (client_stream, _) = listener.accept().await?;
+    let mut client = TcpTransport::new(client_stream);
+    let mut target = TcpTransport::connect(target_addr).await?;
+    let mut frames = ObservedFrameLog::new(started);
+
+    let open = client.read_packet().await?;
+    record_proxy_packet(&mut frames, "client->proxy", &open);
+    target.write_packet(&open).await?;
+    frames.push(
+        "proxy->target",
+        "FORWARD",
+        json!({ "forwarded_message_type": wire_message_name(open.header.message_type) }),
+    );
+
+    let open_ack = target.read_packet().await?;
+    record_proxy_packet(&mut frames, "target->proxy", &open_ack);
+    client.write_packet(&open_ack).await?;
+    frames.push(
+        "proxy->client",
+        "FORWARD",
+        json!({ "forwarded_message_type": wire_message_name(open_ack.header.message_type) }),
+    );
+
+    let submit = client.read_packet().await?;
+    record_proxy_packet(&mut frames, "client->proxy", &submit);
+    if action == ReferenceProxyAction::CloseAfterSubmit {
+        client.close().await?;
+        target.close().await?;
+        frames.push(
+            "proxy->client",
+            "SESSION_CLOSE",
+            json!({ "injected_by_proxy": true }),
+        );
+        return Ok(proxy_report(action, started, frames));
+    }
+
+    if action == ReferenceProxyAction::InjectBackpressure {
+        let injected = proxy_backpressure_packet(submit.header.session_id)?;
+        client.write_packet(&injected).await?;
+        frames.push(
+            "proxy->client",
+            "BACKPRESSURE",
+            json!({
+                "injected_by_proxy": true,
+                "pressure_level": BackpressureLevel::Soft as u16,
+            }),
+        );
+    }
+    if action == ReferenceProxyAction::DelayForward {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        frames.push("proxy", "TIMEOUT_INJECTION", json!({ "delay_ms": 5 }));
+    }
+
+    target.write_packet(&submit).await?;
+    frames.push(
+        "proxy->target",
+        "FORWARD",
+        json!({ "forwarded_message_type": wire_message_name(submit.header.message_type) }),
+    );
+
+    if action == ReferenceProxyAction::PerturbResultBeforeProgress {
+        let progress = target.read_packet().await?;
+        let result = target.read_packet().await?;
+        record_proxy_packet(&mut frames, "target->proxy", &progress);
+        record_proxy_packet(&mut frames, "target->proxy", &result);
+        client.write_packet(&result).await?;
+        frames.push(
+            "proxy->client",
+            "FRAME_ORDER_PERTURBATION",
+            json!({
+                "first_forwarded_message_type": wire_message_name(result.header.message_type),
+                "held_message_type": wire_message_name(progress.header.message_type),
+            }),
+        );
+        client.write_packet(&progress).await?;
+        frames.push(
+            "proxy->client",
+            "FORWARD",
+            json!({ "forwarded_message_type": wire_message_name(progress.header.message_type) }),
+        );
+    } else {
+        let result = target.read_packet().await?;
+        record_proxy_packet(&mut frames, "target->proxy", &result);
+        client.write_packet(&result).await?;
+        frames.push(
+            "proxy->client",
+            "FORWARD",
+            json!({ "forwarded_message_type": wire_message_name(result.header.message_type) }),
+        );
+    }
+
+    let close = client.read_packet().await?;
+    record_proxy_packet(&mut frames, "client->proxy", &close);
+    target.write_packet(&close).await?;
+    frames.push(
+        "proxy->target",
+        "FORWARD",
+        json!({ "forwarded_message_type": wire_message_name(close.header.message_type) }),
+    );
+
+    let close_ack = target.read_packet().await?;
+    record_proxy_packet(&mut frames, "target->proxy", &close_ack);
+    client.write_packet(&close_ack).await?;
+    frames.push(
+        "proxy->client",
+        "FORWARD",
+        json!({ "forwarded_message_type": wire_message_name(close_ack.header.message_type) }),
+    );
+    client.close().await?;
+    target.close().await?;
+    Ok(proxy_report(action, started, frames))
+}
+
+async fn reference_proxy_target_server_task(
+    server: NnrpServer,
+    action: ReferenceProxyAction,
+) -> Result<(), RuntimeError> {
+    let mut session = match server.accept().await {
+        Ok(session) => session,
+        Err(error) if action == ReferenceProxyAction::CloseAfterSubmit => return Err(error),
+        Err(error) => return Err(error),
+    };
+    let submit = match session.receive_submit().await {
+        Ok(submit) => submit,
+        Err(_) if action == ReferenceProxyAction::CloseAfterSubmit => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if action == ReferenceProxyAction::PerturbResultBeforeProgress {
+        session
+            .send_progress(progress(submit.frame_id as u64), b"stage".to_vec())
+            .await?;
+    }
+    session
+        .send_result(submit.frame_id, token_result(), RESPONSE_BODY.to_vec())
+        .await?;
+    let close = session.receive_close().await?;
+    session.ack_close(&close).await?;
+    session.close().await
+}
+
+async fn run_reference_proxy_client(
+    action: ReferenceProxyAction,
+    client: NnrpClient,
+) -> Result<(), RuntimeError> {
+    let mut session = client.open_session().await?;
+    session
+        .submit_nowait(token_submit(), REQUEST_BODY.to_vec())
+        .await?;
+    match action {
+        ReferenceProxyAction::InjectBackpressure => {
+            expect_backpressure(session.await_event().await?)?;
+            let result = session.await_result().await?;
+            if result.body != RESPONSE_BODY {
+                return Err(RuntimeError::UnexpectedMessage(
+                    "wire proxy client received unexpected response body",
+                ));
+            }
+        }
+        ReferenceProxyAction::PerturbResultBeforeProgress => {
+            let result = session.await_result().await?;
+            if result.body != RESPONSE_BODY {
+                return Err(RuntimeError::UnexpectedMessage(
+                    "wire proxy perturbation client received unexpected response body",
+                ));
+            }
+            expect_progress(session.await_event().await?)?;
+        }
+        ReferenceProxyAction::CloseAfterSubmit => {
+            let error = session.await_result().await.expect_err(
+                "wire proxy close injection should close the client connection before result",
+            );
+            if error.to_string().is_empty() {
+                return Err(RuntimeError::Internal(
+                    "wire proxy close injection produced an empty error",
+                ));
+            }
+            return Ok(());
+        }
+        ReferenceProxyAction::Forward | ReferenceProxyAction::DelayForward => {
+            let result = session.await_result().await?;
+            if result.body != RESPONSE_BODY {
+                return Err(RuntimeError::UnexpectedMessage(
+                    "wire proxy client received unexpected response body",
+                ));
+            }
+        }
+    }
+    session.close().await
+}
+
+fn record_proxy_packet(frames: &mut ObservedFrameLog, direction: &str, packet: &RuntimePacket) {
+    frames.push(
+        direction,
+        wire_message_name(packet.header.message_type),
+        json!({
+            "session_id": packet.header.session_id,
+            "frame_id": packet.header.frame_id,
+            "metadata_bytes": packet.metadata.len(),
+            "body_bytes": packet.body.len(),
+        }),
+    );
+}
+
+fn proxy_backpressure_packet(session_id: u32) -> Result<RuntimePacket, RuntimeError> {
+    let mut header = CommonHeader::new(MessageType::Backpressure, PRESSURE_METADATA_LEN as u32, 0);
+    header.session_id = session_id;
+    Ok(RuntimePacket::new(
+        header,
+        soft_backpressure().to_bytes()?.to_vec(),
+        Vec::new(),
+    )?)
+}
+
+fn proxy_report(action: ReferenceProxyAction, started: Instant, frames: ObservedFrameLog) -> Value {
+    json!({
+        "mode": "suite-as-proxy",
+        "action": action.as_str(),
+        "transport": "tcp",
+        "target": "nnrp-rs-reference",
+        "status": "passed",
+        "terminal_state": "success",
+        "timing": {
+            "elapsed_us": started.elapsed().as_micros(),
+        },
+        "frames": frames.into_frames(),
+    })
+}
+
+fn wire_message_name(message_type: MessageType) -> &'static str {
+    match message_type {
+        MessageType::SessionOpen => "SESSION_OPEN",
+        MessageType::SessionOpenAck => "SESSION_OPEN_ACK",
+        MessageType::FrameSubmit => "FRAME_SUBMIT",
+        MessageType::ResultPush => "RESULT_PUSH",
+        MessageType::Progress => "PROGRESS",
+        MessageType::Backpressure => "BACKPRESSURE",
+        MessageType::SessionClose => "SESSION_CLOSE",
+        MessageType::SessionCloseAck => "SESSION_CLOSE_ACK",
+        _ => "OTHER",
+    }
+}
+
 fn expect_backpressure(event: NnrpClientEvent) -> Result<PressureMetadata, RuntimeError> {
     match event {
         NnrpClientEvent::Backpressure(metadata) => Ok(metadata),
@@ -1351,7 +1650,8 @@ fn cache_invalidate() -> CacheInvalidateMetadata {
 mod tests {
     use super::{
         run_suite_as_client_reference, run_suite_as_client_scenario_reference,
-        run_suite_as_server_reference, validate_wire_reference_report, ReferenceTransport,
+        run_suite_as_proxy_reference, run_suite_as_server_reference,
+        validate_wire_reference_report, ReferenceProxyAction, ReferenceTransport,
         WireReferenceScenario, WireReportExpectation, WireTraceExpectation,
     };
     use serde_json::json;
@@ -1605,6 +1905,80 @@ mod tests {
         assert_suite_as_server_report(&report, "websocket");
     }
 
+    #[tokio::test]
+    async fn suite_as_proxy_reference_forwards_bidirectional_frames() {
+        let report = run_suite_as_proxy_reference(ReferenceProxyAction::Forward)
+            .await
+            .expect("proxy forward action should run");
+        assert_proxy_report(
+            &report,
+            "forward",
+            &[
+                "SESSION_OPEN",
+                "SESSION_OPEN_ACK",
+                "FRAME_SUBMIT",
+                "RESULT_PUSH",
+                "SESSION_CLOSE",
+                "SESSION_CLOSE_ACK",
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn suite_as_proxy_reference_injects_backpressure() {
+        let report = run_suite_as_proxy_reference(ReferenceProxyAction::InjectBackpressure)
+            .await
+            .expect("proxy backpressure action should run");
+        assert_proxy_report(
+            &report,
+            "inject-backpressure",
+            &["BACKPRESSURE", "RESULT_PUSH"],
+        );
+        let frames = report["frames"].as_array().expect("frames");
+        assert!(frames.iter().any(|frame| {
+            frame["message_type"] == "BACKPRESSURE"
+                && frame["injected_by_proxy"].as_bool().unwrap_or(false)
+        }));
+    }
+
+    #[tokio::test]
+    async fn suite_as_proxy_reference_injects_timeout_delay() {
+        let report = run_suite_as_proxy_reference(ReferenceProxyAction::DelayForward)
+            .await
+            .expect("proxy delay action should run");
+        assert_proxy_report(
+            &report,
+            "delay-forward",
+            &["TIMEOUT_INJECTION", "RESULT_PUSH"],
+        );
+    }
+
+    #[tokio::test]
+    async fn suite_as_proxy_reference_injects_close_after_submit() {
+        let report = run_suite_as_proxy_reference(ReferenceProxyAction::CloseAfterSubmit)
+            .await
+            .expect("proxy close action should run");
+        assert_proxy_report(&report, "close-after-submit", &["SESSION_CLOSE"]);
+        let frames = report["frames"].as_array().expect("frames");
+        assert!(frames.iter().any(|frame| {
+            frame["message_type"] == "SESSION_CLOSE"
+                && frame["injected_by_proxy"].as_bool().unwrap_or(false)
+        }));
+    }
+
+    #[tokio::test]
+    async fn suite_as_proxy_reference_perturbs_frame_order() {
+        let report =
+            run_suite_as_proxy_reference(ReferenceProxyAction::PerturbResultBeforeProgress)
+                .await
+                .expect("proxy frame-order action should run");
+        assert_proxy_report(
+            &report,
+            "perturb-result-before-progress",
+            &["PROGRESS", "RESULT_PUSH", "FRAME_ORDER_PERTURBATION"],
+        );
+    }
+
     fn assert_suite_as_client_report(report: &serde_json::Value, transport: &str) {
         validate_wire_reference_report(
             report,
@@ -1684,6 +2058,17 @@ mod tests {
         assert_eq!(report["mode"], "suite-as-client");
         assert_eq!(report["scenario"], scenario);
         assert_eq!(report["transport"], transport);
+        assert_eq!(report["status"], "passed");
+        assert_eq!(report["terminal_state"], "success");
+        assert!(report["timing"]["elapsed_us"].as_u64().is_some());
+    }
+
+    fn assert_proxy_report(report: &serde_json::Value, action: &str, required_frames: &[&str]) {
+        validate_wire_reference_report(report, &WireReportExpectation::success(required_frames))
+            .expect("proxy report should validate");
+        assert_eq!(report["mode"], "suite-as-proxy");
+        assert_eq!(report["action"], action);
+        assert_eq!(report["transport"], "tcp");
         assert_eq!(report["status"], "passed");
         assert_eq!(report["terminal_state"], "success");
         assert!(report["timing"]["elapsed_us"].as_u64().is_some());

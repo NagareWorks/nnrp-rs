@@ -21,13 +21,13 @@
   - [x] QUIC listener.
   - [x] IPC listener.
   - [x] WebSocket listener.
-- [ ] Implement suite-as-proxy mode.
-  - [ ] Bidirectional frame forwarding.
-  - [ ] Frame injection.
-  - [ ] Timeout injection.
-  - [ ] Close injection.
-  - [ ] Backpressure injection.
-  - [ ] Frame-order perturbation.
+- [x] Implement suite-as-proxy mode.
+  - [x] Bidirectional frame forwarding.
+  - [x] Frame injection.
+  - [x] Timeout injection.
+  - [x] Close injection.
+  - [x] Backpressure injection.
+  - [x] Frame-order perturbation.
 
 ## Scenario Execution
 
