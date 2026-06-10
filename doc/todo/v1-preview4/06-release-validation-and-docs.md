@@ -9,18 +9,18 @@
 
 ## Validation Gates
 
-- [ ] Run workspace formatting.
-- [ ] Run workspace clippy with warnings denied.
-- [ ] Run workspace tests.
+- [x] Run workspace formatting.
+- [x] Run workspace clippy with warnings denied.
+- [x] Run workspace tests.
 - [ ] Run conformance preview2, preview3, and preview4 baseline validation.
 - [x] Run wire conformance dry-run.
-- [ ] Run transport loopback tests.
-  - [ ] TCP.
-  - [ ] QUIC.
-  - [ ] IPC.
-  - [ ] WebSocket.
-- [ ] Run native artifact inspection.
-- [ ] Run browser WASM artifact inspection.
+- [x] Run transport loopback tests.
+  - [x] TCP.
+  - [x] QUIC.
+  - [x] IPC.
+  - [x] WebSocket.
+- [x] Run native artifact inspection.
+- [x] Run browser WASM artifact inspection.
 
 ## Benchmark Gates
 
