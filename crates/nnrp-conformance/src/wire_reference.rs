@@ -4,6 +4,10 @@ use nnrp_core::{
 };
 use nnrp_runtime::{NnrpClient, NnrpClientConfig, NnrpServer, NnrpServerConfig, RuntimeError};
 use nnrp_transport_ipc::{IpcEndpoint, IpcProvider};
+use nnrp_transport_quic::{
+    quic_client_config, quic_server_config, QuicClientEndpointConfig, QuicProvider,
+    QuicServerEndpointConfig,
+};
 use nnrp_transport_websocket::{WebSocketEndpoint, WebSocketProvider};
 use serde_json::{json, Value};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -15,6 +19,7 @@ const RESPONSE_BODY: &[u8] = b"wire-reference-result";
 pub enum ReferenceTransport {
     Tcp,
     Ipc,
+    Quic,
     WebSocket,
 }
 
@@ -23,6 +28,7 @@ impl ReferenceTransport {
         match self {
             Self::Tcp => "tcp",
             Self::Ipc => "ipc",
+            Self::Quic => "quic",
             Self::WebSocket => "websocket",
         }
     }
@@ -34,6 +40,7 @@ pub async fn run_suite_as_client_reference(
     match transport {
         ReferenceTransport::Tcp => run_tcp_suite_as_client_reference().await,
         ReferenceTransport::Ipc => run_ipc_suite_as_client_reference().await,
+        ReferenceTransport::Quic => run_quic_suite_as_client_reference().await,
         ReferenceTransport::WebSocket => run_websocket_suite_as_client_reference().await,
     }
 }
@@ -49,6 +56,36 @@ async fn run_tcp_suite_as_client_reference() -> Result<Value, RuntimeError> {
     server_task
         .await
         .map_err(|_| RuntimeError::Internal("wire reference TCP server task panicked"))??;
+    Ok(report)
+}
+
+async fn run_quic_suite_as_client_reference() -> Result<Value, RuntimeError> {
+    let started = Instant::now();
+    let (server_endpoint, certificate) = QuicServerEndpointConfig::self_signed_localhost(
+        "127.0.0.1:0"
+            .parse()
+            .expect("loopback QUIC bind address should be a valid socket address"),
+    )?;
+    let server = QuicProvider::bind(
+        server_endpoint,
+        quic_server_config(NnrpServerConfig::default()),
+    )
+    .await?;
+    let addr = server.local_addr()?;
+    let server_task = tokio::spawn(reference_server_task(server));
+
+    let client_endpoint =
+        QuicClientEndpointConfig::localhost_with_root_certificate(certificate.certificate_der);
+    let client = QuicProvider::connect_addr(
+        addr,
+        client_endpoint,
+        quic_client_config(NnrpClientConfig::default()),
+    )
+    .await?;
+    let report = run_reference_client(ReferenceTransport::Quic, started, client).await?;
+    server_task
+        .await
+        .map_err(|_| RuntimeError::Internal("wire reference QUIC server task panicked"))??;
     Ok(report)
 }
 
@@ -282,6 +319,14 @@ mod tests {
             .expect_err("unbound IPC endpoint should fail");
         assert!(!error.to_string().is_empty());
         super::cleanup_ipc_endpoint(&endpoint);
+    }
+
+    #[tokio::test]
+    async fn suite_as_client_reference_runs_quic_endpoint() {
+        let report = run_suite_as_client_reference(ReferenceTransport::Quic)
+            .await
+            .expect("QUIC reference endpoint should run");
+        assert_reference_report(&report, "quic");
     }
 
     #[tokio::test]
