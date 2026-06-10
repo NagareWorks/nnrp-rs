@@ -14,7 +14,7 @@
 - [x] Align Rust capability tokens with the preview4 control and object catalogs.
   - [x] Import the control capability list used by conformance.
   - [x] Import the object capability list used by conformance.
-  - [ ] Keep capability names stable across Rust, FFI, WASM, Python, C#, and JavaScript.
+  - [x] Keep capability names stable across Rust, FFI, WASM, Python, C#, and JavaScript.
 - [x] Align transport names with conformance target manifests.
   - [x] Use `tcp`.
   - [x] Use `quic`.

@@ -4,7 +4,7 @@ Preview4 moves NNRP from token-stream transport substitution toward runtime obje
 
 ## Workstreams
 
-- [ ] [00 - Scope and ownership](00-scope-and-ownership.md)
+- [x] [00 - Scope and ownership](00-scope-and-ownership.md)
 - [x] [01 - Runtime control protocol](01-runtime-control-protocol.md)
 - [x] [02 - Runtime object and cache reference](02-runtime-object-cache-reference.md)
 - [x] [03 - IPC and WebSocket transports](03-ipc-websocket-transports.md)
