@@ -109,7 +109,9 @@ typedef enum NnrpHandleKind {
   NNRP_HANDLE_EVENT_PUMP = 4,
   NNRP_HANDLE_BUFFER = 5,
   NNRP_HANDLE_SCHEMA_REGISTRY = 6,
-  NNRP_HANDLE_CACHE_LEASE = 7
+  NNRP_HANDLE_CACHE_LEASE = 7,
+  NNRP_HANDLE_OBJECT_DESCRIPTOR = 8,
+  NNRP_HANDLE_CACHE_REFERENCE_DESCRIPTOR = 9
 } NnrpHandleKind;
 
 typedef enum NnrpEventKind {
@@ -403,6 +405,12 @@ NnrpFfiStatus nnrp_buffer_release(NnrpHandle buffer);
 NnrpFfiStatus nnrp_object_metadata_buffer_acquire_copy(NnrpBufferView source, NnrpHandle *out_buffer, NnrpBufferView *out_view);
 NnrpFfiStatus nnrp_object_metadata_buffer_view(NnrpHandle buffer, NnrpBufferView *out_view);
 NnrpFfiStatus nnrp_object_metadata_buffer_release(NnrpHandle buffer);
+NnrpFfiStatus nnrp_object_descriptor_create(NnrpRuntimeObjectDescriptor descriptor, NnrpBufferView metadata, NnrpHandle *out_handle);
+NnrpFfiStatus nnrp_object_descriptor_view(NnrpHandle handle, NnrpRuntimeObjectDescriptor *out_descriptor, NnrpBufferView *out_metadata);
+NnrpFfiStatus nnrp_object_descriptor_release(NnrpHandle handle);
+NnrpFfiStatus nnrp_cache_reference_descriptor_create(NnrpCacheReferenceDescriptor descriptor, NnrpBufferView metadata, NnrpHandle *out_handle);
+NnrpFfiStatus nnrp_cache_reference_descriptor_view(NnrpHandle handle, NnrpCacheReferenceDescriptor *out_descriptor, NnrpBufferView *out_metadata);
+NnrpFfiStatus nnrp_cache_reference_descriptor_release(NnrpHandle handle);
 NnrpFfiStatus nnrp_cache_query(NnrpCacheLeaseRequest request, NnrpCacheLeaseResult *out_result);
 NnrpFfiStatus nnrp_cache_touch(NnrpCacheLeaseRequest request, NnrpCacheLeaseResult *out_result);
 NnrpFfiStatus nnrp_cache_prefetch(NnrpHandle owner, const NnrpCacheObjectId *objects, uintptr_t object_count, uint64_t now_ms, uint32_t ttl_ms, NnrpCacheLeaseResult *out_results);

@@ -312,6 +312,8 @@ pub enum NnrpHandleKind {
     Buffer = 5,
     SchemaRegistry = 6,
     CacheLease = 7,
+    ObjectDescriptor = 8,
+    CacheReferenceDescriptor = 9,
 }
 
 #[repr(C)]
@@ -375,6 +377,14 @@ enum NnrpFfiResource {
     Buffer {
         bytes: Vec<u8>,
     },
+    ObjectDescriptor {
+        descriptor: ObjectDescriptorMetadata,
+        metadata: Vec<u8>,
+    },
+    CacheReferenceDescriptor {
+        descriptor: CacheReferenceMetadata,
+        metadata: Vec<u8>,
+    },
     CacheLease {
         owner: NnrpHandle,
         lease: CacheLease,
@@ -437,6 +447,12 @@ impl NnrpFfiHandleStore {
                 NnrpHandleKind::SchemaRegistry
             }
             value if value == NnrpHandleKind::CacheLease as u32 => NnrpHandleKind::CacheLease,
+            value if value == NnrpHandleKind::ObjectDescriptor as u32 => {
+                NnrpHandleKind::ObjectDescriptor
+            }
+            value if value == NnrpHandleKind::CacheReferenceDescriptor as u32 => {
+                NnrpHandleKind::CacheReferenceDescriptor
+            }
             _ => return Err(NnrpFfiStatus::invalid_handle(handle.kind)),
         })?;
         self.entries.insert(
@@ -3378,6 +3394,214 @@ pub unsafe extern "C" fn nnrp_object_metadata_buffer_release(buffer: NnrpHandle)
 #[no_mangle]
 /// # Safety
 ///
+/// `metadata` must remain readable for `metadata.len` bytes for the duration of
+/// the call. `out_handle` must be either null or a valid writable pointer to
+/// one `NnrpHandle`.
+#[rustfmt::skip]
+pub unsafe extern "C" fn nnrp_object_descriptor_create(descriptor: NnrpRuntimeObjectDescriptor, metadata: NnrpBufferView, out_handle: *mut NnrpHandle) -> NnrpFfiStatus {
+    nnrp_object_descriptor_create_impl(descriptor, metadata, out_handle)
+}
+
+unsafe fn nnrp_object_descriptor_create_impl(
+    descriptor: NnrpRuntimeObjectDescriptor,
+    metadata: NnrpBufferView,
+    out_handle: *mut NnrpHandle,
+) -> NnrpFfiStatus {
+    if out_handle.is_null() {
+        return NnrpFfiStatus::invalid_argument(50);
+    }
+    if descriptor.metadata_bytes as usize != metadata.len {
+        return NnrpFfiStatus::invalid_argument(51);
+    }
+    if let Err(status) = metadata.validate() {
+        return status;
+    }
+    let descriptor = match descriptor.to_core() {
+        Ok(descriptor) => descriptor,
+        Err(status) => return status,
+    };
+    let metadata = ffi_read_slice(metadata).to_vec();
+    let mut store = handle_store();
+    let id = next_handle_id(&store, NnrpHandleKind::ObjectDescriptor);
+    let handle = NnrpHandle::new(NnrpHandleKind::ObjectDescriptor, id, 1);
+    if let Err(status) = store.insert(
+        handle,
+        NnrpFfiResource::ObjectDescriptor {
+            descriptor,
+            metadata,
+        },
+    ) {
+        return status;
+    }
+    *out_handle = handle;
+    NnrpFfiStatus::ok()
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `out_descriptor` and `out_metadata` must be either null or valid writable
+/// pointers to one value each.
+#[rustfmt::skip]
+pub unsafe extern "C" fn nnrp_object_descriptor_view(handle: NnrpHandle, out_descriptor: *mut NnrpRuntimeObjectDescriptor, out_metadata: *mut NnrpBufferView) -> NnrpFfiStatus {
+    nnrp_object_descriptor_view_impl(handle, out_descriptor, out_metadata)
+}
+
+unsafe fn nnrp_object_descriptor_view_impl(
+    handle: NnrpHandle,
+    out_descriptor: *mut NnrpRuntimeObjectDescriptor,
+    out_metadata: *mut NnrpBufferView,
+) -> NnrpFfiStatus {
+    if out_descriptor.is_null() || out_metadata.is_null() {
+        return NnrpFfiStatus::invalid_argument(52);
+    }
+    let store = handle_store();
+    match store.get(handle, NnrpHandleKind::ObjectDescriptor) {
+        Ok(NnrpFfiResource::ObjectDescriptor {
+            descriptor,
+            metadata,
+        }) => {
+            *out_descriptor = (*descriptor).into();
+            *out_metadata = NnrpBufferView {
+                ptr: metadata.as_ptr(),
+                len: metadata.len(),
+            };
+            NnrpFfiStatus::ok()
+        }
+        Ok(_) => NnrpFfiStatus::invalid_handle(NnrpHandleKind::ObjectDescriptor as u32),
+        Err(status) => status,
+    }
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// The descriptor handle is copied by value. This function does not dereference
+/// caller-provided pointers.
+#[rustfmt::skip]
+pub unsafe extern "C" fn nnrp_object_descriptor_release(handle: NnrpHandle) -> NnrpFfiStatus {
+    nnrp_object_descriptor_release_impl(handle)
+}
+
+fn nnrp_object_descriptor_release_impl(handle: NnrpHandle) -> NnrpFfiStatus {
+    let mut store = handle_store();
+    match store.get(handle, NnrpHandleKind::ObjectDescriptor) {
+        Ok(NnrpFfiResource::ObjectDescriptor { .. }) => store
+            .remove(handle, NnrpHandleKind::ObjectDescriptor)
+            .map(|_| NnrpFfiStatus::ok())
+            .unwrap_or_else(|status| status),
+        Ok(_) => NnrpFfiStatus::invalid_handle(NnrpHandleKind::ObjectDescriptor as u32),
+        Err(status) => status,
+    }
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `metadata` must remain readable for `metadata.len` bytes for the duration of
+/// the call. `out_handle` must be either null or a valid writable pointer to
+/// one `NnrpHandle`.
+#[rustfmt::skip]
+pub unsafe extern "C" fn nnrp_cache_reference_descriptor_create(descriptor: NnrpCacheReferenceDescriptor, metadata: NnrpBufferView, out_handle: *mut NnrpHandle) -> NnrpFfiStatus {
+    nnrp_cache_reference_descriptor_create_impl(descriptor, metadata, out_handle)
+}
+
+unsafe fn nnrp_cache_reference_descriptor_create_impl(
+    descriptor: NnrpCacheReferenceDescriptor,
+    metadata: NnrpBufferView,
+    out_handle: *mut NnrpHandle,
+) -> NnrpFfiStatus {
+    if out_handle.is_null() {
+        return NnrpFfiStatus::invalid_argument(53);
+    }
+    if descriptor.metadata_bytes as usize != metadata.len {
+        return NnrpFfiStatus::invalid_argument(54);
+    }
+    if let Err(status) = metadata.validate() {
+        return status;
+    }
+    let descriptor = match descriptor.to_core() {
+        Ok(descriptor) => descriptor,
+        Err(status) => return status,
+    };
+    let metadata = ffi_read_slice(metadata).to_vec();
+    let mut store = handle_store();
+    let id = next_handle_id(&store, NnrpHandleKind::CacheReferenceDescriptor);
+    let handle = NnrpHandle::new(NnrpHandleKind::CacheReferenceDescriptor, id, 1);
+    if let Err(status) = store.insert(
+        handle,
+        NnrpFfiResource::CacheReferenceDescriptor {
+            descriptor,
+            metadata,
+        },
+    ) {
+        return status;
+    }
+    *out_handle = handle;
+    NnrpFfiStatus::ok()
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `out_descriptor` and `out_metadata` must be either null or valid writable
+/// pointers to one value each.
+#[rustfmt::skip]
+pub unsafe extern "C" fn nnrp_cache_reference_descriptor_view(handle: NnrpHandle, out_descriptor: *mut NnrpCacheReferenceDescriptor, out_metadata: *mut NnrpBufferView) -> NnrpFfiStatus {
+    nnrp_cache_reference_descriptor_view_impl(handle, out_descriptor, out_metadata)
+}
+
+unsafe fn nnrp_cache_reference_descriptor_view_impl(
+    handle: NnrpHandle,
+    out_descriptor: *mut NnrpCacheReferenceDescriptor,
+    out_metadata: *mut NnrpBufferView,
+) -> NnrpFfiStatus {
+    if out_descriptor.is_null() || out_metadata.is_null() {
+        return NnrpFfiStatus::invalid_argument(55);
+    }
+    let store = handle_store();
+    match store.get(handle, NnrpHandleKind::CacheReferenceDescriptor) {
+        Ok(NnrpFfiResource::CacheReferenceDescriptor {
+            descriptor,
+            metadata,
+        }) => {
+            *out_descriptor = (*descriptor).into();
+            *out_metadata = NnrpBufferView {
+                ptr: metadata.as_ptr(),
+                len: metadata.len(),
+            };
+            NnrpFfiStatus::ok()
+        }
+        Ok(_) => NnrpFfiStatus::invalid_handle(NnrpHandleKind::CacheReferenceDescriptor as u32),
+        Err(status) => status,
+    }
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// The descriptor handle is copied by value. This function does not dereference
+/// caller-provided pointers.
+#[rustfmt::skip]
+pub unsafe extern "C" fn nnrp_cache_reference_descriptor_release(handle: NnrpHandle) -> NnrpFfiStatus {
+    nnrp_cache_reference_descriptor_release_impl(handle)
+}
+
+fn nnrp_cache_reference_descriptor_release_impl(handle: NnrpHandle) -> NnrpFfiStatus {
+    let mut store = handle_store();
+    match store.get(handle, NnrpHandleKind::CacheReferenceDescriptor) {
+        Ok(NnrpFfiResource::CacheReferenceDescriptor { .. }) => store
+            .remove(handle, NnrpHandleKind::CacheReferenceDescriptor)
+            .map(|_| NnrpFfiStatus::ok())
+            .unwrap_or_else(|status| status),
+        Ok(_) => NnrpFfiStatus::invalid_handle(NnrpHandleKind::CacheReferenceDescriptor as u32),
+        Err(status) => status,
+    }
+}
+
+#[no_mangle]
+/// # Safety
+///
 /// `out_result` must be either null or a valid writable pointer to one
 /// `NnrpCacheLeaseResult`.
 #[rustfmt::skip]
@@ -6140,6 +6364,197 @@ mod tests {
             assert_eq!(
                 nnrp_object_metadata_buffer_release(buffer),
                 NnrpFfiStatus::invalid_handle(NnrpHandleKind::Buffer as u32)
+            );
+        }
+    }
+
+    #[test]
+    fn ffi_object_and_cache_descriptor_handles_preserve_metadata_until_release() {
+        unsafe {
+            let object_metadata = br#"{"object":"render-target"}"#;
+            let object_descriptor = NnrpRuntimeObjectDescriptor {
+                object_id: 77,
+                object_kind: RuntimeObjectKind::Tensor as u16,
+                producer_role: RuntimeRole::Server as u8,
+                consumer_role: RuntimeRole::Client as u8,
+                session_id: 9,
+                byte_size: 4096,
+                compute_cost_units: 3,
+                memory_location_hint: MemoryLocationHint::DeviceMemory as u16,
+                ownership_hint: OwnershipHint::ProducerOwned as u16,
+                lifetime_hint_ms: 250,
+                metadata_bytes: object_metadata.len() as u32,
+            };
+            let mut object_handle = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_object_descriptor_create(
+                    object_descriptor,
+                    NnrpBufferView {
+                        ptr: object_metadata.as_ptr(),
+                        len: object_metadata.len(),
+                    },
+                    &mut object_handle,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(object_handle.kind, NnrpHandleKind::ObjectDescriptor as u32);
+
+            let mut observed_object = NnrpRuntimeObjectDescriptor {
+                metadata_bytes: 0,
+                ..object_descriptor
+            };
+            let mut observed_metadata = NnrpBufferView::empty();
+            assert_eq!(
+                nnrp_object_descriptor_view(
+                    object_handle,
+                    &mut observed_object,
+                    &mut observed_metadata,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(observed_object, object_descriptor);
+            assert_eq!(ffi_read_slice(observed_metadata), object_metadata);
+            assert_eq!(
+                nnrp_object_descriptor_release(object_handle),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(
+                nnrp_object_descriptor_view(
+                    object_handle,
+                    &mut observed_object,
+                    &mut observed_metadata,
+                ),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::ObjectDescriptor as u32)
+            );
+
+            let cache_metadata = br#"{"reuse":"same-scene"}"#;
+            let cache_descriptor = NnrpCacheReferenceDescriptor {
+                cache_key_hi: 1,
+                cache_key_lo: 2,
+                profile_id: 0x1001,
+                reuse_scope: CacheReuseScope::Session as u16,
+                lease_id: 44,
+                producer_trace_id: 55,
+                expiration_hint_ms: 1_000,
+                metadata_bytes: cache_metadata.len() as u32,
+                flags: 0,
+            };
+            let mut cache_handle = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_cache_reference_descriptor_create(
+                    cache_descriptor,
+                    NnrpBufferView {
+                        ptr: cache_metadata.as_ptr(),
+                        len: cache_metadata.len(),
+                    },
+                    &mut cache_handle,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(
+                cache_handle.kind,
+                NnrpHandleKind::CacheReferenceDescriptor as u32
+            );
+
+            let mut observed_cache = NnrpCacheReferenceDescriptor {
+                metadata_bytes: 0,
+                ..cache_descriptor
+            };
+            let mut observed_cache_metadata = NnrpBufferView::empty();
+            assert_eq!(
+                nnrp_cache_reference_descriptor_view(
+                    cache_handle,
+                    &mut observed_cache,
+                    &mut observed_cache_metadata,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(observed_cache, cache_descriptor);
+            assert_eq!(ffi_read_slice(observed_cache_metadata), cache_metadata);
+            assert_eq!(
+                nnrp_cache_reference_descriptor_release(cache_handle),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(
+                nnrp_cache_reference_descriptor_release(cache_handle),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::CacheReferenceDescriptor as u32)
+            );
+        }
+    }
+
+    #[test]
+    fn ffi_descriptor_handles_reject_invalid_metadata_shapes() {
+        unsafe {
+            let metadata = [1u8, 2, 3];
+            let object_descriptor = NnrpRuntimeObjectDescriptor {
+                object_id: 88,
+                object_kind: RuntimeObjectKind::Tensor as u16,
+                producer_role: RuntimeRole::Server as u8,
+                consumer_role: RuntimeRole::Client as u8,
+                session_id: 1,
+                byte_size: 4,
+                compute_cost_units: 1,
+                memory_location_hint: MemoryLocationHint::HostMemory as u16,
+                ownership_hint: OwnershipHint::ProducerOwned as u16,
+                lifetime_hint_ms: 10,
+                metadata_bytes: 9,
+            };
+            let mut handle = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_object_descriptor_create(
+                    object_descriptor,
+                    NnrpBufferView {
+                        ptr: metadata.as_ptr(),
+                        len: metadata.len(),
+                    },
+                    &mut handle,
+                ),
+                NnrpFfiStatus::invalid_argument(51)
+            );
+            assert_eq!(
+                nnrp_object_descriptor_create(
+                    NnrpRuntimeObjectDescriptor {
+                        metadata_bytes: 1,
+                        ..object_descriptor
+                    },
+                    NnrpBufferView {
+                        ptr: core::ptr::null(),
+                        len: 1,
+                    },
+                    &mut handle,
+                ),
+                NnrpFfiStatus::invalid_argument(1)
+            );
+
+            let cache_descriptor = NnrpCacheReferenceDescriptor {
+                cache_key_hi: 1,
+                cache_key_lo: 2,
+                profile_id: 0x1001,
+                reuse_scope: CacheReuseScope::Session as u16,
+                lease_id: 1,
+                producer_trace_id: 2,
+                expiration_hint_ms: 10,
+                metadata_bytes: 9,
+                flags: 0,
+            };
+            assert_eq!(
+                nnrp_cache_reference_descriptor_create(
+                    cache_descriptor,
+                    NnrpBufferView {
+                        ptr: metadata.as_ptr(),
+                        len: metadata.len(),
+                    },
+                    &mut handle,
+                ),
+                NnrpFfiStatus::invalid_argument(54)
+            );
+            assert_eq!(
+                nnrp_cache_reference_descriptor_view(
+                    NnrpHandle::invalid(),
+                    core::ptr::null_mut(),
+                    core::ptr::null_mut(),
+                ),
+                NnrpFfiStatus::invalid_argument(55)
             );
         }
     }

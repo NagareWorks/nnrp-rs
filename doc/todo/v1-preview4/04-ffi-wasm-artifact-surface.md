@@ -22,12 +22,12 @@
 
 ## FFI Object Surface
 
-- [ ] Add object descriptor handle types.
-- [ ] Add cache reference descriptor handle types.
+- [x] Add object descriptor handle types.
+- [x] Add cache reference descriptor handle types.
 - [x] Add native-owned metadata buffer release functions.
-- [ ] Add borrowed view rules for object descriptors.
+- [x] Add borrowed view rules for object descriptors.
 - [ ] Add copied snapshot rules for SDKs that cannot preserve borrow lifetimes.
-- [ ] Add tests for handle ownership and release order.
+- [x] Add tests for handle ownership and release order.
 
 ## WASM Surface
 
