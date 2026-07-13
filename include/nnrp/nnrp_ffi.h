@@ -14,7 +14,7 @@ typedef struct NnrpProtocolVersion {
 } NnrpProtocolVersion;
 
 #define NNRP_FFI_ABI_MAJOR 1
-#define NNRP_FFI_ABI_MINOR 11
+#define NNRP_FFI_ABI_MINOR 12
 #define NNRP_FFI_ABI_PATCH 0
 
 #define NNRP_TRANSPORT_SLOT_QUIC 0x00000001u
@@ -41,6 +41,7 @@ typedef struct NnrpProtocolVersion {
 #define NNRP_RUNTIME_FEATURE_CLIENT_COMPACT_RESULT_HELPERS 0x0000000000010000ull
 #define NNRP_RUNTIME_FEATURE_PREVIEW4_CONTROL_EVENTS 0x0000000000020000ull
 #define NNRP_RUNTIME_FEATURE_PREVIEW4_OBJECT_CACHE_EVENTS 0x0000000000040000ull
+#define NNRP_RUNTIME_FEATURE_PREVIEW4_RUNTIME_FRAME_SEND 0x0000000000080000ull
 
 #define NNRP_RESULT_STATE_NONE 0u
 #define NNRP_RESULT_STATE_COMPLETED 1u
@@ -130,7 +131,9 @@ typedef enum NnrpEventKind {
   NNRP_EVENT_FLOW_UPDATED = 8,
   NNRP_EVENT_CONTROL = 9,
   NNRP_EVENT_ERROR = 10,
-  NNRP_EVENT_RESULT_HINT = 11
+  NNRP_EVENT_RESULT_HINT = 11,
+  NNRP_EVENT_PARTIAL_RESULT = 12,
+  NNRP_EVENT_RUNTIME_FRAME = 13
 } NnrpEventKind;
 
 typedef struct NnrpFfiStatus {
@@ -231,10 +234,12 @@ typedef struct NnrpSessionResumeRequest {
 
 typedef struct NnrpEvent {
   uint32_t kind;
+  uint32_t message_type;
   NnrpHandle connection;
   NnrpHandle session;
   NnrpHandle operation;
   uint32_t frame_id;
+  NnrpHandle payload_owner;
   NnrpBufferView payload;
   NnrpFfiDiagnostic diagnostic;
 } NnrpEvent;
@@ -464,6 +469,13 @@ typedef struct NnrpControlRequest {
   NnrpBufferView payload;
 } NnrpControlRequest;
 
+typedef struct NnrpRuntimeFrameSendRequest {
+  NnrpHandle handle;
+  uint32_t message_type;
+  uint32_t frame_id;
+  NnrpBufferView payload;
+} NnrpRuntimeFrameSendRequest;
+
 typedef struct NnrpClientSubmitControlRequest {
   NnrpControlRequest control;
   uintptr_t max_events;
@@ -535,6 +547,7 @@ NnrpFfiStatus nnrp_server_send_result(NnrpServerSendResultRequest request);
 NnrpFfiStatus nnrp_server_send_flow_update(NnrpServerFlowUpdateRequest request);
 NnrpFfiStatus nnrp_server_close(NnrpHandle session);
 NnrpFfiStatus nnrp_control(NnrpControlRequest request);
+NnrpFfiStatus nnrp_runtime_frame_send(NnrpRuntimeFrameSendRequest request);
 NnrpFfiStatus nnrp_poll_empty(NnrpPollResult *out_result);
 NnrpFfiStatus nnrp_dispatch_event(NnrpCallbackSink sink, const NnrpEvent *event);
 

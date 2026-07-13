@@ -8,23 +8,23 @@ use nnrp_core::{
     validate_partial_result_semantics, validate_pressure_semantics, validate_progress_semantics,
     validate_result_drop_reason_semantics, validate_scheduling_semantics,
     validate_session_recovery_ack, validate_session_recovery_request,
-    validate_trace_context_semantics, BudgetMetadata, CacheLease, CacheLeaseOwnerScope,
-    CacheMissMetadata, CacheMissReason, CacheObjectId, CacheObjectKind, CacheReferenceMetadata,
-    CacheReuseScope, CacheValidationFailure, CapabilityMetadata, ControlRequestMetadata,
-    ErrorScope, MemoryLocationHint, MessageType, NnrpError, ObjectDeltaMetadata,
-    ObjectDescriptorMetadata, ObjectReferenceMetadata, ObjectReleaseMetadata, ObjectReleaseReason,
-    OwnershipHint, PartialResultMetadata, PressureMetadata, ProgressMetadata, ProtocolVersion,
-    RecoverableErrorMetadata, ResultDropReasonMetadata, ResultHintMetadata, RetryAfterMetadata,
-    RouteHintMetadata, RuntimeObjectKind, RuntimeRole, SchedulingMetadata, SchemaDescriptorHeader,
-    SchemaRegistry, SchemaRegistryAction, SchemaRegistryFailure, SessionMigrateAckMetadata,
-    SessionMigrateMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
+    validate_trace_context_semantics, BudgetMetadata, CacheInvalidateMetadata, CacheLease,
+    CacheLeaseOwnerScope, CacheMissMetadata, CacheMissReason, CacheObjectId, CacheObjectKind,
+    CacheReferenceMetadata, CacheReuseScope, CacheValidationFailure, CapabilityMetadata,
+    ControlRequestMetadata, ErrorScope, MemoryLocationHint, MessageType, NnrpError,
+    ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata, ObjectReleaseMetadata,
+    ObjectReleaseReason, OwnershipHint, PartialResultMetadata, PressureMetadata, ProgressMetadata,
+    ProtocolVersion, RecoverableErrorMetadata, ResultDropReasonMetadata, ResultHintMetadata,
+    RetryAfterMetadata, RouteHintMetadata, RuntimeObjectKind, RuntimeRole, SchedulingMetadata,
+    SchemaDescriptorHeader, SchemaRegistry, SchemaRegistryAction, SchemaRegistryFailure,
+    SessionMigrateAckMetadata, SessionMigrateMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
     SessionRecoveryOutcome as CoreSessionRecoveryOutcome, SupersedeMetadata, TraceContextMetadata,
     TransportId, TypedPayloadDescriptor, SESSION_ERROR_NONE, SESSION_ERROR_PROFILE_UNSUPPORTED,
     SESSION_ERROR_RESUME_REJECTED, SESSION_ERROR_SCHEMA_UNSUPPORTED, SESSION_FLAG_ALLOW_RESUME,
 };
 
 pub const NNRP_FFI_ABI_MAJOR: u16 = 1;
-pub const NNRP_FFI_ABI_MINOR: u16 = 11;
+pub const NNRP_FFI_ABI_MINOR: u16 = 12;
 pub const NNRP_FFI_ABI_PATCH: u16 = 0;
 
 pub const NNRP_TRANSPORT_SLOT_QUIC: u32 = 0x0000_0001;
@@ -59,6 +59,7 @@ pub const NNRP_RUNTIME_FEATURE_CLIENT_COARSE_RESULT_HELPERS: u64 = 0x0000_0000_0
 pub const NNRP_RUNTIME_FEATURE_CLIENT_COMPACT_RESULT_HELPERS: u64 = 0x0000_0000_0001_0000;
 pub const NNRP_RUNTIME_FEATURE_PREVIEW4_CONTROL_EVENTS: u64 = 0x0000_0000_0002_0000;
 pub const NNRP_RUNTIME_FEATURE_PREVIEW4_OBJECT_CACHE_EVENTS: u64 = 0x0000_0000_0004_0000;
+pub const NNRP_RUNTIME_FEATURE_PREVIEW4_RUNTIME_FRAME_SEND: u64 = 0x0000_0000_0008_0000;
 
 pub const NNRP_RESULT_STATE_NONE: u32 = 0;
 pub const NNRP_RESULT_STATE_COMPLETED: u32 = 1;
@@ -136,8 +137,8 @@ pub fn runtime_capabilities() -> NnrpRuntimeCapabilities {
         sdk_major: 1,
         sdk_minor: 0,
         sdk_patch: 0,
-        sdk_preview: 3,
-        sdk_revision: 8,
+        sdk_preview: 4,
+        sdk_revision: 1,
         reserved1: 0,
         transport_slots: enabled_transport_slots(),
         feature_flags: NNRP_RUNTIME_FEATURE_PROTOCOL_CORE
@@ -158,7 +159,8 @@ pub fn runtime_capabilities() -> NnrpRuntimeCapabilities {
             | NNRP_RUNTIME_FEATURE_CLIENT_COARSE_RESULT_HELPERS
             | NNRP_RUNTIME_FEATURE_CLIENT_COMPACT_RESULT_HELPERS
             | NNRP_RUNTIME_FEATURE_PREVIEW4_CONTROL_EVENTS
-            | NNRP_RUNTIME_FEATURE_PREVIEW4_OBJECT_CACHE_EVENTS,
+            | NNRP_RUNTIME_FEATURE_PREVIEW4_OBJECT_CACHE_EVENTS
+            | NNRP_RUNTIME_FEATURE_PREVIEW4_RUNTIME_FRAME_SEND,
     }
 }
 
@@ -478,20 +480,43 @@ struct NnrpFfiHandleStore {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct NnrpQueuedEvent {
     kind: u32,
+    message_type: u32,
     connection: NnrpHandle,
     session: NnrpHandle,
     operation: NnrpHandle,
     frame_id: u32,
+    payload_owner: NnrpHandle,
 }
 
 impl NnrpQueuedEvent {
-    fn into_event(self) -> NnrpEvent {
+    const fn plain(
+        kind: NnrpEventKind,
+        connection: NnrpHandle,
+        session: NnrpHandle,
+        operation: NnrpHandle,
+        frame_id: u32,
+    ) -> Self {
+        Self {
+            kind: kind as u32,
+            message_type: 0,
+            connection,
+            session,
+            operation,
+            frame_id,
+            payload_owner: NnrpHandle::invalid(),
+        }
+    }
+
+    fn into_event(self, payload: NnrpBufferView) -> NnrpEvent {
         NnrpEvent {
             kind: self.kind,
+            message_type: self.message_type,
             connection: self.connection,
             session: self.session,
             operation: self.operation,
             frame_id: self.frame_id,
+            payload_owner: self.payload_owner,
+            payload,
             ..NnrpEvent::none()
         }
     }
@@ -617,7 +642,19 @@ impl NnrpFfiHandleStore {
             _ => true,
         });
         self.entries.remove(&(connection.kind, connection.id));
+        let payload_owners: Vec<NnrpHandle> = self
+            .events
+            .iter()
+            .filter_map(|event| {
+                (event.connection == connection
+                    && event.payload_owner.kind == NnrpHandleKind::Buffer as u32)
+                    .then_some(event.payload_owner)
+            })
+            .collect();
         self.events.retain(|event| event.connection != connection);
+        for owner in payload_owners {
+            self.entries.remove(&(owner.kind, owner.id));
+        }
         Ok(())
     }
 
@@ -634,7 +671,21 @@ impl NnrpFfiHandleStore {
         else {
             return Ok(None);
         };
-        Ok(self.events.remove(index).map(NnrpQueuedEvent::into_event))
+        let Some(event) = self.events.remove(index) else {
+            return Ok(None);
+        };
+        let payload = if event.payload_owner.kind == NnrpHandleKind::Buffer as u32 {
+            match self.get(event.payload_owner, NnrpHandleKind::Buffer)? {
+                NnrpFfiResource::Buffer { bytes } => NnrpBufferView {
+                    ptr: bytes.as_ptr(),
+                    len: bytes.len(),
+                },
+                _ => return Err(NnrpFfiStatus::invalid_handle(NnrpHandleKind::Buffer as u32)),
+            }
+        } else {
+            NnrpBufferView::empty()
+        };
+        Ok(Some(event.into_event(payload)))
     }
 
     fn get_connection_role(
@@ -1723,16 +1774,19 @@ pub enum NnrpEventKind {
     Error = 10,
     ResultHint = 11,
     PartialResult = 12,
+    RuntimeFrame = 13,
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NnrpEvent {
     pub kind: u32,
+    pub message_type: u32,
     pub connection: NnrpHandle,
     pub session: NnrpHandle,
     pub operation: NnrpHandle,
     pub frame_id: u32,
+    pub payload_owner: NnrpHandle,
     pub payload: NnrpBufferView,
     pub diagnostic: NnrpFfiDiagnostic,
 }
@@ -1741,10 +1795,12 @@ impl NnrpEvent {
     pub const fn none() -> Self {
         Self {
             kind: NnrpEventKind::None as u32,
+            message_type: 0,
             connection: NnrpHandle::invalid(),
             session: NnrpHandle::invalid(),
             operation: NnrpHandle::invalid(),
             frame_id: 0,
+            payload_owner: NnrpHandle::invalid(),
             payload: NnrpBufferView::empty(),
             diagnostic: NnrpFfiDiagnostic {
                 status: NnrpFfiStatus::ok(),
@@ -2023,6 +2079,15 @@ pub struct NnrpControlRequest {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpRuntimeFrameSendRequest {
+    pub handle: NnrpHandle,
+    pub message_type: u32,
+    pub frame_id: u32,
+    pub payload: NnrpBufferView,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NnrpClientSubmitControlRequest {
     pub control: NnrpControlRequest,
     pub max_events: usize,
@@ -2079,13 +2144,13 @@ pub unsafe extern "C" fn nnrp_client_connect(
         return status;
     }
 
-    store.push_event(NnrpQueuedEvent {
-        kind: NnrpEventKind::ConnectionOpened as u32,
-        connection: handle,
-        session: NnrpHandle::invalid(),
-        operation: NnrpHandle::invalid(),
-        frame_id: 0,
-    });
+    store.push_event(NnrpQueuedEvent::plain(
+        NnrpEventKind::ConnectionOpened,
+        handle,
+        NnrpHandle::invalid(),
+        NnrpHandle::invalid(),
+        0,
+    ));
     *out_connection = handle;
     NnrpFfiStatus::ok()
 }
@@ -2140,13 +2205,13 @@ pub unsafe extern "C" fn nnrp_client_open_session(
         return status;
     }
 
-    store.push_event(NnrpQueuedEvent {
-        kind: NnrpEventKind::SessionOpened as u32,
-        connection: request.connection,
-        session: handle,
-        operation: NnrpHandle::invalid(),
-        frame_id: 0,
-    });
+    store.push_event(NnrpQueuedEvent::plain(
+        NnrpEventKind::SessionOpened,
+        request.connection,
+        handle,
+        NnrpHandle::invalid(),
+        0,
+    ));
     *out_session = handle;
     NnrpFfiStatus::ok()
 }
@@ -2265,13 +2330,13 @@ pub unsafe extern "C" fn nnrp_client_submit(
         return status;
     }
 
-    store.push_event(NnrpQueuedEvent {
-        kind: NnrpEventKind::SubmitAccepted as u32,
-        connection: session_resource,
-        session: request.session,
-        operation: handle,
-        frame_id: request.frame_id,
-    });
+    store.push_event(NnrpQueuedEvent::plain(
+        NnrpEventKind::SubmitAccepted,
+        session_resource,
+        request.session,
+        handle,
+        request.frame_id,
+    ));
     *out_operation = handle;
     NnrpFfiStatus::ok()
 }
@@ -2300,13 +2365,13 @@ pub unsafe extern "C" fn nnrp_client_close(session: NnrpHandle) -> NnrpFfiStatus
     store
         .remove(session, NnrpHandleKind::Session)
         .map(|_| {
-            store.push_event(NnrpQueuedEvent {
-                kind: NnrpEventKind::SessionClosed as u32,
+            store.push_event(NnrpQueuedEvent::plain(
+                NnrpEventKind::SessionClosed,
                 connection,
                 session,
-                operation: NnrpHandle::invalid(),
-                frame_id: 0,
-            });
+                NnrpHandle::invalid(),
+                0,
+            ));
             NnrpFfiStatus::ok()
         })
         .unwrap_or_else(|status| status)
@@ -2350,13 +2415,13 @@ pub unsafe extern "C" fn nnrp_client_cancel(request: NnrpClientCancelRequest) ->
         Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32),
         Err(status) => return status,
     };
-    store.push_event(NnrpQueuedEvent {
-        kind: NnrpEventKind::Control as u32,
+    store.push_event(NnrpQueuedEvent::plain(
+        NnrpEventKind::Control,
         connection,
-        session: request.session,
-        operation: NnrpHandle::invalid(),
-        frame_id: request.frame_id,
-    });
+        request.session,
+        NnrpHandle::invalid(),
+        request.frame_id,
+    ));
     NnrpFfiStatus::ok()
 }
 
@@ -3684,6 +3749,106 @@ fn validate_control_metadata_payload(
     .map_err(|error| NnrpFfiStatus::from_core_error(&error))
 }
 
+fn validate_runtime_frame_payload(
+    message_type: u32,
+    payload: NnrpBufferView,
+) -> Result<MessageType, NnrpFfiStatus> {
+    payload.validate()?;
+    let message_code =
+        u8::try_from(message_type).map_err(|_| NnrpFfiStatus::invalid_argument(140))?;
+    let message_type = MessageType::try_from_u8(message_code)
+        .map_err(|error| NnrpFfiStatus::from_core_error(&error))?;
+    let bytes = unsafe { ffi_read_slice(payload) };
+
+    let result = match message_type {
+        MessageType::Cancel
+        | MessageType::Abort
+        | MessageType::PriorityUpdate
+        | MessageType::Deadline
+        | MessageType::ExpireAt
+        | MessageType::Supersede
+        | MessageType::BudgetUpdate
+        | MessageType::Progress
+        | MessageType::PartialResult
+        | MessageType::Backpressure
+        | MessageType::CreditUpdate
+        | MessageType::CapabilityNegotiation
+        | MessageType::DegradeProfile
+        | MessageType::RouteHint
+        | MessageType::ExecutionHint
+        | MessageType::TraceContext
+        | MessageType::ResultDropReason
+        | MessageType::ErrorRecoverable
+        | MessageType::RetryAfter => {
+            validate_control_metadata_payload(message_type as u32, payload)
+        }
+        MessageType::ObjectDeclare => ObjectDescriptorMetadata::parse_with_extension(bytes)
+            .map(|_| ())
+            .map_err(|error| NnrpFfiStatus::from_core_error(&error)),
+        MessageType::ObjectRef => ObjectReferenceMetadata::parse_with_extension(bytes)
+            .map(|_| ())
+            .map_err(|error| NnrpFfiStatus::from_core_error(&error)),
+        MessageType::ObjectRelease => ObjectReleaseMetadata::parse_with_diagnostics(bytes)
+            .map(|_| ())
+            .map_err(|error| NnrpFfiStatus::from_core_error(&error)),
+        MessageType::ObjectPatch | MessageType::ObjectDelta => {
+            ObjectDeltaMetadata::parse_with_extension(bytes)
+                .map(|_| ())
+                .map_err(|error| NnrpFfiStatus::from_core_error(&error))
+        }
+        MessageType::CacheReference => CacheReferenceMetadata::parse_with_extension(bytes)
+            .map(|_| ())
+            .map_err(|error| NnrpFfiStatus::from_core_error(&error)),
+        MessageType::CacheMiss => CacheMissMetadata::parse_with_diagnostics(bytes)
+            .map(|_| ())
+            .map_err(|error| NnrpFfiStatus::from_core_error(&error)),
+        MessageType::CacheInvalidate => CacheInvalidateMetadata::parse(bytes)
+            .map(|_| ())
+            .map_err(|error| NnrpFfiStatus::from_core_error(&error)),
+        _ => Err(NnrpFfiStatus::from_core_error(
+            &NnrpError::InvalidProtocolCombination {
+                rule: "runtime frame send requires a preview4 control, object, or cache message",
+            },
+        )),
+    };
+    result.map(|_| message_type)
+}
+
+fn validate_runtime_frame_direction(
+    role: NnrpFfiConnectionRole,
+    message_type: MessageType,
+) -> Result<(), NnrpFfiStatus> {
+    let allowed = match role {
+        NnrpFfiConnectionRole::Client => !matches!(
+            message_type,
+            MessageType::Progress
+                | MessageType::PartialResult
+                | MessageType::Backpressure
+                | MessageType::CreditUpdate
+                | MessageType::ResultDropReason
+        ),
+        NnrpFfiConnectionRole::Server => !matches!(
+            message_type,
+            MessageType::Cancel
+                | MessageType::Abort
+                | MessageType::PriorityUpdate
+                | MessageType::Deadline
+                | MessageType::ExpireAt
+                | MessageType::Supersede
+                | MessageType::BudgetUpdate
+        ),
+    };
+    if allowed {
+        Ok(())
+    } else {
+        Err(NnrpFfiStatus::from_core_error(
+            &NnrpError::InvalidProtocolCombination {
+                rule: "runtime frame message direction does not match the connection role",
+            },
+        ))
+    }
+}
+
 fn control_event_kind(control_code: u32) -> NnrpEventKind {
     if control_code == MessageType::ResultHint as u32 {
         NnrpEventKind::ResultHint
@@ -4363,13 +4528,13 @@ pub unsafe extern "C" fn nnrp_server_bind(
     ) {
         return status;
     }
-    store.push_event(NnrpQueuedEvent {
-        kind: NnrpEventKind::ConnectionOpened as u32,
-        connection: handle,
-        session: NnrpHandle::invalid(),
-        operation: NnrpHandle::invalid(),
-        frame_id: 0,
-    });
+    store.push_event(NnrpQueuedEvent::plain(
+        NnrpEventKind::ConnectionOpened,
+        handle,
+        NnrpHandle::invalid(),
+        NnrpHandle::invalid(),
+        0,
+    ));
     *out_server = handle;
     NnrpFfiStatus::ok()
 }
@@ -4411,13 +4576,13 @@ pub unsafe extern "C" fn nnrp_server_accept(
     ) {
         return status;
     }
-    store.push_event(NnrpQueuedEvent {
-        kind: NnrpEventKind::SessionOpened as u32,
-        connection: request.server,
-        session: handle,
-        operation: NnrpHandle::invalid(),
-        frame_id: 0,
-    });
+    store.push_event(NnrpQueuedEvent::plain(
+        NnrpEventKind::SessionOpened,
+        request.server,
+        handle,
+        NnrpHandle::invalid(),
+        0,
+    ));
     *out_session = handle;
     NnrpFfiStatus::ok()
 }
@@ -4467,13 +4632,13 @@ pub unsafe extern "C" fn nnrp_server_receive_submit(
     ) {
         return status;
     }
-    store.push_event(NnrpQueuedEvent {
-        kind: NnrpEventKind::SubmitAccepted as u32,
+    store.push_event(NnrpQueuedEvent::plain(
+        NnrpEventKind::SubmitAccepted,
         connection,
-        session: request.session,
-        operation: handle,
-        frame_id: request.frame_id,
-    });
+        request.session,
+        handle,
+        request.frame_id,
+    ));
     *out_operation = handle;
     NnrpFfiStatus::ok()
 }
@@ -4674,13 +4839,9 @@ fn push_operation_event_with_scope(
     if remove_operation {
         store.entries.remove(&(operation.kind, operation.id));
     }
-    store.push_event(NnrpQueuedEvent {
-        kind: event_kind as u32,
-        connection,
-        session,
-        operation,
-        frame_id,
-    });
+    store.push_event(NnrpQueuedEvent::plain(
+        event_kind, connection, session, operation, frame_id,
+    ));
     Ok(OperationEventScope {
         connection,
         session,
@@ -4702,13 +4863,13 @@ pub unsafe extern "C" fn nnrp_server_send_flow_update(
         Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32),
         Err(status) => return status,
     };
-    store.push_event(NnrpQueuedEvent {
-        kind: NnrpEventKind::FlowUpdated as u32,
+    store.push_event(NnrpQueuedEvent::plain(
+        NnrpEventKind::FlowUpdated,
         connection,
-        session: request.session,
-        operation: NnrpHandle::invalid(),
-        frame_id: request.frame_id,
-    });
+        request.session,
+        NnrpHandle::invalid(),
+        request.frame_id,
+    ));
     NnrpFfiStatus::ok()
 }
 
@@ -4728,16 +4889,72 @@ pub unsafe extern "C" fn nnrp_server_close(session: NnrpHandle) -> NnrpFfiStatus
     store
         .remove(session, NnrpHandleKind::Session)
         .map(|_| {
-            store.push_event(NnrpQueuedEvent {
-                kind: NnrpEventKind::SessionClosed as u32,
+            store.push_event(NnrpQueuedEvent::plain(
+                NnrpEventKind::SessionClosed,
                 connection,
                 session,
-                operation: NnrpHandle::invalid(),
-                frame_id: 0,
-            });
+                NnrpHandle::invalid(),
+                0,
+            ));
             NnrpFfiStatus::ok()
         })
         .unwrap_or_else(|status| status)
+}
+
+#[no_mangle]
+/// Sends one validated Preview4 runtime frame through a client or server
+/// session/operation handle and queues an owned typed event.
+///
+/// # Safety
+///
+/// `request.payload` must remain readable for `request.payload.len` bytes for
+/// the duration of the call. The implementation snapshots the payload before
+/// returning. The receiver owns the returned event payload through
+/// `NnrpEvent.payload_owner` and must release it with `nnrp_buffer_release`.
+#[rustfmt::skip]
+pub unsafe extern "C" fn nnrp_runtime_frame_send(request: NnrpRuntimeFrameSendRequest) -> NnrpFfiStatus { nnrp_runtime_frame_send_impl(request) }
+
+unsafe fn nnrp_runtime_frame_send_impl(request: NnrpRuntimeFrameSendRequest) -> NnrpFfiStatus {
+    let message_type = match validate_runtime_frame_payload(request.message_type, request.payload) {
+        Ok(message_type) => message_type,
+        Err(status) => return status,
+    };
+    if !matches!(
+        request.handle.kind,
+        value if value == NnrpHandleKind::Session as u32
+            || value == NnrpHandleKind::Operation as u32
+    ) {
+        return NnrpFfiStatus::invalid_handle(request.handle.kind);
+    }
+
+    let mut store = handle_store();
+    let (connection, session, operation) = match event_scope_for_handle(&store, request.handle) {
+        Ok(scope) => scope,
+        Err(status) => return status,
+    };
+    let role = match store.get_connection_role(connection) {
+        Ok(role) => role,
+        Err(status) => return status,
+    };
+    if let Err(status) = validate_runtime_frame_direction(role, message_type) {
+        return status;
+    }
+
+    let payload = ffi_read_slice(request.payload).to_vec();
+    let (payload_owner, _) = match insert_owned_buffer(&mut store, payload) {
+        Ok(owned) => owned,
+        Err(status) => return status,
+    };
+    store.push_event(NnrpQueuedEvent {
+        kind: NnrpEventKind::RuntimeFrame as u32,
+        message_type: message_type as u32,
+        connection,
+        session,
+        operation,
+        frame_id: request.frame_id,
+        payload_owner,
+    });
+    NnrpFfiStatus::ok()
 }
 
 #[no_mangle]
@@ -4807,13 +5024,9 @@ unsafe fn nnrp_control_impl(request: NnrpControlRequest) -> NnrpFfiStatus {
         }
         _ => return NnrpFfiStatus::invalid_handle(request.handle.kind),
     };
-    store.push_event(NnrpQueuedEvent {
-        kind: event_kind as u32,
-        connection,
-        session,
-        operation,
-        frame_id: 0,
-    });
+    store.push_event(NnrpQueuedEvent::plain(
+        event_kind, connection, session, operation, 0,
+    ));
     NnrpFfiStatus::ok()
 }
 
@@ -4994,8 +5207,8 @@ mod tests {
         assert_eq!(capabilities.sdk_major, 1);
         assert_eq!(capabilities.sdk_minor, 0);
         assert_eq!(capabilities.sdk_patch, 0);
-        assert_eq!(capabilities.sdk_preview, 3);
-        assert_eq!(capabilities.sdk_revision, 8);
+        assert_eq!(capabilities.sdk_preview, 4);
+        assert_eq!(capabilities.sdk_revision, 1);
         assert_eq!(capabilities.reserved1, 0);
         assert_eq!(capabilities.transport_slots, enabled_transport_slots());
         assert_eq!(transport_slot_bit(TransportId::Unspecified), 0);
@@ -5097,6 +5310,10 @@ mod tests {
         );
         assert_ne!(
             capabilities.feature_flags & NNRP_RUNTIME_FEATURE_PREVIEW4_OBJECT_CACHE_EVENTS,
+            0
+        );
+        assert_ne!(
+            capabilities.feature_flags & NNRP_RUNTIME_FEATURE_PREVIEW4_RUNTIME_FRAME_SEND,
             0
         );
     }
@@ -7059,6 +7276,129 @@ mod tests {
         .to_vec_with_diagnostics(&[1, 3, 5])
         .expect("retry-after metadata should encode");
         assert_valid(MessageType::RetryAfter, &retry_after);
+    }
+
+    #[test]
+    fn ffi_runtime_frame_validator_accepts_preview4_object_cache_matrix() {
+        fn assert_valid(message_type: MessageType, payload: &[u8]) {
+            assert_eq!(
+                validate_runtime_frame_payload(
+                    message_type as u32,
+                    NnrpBufferView {
+                        ptr: payload.as_ptr(),
+                        len: payload.len(),
+                    },
+                ),
+                Ok(message_type)
+            );
+        }
+
+        let object = ObjectDescriptorMetadata {
+            object_id: 1,
+            object_kind: RuntimeObjectKind::Tensor,
+            producer_role: RuntimeRole::Runtime,
+            consumer_role: RuntimeRole::Client,
+            session_id: 2,
+            byte_size: 4096,
+            compute_cost_units: 7,
+            memory_location_hint: MemoryLocationHint::DeviceMemory,
+            ownership_hint: OwnershipHint::Borrowed,
+            lifetime_hint_ms: 500,
+            metadata_bytes: 1,
+        }
+        .to_vec_with_extension(&[1])
+        .expect("object descriptor should encode");
+        assert_valid(MessageType::ObjectDeclare, &object);
+
+        let reference = ObjectReferenceMetadata {
+            object_id: 1,
+            operation_id: 3,
+            object_version: 4,
+            offset: 8,
+            length: 16,
+            flags: nnrp_core::OBJECT_REFERENCE_FLAGS_KNOWN_MASK,
+            metadata_bytes: 1,
+        }
+        .to_vec_with_extension(&[2])
+        .expect("object reference should encode");
+        assert_valid(MessageType::ObjectRef, &reference);
+
+        let release = ObjectReleaseMetadata {
+            object_id: 1,
+            operation_id: 3,
+            release_reason: ObjectReleaseReason::Cancelled,
+            source_role: RuntimeRole::Scheduler,
+            flags: nnrp_core::OBJECT_RELEASE_FLAGS_KNOWN_MASK,
+            diagnostic_bytes: 1,
+        }
+        .to_vec_with_diagnostics(&[3])
+        .expect("object release should encode");
+        assert_valid(MessageType::ObjectRelease, &release);
+
+        let delta = ObjectDeltaMetadata {
+            object_id: 1,
+            delta_sequence: 2,
+            region_offset: 64,
+            region_bytes: 32,
+            delta_bytes: 16,
+            flags: nnrp_core::OBJECT_DELTA_FLAGS_KNOWN_MASK,
+            metadata_bytes: 1,
+        }
+        .to_vec_with_extension(&[4])
+        .expect("object delta should encode");
+        assert_valid(MessageType::ObjectPatch, &delta);
+        assert_valid(MessageType::ObjectDelta, &delta);
+
+        let cache_reference = CacheReferenceMetadata {
+            cache_key_hi: 0x1122,
+            cache_key_lo: 0x3344,
+            profile_id: 3,
+            reuse_scope: CacheReuseScope::Session,
+            lease_id: 5,
+            producer_trace_id: 6,
+            expiration_hint_ms: 700,
+            metadata_bytes: 1,
+            flags: nnrp_core::CACHE_REFERENCE_FLAGS_KNOWN_MASK,
+        }
+        .to_vec_with_extension(&[5])
+        .expect("cache reference should encode");
+        assert_valid(MessageType::CacheReference, &cache_reference);
+
+        let cache_miss = CacheMissMetadata {
+            cache_key_hi: 0x1122,
+            cache_key_lo: 0x3344,
+            miss_reason: CacheMissReason::SchemaMismatch,
+            profile_id: 3,
+            diagnostic_bytes: 1,
+        }
+        .to_vec_with_diagnostics(&[6])
+        .expect("cache miss should encode");
+        assert_valid(MessageType::CacheMiss, &cache_miss);
+
+        let cache_invalidate = CacheInvalidateMetadata {
+            invalidate_scope: nnrp_core::CacheInvalidateScope::ObjectKey,
+            cache_namespace: 7,
+            cache_key_hi: 8,
+            cache_key_lo: 9,
+            reason_code: 10,
+        }
+        .to_bytes()
+        .expect("cache invalidate should encode");
+        assert_valid(MessageType::CacheInvalidate, &cache_invalidate);
+
+        let unsupported = validate_runtime_frame_payload(
+            MessageType::FrameSubmit as u32,
+            NnrpBufferView::empty(),
+        )
+        .expect_err("data-plane frame must not use runtime frame send");
+        assert_eq!(
+            unsupported.status_code,
+            NnrpFfiStatusCode::ProtocolError as u32
+        );
+        assert_eq!(
+            validate_runtime_frame_payload(256, NnrpBufferView::empty()),
+            Err(NnrpFfiStatus::invalid_argument(140))
+        );
     }
 
     #[test]
@@ -9458,6 +9798,354 @@ mod tests {
     }
 
     #[test]
+    fn ffi_runtime_frame_send_snapshots_payload_and_transfers_ownership() {
+        unsafe {
+            let mut connection = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_connect(
+                    NnrpClientConnectRequest {
+                        connection_id: 93_001,
+                        generation: 1,
+                        transport_id: test_transport_id(),
+                    },
+                    &mut connection,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            let mut session = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_open_session(
+                    NnrpSessionOpenRequest {
+                        connection,
+                        requested_session_id: 93_002,
+                        generation: 1,
+                        profile_id: 2,
+                        schema_id: 0x1001,
+                        schema_version: 4,
+                    },
+                    &mut session,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            drain_events(connection);
+
+            let mut payload = TraceContextMetadata {
+                trace_id: 101,
+                span_id: 102,
+                parent_span_id: 103,
+                stage_code: 6,
+                flags: nnrp_core::TRACE_CONTEXT_FLAGS_KNOWN_MASK,
+                body_bytes: 3,
+            }
+            .to_vec_with_body(&[5, 6, 7])
+            .expect("trace context metadata should encode");
+            let expected = payload.clone();
+            assert_eq!(
+                nnrp_runtime_frame_send_impl(NnrpRuntimeFrameSendRequest {
+                    handle: session,
+                    message_type: MessageType::TraceContext as u32,
+                    frame_id: 93,
+                    payload: NnrpBufferView {
+                        ptr: payload.as_ptr(),
+                        len: payload.len(),
+                    },
+                }),
+                NnrpFfiStatus::ok()
+            );
+            payload.fill(0);
+
+            let mut result = empty_poll_result();
+            assert_eq!(
+                nnrp_client_await_event(connection, &mut result),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(result.has_event, 1);
+            assert_eq!(result.event.kind, NnrpEventKind::RuntimeFrame as u32);
+            assert_eq!(result.event.message_type, MessageType::TraceContext as u32);
+            assert_eq!(result.event.connection, connection);
+            assert_eq!(result.event.session, session);
+            assert_eq!(result.event.operation, NnrpHandle::invalid());
+            assert_eq!(result.event.frame_id, 93);
+            assert_eq!(ffi_read_slice(result.event.payload), expected.as_slice());
+            assert_eq!(
+                result.event.payload_owner.kind,
+                NnrpHandleKind::Buffer as u32
+            );
+            assert_eq!(
+                nnrp_buffer_release(result.event.payload_owner),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(
+                nnrp_buffer_release(result.event.payload_owner),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Buffer as u32)
+            );
+            assert_eq!(nnrp_connection_close(connection), NnrpFfiStatus::ok());
+        }
+    }
+
+    #[test]
+    fn ffi_runtime_frame_send_enforces_role_and_payload_contracts() {
+        unsafe {
+            let mut client = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_connect(
+                    NnrpClientConnectRequest {
+                        connection_id: 94_001,
+                        generation: 1,
+                        transport_id: test_transport_id(),
+                    },
+                    &mut client,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            let mut client_session = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_open_session(
+                    NnrpSessionOpenRequest {
+                        connection: client,
+                        requested_session_id: 94_002,
+                        generation: 1,
+                        profile_id: 2,
+                        schema_id: 0x1001,
+                        schema_version: 4,
+                    },
+                    &mut client_session,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            drain_events(client);
+
+            let trace = TraceContextMetadata {
+                trace_id: 201,
+                span_id: 202,
+                parent_span_id: 203,
+                stage_code: 6,
+                flags: nnrp_core::TRACE_CONTEXT_FLAGS_KNOWN_MASK,
+                body_bytes: 0,
+            }
+            .to_vec_with_body(&[])
+            .expect("trace context metadata should encode");
+            assert_eq!(
+                nnrp_runtime_frame_send_impl(NnrpRuntimeFrameSendRequest {
+                    handle: client,
+                    message_type: MessageType::TraceContext as u32,
+                    frame_id: 93,
+                    payload: NnrpBufferView {
+                        ptr: trace.as_ptr(),
+                        len: trace.len(),
+                    },
+                }),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Connection as u32)
+            );
+            assert_eq!(
+                nnrp_runtime_frame_send_impl(NnrpRuntimeFrameSendRequest {
+                    handle: NnrpHandle::new(NnrpHandleKind::Session, 999_999, 1),
+                    message_type: MessageType::TraceContext as u32,
+                    frame_id: 93,
+                    payload: NnrpBufferView {
+                        ptr: trace.as_ptr(),
+                        len: trace.len(),
+                    },
+                }),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32)
+            );
+
+            let progress = ProgressMetadata {
+                operation_id: 51,
+                progress_sequence: 52,
+                stage_code: 5,
+                percent_x100: 8_750,
+                object_id: 53,
+                body_bytes: 2,
+            }
+            .to_vec_with_body(&[9, 8])
+            .expect("progress metadata should encode");
+            let client_direction = nnrp_runtime_frame_send_impl(NnrpRuntimeFrameSendRequest {
+                handle: client_session,
+                message_type: MessageType::Progress as u32,
+                frame_id: 94,
+                payload: NnrpBufferView {
+                    ptr: progress.as_ptr(),
+                    len: progress.len(),
+                },
+            });
+            assert_eq!(
+                client_direction.status_code,
+                NnrpFfiStatusCode::ProtocolError as u32
+            );
+
+            let malformed = [1u8, 2, 3];
+            let malformed_status = nnrp_runtime_frame_send_impl(NnrpRuntimeFrameSendRequest {
+                handle: client_session,
+                message_type: MessageType::TraceContext as u32,
+                frame_id: 95,
+                payload: NnrpBufferView {
+                    ptr: malformed.as_ptr(),
+                    len: malformed.len(),
+                },
+            });
+            assert_eq!(
+                malformed_status.status_code,
+                NnrpFfiStatusCode::InvalidArgument as u32
+            );
+
+            let mut server = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_server_bind(
+                    NnrpServerBindRequest {
+                        server_id: 94_101,
+                        generation: 1,
+                        transport_id: test_transport_id(),
+                    },
+                    &mut server,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            let mut server_session = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_server_accept(
+                    NnrpServerAcceptRequest {
+                        server,
+                        session_id: 94_102,
+                        generation: 1,
+                        profile_id: 2,
+                        schema_id: 0x1001,
+                        schema_version: 4,
+                    },
+                    &mut server_session,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            drain_events(server);
+            assert_eq!(
+                nnrp_runtime_frame_send_impl(NnrpRuntimeFrameSendRequest {
+                    handle: server_session,
+                    message_type: MessageType::Progress as u32,
+                    frame_id: 96,
+                    payload: NnrpBufferView {
+                        ptr: progress.as_ptr(),
+                        len: progress.len(),
+                    },
+                }),
+                NnrpFfiStatus::ok()
+            );
+
+            let cancel = ControlRequestMetadata {
+                operation_id: 11,
+                control_sequence: 12,
+                reason_code: 1,
+                source_role: 4,
+                flags: nnrp_core::CONTROL_REQUEST_FLAGS_KNOWN_MASK,
+                diagnostic_bytes: 0,
+            }
+            .to_vec_with_diagnostics(&[])
+            .expect("cancel metadata should encode");
+            let server_direction = nnrp_runtime_frame_send_impl(NnrpRuntimeFrameSendRequest {
+                handle: server_session,
+                message_type: MessageType::Cancel as u32,
+                frame_id: 97,
+                payload: NnrpBufferView {
+                    ptr: cancel.as_ptr(),
+                    len: cancel.len(),
+                },
+            });
+            assert_eq!(
+                server_direction.status_code,
+                NnrpFfiStatusCode::ProtocolError as u32
+            );
+
+            let mut result = empty_poll_result();
+            assert_eq!(
+                nnrp_client_await_event(server, &mut result),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(result.event.kind, NnrpEventKind::RuntimeFrame as u32);
+            assert_eq!(result.event.message_type, MessageType::Progress as u32);
+            assert_eq!(ffi_read_slice(result.event.payload), progress.as_slice());
+            assert_eq!(
+                nnrp_buffer_release(result.event.payload_owner),
+                NnrpFfiStatus::ok()
+            );
+
+            assert_eq!(nnrp_connection_close(client), NnrpFfiStatus::ok());
+            assert_eq!(nnrp_connection_close(server), NnrpFfiStatus::ok());
+        }
+    }
+
+    #[test]
+    fn ffi_connection_close_releases_queued_runtime_frame_payloads() {
+        unsafe {
+            let mut connection = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_connect(
+                    NnrpClientConnectRequest {
+                        connection_id: 95_001,
+                        generation: 1,
+                        transport_id: test_transport_id(),
+                    },
+                    &mut connection,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            let mut session = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_open_session(
+                    NnrpSessionOpenRequest {
+                        connection,
+                        requested_session_id: 95_002,
+                        generation: 1,
+                        profile_id: 2,
+                        schema_id: 0x1001,
+                        schema_version: 4,
+                    },
+                    &mut session,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            drain_events(connection);
+
+            let trace = TraceContextMetadata {
+                trace_id: 301,
+                span_id: 302,
+                parent_span_id: 303,
+                stage_code: 6,
+                flags: nnrp_core::TRACE_CONTEXT_FLAGS_KNOWN_MASK,
+                body_bytes: 0,
+            }
+            .to_vec_with_body(&[])
+            .expect("trace context metadata should encode");
+            assert_eq!(
+                nnrp_runtime_frame_send_impl(NnrpRuntimeFrameSendRequest {
+                    handle: session,
+                    message_type: MessageType::TraceContext as u32,
+                    frame_id: 95,
+                    payload: NnrpBufferView {
+                        ptr: trace.as_ptr(),
+                        len: trace.len(),
+                    },
+                }),
+                NnrpFfiStatus::ok()
+            );
+            let payload_owner = {
+                let store = handle_store();
+                store
+                    .events
+                    .iter()
+                    .find(|event| event.connection == connection)
+                    .expect("runtime frame should be queued")
+                    .payload_owner
+            };
+            assert_eq!(payload_owner.kind, NnrpHandleKind::Buffer as u32);
+
+            assert_eq!(nnrp_connection_close(connection), NnrpFfiStatus::ok());
+            assert_eq!(
+                nnrp_buffer_release(payload_owner),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Buffer as u32)
+            );
+        }
+    }
+
+    #[test]
     fn ffi_server_abi_emits_pollable_runtime_events() {
         unsafe {
             let mut server = NnrpHandle::invalid();
@@ -10497,6 +11185,12 @@ mod tests {
         while nnrp_client_await_event(connection, &mut result).status_code
             == NnrpFfiStatusCode::Ok as u32
         {
+            if result.event.payload_owner.kind == NnrpHandleKind::Buffer as u32 {
+                assert_eq!(
+                    nnrp_buffer_release(result.event.payload_owner),
+                    NnrpFfiStatus::ok()
+                );
+            }
             result = empty_poll_result();
         }
     }
