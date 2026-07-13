@@ -460,7 +460,7 @@ fn l2_runtime_ffi_client_event_flow() -> Result<(), String> {
         ))?;
         require_event(connection, NnrpEventKind::SessionOpened, 0)?;
 
-        let payload = [b'a', b'b', b'c'];
+        let payload = *b"abc";
         let mut operation = NnrpHandle::invalid();
         require_status(nnrp_client_submit(
             NnrpSubmitRequest {
@@ -606,7 +606,7 @@ fn l2_runtime_ffi_server_event_flow() -> Result<(), String> {
         ))?;
         require_event(server, NnrpEventKind::SessionOpened, 0)?;
 
-        let payload = [b'x', b'y', b'z'];
+        let payload = *b"xyz";
         let mut operation = NnrpHandle::invalid();
         require_status(nnrp_server_receive_submit(
             NnrpServerReceiveSubmitRequest {
@@ -891,7 +891,7 @@ fn public_operation_cancel_scope() -> Result<(), String> {
 
 fn public_typed_payload_contract() -> Result<(), String> {
     l0_typed_payload_token_descriptor_golden()?;
-    let payload = [b'a', b'b', b'c'];
+    let payload = *b"abc";
     let region = TypedPayloadRegion::from_parts(
         PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),
         vec![token_delta_descriptor()],
