@@ -373,7 +373,7 @@ mod tests {
 
         let remote = RemoteTransportSupport::new([TransportId::WebSocket]);
         let selection = registry
-            .select(&remote, TransportPolicy::ForceWebSocket)
+            .select(&remote, TransportPolicy::ForceWebSocket, None)
             .expect("websocket provider should satisfy force websocket");
         assert_eq!(selection.selected.name, WebSocketProvider::NAME);
     }

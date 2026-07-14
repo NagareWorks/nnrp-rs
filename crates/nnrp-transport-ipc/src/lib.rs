@@ -638,7 +638,7 @@ mod tests {
 
         let remote = RemoteTransportSupport::new([TransportId::Ipc]);
         let selection = registry
-            .select(&remote, TransportPolicy::ForceIpc)
+            .select(&remote, TransportPolicy::ForceIpc, None)
             .expect("ipc provider should satisfy force ipc");
         assert_eq!(selection.selected.name, IpcProvider::NAME);
     }

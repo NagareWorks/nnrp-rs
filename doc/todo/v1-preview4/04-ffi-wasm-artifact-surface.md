@@ -52,4 +52,9 @@
   - [x] Runtime object reference codecs.
   - [x] Browser WebSocket substrate helpers.
 - [x] Write manifest fields for transport name, protocol version, ABI version, and enabled features.
+- [x] Write provider metadata required for deterministic downstream selection.
+  - [x] Native TCP, QUIC, IPC, and WebSocket provider identities and platform limitations.
+  - [x] Browser WASM WebSocket provider identity and browser limitation.
+  - [x] Canonical decimal cost and frame-limit values.
+- [x] Export structured WASM probe metrics and candidate diagnostics without weighted scores.
 - [x] Reject release artifacts that collapse all transport behavior into one hidden package.

@@ -411,7 +411,7 @@ mod tests {
             ));
         let remote = RemoteTransportSupport::new([TransportId::Quic]);
         let selection = registry
-            .select(&remote, TransportPolicy::ForceQuic)
+            .select(&remote, TransportPolicy::ForceQuic, None)
             .expect("available quic backend should satisfy force quic");
 
         assert_eq!(selection.selected.transport_id, TransportId::Quic);

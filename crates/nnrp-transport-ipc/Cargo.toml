@@ -15,7 +15,7 @@ categories.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.4.2" }
-nnrp-runtime = { path = "../nnrp-runtime", version = "1.0.0-preview.4.2" }
-nnrp-transport-provider = { path = "../nnrp-transport-provider", version = "1.0.0-preview.4.2" }
+nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.4.3" }
+nnrp-runtime = { path = "../nnrp-runtime", version = "1.0.0-preview.4.3" }
+nnrp-transport-provider = { path = "../nnrp-transport-provider", version = "1.0.0-preview.4.3" }
 tokio.workspace = true

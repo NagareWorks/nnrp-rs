@@ -7,18 +7,30 @@ NATIVE_TRANSPORTS = {
     "tcp": {
         "package": "nnrp-ffi-transport-tcp",
         "features": ["transport-tcp"],
+        "provider_id": "nnrp.transport.tcp.native",
+        "preference_rank": 2,
+        "limitations": ["requires-tcp", "native-host-only"],
     },
     "quic": {
         "package": "nnrp-ffi-transport-quic",
         "features": ["transport-quic"],
+        "provider_id": "nnrp.transport.quic.native",
+        "preference_rank": 1,
+        "limitations": ["requires-udp", "native-host-only"],
     },
     "ipc": {
         "package": "nnrp-ffi-transport-ipc",
         "features": ["transport-ipc"],
+        "provider_id": "nnrp.transport.ipc.native",
+        "preference_rank": 0,
+        "limitations": ["local-host-only", "native-host-only"],
     },
     "websocket": {
         "package": "nnrp-ffi-transport-websocket",
         "features": ["transport-websocket"],
+        "provider_id": "nnrp.transport.websocket.native",
+        "preference_rank": 3,
+        "limitations": ["requires-tcp", "native-host-only"],
     },
 }
 
@@ -32,7 +44,7 @@ BROWSER_WASM_SCOPE = {
         "nnrp_wasm_protocol_major",
         "nnrp_wasm_wire_format",
         "selectTransportWithProbeJson",
-        "scoreProviderProbeJson",
+        "summarizeProviderProbeJson",
         "encodeWebSocketBinaryFrameJson",
         "decodeWebSocketBinaryFrameJson",
         "decodeWebSocketBinaryFrameBatchJson",
@@ -41,6 +53,13 @@ BROWSER_WASM_SCOPE = {
         "encodeRuntimeObjectMetadataJson",
         "decodeRuntimeObjectMetadataJson",
     ],
+    "provider": {
+        "id": "nnrp.transport.websocket.browser-wasm",
+        "cost": {"model_id": 0, "units": "0"},
+        "preference_rank": 3,
+        "limits": {"max_frame_bytes": "67108864"},
+        "limitations": ["requires-tcp", "browser-host-only"],
+    },
 }
 
 
@@ -58,6 +77,22 @@ def require_equal(actual, expected, label: str, manifest_path: Path) -> None:
         raise SystemExit(
             f"{manifest_path}: expected {label} {expected!r}, found {actual!r}"
         )
+
+
+def expected_native_provider(scope: str, os_name: str) -> dict:
+    expected = NATIVE_TRANSPORTS[scope]
+    limitations = list(expected["limitations"])
+    if scope == "ipc":
+        limitations.append(
+            "windows-named-pipe" if os_name == "windows" else "unix-domain-socket"
+        )
+    return {
+        "id": expected["provider_id"],
+        "cost": {"model_id": 0, "units": "0"},
+        "preference_rank": expected["preference_rank"],
+        "limits": {"max_frame_bytes": "67108864"},
+        "limitations": limitations,
+    }
 
 
 def inspect_native(native_dir: Path) -> None:
@@ -83,6 +118,12 @@ def inspect_native(native_dir: Path) -> None:
             manifest.get("enabled_features"),
             expected["features"],
             "enabled_features",
+            manifest_path,
+        )
+        require_equal(
+            manifest.get("provider"),
+            expected_native_provider(scope, manifest.get("os")),
+            "provider",
             manifest_path,
         )
 
@@ -151,6 +192,12 @@ def inspect_wasm(wasm_dir: Path) -> None:
             manifest.get("exports"),
             BROWSER_WASM_SCOPE["exports"],
             "exports",
+            manifest_path,
+        )
+        require_equal(
+            manifest.get("provider"),
+            BROWSER_WASM_SCOPE["provider"],
+            "provider",
             manifest_path,
         )
 

@@ -349,24 +349,51 @@ fn l3_transport_probe_selection() -> Result<(), String> {
     ];
     let remote = RemoteTransportSupport::new([TransportId::Tcp, TransportId::Quic]);
     let samples = [
-        ProbeSample::success(TransportId::Tcp, TcpProvider::NAME, 10_000, 1_500, 512, 512),
-        ProbeSample::success(TransportId::Quic, "nnrp-quic-native", 10_000, 800, 512, 512),
+        ProbeSample::success(
+            TransportId::Tcp,
+            "nnrp.transport.tcp.native",
+            10_000,
+            1_500,
+            512,
+            512,
+        ),
+        ProbeSample::success(
+            TransportId::Quic,
+            "nnrp.transport.quic.native",
+            10_000,
+            800,
+            512,
+            512,
+        ),
     ];
     let selection =
-        select_transport_with_probe(&providers, &remote, TransportPolicy::Auto, &samples)
+        select_transport_with_probe(&providers, &remote, TransportPolicy::Auto, None, &samples)
             .map_err(|error| error.to_string())?;
     if selection.selected.transport_id != TransportId::Quic {
         return Err("transport probe did not prefer the lower-latency QUIC sample".to_string());
     }
 
     let fallback_samples = [
-        ProbeSample::success(TransportId::Tcp, TcpProvider::NAME, 10_000, 900, 512, 512),
-        ProbeSample::failure(TransportId::Quic, "nnrp-quic-native", 10_000, true),
+        ProbeSample::success(
+            TransportId::Tcp,
+            "nnrp.transport.tcp.native",
+            10_000,
+            900,
+            512,
+            512,
+        ),
+        ProbeSample::failure(
+            TransportId::Quic,
+            "nnrp.transport.quic.native",
+            10_000,
+            true,
+        ),
     ];
     let fallback = select_transport_with_probe(
         &providers,
         &remote,
         TransportPolicy::PreferQuic,
+        None,
         &fallback_samples,
     )
     .map_err(|error| error.to_string())?;

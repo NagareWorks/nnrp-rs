@@ -10,21 +10,33 @@ NATIVE_TRANSPORTS = {
         "package": "nnrp-ffi-transport-tcp",
         "features": ["transport-tcp"],
         "slots": ["tcp"],
+        "provider_id": "nnrp.transport.tcp.native",
+        "preference_rank": 2,
+        "limitations": ["requires-tcp", "native-host-only"],
     },
     "quic": {
         "package": "nnrp-ffi-transport-quic",
         "features": ["transport-quic"],
         "slots": ["quic"],
+        "provider_id": "nnrp.transport.quic.native",
+        "preference_rank": 1,
+        "limitations": ["requires-udp", "native-host-only"],
     },
     "ipc": {
         "package": "nnrp-ffi-transport-ipc",
         "features": ["transport-ipc"],
         "slots": ["ipc"],
+        "provider_id": "nnrp.transport.ipc.native",
+        "preference_rank": 0,
+        "limitations": ["local-host-only", "native-host-only"],
     },
     "websocket": {
         "package": "nnrp-ffi-transport-websocket",
         "features": ["transport-websocket"],
         "slots": ["websocket"],
+        "provider_id": "nnrp.transport.websocket.native",
+        "preference_rank": 3,
+        "limitations": ["requires-tcp", "native-host-only"],
     },
 }
 BROWSER_WASM_SCOPE = {
@@ -37,7 +49,7 @@ BROWSER_WASM_SCOPE = {
         "nnrp_wasm_protocol_major",
         "nnrp_wasm_wire_format",
         "selectTransportWithProbeJson",
-        "scoreProviderProbeJson",
+        "summarizeProviderProbeJson",
         "encodeWebSocketBinaryFrameJson",
         "decodeWebSocketBinaryFrameJson",
         "decodeWebSocketBinaryFrameBatchJson",
@@ -46,6 +58,13 @@ BROWSER_WASM_SCOPE = {
         "encodeRuntimeObjectMetadataJson",
         "decodeRuntimeObjectMetadataJson",
     ],
+    "provider": {
+        "id": "nnrp.transport.websocket.browser-wasm",
+        "cost": {"model_id": 0, "units": "0"},
+        "preference_rank": 3,
+        "limits": {"max_frame_bytes": "67108864"},
+        "limitations": ["requires-tcp", "browser-host-only"],
+    },
 }
 
 
@@ -166,14 +185,30 @@ def check_native_manifests() -> None:
         require_equal(packaged["package"], expected["package"], f"{scope} package name")
         require_equal(packaged["features"], expected["features"], f"{scope} package features")
         require_equal(packaged["slots"], expected["slots"], f"{scope} package slots")
+        require_equal(packaged["provider_id"], expected["provider_id"], f"{scope} provider id")
+        require_equal(
+            packaged["preference_rank"],
+            expected["preference_rank"],
+            f"{scope} preference rank",
+        )
+        require_equal(
+            packaged["limitations"], expected["limitations"], f"{scope} limitations"
+        )
         require_equal(inspected["package"], expected["package"], f"{scope} inspector package name")
         require_equal(inspected["features"], expected["features"], f"{scope} inspector features")
+        require_equal(
+            inspected["limitations"],
+            expected["limitations"],
+            f"{scope} inspector limitations",
+        )
+        for os_name in ("linux", "windows"):
+            require_equal(
+                native.provider_manifest(scope, os_name),
+                inspector.expected_native_provider(scope, os_name),
+                f"{scope} {os_name} provider metadata",
+            )
 
-    require_equal(
-        native.TRANSPORT_SCOPES["all"]["slots"],
-        ["tcp", "quic", "ipc", "websocket"],
-        "aggregate native transport slots",
-    )
+    require_equal(set(native.TRANSPORT_SCOPES), set(NATIVE_TRANSPORTS), "native scopes")
 
 
 def check_wasm_manifest() -> None:
@@ -188,6 +223,9 @@ def check_wasm_manifest() -> None:
     require_equal(packaged["artifact"], BROWSER_WASM_SCOPE["artifact"], "browser WASM artifact")
     require_equal(packaged["features"], BROWSER_WASM_SCOPE["features"], "browser WASM features")
     require_equal(packaged["slots"], BROWSER_WASM_SCOPE["slots"], "browser WASM slots")
+    require_equal(
+        packaged["provider"], BROWSER_WASM_SCOPE["provider"], "browser WASM provider"
+    )
     require_equal(wasm.WASM_EXPORTS, BROWSER_WASM_SCOPE["exports"], "browser WASM exports")
     require_equal(
         inspector.BROWSER_WASM_SCOPE["package"],
@@ -213,6 +251,11 @@ def check_wasm_manifest() -> None:
         inspector.BROWSER_WASM_SCOPE["exports"],
         BROWSER_WASM_SCOPE["exports"],
         "browser WASM inspector exports",
+    )
+    require_equal(
+        inspector.BROWSER_WASM_SCOPE["provider"],
+        BROWSER_WASM_SCOPE["provider"],
+        "browser WASM inspector provider",
     )
     missing = sorted(set(BROWSER_WASM_SCOPE["exports"]) - declarations)
     if missing:

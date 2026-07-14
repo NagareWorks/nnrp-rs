@@ -2,6 +2,12 @@
 
 Preview4 moves the Rust workspace beyond token-stream transport substitution and into runtime orchestration features that help SDKs model cancellation, priority, progress, partial results, cache references, route hints, trace context, result drop reasons, IPC, and WebSocket endpoints directly.
 
+## 1.0.0-preview.4.3
+
+This revision freezes provider metadata and deterministic selection as a first-class Rust SDK API. Native and browser
+WASM manifests expose the same cost, preference, frame-limit, and limitation fields consumed by downstream SDKs.
+Provider selection returns ordered candidate diagnostics and structured probe metrics without weighted scores.
+
 ## 1.0.0-preview.4.2
 
 This revision fixes native FFI validation for `OBJECT_PATCH` and `OBJECT_DELTA` frames that carry both extension metadata and delta payload bytes. The coarse `nnrp_runtime_frame_send` ABI remains at `1.12.0`; only validation of the already-frozen payload layout changes.
@@ -40,7 +46,9 @@ Native artifacts are transport-scoped. Release packages emit one native package 
 
 Release CI inspects native and WASM manifests and rejects artifacts that collapse transport ownership boundaries.
 
-Preview4 does not replace Preview3 artifacts in place. Downstream SDKs that still pin Preview3 should keep using the existing Preview3 tags and release assets until their Preview4 package and benchmark work lands.
+Provider selection exposes frozen cost, preference, limit, limitation, probe, rank, and rejection diagnostics. Probe
+samples bind to stable provider ids and use deterministic per-sample throughput and median aggregation. Native and
+browser WASM manifests carry the same provider metadata, and Rust/WASM public APIs do not expose weighted scores.
 
 ## Wire Conformance
 
