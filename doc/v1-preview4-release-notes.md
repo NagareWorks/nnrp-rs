@@ -2,6 +2,10 @@
 
 Preview4 moves the Rust workspace beyond token-stream transport substitution and into runtime orchestration features that help SDKs model cancellation, priority, progress, partial results, cache references, route hints, trace context, result drop reasons, IPC, and WebSocket endpoints directly.
 
+## 1.0.0-preview.4.2
+
+This revision fixes native FFI validation for `OBJECT_PATCH` and `OBJECT_DELTA` frames that carry both extension metadata and delta payload bytes. The coarse `nnrp_runtime_frame_send` ABI remains at `1.12.0`; only validation of the already-frozen payload layout changes.
+
 ## Runtime Control
 
 Preview4 adds protocol-level control frames for:

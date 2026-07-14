@@ -19,8 +19,9 @@ use nnrp_core::{
     SchemaDescriptorHeader, SchemaRegistry, SchemaRegistryAction, SchemaRegistryFailure,
     SessionMigrateAckMetadata, SessionMigrateMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
     SessionRecoveryOutcome as CoreSessionRecoveryOutcome, SupersedeMetadata, TraceContextMetadata,
-    TransportId, TypedPayloadDescriptor, SESSION_ERROR_NONE, SESSION_ERROR_PROFILE_UNSUPPORTED,
-    SESSION_ERROR_RESUME_REJECTED, SESSION_ERROR_SCHEMA_UNSUPPORTED, SESSION_FLAG_ALLOW_RESUME,
+    TransportId, TypedPayloadDescriptor, OBJECT_DELTA_METADATA_LEN, SESSION_ERROR_NONE,
+    SESSION_ERROR_PROFILE_UNSUPPORTED, SESSION_ERROR_RESUME_REJECTED,
+    SESSION_ERROR_SCHEMA_UNSUPPORTED, SESSION_FLAG_ALLOW_RESUME,
 };
 
 pub const NNRP_FFI_ABI_MAJOR: u16 = 1;
@@ -3791,11 +3792,7 @@ fn validate_runtime_frame_payload(
         MessageType::ObjectRelease => ObjectReleaseMetadata::parse_with_diagnostics(bytes)
             .map(|_| ())
             .map_err(|error| NnrpFfiStatus::from_core_error(&error)),
-        MessageType::ObjectPatch | MessageType::ObjectDelta => {
-            ObjectDeltaMetadata::parse_with_extension(bytes)
-                .map(|_| ())
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))
-        }
+        MessageType::ObjectPatch | MessageType::ObjectDelta => validate_object_delta_payload(bytes),
         MessageType::CacheReference => CacheReferenceMetadata::parse_with_extension(bytes)
             .map(|_| ())
             .map_err(|error| NnrpFfiStatus::from_core_error(&error)),
@@ -3812,6 +3809,28 @@ fn validate_runtime_frame_payload(
         )),
     };
     result.map(|_| message_type)
+}
+
+fn validate_object_delta_payload(bytes: &[u8]) -> Result<(), NnrpFfiStatus> {
+    let metadata = ObjectDeltaMetadata::parse(bytes)
+        .map_err(|error| NnrpFfiStatus::from_core_error(&error))?;
+    let declared = OBJECT_DELTA_METADATA_LEN
+        .checked_add(metadata.metadata_bytes as usize)
+        .and_then(|length| length.checked_add(metadata.delta_bytes as usize))
+        .ok_or_else(|| NnrpFfiStatus::from_core_error(&NnrpError::MessageLengthOverflow))?;
+    if declared != bytes.len() {
+        return Err(NnrpFfiStatus::from_core_error(
+            &NnrpError::DeclaredLengthMismatch {
+                field: "object_delta.payload_bytes",
+                declared,
+                actual: bytes.len(),
+            },
+        ));
+    }
+    let metadata_end = OBJECT_DELTA_METADATA_LEN + metadata.metadata_bytes as usize;
+    ObjectDeltaMetadata::parse_with_extension(&bytes[..metadata_end])
+        .map(|_| ())
+        .map_err(|error| NnrpFfiStatus::from_core_error(&error))
 }
 
 fn validate_runtime_frame_direction(
@@ -7335,7 +7354,7 @@ mod tests {
         .expect("object release should encode");
         assert_valid(MessageType::ObjectRelease, &release);
 
-        let delta = ObjectDeltaMetadata {
+        let mut delta = ObjectDeltaMetadata {
             object_id: 1,
             delta_sequence: 2,
             region_offset: 64,
@@ -7346,6 +7365,7 @@ mod tests {
         }
         .to_vec_with_extension(&[4])
         .expect("object delta should encode");
+        delta.extend_from_slice(&[5; 16]);
         assert_valid(MessageType::ObjectPatch, &delta);
         assert_valid(MessageType::ObjectDelta, &delta);
 
@@ -9987,6 +10007,53 @@ mod tests {
             assert_eq!(
                 malformed_status.status_code,
                 NnrpFfiStatusCode::InvalidArgument as u32
+            );
+
+            let object_delta_metadata = ObjectDeltaMetadata {
+                object_id: 9,
+                delta_sequence: 2,
+                region_offset: 128,
+                region_bytes: 64,
+                delta_bytes: 4,
+                flags: nnrp_core::OBJECT_DELTA_FLAGS_KNOWN_MASK,
+                metadata_bytes: 2,
+            };
+            let mut object_delta = object_delta_metadata
+                .to_bytes()
+                .expect("object delta metadata should encode")
+                .to_vec();
+            object_delta.extend_from_slice(b"md");
+            object_delta.extend_from_slice(b"xxxx");
+            for (frame_id, message_type) in [
+                (96, MessageType::ObjectPatch),
+                (97, MessageType::ObjectDelta),
+            ] {
+                assert_eq!(
+                    nnrp_runtime_frame_send_impl(NnrpRuntimeFrameSendRequest {
+                        handle: client_session,
+                        message_type: message_type as u32,
+                        frame_id,
+                        payload: NnrpBufferView {
+                            ptr: object_delta.as_ptr(),
+                            len: object_delta.len(),
+                        },
+                    }),
+                    NnrpFfiStatus::ok()
+                );
+            }
+            let truncated_object_delta = &object_delta[..object_delta.len() - 1];
+            let truncated_status = nnrp_runtime_frame_send_impl(NnrpRuntimeFrameSendRequest {
+                handle: client_session,
+                message_type: MessageType::ObjectDelta as u32,
+                frame_id: 98,
+                payload: NnrpBufferView {
+                    ptr: truncated_object_delta.as_ptr(),
+                    len: truncated_object_delta.len(),
+                },
+            });
+            assert_eq!(
+                truncated_status.status_code,
+                NnrpFfiStatusCode::ProtocolError as u32
             );
 
             let mut server = NnrpHandle::invalid();
