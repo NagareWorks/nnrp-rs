@@ -382,8 +382,10 @@ jobs:
               manifest = json.loads(manifest_path.read_text()) if manifest_path.is_file() else {}
               package = manifest.get('package', 'nnrp-ffi')
               platform_name = package_dir.name
-              scope = manifest.get('transport_scope', 'all')
-              if scope != 'all' and platform_name.startswith(f'{scope}-'):
+              scope = manifest.get('transport_scope')
+              if scope not in {'tcp', 'quic', 'ipc', 'websocket'}:
+                  raise SystemExit(f'{manifest_path}: invalid transport_scope {scope!r}')
+              if platform_name.startswith(f'{scope}-'):
                 platform_name = platform_name[len(scope) + 1:]
               zip_dir(package_dir, release_dir / f'{package}-native-{platform_name}-{version}.zip')
 

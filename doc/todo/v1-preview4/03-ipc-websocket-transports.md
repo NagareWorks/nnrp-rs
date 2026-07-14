@@ -10,7 +10,10 @@
 - [x] Keep provider probing behavior stable.
   - [x] If one transport package is present, select that transport directly.
   - [x] If multiple transport packages are present, probe candidates by policy.
-  - [x] Preserve capability, cost, and preference metadata in probe results.
+  - [x] Match probe samples by stable provider id instead of package display name.
+  - [x] Preserve provider cost, preference, limits, and limitations in candidate diagnostics.
+  - [x] Apply the frozen success-count, throughput, RTT, comparable-cost, policy, and identity comparator.
+  - [x] Expose ordered candidates and registered rejection reasons without an opaque score.
 - [x] Ensure every provider owns real connect/listen/send/receive behavior.
 - [x] Keep provider packages from becoming configuration-only switches.
 
@@ -67,3 +70,5 @@
 - [x] Add WebSocket native artifacts to release packaging.
 - [x] Ensure transport-specific artifacts remain scoped to transport packages.
 - [x] Ensure downstream SDK manifests can distinguish TCP, QUIC, IPC, and WebSocket artifacts.
+  - [x] Write the frozen provider id, cost, preference rank, frame limit, and limitations.
+  - [x] Reject aggregate `all` native artifacts from the release surface.

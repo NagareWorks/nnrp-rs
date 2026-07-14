@@ -60,7 +60,7 @@ mod tests {
         let registry = TransportProviderRegistry::new().with_provider(TcpProvider::descriptor());
         let remote = RemoteTransportSupport::new([TransportId::Tcp]);
         let selection = registry
-            .select(&remote, TransportPolicy::ForceTcp)
+            .select(&remote, TransportPolicy::ForceTcp, None)
             .expect("tcp provider should satisfy force tcp");
         assert_eq!(selection.selected.name, TcpProvider::NAME);
     }

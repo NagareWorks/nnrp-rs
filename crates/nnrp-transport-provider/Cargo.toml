@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
-description = "NNRP transport provider registry, capability intersection, native discovery, and probe scoring."
+description = "NNRP transport provider metadata, capability intersection, native discovery, and deterministic selection."
 repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/nnrp-transport-provider"
@@ -23,5 +23,5 @@ native-loader = []
 wasm = []
 
 [dependencies]
-nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.4.2" }
+nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.4.3" }
 thiserror.workspace = true

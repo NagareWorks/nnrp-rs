@@ -62,35 +62,37 @@ TARGETS = {
 }
 
 TRANSPORT_SCOPES = {
-    "all": {
-        "package": "nnrp-ffi",
-        "features": [
-            "transport-tcp",
-            "transport-quic",
-            "transport-ipc",
-            "transport-websocket",
-        ],
-        "slots": ["tcp", "quic", "ipc", "websocket"],
-    },
     "tcp": {
         "package": "nnrp-ffi-transport-tcp",
         "features": ["transport-tcp"],
         "slots": ["tcp"],
+        "provider_id": "nnrp.transport.tcp.native",
+        "preference_rank": 2,
+        "limitations": ["requires-tcp", "native-host-only"],
     },
     "quic": {
         "package": "nnrp-ffi-transport-quic",
         "features": ["transport-quic"],
         "slots": ["quic"],
+        "provider_id": "nnrp.transport.quic.native",
+        "preference_rank": 1,
+        "limitations": ["requires-udp", "native-host-only"],
     },
     "ipc": {
         "package": "nnrp-ffi-transport-ipc",
         "features": ["transport-ipc"],
         "slots": ["ipc"],
+        "provider_id": "nnrp.transport.ipc.native",
+        "preference_rank": 0,
+        "limitations": ["local-host-only", "native-host-only"],
     },
     "websocket": {
         "package": "nnrp-ffi-transport-websocket",
         "features": ["transport-websocket"],
         "slots": ["websocket"],
+        "provider_id": "nnrp.transport.websocket.native",
+        "preference_rank": 3,
+        "limitations": ["requires-tcp", "native-host-only"],
     },
 }
 
@@ -230,9 +232,23 @@ def copy_headers(package_dir: Path) -> list[str]:
     for header in headers:
         shutil.copy2(header, package_include / header.name)
 
-    # Keep the legacy root-level FFI header for early Preview3 consumers.
-    shutil.copy2(include_root / "nnrp_ffi.h", package_dir / "nnrp_ffi.h")
     return [f"include/nnrp/{header.name}" for header in headers]
+
+
+def provider_manifest(transport_scope: str, os_name: str) -> dict:
+    scope = TRANSPORT_SCOPES[transport_scope]
+    limitations = list(scope["limitations"])
+    if transport_scope == "ipc":
+        limitations.append(
+            "windows-named-pipe" if os_name == "windows" else "unix-domain-socket"
+        )
+    return {
+        "id": scope["provider_id"],
+        "cost": {"model_id": 0, "units": "0"},
+        "preference_rank": scope["preference_rank"],
+        "limits": {"max_frame_bytes": "67108864"},
+        "limitations": limitations,
+    }
 
 
 def copy_library_artifacts(library: Path, package_dir: Path, os_name: str) -> list[str]:
@@ -266,8 +282,7 @@ def package_artifact(
     resolved_package_name = package_name or f"{os_name}-{arch_name}"
     if target and package_name is None:
         resolved_package_name = f"{resolved_package_name}-{target}"
-    if transport_scope != "all":
-        resolved_package_name = f"{transport_scope}-{resolved_package_name}"
+    resolved_package_name = f"{transport_scope}-{resolved_package_name}"
     package_dir = out_dir / resolved_package_name
     if package_dir.exists():
         shutil.rmtree(package_dir)
@@ -282,6 +297,7 @@ def package_artifact(
         "protocol_version": PROTOCOL_VERSION,
         "abi_version": FFI_ABI_VERSION,
         "enabled_features": TRANSPORT_SCOPES[transport_scope]["features"],
+        "provider": provider_manifest(transport_scope, os_name),
         "profile": "release" if release else "debug",
         "os": os_name,
         "arch": arch_name,
@@ -291,7 +307,6 @@ def package_artifact(
         "libraries": libraries,
         "header": "include/nnrp/nnrp.h",
         "headers": headers,
-        "legacy_header": "nnrp_ffi.h",
         "exports": EXPECTED_EXPORTS,
     }
     (package_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")

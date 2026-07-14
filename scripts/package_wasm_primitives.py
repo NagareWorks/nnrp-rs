@@ -12,7 +12,7 @@ WASM_EXPORTS = [
     "nnrp_wasm_protocol_major",
     "nnrp_wasm_wire_format",
     "selectTransportWithProbeJson",
-    "scoreProviderProbeJson",
+    "summarizeProviderProbeJson",
     "encodeWebSocketBinaryFrameJson",
     "decodeWebSocketBinaryFrameJson",
     "decodeWebSocketBinaryFrameBatchJson",
@@ -29,6 +29,13 @@ TRANSPORT_SCOPES = {
         "directory": "nnrp-wasm-browser",
         "features": ["transport-websocket", "wasm-provider"],
         "slots": ["websocket"],
+        "provider": {
+            "id": "nnrp.transport.websocket.browser-wasm",
+            "cost": {"model_id": 0, "units": "0"},
+            "preference_rank": 3,
+            "limits": {"max_frame_bytes": "67108864"},
+            "limitations": ["requires-tcp", "browser-host-only"],
+        },
     },
 }
 
@@ -75,6 +82,7 @@ def package_wasm(out_dir: Path, transport_scope: str) -> Path:
         "protocol_version": PROTOCOL_VERSION,
         "abi_version": WASM_ABI_VERSION,
         "enabled_features": scope["features"],
+        "provider": scope["provider"],
         "wasm": "nnrp_wasm.wasm",
         "types": "nnrp_wasm.d.ts",
         "owner": "nnrp-rs",

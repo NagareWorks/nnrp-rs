@@ -9,8 +9,10 @@ use nnrp_core::{
     COMMON_HEADER_LEN,
 };
 use nnrp_transport_provider::{
-    select_transport_with_probe, ProbeSample, RemoteTransportSupport, TransportPolicy,
-    TransportProviderDescriptor, TransportProviderKind,
+    select_transport_with_probe, summarize_provider_probe, ProbeMetrics, ProbeSample, ProbeState,
+    ProviderCost, ProviderLimitation, ProviderLimits, RemoteTransportSupport,
+    TransportCandidateDiagnostic, TransportPolicy, TransportProviderDescriptor,
+    TransportProviderKind, TransportProviderMetadata, TransportRejectionReason,
 };
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -38,32 +40,41 @@ pub fn select_transport_with_probe_json(
     providers_json: &str,
     remote_transports_json: &str,
     policy: &str,
+    requested_max_frame_bytes: Option<String>,
     samples_json: &str,
 ) -> Result<String, JsValue> {
     let providers = parse_providers(providers_json)?;
     let remote = RemoteTransportSupport::new(parse_transport_ids(remote_transports_json)?);
     let policy = parse_policy(policy)?;
+    let requested_max_frame_bytes = requested_max_frame_bytes
+        .as_deref()
+        .map(parse_canonical_u64)
+        .transpose()?;
     let samples = parse_probe_samples(samples_json)?;
-    let selection = select_transport_with_probe(&providers, &remote, policy, &samples)
-        .map_err(|error| js_error(&error.to_string()))?;
+    let selection = select_transport_with_probe(
+        &providers,
+        &remote,
+        policy,
+        requested_max_frame_bytes,
+        &samples,
+    )
+    .map_err(|error| js_error(&error.to_string()))?;
 
     serde_json::to_string(&WasmTransportSelection::from(selection))
         .map_err(|error| js_error(&error.to_string()))
 }
 
-#[wasm_bindgen(js_name = scoreProviderProbeJson)]
-pub fn score_provider_probe_json(
+#[wasm_bindgen(js_name = summarizeProviderProbeJson)]
+pub fn summarize_provider_probe_json(
     provider_json: &str,
-    policy: &str,
     samples_json: &str,
 ) -> Result<String, JsValue> {
     let provider = parse_provider(provider_json)?;
-    let policy = parse_policy(policy)?;
     let samples = parse_probe_samples(samples_json)?;
-    let score = nnrp_transport_provider::score_provider_probe(&provider, &samples, policy)
+    let metrics = summarize_provider_probe(&provider, &samples)
         .ok_or_else(|| js_error("no matching probe samples for provider"))?;
 
-    serde_json::to_string(&WasmProbeScore::from(score))
+    serde_json::to_string(&WasmProbeMetrics::from(metrics))
         .map_err(|error| js_error(&error.to_string()))
 }
 
@@ -407,19 +418,40 @@ struct WasmProviderInput {
     transport_id: u32,
     kind: Option<String>,
     available: Option<bool>,
+    metadata: WasmProviderMetadata,
     diagnostic: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct WasmProbeSampleInput {
     transport_id: u32,
-    provider_name: String,
+    provider_id: String,
     elapsed_us: u64,
     rtt_us: Option<u64>,
     bytes_sent: u64,
     bytes_received: u64,
     timed_out: Option<bool>,
     failed: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct WasmProviderCost {
+    model_id: u16,
+    units: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct WasmProviderLimits {
+    max_frame_bytes: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct WasmProviderMetadata {
+    id: String,
+    cost: WasmProviderCost,
+    preference_rank: u16,
+    limits: WasmProviderLimits,
+    limitations: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1242,18 +1274,14 @@ impl WasmCacheMiss {
 #[derive(Debug, Serialize)]
 struct WasmTransportSelection {
     selected: WasmProviderOutput,
-    selected_score: WasmProbeScore,
-    candidates: Vec<WasmCandidateScore>,
-    rejected: Vec<WasmRejectedCandidate>,
+    candidates: Vec<WasmCandidateDiagnostic>,
 }
 
-impl From<nnrp_transport_provider::ProbeSelection> for WasmTransportSelection {
-    fn from(value: nnrp_transport_provider::ProbeSelection) -> Self {
+impl From<nnrp_transport_provider::TransportSelection> for WasmTransportSelection {
+    fn from(value: nnrp_transport_provider::TransportSelection) -> Self {
         Self {
             selected: value.selected.into(),
-            selected_score: value.selected_score.into(),
             candidates: value.candidates.into_iter().map(Into::into).collect(),
-            rejected: value.rejected.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -1265,6 +1293,7 @@ struct WasmProviderOutput {
     transport_id: u32,
     kind: String,
     available: bool,
+    metadata: WasmProviderMetadata,
     diagnostic: Option<String>,
 }
 
@@ -1276,62 +1305,83 @@ impl From<TransportProviderDescriptor> for WasmProviderOutput {
             transport_id: value.transport_id as u32,
             kind: provider_kind_name(value.kind).to_string(),
             available: value.available,
+            metadata: value.metadata.into(),
             diagnostic: value.diagnostic,
         }
     }
 }
 
 #[derive(Debug, Serialize)]
-struct WasmCandidateScore {
-    provider: WasmProviderOutput,
-    probe_score: WasmProbeScore,
-}
-
-impl From<nnrp_transport_provider::ProbeCandidateScore> for WasmCandidateScore {
-    fn from(value: nnrp_transport_provider::ProbeCandidateScore) -> Self {
-        Self {
-            provider: value.provider.into(),
-            probe_score: value.probe_score.into(),
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-struct WasmProbeScore {
-    sample_count: usize,
-    failure_count: usize,
-    failure_rate: f64,
-    median_rtt_us: u64,
-    throughput_bytes_per_sec: u64,
-    score: f64,
-}
-
-impl From<nnrp_transport_provider::ProbeScore> for WasmProbeScore {
-    fn from(value: nnrp_transport_provider::ProbeScore) -> Self {
-        Self {
-            sample_count: value.sample_count,
-            failure_count: value.failure_count,
-            failure_rate: value.failure_rate,
-            median_rtt_us: value.median_rtt_us,
-            throughput_bytes_per_sec: value.throughput_bytes_per_sec,
-            score: value.score,
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-struct WasmRejectedCandidate {
+struct WasmCandidateDiagnostic {
     transport_id: u32,
-    provider_name: Option<String>,
-    reason: String,
+    provider: WasmProviderMetadata,
+    local_available: bool,
+    peer_supported: bool,
+    within_limits: bool,
+    probe_state: String,
+    probe: Option<WasmProbeMetrics>,
+    selection_rank: Option<u32>,
+    rejection_reason: Option<String>,
+    diagnostic: Option<String>,
 }
 
-impl From<nnrp_transport_provider::RejectedTransportCandidate> for WasmRejectedCandidate {
-    fn from(value: nnrp_transport_provider::RejectedTransportCandidate) -> Self {
+impl From<TransportCandidateDiagnostic> for WasmCandidateDiagnostic {
+    fn from(value: TransportCandidateDiagnostic) -> Self {
         Self {
             transport_id: value.transport_id as u32,
-            provider_name: value.provider_name,
-            reason: format!("{:?}", value.reason),
+            provider: value.provider.into(),
+            local_available: value.local_available,
+            peer_supported: value.peer_supported,
+            within_limits: value.within_limits,
+            probe_state: probe_state_name(value.probe_state).to_owned(),
+            probe: value.probe.map(Into::into),
+            selection_rank: value.selection_rank,
+            rejection_reason: value
+                .rejection_reason
+                .map(transport_rejection_reason_name)
+                .map(str::to_owned),
+            diagnostic: value.diagnostic,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct WasmProbeMetrics {
+    sample_count: u32,
+    success_count: u32,
+    median_throughput_bytes_per_sec: String,
+    median_rtt_us: String,
+}
+
+impl From<ProbeMetrics> for WasmProbeMetrics {
+    fn from(value: ProbeMetrics) -> Self {
+        Self {
+            sample_count: value.sample_count,
+            success_count: value.success_count,
+            median_throughput_bytes_per_sec: value.median_throughput_bytes_per_sec.to_string(),
+            median_rtt_us: value.median_rtt_us.to_string(),
+        }
+    }
+}
+
+impl From<TransportProviderMetadata> for WasmProviderMetadata {
+    fn from(value: TransportProviderMetadata) -> Self {
+        Self {
+            id: value.id,
+            cost: WasmProviderCost {
+                model_id: value.cost.model_id,
+                units: value.cost.units.to_string(),
+            },
+            preference_rank: value.preference_rank,
+            limits: WasmProviderLimits {
+                max_frame_bytes: value.limits.max_frame_bytes.to_string(),
+            },
+            limitations: value
+                .limitations
+                .into_iter()
+                .map(provider_limitation_name)
+                .map(str::to_owned)
+                .collect(),
         }
     }
 }
@@ -1351,15 +1401,11 @@ fn parse_provider(source: &str) -> Result<TransportProviderDescriptor, JsValue> 
 fn provider_from_input(input: WasmProviderInput) -> Result<TransportProviderDescriptor, JsValue> {
     let transport_id = parse_transport_id(input.transport_id)?;
     let kind = parse_provider_kind(input.kind.as_deref().unwrap_or("wasm"))?;
-    if input.available.unwrap_or(true) {
-        Ok(TransportProviderDescriptor::available(
-            input.name,
-            input.version,
-            transport_id,
-            kind,
-        ))
+    let metadata = provider_metadata_from_input(input.metadata)?;
+    let provider = if input.available.unwrap_or(true) {
+        TransportProviderDescriptor::available(input.name, input.version, transport_id, kind)
     } else {
-        Ok(TransportProviderDescriptor::missing(
+        TransportProviderDescriptor::missing(
             input.name,
             input.version,
             transport_id,
@@ -1367,8 +1413,43 @@ fn provider_from_input(input: WasmProviderInput) -> Result<TransportProviderDesc
             input
                 .diagnostic
                 .unwrap_or_else(|| "provider is not available".to_string()),
-        ))
+        )
+    };
+    Ok(provider.with_metadata(metadata))
+}
+
+fn provider_metadata_from_input(
+    input: WasmProviderMetadata,
+) -> Result<TransportProviderMetadata, JsValue> {
+    if input.id.is_empty() || !input.id.is_ascii() {
+        return Err(js_error("provider metadata id must be non-empty ASCII"));
     }
+    let units = parse_canonical_u64(&input.cost.units)?;
+    if input.cost.model_id == 0 && units != 0 {
+        return Err(js_error(
+            "provider cost units must be zero when model_id is zero",
+        ));
+    }
+    let max_frame_bytes = parse_canonical_u64(&input.limits.max_frame_bytes)?;
+    if max_frame_bytes == 0 {
+        return Err(js_error("provider max_frame_bytes must be positive"));
+    }
+    let limitations = input
+        .limitations
+        .iter()
+        .map(|value| parse_provider_limitation(value))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(TransportProviderMetadata {
+        id: input.id,
+        cost: ProviderCost {
+            model_id: input.cost.model_id,
+            units,
+        },
+        preference_rank: input.preference_rank,
+        limits: ProviderLimits { max_frame_bytes },
+        limitations,
+    })
 }
 
 fn parse_probe_samples(source: &str) -> Result<Vec<ProbeSample>, JsValue> {
@@ -1379,7 +1460,7 @@ fn parse_probe_samples(source: &str) -> Result<Vec<ProbeSample>, JsValue> {
         .map(|sample| {
             Ok(ProbeSample {
                 transport_id: parse_transport_id(sample.transport_id)?,
-                provider_name: sample.provider_name,
+                provider_id: sample.provider_id,
                 elapsed_us: sample.elapsed_us,
                 rtt_us: sample.rtt_us,
                 bytes_sent: sample.bytes_sent,
@@ -1453,6 +1534,64 @@ fn parse_policy(value: &str) -> Result<TransportPolicy, JsValue> {
         "force_ipc" => Ok(TransportPolicy::ForceIpc),
         "force_websocket" => Ok(TransportPolicy::ForceWebSocket),
         other => Err(js_error(&format!("unknown transport policy: {other}"))),
+    }
+}
+
+fn parse_canonical_u64(value: &str) -> Result<u64, JsValue> {
+    let canonical = value == "0"
+        || (!value.is_empty()
+            && !value.starts_with('0')
+            && value.bytes().all(|byte| byte.is_ascii_digit()));
+    if !canonical {
+        return Err(js_error("value must be a canonical decimal u64 string"));
+    }
+    value
+        .parse::<u64>()
+        .map_err(|_| js_error("value exceeds the u64 range"))
+}
+
+fn parse_provider_limitation(value: &str) -> Result<ProviderLimitation, JsValue> {
+    match value {
+        "requires-udp" => Ok(ProviderLimitation::RequiresUdp),
+        "requires-tcp" => Ok(ProviderLimitation::RequiresTcp),
+        "local-host-only" => Ok(ProviderLimitation::LocalHostOnly),
+        "native-host-only" => Ok(ProviderLimitation::NativeHostOnly),
+        "browser-host-only" => Ok(ProviderLimitation::BrowserHostOnly),
+        "unix-domain-socket" => Ok(ProviderLimitation::UnixDomainSocket),
+        "windows-named-pipe" => Ok(ProviderLimitation::WindowsNamedPipe),
+        other => Err(js_error(&format!("unknown provider limitation: {other}"))),
+    }
+}
+
+fn provider_limitation_name(value: ProviderLimitation) -> &'static str {
+    match value {
+        ProviderLimitation::RequiresUdp => "requires-udp",
+        ProviderLimitation::RequiresTcp => "requires-tcp",
+        ProviderLimitation::LocalHostOnly => "local-host-only",
+        ProviderLimitation::NativeHostOnly => "native-host-only",
+        ProviderLimitation::BrowserHostOnly => "browser-host-only",
+        ProviderLimitation::UnixDomainSocket => "unix-domain-socket",
+        ProviderLimitation::WindowsNamedPipe => "windows-named-pipe",
+    }
+}
+
+fn probe_state_name(value: ProbeState) -> &'static str {
+    match value {
+        ProbeState::NotRun => "not-run",
+        ProbeState::Succeeded => "succeeded",
+        ProbeState::Failed => "failed",
+        ProbeState::Missing => "missing",
+    }
+}
+
+fn transport_rejection_reason_name(value: TransportRejectionReason) -> &'static str {
+    match value {
+        TransportRejectionReason::PolicyDisallowed => "policy-disallowed",
+        TransportRejectionReason::LocalUnavailable => "local-unavailable",
+        TransportRejectionReason::PeerUnsupported => "peer-unsupported",
+        TransportRejectionReason::LimitExceeded => "limit-exceeded",
+        TransportRejectionReason::ProbeMissing => "probe-missing",
+        TransportRejectionReason::ProbeFailed => "probe-failed",
     }
 }
 
@@ -1913,19 +2052,21 @@ mod tests {
     #[cfg(all(feature = "transport-tcp", feature = "transport-quic"))]
     #[test]
     fn wasm_probe_selection_prefers_measured_tcp_over_flaky_quic() {
-        let providers = r#"[
-            {"name":"tcp","version":"0.0.0","transport_id":2,"kind":"wasm","available":true},
-            {"name":"quic","version":"0.0.0","transport_id":1,"kind":"wasm","available":true}
-        ]"#;
+        let providers = format!(
+            "[{},{}]",
+            provider_json("tcp", "nnrp.transport.tcp.native", 2, "pure_rust", true),
+            provider_json("quic", "nnrp.transport.quic.native", 1, "pure_rust", true)
+        );
         let samples = r#"[
-            {"transport_id":2,"provider_name":"tcp","elapsed_us":20000,"rtt_us":5000,"bytes_sent":1024,"bytes_received":1024},
-            {"transport_id":2,"provider_name":"tcp","elapsed_us":20000,"rtt_us":5100,"bytes_sent":1024,"bytes_received":1024},
-            {"transport_id":1,"provider_name":"quic","elapsed_us":20000,"rtt_us":800,"bytes_sent":1024,"bytes_received":1024},
-            {"transport_id":1,"provider_name":"quic","elapsed_us":20000,"rtt_us":null,"bytes_sent":0,"bytes_received":0,"timed_out":true,"failed":true}
+            {"transport_id":2,"provider_id":"nnrp.transport.tcp.native","elapsed_us":20000,"rtt_us":5000,"bytes_sent":1024,"bytes_received":1024},
+            {"transport_id":2,"provider_id":"nnrp.transport.tcp.native","elapsed_us":20000,"rtt_us":5100,"bytes_sent":1024,"bytes_received":1024},
+            {"transport_id":1,"provider_id":"nnrp.transport.quic.native","elapsed_us":20000,"rtt_us":800,"bytes_sent":1024,"bytes_received":1024},
+            {"transport_id":1,"provider_id":"nnrp.transport.quic.native","elapsed_us":20000,"rtt_us":null,"bytes_sent":0,"bytes_received":0,"timed_out":true,"failed":true}
         ]"#;
 
         let output =
-            select_transport_with_probe_json(providers, "[1,2]", "prefer_quic", samples).unwrap();
+            select_transport_with_probe_json(&providers, "[1,2]", "prefer_quic", None, samples)
+                .unwrap();
         let output = serde_json::from_str::<serde_json::Value>(&output).unwrap();
         assert_eq!(output["selected"]["transport_id"], 2);
         assert_eq!(output["candidates"].as_array().unwrap().len(), 2);
@@ -1934,72 +2075,189 @@ mod tests {
     #[cfg(all(feature = "transport-tcp", feature = "transport-quic"))]
     #[test]
     fn wasm_probe_selection_reports_rejected_unavailable_provider() {
-        let providers = r#"[
-            {"name":"tcp-native","version":"0.0.0","transport_id":2,"kind":"native_dynamic","available":true},
-            {"name":"quic-native","version":"0.0.0","transport_id":1,"kind":"pure_rust","available":false,"diagnostic":"backend missing"}
-        ]"#;
+        let providers = format!(
+            "[{},{}]",
+            provider_json(
+                "tcp-native",
+                "nnrp.transport.tcp.native",
+                2,
+                "native_dynamic",
+                true
+            ),
+            provider_json(
+                "quic-native",
+                "nnrp.transport.quic.native",
+                1,
+                "pure_rust",
+                false
+            )
+        );
         let samples = r#"[
-            {"transport_id":2,"provider_name":"tcp-native","elapsed_us":10000,"rtt_us":2500,"bytes_sent":4096,"bytes_received":4096}
+            {"transport_id":2,"provider_id":"nnrp.transport.tcp.native","elapsed_us":10000,"rtt_us":2500,"bytes_sent":4096,"bytes_received":4096}
         ]"#;
 
         let output =
-            select_transport_with_probe_json(providers, "[1,2]", "prefer_tcp", samples).unwrap();
+            select_transport_with_probe_json(&providers, "[1,2]", "prefer_tcp", None, samples)
+                .unwrap();
         let output = serde_json::from_str::<serde_json::Value>(&output).unwrap();
 
         assert_eq!(output["selected"]["kind"], "native_dynamic");
-        assert_eq!(output["rejected"][0]["transport_id"], 1);
-        assert_eq!(output["rejected"][0]["provider_name"], "quic-native");
-        assert!(output["rejected"][0]["reason"]
-            .as_str()
+        let rejected = output["candidates"]
+            .as_array()
             .unwrap()
-            .contains("LocalProviderUnavailable"));
+            .iter()
+            .find(|candidate| candidate["transport_id"] == 1)
+            .unwrap();
+        assert_eq!(rejected["rejection_reason"], "local-unavailable");
     }
 
     #[cfg(feature = "transport-quic")]
     #[test]
-    fn wasm_score_provider_probe_returns_json_score() {
-        let provider = r#"{"name":"quic","version":"0.0.0","transport_id":1,"kind":"pure_rust","available":true}"#;
+    fn wasm_summarizes_provider_probe_as_structured_metrics() {
+        let provider = provider_json("quic", "nnrp.transport.quic.native", 1, "pure_rust", true);
         let samples = r#"[
-            {"transport_id":1,"provider_name":"quic","elapsed_us":8000,"rtt_us":1000,"bytes_sent":2048,"bytes_received":2048},
-            {"transport_id":1,"provider_name":"quic","elapsed_us":9000,"rtt_us":1200,"bytes_sent":2048,"bytes_received":2048}
+            {"transport_id":1,"provider_id":"nnrp.transport.quic.native","elapsed_us":8000,"rtt_us":1000,"bytes_sent":2048,"bytes_received":2048},
+            {"transport_id":1,"provider_id":"nnrp.transport.quic.native","elapsed_us":9000,"rtt_us":1200,"bytes_sent":2048,"bytes_received":2048}
         ]"#;
 
-        let output = score_provider_probe_json(provider, "force_quic", samples).unwrap();
+        let output = summarize_provider_probe_json(&provider, samples).unwrap();
         let output = serde_json::from_str::<serde_json::Value>(&output).unwrap();
 
         assert_eq!(output["sample_count"], 2);
-        assert_eq!(output["failure_count"], 0);
-        assert_eq!(output["median_rtt_us"], 1200);
+        assert_eq!(output["success_count"], 2);
+        assert_eq!(output["median_rtt_us"], "1100");
     }
 
     #[cfg(feature = "transport-tcp")]
     #[test]
-    fn wasm_score_provider_probe_reports_missing_samples() {
-        let provider =
-            r#"{"name":"tcp","version":"0.0.0","transport_id":2,"kind":"wasm","available":true}"#;
-        assert!(score_provider_probe_json(provider, "auto", "[]").is_err());
+    fn wasm_probe_summary_reports_missing_samples() {
+        let provider = provider_json("tcp", "nnrp.transport.tcp.native", 2, "pure_rust", true);
+        assert!(summarize_provider_probe_json(&provider, "[]").is_err());
+    }
+
+    #[cfg(feature = "transport-tcp")]
+    #[test]
+    fn wasm_provider_metadata_validation_covers_the_frozen_registry() {
+        let provider = serde_json::json!({
+            "name": "tcp",
+            "version": "0.0.0",
+            "transport_id": 2,
+            "kind": "pure_rust",
+            "available": true,
+            "metadata": {
+                "id": "nnrp.transport.tcp.native",
+                "cost": { "model_id": 1, "units": "7" },
+                "preference_rank": 3,
+                "limits": { "max_frame_bytes": "67108864" },
+                "limitations": [
+                    "requires-udp",
+                    "requires-tcp",
+                    "local-host-only",
+                    "native-host-only",
+                    "browser-host-only",
+                    "unix-domain-socket",
+                    "windows-named-pipe"
+                ]
+            }
+        })
+        .to_string();
+        let samples = r#"[{
+            "transport_id":2,
+            "provider_id":"nnrp.transport.tcp.native",
+            "elapsed_us":10,
+            "rtt_us":5,
+            "bytes_sent":10,
+            "bytes_received":10
+        }]"#;
+
+        let selection =
+            select_transport_with_probe_json(&format!("[{provider}]"), "[2]", "auto", None, "[]")
+                .unwrap();
+        let selection = serde_json::from_str::<serde_json::Value>(&selection).unwrap();
+        assert_eq!(
+            selection["candidates"][0]["provider"]["limitations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            7
+        );
+
+        let output = summarize_provider_probe_json(&provider, samples).unwrap();
+        let output = serde_json::from_str::<serde_json::Value>(&output).unwrap();
+        assert_eq!(output["success_count"], 1);
+
+        for invalid_metadata in [
+            serde_json::json!({
+                "id": "",
+                "cost": { "model_id": 0, "units": "0" },
+                "preference_rank": 3,
+                "limits": { "max_frame_bytes": "1" },
+                "limitations": []
+            }),
+            serde_json::json!({
+                "id": "nnrp.transport.websocket.browser-wasm",
+                "cost": { "model_id": 0, "units": "1" },
+                "preference_rank": 3,
+                "limits": { "max_frame_bytes": "1" },
+                "limitations": []
+            }),
+            serde_json::json!({
+                "id": "nnrp.transport.websocket.browser-wasm",
+                "cost": { "model_id": 0, "units": "0" },
+                "preference_rank": 3,
+                "limits": { "max_frame_bytes": "0" },
+                "limitations": []
+            }),
+            serde_json::json!({
+                "id": "nnrp.transport.websocket.browser-wasm",
+                "cost": { "model_id": 0, "units": "00" },
+                "preference_rank": 3,
+                "limits": { "max_frame_bytes": "1" },
+                "limitations": []
+            }),
+            serde_json::json!({
+                "id": "nnrp.transport.websocket.browser-wasm",
+                "cost": { "model_id": 0, "units": "0" },
+                "preference_rank": 3,
+                "limits": { "max_frame_bytes": "18446744073709551616" },
+                "limitations": []
+            }),
+            serde_json::json!({
+                "id": "nnrp.transport.websocket.browser-wasm",
+                "cost": { "model_id": 0, "units": "0" },
+                "preference_rank": 3,
+                "limits": { "max_frame_bytes": "1" },
+                "limitations": ["unknown"]
+            }),
+        ] {
+            let mut invalid = serde_json::from_str::<serde_json::Value>(&provider).unwrap();
+            invalid["metadata"] = invalid_metadata;
+            assert!(summarize_provider_probe_json(&invalid.to_string(), samples).is_err());
+        }
     }
 
     #[cfg(feature = "transport-tcp")]
     #[test]
     fn wasm_rejects_invalid_policy_kind_and_transport_id() {
-        let tcp =
-            r#"{"name":"tcp","version":"0.0.0","transport_id":2,"kind":"wasm","available":true}"#;
-        let unspecified = r#"{"name":"unspecified","version":"0.0.0","transport_id":0,"kind":"wasm","available":true}"#;
-        let bad_kind =
-            r#"{"name":"tcp","version":"0.0.0","transport_id":2,"kind":"plugin","available":true}"#;
+        let tcp = provider_json("tcp", "nnrp.transport.tcp.native", 2, "pure_rust", true);
+        let unspecified = provider_json(
+            "unspecified",
+            "nnrp.transport.unspecified.native",
+            0,
+            "pure_rust",
+            true,
+        );
+        let bad_kind = provider_json("tcp", "nnrp.transport.tcp.native", 2, "plugin", true);
         let bad_transport =
-            r#"{"name":"tcp","version":"0.0.0","transport_id":99,"kind":"wasm","available":true}"#;
-        let ipc =
-            r#"{"name":"ipc","version":"0.0.0","transport_id":3,"kind":"wasm","available":true}"#;
-        let websocket = r#"{"name":"websocket","version":"0.0.0","transport_id":4,"kind":"wasm","available":true}"#;
+            provider_json("tcp", "nnrp.transport.tcp.native", 99, "pure_rust", true);
 
-        assert!(score_provider_probe_json(tcp, "sticky", "[]").is_err());
-        assert!(score_provider_probe_json(unspecified, "auto", "[]").is_err());
-        assert!(score_provider_probe_json(bad_kind, "force_tcp", "[]").is_err());
-        assert!(score_provider_probe_json(bad_transport, "force_tcp", "[]").is_err());
-        assert!(score_provider_probe_json(ipc, "force_ipc", "[]").is_err());
-        assert!(score_provider_probe_json(websocket, "force_websocket", "[]").is_err());
+        assert!(
+            select_transport_with_probe_json(&format!("[{tcp}]"), "[2]", "sticky", None, "[]")
+                .is_err()
+        );
+        assert!(summarize_provider_probe_json(&unspecified, "[]").is_err());
+        assert!(summarize_provider_probe_json(&bad_kind, "[]").is_err());
+        assert!(summarize_provider_probe_json(&bad_transport, "[]").is_err());
     }
 
     #[test]
@@ -2025,16 +2283,38 @@ mod tests {
     #[cfg(all(feature = "transport-tcp", not(feature = "transport-quic")))]
     #[test]
     fn wasm_tcp_scoped_artifact_rejects_quic_provider() {
-        let quic =
-            r#"{"name":"quic","version":"0.0.0","transport_id":1,"kind":"wasm","available":true}"#;
-        assert!(score_provider_probe_json(quic, "force_quic", "[]").is_err());
+        let quic = provider_json("quic", "nnrp.transport.quic.native", 1, "pure_rust", true);
+        assert!(summarize_provider_probe_json(&quic, "[]").is_err());
     }
 
     #[cfg(all(feature = "transport-quic", not(feature = "transport-tcp")))]
     #[test]
     fn wasm_quic_scoped_artifact_rejects_tcp_provider() {
-        let tcp =
-            r#"{"name":"tcp","version":"0.0.0","transport_id":2,"kind":"wasm","available":true}"#;
-        assert!(score_provider_probe_json(tcp, "force_tcp", "[]").is_err());
+        let tcp = provider_json("tcp", "nnrp.transport.tcp.native", 2, "pure_rust", true);
+        assert!(summarize_provider_probe_json(&tcp, "[]").is_err());
+    }
+
+    fn provider_json(
+        name: &str,
+        provider_id: &str,
+        transport_id: u32,
+        kind: &str,
+        available: bool,
+    ) -> String {
+        serde_json::json!({
+            "name": name,
+            "version": "0.0.0",
+            "transport_id": transport_id,
+            "kind": kind,
+            "available": available,
+            "metadata": {
+                "id": provider_id,
+                "cost": { "model_id": 0, "units": "0" },
+                "preference_rank": transport_id,
+                "limits": { "max_frame_bytes": "67108864" },
+                "limitations": []
+            }
+        })
+        .to_string()
     }
 }

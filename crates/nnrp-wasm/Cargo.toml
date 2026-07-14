@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
-description = "WASM primitive package for NNRP protocol version, probe scoring, and transport selection bindings."
+description = "WASM primitives for NNRP framing, structured probe metrics, and deterministic transport selection."
 repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/nnrp-wasm"
@@ -25,8 +25,8 @@ transport-websocket = ["nnrp-transport-provider/websocket"]
 wasm-provider = ["nnrp-transport-provider/wasm"]
 
 [dependencies]
-nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.4.2" }
-nnrp-transport-provider = { path = "../nnrp-transport-provider", version = "1.0.0-preview.4.2", default-features = false }
+nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.4.3" }
+nnrp-transport-provider = { path = "../nnrp-transport-provider", version = "1.0.0-preview.4.3", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 wasm-bindgen.workspace = true

@@ -13,18 +13,36 @@ export type TransportId = 1 | 2 | 3 | 4;
 
 export type ProviderKind = "pure_rust" | "native_dynamic" | "wasm";
 
+export type ProviderLimitation =
+  | "requires-udp"
+  | "requires-tcp"
+  | "local-host-only"
+  | "native-host-only"
+  | "browser-host-only"
+  | "unix-domain-socket"
+  | "windows-named-pipe";
+
+export interface ProviderMetadata {
+  id: string;
+  cost: { model_id: number; units: string };
+  preference_rank: number;
+  limits: { max_frame_bytes: string };
+  limitations: ProviderLimitation[];
+}
+
 export interface TransportProviderInput {
   name: string;
   version: string;
   transport_id: TransportId;
   kind?: ProviderKind;
   available?: boolean;
+  metadata: ProviderMetadata;
   diagnostic?: string;
 }
 
 export interface ProbeSampleInput {
   transport_id: TransportId;
-  provider_name: string;
+  provider_id: string;
   elapsed_us: number;
   rtt_us: number | null;
   bytes_sent: number;
@@ -33,20 +51,38 @@ export interface ProbeSampleInput {
   failed?: boolean;
 }
 
-export interface ProbeScore {
+export interface ProbeMetrics {
   sample_count: number;
-  failure_count: number;
-  failure_rate: number;
-  median_rtt_us: number;
-  throughput_bytes_per_sec: number;
-  score: number;
+  success_count: number;
+  median_throughput_bytes_per_sec: string;
+  median_rtt_us: string;
+}
+
+export type ProbeState = "not-run" | "succeeded" | "failed" | "missing";
+export type TransportRejectionReason =
+  | "policy-disallowed"
+  | "local-unavailable"
+  | "peer-unsupported"
+  | "limit-exceeded"
+  | "probe-missing"
+  | "probe-failed";
+
+export interface TransportCandidateDiagnostic {
+  transport_id: TransportId;
+  provider: ProviderMetadata;
+  local_available: boolean;
+  peer_supported: boolean;
+  within_limits: boolean;
+  probe_state: ProbeState;
+  probe?: ProbeMetrics;
+  selection_rank?: number;
+  rejection_reason?: TransportRejectionReason;
+  diagnostic?: string;
 }
 
 export interface TransportSelection {
   selected: TransportProviderInput;
-  selected_score: ProbeScore;
-  candidates: Array<{ provider: TransportProviderInput; probe_score: ProbeScore }>;
-  rejected: Array<{ transport_id: TransportId; provider_name?: string; reason: string }>;
+  candidates: TransportCandidateDiagnostic[];
 }
 
 export interface WebSocketFrameHeaderInput {
@@ -300,12 +336,12 @@ export function selectTransportWithProbeJson(
   providersJson: string,
   remoteTransportsJson: string,
   policy: TransportPolicy,
+  requestedMaxFrameBytes: string | undefined,
   samplesJson: string,
 ): string;
 
-export function scoreProviderProbeJson(
+export function summarizeProviderProbeJson(
   providerJson: string,
-  policy: TransportPolicy,
   samplesJson: string,
 ): string;
 

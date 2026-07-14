@@ -937,7 +937,7 @@ fn public_tcp_transport_contract() -> Result<(), String> {
     let registry = TransportProviderRegistry::new().with_provider(TcpProvider::descriptor());
     let remote = RemoteTransportSupport::new([TransportId::Tcp]);
     let selection = registry
-        .select(&remote, TransportPolicy::ForceTcp)
+        .select(&remote, TransportPolicy::ForceTcp, None)
         .map_err(|error| error.to_string())?;
     if selection.selected.transport_id != TransportId::Tcp {
         return Err("TCP transport provider was not selected".to_string());
@@ -956,24 +956,51 @@ fn public_quic_transport_contract() -> Result<(), String> {
     ];
     let remote = RemoteTransportSupport::new([TransportId::Tcp, TransportId::Quic]);
     let samples = [
-        ProbeSample::success(TransportId::Tcp, TcpProvider::NAME, 10_000, 1_500, 512, 512),
-        ProbeSample::success(TransportId::Quic, "nnrp-quic-native", 10_000, 800, 512, 512),
+        ProbeSample::success(
+            TransportId::Tcp,
+            "nnrp.transport.tcp.native",
+            10_000,
+            1_500,
+            512,
+            512,
+        ),
+        ProbeSample::success(
+            TransportId::Quic,
+            "nnrp.transport.quic.native",
+            10_000,
+            800,
+            512,
+            512,
+        ),
     ];
     let selection =
-        select_transport_with_probe(&providers, &remote, TransportPolicy::Auto, &samples)
+        select_transport_with_probe(&providers, &remote, TransportPolicy::Auto, None, &samples)
             .map_err(|error| error.to_string())?;
     if selection.selected.transport_id != TransportId::Quic {
         return Err("QUIC transport provider did not win the scored probe path".to_string());
     }
 
     let fallback_samples = [
-        ProbeSample::success(TransportId::Tcp, TcpProvider::NAME, 10_000, 900, 512, 512),
-        ProbeSample::failure(TransportId::Quic, "nnrp-quic-native", 10_000, true),
+        ProbeSample::success(
+            TransportId::Tcp,
+            "nnrp.transport.tcp.native",
+            10_000,
+            900,
+            512,
+            512,
+        ),
+        ProbeSample::failure(
+            TransportId::Quic,
+            "nnrp.transport.quic.native",
+            10_000,
+            true,
+        ),
     ];
     let fallback = select_transport_with_probe(
         &providers,
         &remote,
         TransportPolicy::PreferQuic,
+        None,
         &fallback_samples,
     )
     .map_err(|error| error.to_string())?;
