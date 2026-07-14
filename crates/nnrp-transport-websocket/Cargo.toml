@@ -16,8 +16,8 @@ categories.workspace = true
 [dependencies]
 async-trait.workspace = true
 futures-util.workspace = true
-nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.4.1" }
-nnrp-runtime = { path = "../nnrp-runtime", version = "1.0.0-preview.4.1" }
-nnrp-transport-provider = { path = "../nnrp-transport-provider", version = "1.0.0-preview.4.1" }
+nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.4.2" }
+nnrp-runtime = { path = "../nnrp-runtime", version = "1.0.0-preview.4.2" }
+nnrp-transport-provider = { path = "../nnrp-transport-provider", version = "1.0.0-preview.4.2" }
 tokio.workspace = true
 tokio-tungstenite.workspace = true

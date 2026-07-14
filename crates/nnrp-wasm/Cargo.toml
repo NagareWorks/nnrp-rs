@@ -25,8 +25,8 @@ transport-websocket = ["nnrp-transport-provider/websocket"]
 wasm-provider = ["nnrp-transport-provider/wasm"]
 
 [dependencies]
-nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.4.1" }
-nnrp-transport-provider = { path = "../nnrp-transport-provider", version = "1.0.0-preview.4.1", default-features = false }
+nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.4.2" }
+nnrp-transport-provider = { path = "../nnrp-transport-provider", version = "1.0.0-preview.4.2", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 wasm-bindgen.workspace = true
