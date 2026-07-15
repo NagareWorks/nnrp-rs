@@ -501,7 +501,18 @@ jobs:
             return 1
           }
 
-          for crate in nnrp-core nnrp-runtime nnrp-transport-provider nnrp-ffi nnrp-transport-tcp nnrp-transport-quic nnrp-transport-ipc nnrp-transport-websocket nnrp-wasm nnrp-conformance; do
+          if ! publish_order="$(python scripts/resolve_crate_publish_order.py)"; then
+            echo "Failed to resolve crates.io publish order."
+            exit 1
+          fi
+          mapfile -t crates <<< "$publish_order"
+          if [ "${#crates[@]}" -eq 0 ]; then
+            echo "Resolved crates.io publish order is empty."
+            exit 1
+          fi
+          printf 'Resolved crates.io publish order: %s\n' "${crates[*]}"
+
+          for crate in "${crates[@]}"; do
             published=0
             if crate_version_exists "$crate"; then
               echo "$crate $version is already published; skipping."
