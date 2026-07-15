@@ -24,9 +24,13 @@ use nnrp_core::{
     SESSION_ERROR_SCHEMA_UNSUPPORTED, SESSION_FLAG_ALLOW_RESUME,
 };
 
+mod transport;
+mod transport_exports;
+pub use transport::*;
+
 pub const NNRP_FFI_ABI_MAJOR: u16 = 1;
 pub const NNRP_FFI_ABI_MINOR: u16 = 12;
-pub const NNRP_FFI_ABI_PATCH: u16 = 0;
+pub const NNRP_FFI_ABI_PATCH: u16 = 1;
 
 pub const NNRP_TRANSPORT_SLOT_QUIC: u32 = 0x0000_0001;
 pub const NNRP_TRANSPORT_SLOT_TCP: u32 = 0x0000_0002;
@@ -61,6 +65,7 @@ pub const NNRP_RUNTIME_FEATURE_CLIENT_COMPACT_RESULT_HELPERS: u64 = 0x0000_0000_
 pub const NNRP_RUNTIME_FEATURE_PREVIEW4_CONTROL_EVENTS: u64 = 0x0000_0000_0002_0000;
 pub const NNRP_RUNTIME_FEATURE_PREVIEW4_OBJECT_CACHE_EVENTS: u64 = 0x0000_0000_0004_0000;
 pub const NNRP_RUNTIME_FEATURE_PREVIEW4_RUNTIME_FRAME_SEND: u64 = 0x0000_0000_0008_0000;
+pub const NNRP_RUNTIME_FEATURE_TRANSPORT_FRAMED_IO: u64 = 0x0000_0000_0010_0000;
 
 pub const NNRP_RESULT_STATE_NONE: u32 = 0;
 pub const NNRP_RESULT_STATE_COMPLETED: u32 = 1;
@@ -139,7 +144,7 @@ pub fn runtime_capabilities() -> NnrpRuntimeCapabilities {
         sdk_minor: 0,
         sdk_patch: 0,
         sdk_preview: 4,
-        sdk_revision: 1,
+        sdk_revision: 4,
         reserved1: 0,
         transport_slots: enabled_transport_slots(),
         feature_flags: NNRP_RUNTIME_FEATURE_PROTOCOL_CORE
@@ -161,7 +166,8 @@ pub fn runtime_capabilities() -> NnrpRuntimeCapabilities {
             | NNRP_RUNTIME_FEATURE_CLIENT_COMPACT_RESULT_HELPERS
             | NNRP_RUNTIME_FEATURE_PREVIEW4_CONTROL_EVENTS
             | NNRP_RUNTIME_FEATURE_PREVIEW4_OBJECT_CACHE_EVENTS
-            | NNRP_RUNTIME_FEATURE_PREVIEW4_RUNTIME_FRAME_SEND,
+            | NNRP_RUNTIME_FEATURE_PREVIEW4_RUNTIME_FRAME_SEND
+            | NNRP_RUNTIME_FEATURE_TRANSPORT_FRAMED_IO,
     }
 }
 
@@ -382,6 +388,9 @@ pub enum NnrpHandleKind {
     CacheLease = 7,
     ObjectDescriptor = 8,
     CacheReferenceDescriptor = 9,
+    TransportConnection = 10,
+    TransportListener = 11,
+    TransportSecurityConfig = 12,
 }
 
 #[repr(C)]
@@ -3952,6 +3961,12 @@ fn insert_owned_buffer(
     Ok((handle, view))
 }
 
+pub(crate) fn store_owned_buffer(
+    bytes: Vec<u8>,
+) -> Result<(NnrpHandle, NnrpBufferView), NnrpFfiStatus> {
+    insert_owned_buffer(&mut handle_store(), bytes)
+}
+
 #[no_mangle]
 /// # Safety
 ///
@@ -5206,6 +5221,25 @@ mod tests {
         TransportId::Tcp as u32
     }
 
+    #[cfg(all(
+        not(feature = "transport-quic"),
+        not(feature = "transport-tcp"),
+        feature = "transport-ipc"
+    ))]
+    const fn test_transport_id() -> u32 {
+        TransportId::Ipc as u32
+    }
+
+    #[cfg(all(
+        not(feature = "transport-quic"),
+        not(feature = "transport-tcp"),
+        not(feature = "transport-ipc"),
+        feature = "transport-websocket"
+    ))]
+    const fn test_transport_id() -> u32 {
+        TransportId::WebSocket as u32
+    }
+
     #[test]
     fn ffi_current_version_stays_aligned() {
         let version = current_protocol_version();
@@ -5227,7 +5261,7 @@ mod tests {
         assert_eq!(capabilities.sdk_minor, 0);
         assert_eq!(capabilities.sdk_patch, 0);
         assert_eq!(capabilities.sdk_preview, 4);
-        assert_eq!(capabilities.sdk_revision, 1);
+        assert_eq!(capabilities.sdk_revision, 4);
         assert_eq!(capabilities.reserved1, 0);
         assert_eq!(capabilities.transport_slots, enabled_transport_slots());
         assert_eq!(transport_slot_bit(TransportId::Unspecified), 0);

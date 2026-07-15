@@ -18,10 +18,18 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 
 [features]
 default = ["transport-tcp", "transport-quic"]
-transport-tcp = []
-transport-quic = []
-transport-ipc = []
-transport-websocket = []
+transport-tcp = ["dep:nnrp-transport-tcp"]
+transport-quic = ["dep:nnrp-transport-quic"]
+transport-ipc = ["dep:nnrp-transport-ipc"]
+transport-websocket = ["dep:nnrp-transport-websocket"]
 
 [dependencies]
-nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.4.3" }
+async-trait.workspace = true
+http.workspace = true
+nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.4.4" }
+nnrp-runtime = { path = "../nnrp-runtime", version = "1.0.0-preview.4.4" }
+nnrp-transport-ipc = { path = "../nnrp-transport-ipc", version = "1.0.0-preview.4.4", optional = true }
+nnrp-transport-quic = { path = "../nnrp-transport-quic", version = "1.0.0-preview.4.4", optional = true }
+nnrp-transport-tcp = { path = "../nnrp-transport-tcp", version = "1.0.0-preview.4.4", optional = true }
+nnrp-transport-websocket = { path = "../nnrp-transport-websocket", version = "1.0.0-preview.4.4", optional = true }
+tokio.workspace = true

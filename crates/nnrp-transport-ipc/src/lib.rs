@@ -1,5 +1,5 @@
 use std::{
-    fmt,
+    fmt, io,
     path::{Path, PathBuf},
     str::FromStr,
 };
@@ -205,13 +205,31 @@ fn spawn_ipc_write_task(
                     }
                 }
                 IpcWriteCommand::Close { ack } => {
-                    let result = writer.shutdown().await.map_err(Into::into);
+                    let result = normalize_shutdown(writer.shutdown().await);
                     let _ = ack.send(result);
                     break;
                 }
             }
         }
     })
+}
+
+fn normalize_shutdown(result: io::Result<()>) -> Result<(), RuntimeError> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::BrokenPipe
+                    | io::ErrorKind::ConnectionAborted
+                    | io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::NotConnected
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn ipc_task_closed(direction: &'static str) -> RuntimeError {
@@ -561,11 +579,25 @@ impl WindowsIpcListener {
 
 #[cfg(windows)]
 async fn connect_named_pipe(path: &str) -> Result<IpcStream, RuntimeError> {
-    Ok(IpcStream {
-        inner: PlatformIpcStream::Client(
-            tokio::net::windows::named_pipe::ClientOptions::new().open(path)?,
-        ),
-    })
+    const MAX_CONNECT_ATTEMPTS: usize = 25;
+    const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(10);
+    for attempt in 0..MAX_CONNECT_ATTEMPTS {
+        match tokio::net::windows::named_pipe::ClientOptions::new().open(path) {
+            Ok(pipe) => {
+                return Ok(IpcStream {
+                    inner: PlatformIpcStream::Client(pipe),
+                })
+            }
+            Err(error)
+                if matches!(error.raw_os_error(), Some(2 | 231))
+                    && attempt + 1 < MAX_CONNECT_ATTEMPTS =>
+            {
+                tokio::time::sleep(RETRY_DELAY).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    unreachable!("the bounded named-pipe connection loop always returns")
 }
 
 #[cfg(not(windows))]
@@ -690,21 +722,40 @@ mod tests {
             Err(RuntimeError::UnsupportedTransport(_))
         ));
 
+        let (accepted_tx, accepted_rx) = oneshot::channel();
+        let (peer_closed_tx, peer_closed_rx) = oneshot::channel();
         let server_task = tokio::spawn(async move {
             let mut accepted = listener.accept().await?;
             assert_eq!(accepted.transport_kind(), RuntimeTransportKind::Ipc);
+            let _ = accepted_tx.send(());
+            let _ = peer_closed_rx.await;
             accepted.close().await
         });
 
         let mut client = IpcProvider::connect_transport(&endpoint).await?;
         assert_eq!(client.transport_kind(), RuntimeTransportKind::Ipc);
+        let _ = accepted_rx.await;
         client.close().await?;
+        let _ = peer_closed_tx.send(());
 
         server_task
             .await
             .map_err(|_| RuntimeError::Internal("ipc raw server task panicked"))??;
         let _ = std::fs::remove_file(path);
         Ok(())
+    }
+
+    #[test]
+    fn ipc_shutdown_treats_terminal_peer_errors_as_closed() {
+        for kind in [
+            io::ErrorKind::BrokenPipe,
+            io::ErrorKind::ConnectionAborted,
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::NotConnected,
+        ] {
+            assert!(normalize_shutdown(Err(io::Error::from(kind))).is_ok());
+        }
+        assert!(normalize_shutdown(Err(io::Error::from(io::ErrorKind::PermissionDenied))).is_err());
     }
 
     #[cfg(unix)]

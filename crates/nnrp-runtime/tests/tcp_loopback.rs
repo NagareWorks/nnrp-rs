@@ -12,10 +12,10 @@ use nnrp_core::{
     SessionMigrateAckMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
     SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata, SessionPatchRejectReason,
     SessionPriorityClass, SessionStatus, SubmitMode, TileIndexMode, TransportId,
-    FLOW_UPDATE_FLAG_CREDIT_VALID, RESULT_DROP_REASON_DEADLINE_EXPIRED, RESULT_PUSH_METADATA_LEN,
-    SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE, SESSION_OPEN_ACK_METADATA_LEN,
-    SESSION_OPEN_METADATA_LEN, STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID,
-    TOKEN_DELTA_SCHEMA_VERSION,
+    TransportProbeAckMetadata, TransportProbeMetadata, FLOW_UPDATE_FLAG_CREDIT_VALID,
+    RESULT_DROP_REASON_DEADLINE_EXPIRED, RESULT_PUSH_METADATA_LEN, SESSION_CLOSE_ACK_METADATA_LEN,
+    SESSION_ERROR_NONE, SESSION_OPEN_ACK_METADATA_LEN, SESSION_OPEN_METADATA_LEN,
+    STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
 };
 use nnrp_runtime::{
     BoxedFramedTransport, FramedListener, FramedTransport, NnrpClient, NnrpClientConfig,
@@ -56,6 +56,46 @@ async fn tcp_loopback_opens_matching_client_and_server_sessions() -> Result<(), 
         server_task.await.expect("server task should join")?;
     assert_eq!(server_session_id, 42);
     assert_eq!(server_profile_id, config.profile_id);
+    Ok(())
+}
+
+#[tokio::test]
+async fn server_answers_transport_probe_before_session_open() -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        let close = session.receive_close().await?;
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let mut transport = TcpTransport::connect(addr).await?;
+    let probe = TransportProbeMetadata {
+        probe_id: 7,
+        probe_payload_bytes: 1024,
+        client_send_ts_us: 1,
+    };
+    transport
+        .write_packet(&RuntimePacket::new(
+            CommonHeader::new(MessageType::TransportProbe, 0, 0),
+            probe.to_bytes()?.to_vec(),
+            vec![0; 1024],
+        )?)
+        .await?;
+    let ack_packet = transport.read_packet().await?;
+    assert_eq!(
+        ack_packet.header.message_type,
+        MessageType::TransportProbeAck
+    );
+    let ack = TransportProbeAckMetadata::parse(&ack_packet.metadata)?;
+    assert_eq!(ack.probe_id, 7);
+    assert!(ack.server_recv_ts_us > 0);
+
+    let client = NnrpClient::from_transport(transport, NnrpClientConfig::default())?;
+    let session = client.open_session().await?;
+    session.close().await?;
+    server_task.await.expect("server task should join")?;
     Ok(())
 }
 

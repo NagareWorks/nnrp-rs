@@ -15,8 +15,10 @@ Downstream SDKs should consume Preview4 as a protocol and artifact boundary upda
 - Validate `manifest.json` before loading a native library.
 - Reject artifacts whose `transport_scope` does not match the SDK package.
 - Reject artifacts whose `transport_slots` contains transports outside the package boundary.
+- Require FFI ABI `1.12.1` and Rust artifact revision `1.0.0-preview.4.4` for reachable transport handles and packet batches.
+- Bind transport connect, listen, accept, endpoint, probe, batch read/write, security-config, and close exports directly.
 - Keep native calls coarse around session, control, object, progress, result, and release hot paths.
-- Keep SDKs pinned to Preview3 release assets until their Preview4 transport package split and benchmark gates are complete.
+- Keep complete NNRP packets as the transport FFI unit; do not introduce per-socket-chunk cross-language calls.
 
 ## Browser WASM
 
@@ -35,3 +37,4 @@ Downstream SDKs should consume Preview4 as a protocol and artifact boundary upda
 - Keep SDK adapter conformance for SDK public API behavior.
 - Add wire conformance target manifests for direct endpoint behavior.
 - Treat skipped wire cases as explicit capability or transport gaps, not as passes.
+- Load the packaged dynamic library in SDK CI and run at least one real loopback through the SDK transport package.

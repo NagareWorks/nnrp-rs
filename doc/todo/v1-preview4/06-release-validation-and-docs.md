@@ -20,6 +20,9 @@
   - [x] IPC.
   - [x] WebSocket.
 - [x] Run native artifact inspection.
+  - [x] Verify transport-scoped export sets.
+  - [x] Load host DLL, SO, and dylib outputs in their platform CI jobs.
+  - [x] Run real packet-batch loopbacks through each loaded transport artifact.
 - [x] Run browser WASM artifact inspection.
 
 ## Benchmark Gates

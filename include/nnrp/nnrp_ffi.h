@@ -15,7 +15,7 @@ typedef struct NnrpProtocolVersion {
 
 #define NNRP_FFI_ABI_MAJOR 1
 #define NNRP_FFI_ABI_MINOR 12
-#define NNRP_FFI_ABI_PATCH 0
+#define NNRP_FFI_ABI_PATCH 1
 
 #define NNRP_TRANSPORT_SLOT_QUIC 0x00000001u
 #define NNRP_TRANSPORT_SLOT_TCP 0x00000002u
@@ -42,6 +42,7 @@ typedef struct NnrpProtocolVersion {
 #define NNRP_RUNTIME_FEATURE_PREVIEW4_CONTROL_EVENTS 0x0000000000020000ull
 #define NNRP_RUNTIME_FEATURE_PREVIEW4_OBJECT_CACHE_EVENTS 0x0000000000040000ull
 #define NNRP_RUNTIME_FEATURE_PREVIEW4_RUNTIME_FRAME_SEND 0x0000000000080000ull
+#define NNRP_RUNTIME_FEATURE_TRANSPORT_FRAMED_IO 0x0000000000100000ull
 
 #define NNRP_RESULT_STATE_NONE 0u
 #define NNRP_RESULT_STATE_COMPLETED 1u
@@ -116,7 +117,10 @@ typedef enum NnrpHandleKind {
   NNRP_HANDLE_SCHEMA_REGISTRY = 6,
   NNRP_HANDLE_CACHE_LEASE = 7,
   NNRP_HANDLE_OBJECT_DESCRIPTOR = 8,
-  NNRP_HANDLE_CACHE_REFERENCE_DESCRIPTOR = 9
+  NNRP_HANDLE_CACHE_REFERENCE_DESCRIPTOR = 9,
+  NNRP_HANDLE_TRANSPORT_CONNECTION = 10,
+  NNRP_HANDLE_TRANSPORT_LISTENER = 11,
+  NNRP_HANDLE_TRANSPORT_SECURITY_CONFIG = 12
 } NnrpHandleKind;
 
 typedef enum NnrpEventKind {
@@ -167,6 +171,70 @@ typedef struct NnrpBufferViewMut {
   uint8_t *ptr;
   uintptr_t len;
 } NnrpBufferViewMut;
+
+typedef struct NnrpTransportOpenRequest {
+  uint32_t transport_id;
+  uint32_t flags;
+  NnrpBufferView endpoint;
+  NnrpHandle config;
+  uint64_t max_packet_bytes;
+  uint32_t timeout_ms;
+  uint32_t reserved0;
+} NnrpTransportOpenRequest;
+
+typedef struct NnrpTransportAcceptRequest {
+  NnrpHandle listener;
+  uint32_t timeout_ms;
+  uint32_t reserved0;
+} NnrpTransportAcceptRequest;
+
+typedef struct NnrpTransportWriteBatchRequest {
+  NnrpHandle connection;
+  const NnrpBufferView *frames;
+  uint32_t frame_count;
+  uint32_t flags;
+} NnrpTransportWriteBatchRequest;
+
+typedef struct NnrpTransportReadBatchRequest {
+  NnrpHandle connection;
+  uint32_t max_frames;
+  uint32_t timeout_ms;
+  uint64_t max_bytes;
+} NnrpTransportReadBatchRequest;
+
+typedef struct NnrpTransportFrameBatch {
+  NnrpHandle payload_owner;
+  NnrpBufferView payload;
+  uint32_t frame_count;
+  uint32_t reserved0;
+} NnrpTransportFrameBatch;
+
+typedef struct NnrpTransportProbeRequest {
+  NnrpTransportOpenRequest open;
+  uint32_t sample_count;
+  uint32_t probe_payload_bytes;
+} NnrpTransportProbeRequest;
+
+typedef struct NnrpTransportProbeResult {
+  uint32_t sample_count;
+  uint32_t success_count;
+  uint64_t median_throughput_bytes_per_second;
+  uint64_t median_rtt_microseconds;
+} NnrpTransportProbeResult;
+
+typedef struct NnrpTransportClientSecurityConfigRequest {
+  uint32_t transport_id;
+  uint32_t flags;
+  NnrpBufferView server_name;
+  NnrpBufferView trusted_certificate_der;
+} NnrpTransportClientSecurityConfigRequest;
+
+typedef struct NnrpTransportServerSecurityConfigRequest {
+  uint32_t transport_id;
+  uint32_t flags;
+  NnrpBufferView certificate_der;
+  NnrpBufferView private_key_pkcs8_der;
+} NnrpTransportServerSecurityConfigRequest;
 
 typedef struct NnrpSchemaDescriptorHeader {
   uint32_t schema_id;
@@ -525,6 +593,16 @@ NnrpFfiStatus nnrp_migration_should_replay_frame(NnrpBufferView session_migrate_
 NnrpFfiStatus nnrp_buffer_acquire_copy(NnrpBufferView source, NnrpHandle *out_buffer, NnrpBufferView *out_view);
 NnrpFfiStatus nnrp_buffer_view(NnrpHandle buffer, NnrpBufferView *out_view);
 NnrpFfiStatus nnrp_buffer_release(NnrpHandle buffer);
+NnrpFfiStatus nnrp_transport_client_security_config_create(NnrpTransportClientSecurityConfigRequest request, NnrpHandle *out_config);
+NnrpFfiStatus nnrp_transport_server_security_config_create(NnrpTransportServerSecurityConfigRequest request, NnrpHandle *out_config);
+NnrpFfiStatus nnrp_transport_probe(NnrpTransportProbeRequest request, NnrpTransportProbeResult *out_result);
+NnrpFfiStatus nnrp_transport_connect(NnrpTransportOpenRequest request, NnrpHandle *out_connection);
+NnrpFfiStatus nnrp_transport_listen(NnrpTransportOpenRequest request, NnrpHandle *out_listener);
+NnrpFfiStatus nnrp_transport_accept(NnrpTransportAcceptRequest request, NnrpHandle *out_connection);
+NnrpFfiStatus nnrp_transport_listener_endpoint(NnrpHandle listener, NnrpHandle *out_buffer, NnrpBufferView *out_endpoint);
+NnrpFfiStatus nnrp_transport_write_batch(NnrpTransportWriteBatchRequest request);
+NnrpFfiStatus nnrp_transport_read_batch(NnrpTransportReadBatchRequest request, NnrpTransportFrameBatch *out_batch);
+NnrpFfiStatus nnrp_transport_close(NnrpHandle handle);
 NnrpFfiStatus nnrp_object_metadata_buffer_acquire_copy(NnrpBufferView source, NnrpHandle *out_buffer, NnrpBufferView *out_view);
 NnrpFfiStatus nnrp_object_metadata_buffer_view(NnrpHandle buffer, NnrpBufferView *out_view);
 NnrpFfiStatus nnrp_object_metadata_buffer_release(NnrpHandle buffer);

@@ -1,4 +1,4 @@
-use std::{fmt, net::SocketAddr, str::FromStr};
+use std::{fmt, net::SocketAddr, str::FromStr, sync::Arc};
 
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
@@ -11,11 +11,16 @@ use nnrp_runtime::{
 use nnrp_transport_provider::{
     TransportProviderDescriptor, TransportProviderKind, TransportProviderRegistry,
 };
+use rustls::{
+    pki_types::{CertificateDer, PrivatePkcs8KeyDer},
+    ClientConfig, RootCertStore, ServerConfig,
+};
 use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
+use tokio_rustls::{server::TlsStream, TlsAcceptor};
 use tokio_tungstenite::{
-    accept_async, connect_async,
-    tungstenite::{protocol::CloseFrame, Error as WebSocketError, Message},
-    MaybeTlsStream, WebSocketStream,
+    accept_async, connect_async, connect_async_tls_with_config,
+    tungstenite::{http::Uri, protocol::CloseFrame, Error as WebSocketError, Message},
+    Connector, MaybeTlsStream, WebSocketStream,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,9 +93,56 @@ impl WebSocketTransport {
         })
     }
 
+    pub async fn connect_secure_with_limits(
+        endpoint: &WebSocketEndpoint,
+        server_name: &str,
+        trusted_certificate_der: impl Into<Vec<u8>>,
+        limits: RuntimeFrameLimits,
+    ) -> Result<Self, RuntimeError> {
+        if !endpoint.is_secure() {
+            return Err(RuntimeError::UnsupportedTransport(
+                "secure WebSocket connect requires wss://",
+            ));
+        }
+        let uri = endpoint.as_str().parse::<Uri>().map_err(|_| {
+            RuntimeError::UnsupportedTransport("secure WebSocket endpoint is invalid")
+        })?;
+        if uri.host() != Some(server_name) {
+            return Err(RuntimeError::UnsupportedTransport(
+                "secure WebSocket server name must match endpoint host",
+            ));
+        }
+        let mut roots = RootCertStore::empty();
+        roots
+            .add(CertificateDer::from(trusted_certificate_der.into()))
+            .map_err(runtime_io)?;
+        let client_config = ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let connector = Connector::Rustls(Arc::new(client_config));
+        let (stream, _) =
+            connect_async_tls_with_config(endpoint.as_str(), None, false, Some(connector))
+                .await
+                .map_err(runtime_ws)?;
+        Ok(Self {
+            stream: WebSocketStreamKind::Client(stream),
+            limits,
+        })
+    }
+
     fn server(stream: WebSocketStream<TcpStream>, limits: RuntimeFrameLimits) -> Self {
         Self {
             stream: WebSocketStreamKind::Server(stream),
+            limits,
+        }
+    }
+
+    fn secure_server(
+        stream: WebSocketStream<TlsStream<TcpStream>>,
+        limits: RuntimeFrameLimits,
+    ) -> Self {
+        Self {
+            stream: WebSocketStreamKind::SecureServer(stream),
             limits,
         }
     }
@@ -141,10 +193,21 @@ impl FramedTransport for WebSocketTransport {
     }
 }
 
-#[derive(Debug)]
 pub struct WebSocketFramedListener {
     listener: TcpListener,
     limits: RuntimeFrameLimits,
+    tls_acceptor: Option<TlsAcceptor>,
+}
+
+impl fmt::Debug for WebSocketFramedListener {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WebSocketFramedListener")
+            .field("listener", &self.listener)
+            .field("limits", &self.limits)
+            .field("secure", &self.tls_acceptor.is_some())
+            .finish()
+    }
 }
 
 impl WebSocketFramedListener {
@@ -159,6 +222,26 @@ impl WebSocketFramedListener {
         Ok(Self {
             listener: TcpListener::bind(addr).await?,
             limits,
+            tls_acceptor: None,
+        })
+    }
+
+    pub async fn bind_secure_with_limits(
+        addr: impl ToSocketAddrs,
+        certificate_der: impl Into<Vec<u8>>,
+        private_key_pkcs8_der: impl Into<Vec<u8>>,
+        limits: RuntimeFrameLimits,
+    ) -> Result<Self, RuntimeError> {
+        let certificate_chain = vec![CertificateDer::from(certificate_der.into())];
+        let private_key = PrivatePkcs8KeyDer::from(private_key_pkcs8_der.into());
+        let server_config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certificate_chain, private_key.into())
+            .map_err(runtime_io)?;
+        Ok(Self {
+            listener: TcpListener::bind(addr).await?,
+            limits,
+            tls_acceptor: Some(TlsAcceptor::from(Arc::new(server_config))),
         })
     }
 }
@@ -175,6 +258,14 @@ impl FramedListener for WebSocketFramedListener {
 
     async fn accept(&self) -> Result<BoxedFramedTransport, RuntimeError> {
         let (stream, _) = self.listener.accept().await?;
+        if let Some(acceptor) = &self.tls_acceptor {
+            let stream = acceptor.accept(stream).await.map_err(runtime_io)?;
+            let websocket = accept_async(stream).await.map_err(runtime_ws)?;
+            return Ok(Box::new(WebSocketTransport::secure_server(
+                websocket,
+                self.limits,
+            )));
+        }
         let websocket = accept_async(stream).await.map_err(runtime_ws)?;
         Ok(Box::new(WebSocketTransport::server(websocket, self.limits)))
     }
@@ -240,6 +331,7 @@ pub fn register_websocket_provider(registry: &mut TransportProviderRegistry) {
 enum WebSocketStreamKind {
     Client(WebSocketStream<MaybeTlsStream<TcpStream>>),
     Server(WebSocketStream<TcpStream>),
+    SecureServer(WebSocketStream<TlsStream<TcpStream>>),
 }
 
 impl WebSocketStreamKind {
@@ -247,6 +339,7 @@ impl WebSocketStreamKind {
         match self {
             Self::Client(stream) => stream.next().await.transpose().map_err(runtime_ws),
             Self::Server(stream) => stream.next().await.transpose().map_err(runtime_ws),
+            Self::SecureServer(stream) => stream.next().await.transpose().map_err(runtime_ws),
         }
     }
 
@@ -254,6 +347,7 @@ impl WebSocketStreamKind {
         match self {
             Self::Client(stream) => stream.send(message).await,
             Self::Server(stream) => stream.send(message).await,
+            Self::SecureServer(stream) => stream.send(message).await,
         }
     }
 
@@ -261,6 +355,7 @@ impl WebSocketStreamKind {
         match self {
             Self::Client(stream) => stream.close(None).await,
             Self::Server(stream) => stream.close(None).await,
+            Self::SecureServer(stream) => stream.close(None).await,
         }
     }
 }
@@ -313,6 +408,10 @@ fn packet_from_binary(
 }
 
 fn runtime_ws(error: WebSocketError) -> RuntimeError {
+    RuntimeError::Io(std::io::Error::other(error))
+}
+
+fn runtime_io(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> RuntimeError {
     RuntimeError::Io(std::io::Error::other(error))
 }
 

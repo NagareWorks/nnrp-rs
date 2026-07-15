@@ -2,6 +2,17 @@
 
 Preview4 moves the Rust workspace beyond token-stream transport substitution and into runtime orchestration features that help SDKs model cancellation, priority, progress, partial results, cache references, route hints, trace context, result drop reasons, IPC, and WebSocket endpoints directly.
 
+## 1.0.0-preview.4.4
+
+This revision makes every transport-scoped native artifact reachable through the frozen coarse transport FFI. TCP,
+QUIC, IPC, and WebSocket libraries now own their actual connect, listen, accept, probe, and packet-batch paths instead
+of merely advertising provider metadata. The ABI adds typed connection, listener, and security handles, endpoint
+snapshots, native-owned read batches, and deterministic close semantics.
+
+Native artifact validation now loads each produced dynamic library and completes a real two-frame NNRP packet
+loopback through its exported ABI. This is in addition to Rust-level TCP, QUIC, IPC, WS, and WSS tests, so symbol-only
+or configuration-only transport artifacts cannot pass the release gate.
+
 ## 1.0.0-preview.4.3
 
 This revision freezes provider metadata and deterministic selection as a first-class Rust SDK API. Native and browser
@@ -45,6 +56,7 @@ TCP, QUIC, IPC, and WebSocket stay in separate transport crates with owned conne
 Native artifacts are transport-scoped. Release packages emit one native package per transport scope: `tcp`, `quic`, `ipc`, and `websocket`. Browser WASM emits `nnrp-wasm-browser` and only declares the browser WebSocket substrate.
 
 Release CI inspects native and WASM manifests and rejects artifacts that collapse transport ownership boundaries.
+Host-native CI also loads each transport library and verifies a real packet-batch loopback through the exported C ABI.
 
 Provider selection exposes frozen cost, preference, limit, limitation, probe, rank, and rejection diagnostics. Probe
 samples bind to stable provider ids and use deterministic per-sample throughput and median aggregation. Native and
