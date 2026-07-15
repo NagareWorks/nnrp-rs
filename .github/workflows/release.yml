@@ -138,18 +138,38 @@ jobs:
             toolchain="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
             case "${{ matrix.target }}" in
               aarch64-linux-android)
-                echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$toolchain/aarch64-linux-android21-clang" >> "$GITHUB_ENV"
+                compiler="$toolchain/aarch64-linux-android21-clang"
+                cargo_linker="CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER"
+                cc_env="CC_aarch64_linux_android"
+                ar_env="AR_aarch64_linux_android"
                 ;;
               armv7-linux-androideabi)
-                echo "CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER=$toolchain/armv7a-linux-androideabi21-clang" >> "$GITHUB_ENV"
+                compiler="$toolchain/armv7a-linux-androideabi21-clang"
+                cargo_linker="CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER"
+                cc_env="CC_armv7_linux_androideabi"
+                ar_env="AR_armv7_linux_androideabi"
                 ;;
               i686-linux-android)
-                echo "CARGO_TARGET_I686_LINUX_ANDROID_LINKER=$toolchain/i686-linux-android21-clang" >> "$GITHUB_ENV"
+                compiler="$toolchain/i686-linux-android21-clang"
+                cargo_linker="CARGO_TARGET_I686_LINUX_ANDROID_LINKER"
+                cc_env="CC_i686_linux_android"
+                ar_env="AR_i686_linux_android"
                 ;;
               x86_64-linux-android)
-                echo "CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=$toolchain/x86_64-linux-android21-clang" >> "$GITHUB_ENV"
+                compiler="$toolchain/x86_64-linux-android21-clang"
+                cargo_linker="CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER"
+                cc_env="CC_x86_64_linux_android"
+                ar_env="AR_x86_64_linux_android"
+                ;;
+              *)
+                echo "Unsupported Android target: ${{ matrix.target }}"
+                exit 1
                 ;;
             esac
+
+            echo "$cargo_linker=$compiler" >> "$GITHUB_ENV"
+            echo "$cc_env=$compiler" >> "$GITHUB_ENV"
+            echo "$ar_env=$toolchain/llvm-ar" >> "$GITHUB_ENV"
           fi
 
       - name: Package native link library
