@@ -149,6 +149,9 @@ jobs:
       - name: Release surface sync check
         run: python scripts/check_release_surface_sync.py
 
+      - name: Release helper tests
+        run: python -m unittest scripts.tests.test_resolve_crate_publish_order
+
       - name: Test
         env:
           NNRP_CONFORMANCE_SUITE_REPO: ${{ github.workspace }}/nnrp-conformance-action
