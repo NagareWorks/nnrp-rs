@@ -162,7 +162,9 @@ jobs:
           NNRP_CONFORMANCE_SUITE_REPO: ${{ github.workspace }}/nnrp-conformance-action
         run: |
           mkdir -p target/llvm-cov
-          cargo llvm-cov --workspace --lcov --output-path target/llvm-cov/lcov.info
+          cargo llvm-cov --workspace --all-features --lcov \
+            --ignore-filename-regex 'crates/nnrp-ffi/src/transport_exports\.rs' \
+            --output-path target/llvm-cov/lcov.info
 
       - name: Coverage gates
         shell: bash

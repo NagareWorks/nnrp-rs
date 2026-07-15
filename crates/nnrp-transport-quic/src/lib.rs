@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use nnrp_core::{CommonHeader, TransportId, COMMON_HEADER_LEN};
 use nnrp_runtime::{
     BoxedFramedListener, BoxedFramedTransport, FramedListener, FramedTransport, NnrpClient,
-    NnrpClientConfig, NnrpServer, NnrpServerConfig, RuntimeError, RuntimePacket,
-    RuntimeTransportKind,
+    NnrpClientConfig, NnrpServer, NnrpServerConfig, RuntimeError, RuntimeFrameLimits,
+    RuntimePacket, RuntimeTransportKind,
 };
 use nnrp_transport_provider::{
     TransportProviderDescriptor, TransportProviderKind, TransportProviderRegistry,
@@ -137,15 +137,25 @@ impl QuicServerEndpointConfig {
 #[derive(Debug)]
 pub struct QuicTransport {
     _endpoint: Endpoint,
-    _connection: Connection,
-    send: SendStream,
-    recv: RecvStream,
+    connection: Connection,
+    send: Option<SendStream>,
+    recv: Option<RecvStream>,
+    initiator: bool,
+    limits: RuntimeFrameLimits,
 }
 
 impl QuicTransport {
     pub async fn connect(
         addr: SocketAddr,
         config: &QuicClientEndpointConfig,
+    ) -> Result<Self, RuntimeError> {
+        Self::connect_with_limits(addr, config, RuntimeFrameLimits::default()).await
+    }
+
+    pub async fn connect_with_limits(
+        addr: SocketAddr,
+        config: &QuicClientEndpointConfig,
+        limits: RuntimeFrameLimits,
     ) -> Result<Self, RuntimeError> {
         let mut endpoint = Endpoint::client(config.bind_addr)?;
         endpoint.set_default_client_config(config.client_config()?);
@@ -154,23 +164,39 @@ impl QuicTransport {
             .map_err(runtime_io)?
             .await
             .map_err(runtime_io)?;
-        let (send, recv) = connection.open_bi().await.map_err(runtime_io)?;
-
         Ok(Self {
             _endpoint: endpoint,
-            _connection: connection,
-            send,
-            recv,
+            connection,
+            send: None,
+            recv: None,
+            initiator: true,
+            limits,
         })
     }
 
-    fn new(endpoint: Endpoint, connection: Connection, send: SendStream, recv: RecvStream) -> Self {
+    fn new(endpoint: Endpoint, connection: Connection, limits: RuntimeFrameLimits) -> Self {
         Self {
             _endpoint: endpoint,
-            _connection: connection,
-            send,
-            recv,
+            connection,
+            send: None,
+            recv: None,
+            initiator: false,
+            limits,
         }
+    }
+
+    async fn ensure_streams(&mut self) -> Result<(), RuntimeError> {
+        if self.send.is_some() && self.recv.is_some() {
+            return Ok(());
+        }
+        let (send, recv) = if self.initiator {
+            self.connection.open_bi().await.map_err(runtime_io)?
+        } else {
+            self.connection.accept_bi().await.map_err(runtime_io)?
+        };
+        self.send = Some(send);
+        self.recv = Some(recv);
+        Ok(())
     }
 }
 
@@ -181,40 +207,49 @@ impl FramedTransport for QuicTransport {
     }
 
     async fn read_packet(&mut self) -> Result<RuntimePacket, RuntimeError> {
+        self.ensure_streams().await?;
+        let recv = self
+            .recv
+            .as_mut()
+            .expect("QUIC receive stream is initialized");
         let mut header_bytes = [0u8; COMMON_HEADER_LEN];
-        self.recv
-            .read_exact(&mut header_bytes)
+        recv.read_exact(&mut header_bytes)
             .await
             .map_err(runtime_io)?;
         let header = CommonHeader::parse(&header_bytes)?;
+        self.limits.validate_packet_len(header.packet_len()?)?;
 
         let mut metadata = vec![0u8; header.meta_len as usize];
         if !metadata.is_empty() {
-            self.recv
-                .read_exact(&mut metadata)
-                .await
-                .map_err(runtime_io)?;
+            recv.read_exact(&mut metadata).await.map_err(runtime_io)?;
         }
 
         let mut body = vec![0u8; header.body_len as usize];
         if !body.is_empty() {
-            self.recv.read_exact(&mut body).await.map_err(runtime_io)?;
+            recv.read_exact(&mut body).await.map_err(runtime_io)?;
         }
 
         Ok(RuntimePacket::from_parts(header, metadata, body)?)
     }
 
     async fn write_packet(&mut self, packet: &RuntimePacket) -> Result<(), RuntimeError> {
+        self.ensure_streams().await?;
+        let bytes = packet.to_bytes()?;
+        self.limits.validate_packet_len(bytes.len())?;
         self.send
-            .write_all(&packet.to_bytes()?)
+            .as_mut()
+            .expect("QUIC send stream is initialized")
+            .write_all(&bytes)
             .await
             .map_err(runtime_io)?;
         Ok(())
     }
 
     async fn close(&mut self) -> Result<(), RuntimeError> {
-        let _ = self.send.finish();
-        let _ = self.send.stopped().await;
+        if let Some(send) = &mut self.send {
+            let _ = send.finish();
+            let _ = send.stopped().await;
+        }
         Ok(())
     }
 }
@@ -222,12 +257,21 @@ impl FramedTransport for QuicTransport {
 #[derive(Debug)]
 pub struct QuicFramedListener {
     endpoint: Endpoint,
+    limits: RuntimeFrameLimits,
 }
 
 impl QuicFramedListener {
     pub fn bind(config: &QuicServerEndpointConfig) -> Result<Self, RuntimeError> {
+        Self::bind_with_limits(config, RuntimeFrameLimits::default())
+    }
+
+    pub fn bind_with_limits(
+        config: &QuicServerEndpointConfig,
+        limits: RuntimeFrameLimits,
+    ) -> Result<Self, RuntimeError> {
         Ok(Self {
             endpoint: Endpoint::server(config.server_config()?, config.bind_addr)?,
+            limits,
         })
     }
 }
@@ -249,12 +293,10 @@ impl FramedListener for QuicFramedListener {
             .await
             .ok_or(RuntimeError::Internal("QUIC endpoint closed"))?;
         let connection = incoming.await.map_err(runtime_io)?;
-        let (send, recv) = connection.accept_bi().await.map_err(runtime_io)?;
         Ok(Box::new(QuicTransport::new(
             self.endpoint.clone(),
             connection,
-            send,
-            recv,
+            self.limits,
         )))
     }
 }

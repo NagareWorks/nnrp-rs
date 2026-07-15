@@ -29,6 +29,19 @@
 - [x] Add copied snapshot rules for SDKs that cannot preserve borrow lifetimes.
 - [x] Add tests for handle ownership and release order.
 
+## FFI Transport Reachability
+
+- [x] Add transport connection, listener, and security-config handle kinds.
+- [x] Add endpoint-bearing connect and listen requests for TCP, QUIC, IPC, and WebSocket artifacts.
+- [x] Add listener endpoint snapshots for ephemeral ports and generated IPC endpoints.
+- [x] Add coarse complete-packet batch read and write calls.
+  - [x] Preserve the first failed write index in status detail.
+  - [x] Preserve an unread packet when a read batch reaches its byte limit.
+- [x] Add transport probe calls that require peer acknowledgements.
+- [x] Add deterministic idempotent transport resource close behavior.
+- [x] Run real Rust FFI loopbacks for TCP, QUIC, IPC, WS, and WSS.
+- [x] Load each packaged host dynamic library and run a real packet-batch loopback through exported symbols.
+
 ## WASM Surface
 
 - [x] Add TypeScript-visible runtime control structures.
@@ -58,3 +71,4 @@
   - [x] Canonical decimal cost and frame-limit values.
 - [x] Export structured WASM probe metrics and candidate diagnostics without weighted scores.
 - [x] Reject release artifacts that collapse all transport behavior into one hidden package.
+- [x] Reject transport artifacts whose exported ABI cannot establish and use their declared transport.

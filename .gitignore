@@ -1,6 +1,8 @@
 /target/
 artifacts/
 Cargo.lock
+**/__pycache__/
+*.py[cod]
 
 # Rust backup files
 **/*.rs.bk

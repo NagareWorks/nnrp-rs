@@ -5,14 +5,25 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PROTOCOL_VERSION = "NNRP/1"
-FFI_ABI_VERSION = "1.12.0"
+FFI_ABI_VERSION = "1.12.1"
 EXPECTED_EXPORTS = [
     "nnrp_current_protocol_version",
     "nnrp_runtime_capabilities",
+    "nnrp_transport_client_security_config_create",
+    "nnrp_transport_server_security_config_create",
+    "nnrp_transport_probe",
+    "nnrp_transport_connect",
+    "nnrp_transport_listen",
+    "nnrp_transport_accept",
+    "nnrp_transport_listener_endpoint",
+    "nnrp_transport_write_batch",
+    "nnrp_transport_read_batch",
+    "nnrp_transport_close",
     "nnrp_connection_bootstrap",
     "nnrp_client_connect",
     "nnrp_session_open",
@@ -223,6 +234,21 @@ def verify_exports(library: Path, os_name: str, library_kind: str) -> None:
         )
 
 
+def smoke_test_transport(library: Path, transport_scope: str) -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "smoke_test_native_transport_ffi.py"),
+            "--library",
+            str(library),
+            "--transport-scope",
+            transport_scope,
+        ],
+        cwd=ROOT,
+        check=True,
+    )
+
+
 def copy_headers(package_dir: Path) -> list[str]:
     include_root = ROOT / "include" / "nnrp"
     package_include = package_dir / "include" / "nnrp"
@@ -351,6 +377,8 @@ def main() -> None:
         library = locate_library(os_name, library_kind, release, args.target)
         if not args.skip_symbol_check:
             verify_exports(library, os_name, library_kind)
+        if args.target is None and library_kind == "dynamic":
+            smoke_test_transport(library, transport_scope)
         package_dir = package_artifact(
             library,
             os_name,

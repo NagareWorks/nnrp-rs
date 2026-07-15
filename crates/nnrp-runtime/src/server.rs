@@ -16,15 +16,16 @@ use nnrp_core::{
     RouteHintMetadata, RuntimeRole, SchedulingMetadata, SchemaRegistry, SessionCloseAckMetadata,
     SessionCloseMetadata, SessionCloseStatus, SessionMigrateAckMetadata, SessionMigrateMetadata,
     SessionOpenAckMetadata, SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchMetadata,
-    SessionStatus, CACHE_INVALIDATE_METADATA_LEN, CACHE_MISS_METADATA_LEN,
-    CACHE_REFERENCE_METADATA_LEN, CAPABILITY_METADATA_LEN, CONTROL_REQUEST_METADATA_LEN,
-    FLOW_UPDATE_METADATA_LEN, FRAME_SUBMIT_METADATA_LEN, OBJECT_DELTA_METADATA_LEN,
-    OBJECT_DESCRIPTOR_METADATA_LEN, OBJECT_REFERENCE_METADATA_LEN, OBJECT_RELEASE_METADATA_LEN,
-    PARTIAL_RESULT_METADATA_LEN, PRESSURE_METADATA_LEN, PROGRESS_METADATA_LEN,
-    RESULT_DROP_REASON_DEADLINE_EXPIRED, RESULT_DROP_REASON_METADATA_LEN, RESULT_PUSH_METADATA_LEN,
-    ROUTE_HINT_METADATA_LEN, SCHEDULING_FLAG_EMIT_DROP_REASON, SCHEDULING_METADATA_LEN,
-    SESSION_ACK_FLAG_RESUME_ENABLED, SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_LIMIT_REACHED,
-    SESSION_ERROR_NONE, SESSION_ERROR_PROFILE_UNSUPPORTED, SESSION_ERROR_RESUME_REJECTED,
+    SessionStatus, TransportProbeAckMetadata, TransportProbeMetadata,
+    CACHE_INVALIDATE_METADATA_LEN, CACHE_MISS_METADATA_LEN, CACHE_REFERENCE_METADATA_LEN,
+    CAPABILITY_METADATA_LEN, CONTROL_REQUEST_METADATA_LEN, FLOW_UPDATE_METADATA_LEN,
+    FRAME_SUBMIT_METADATA_LEN, OBJECT_DELTA_METADATA_LEN, OBJECT_DESCRIPTOR_METADATA_LEN,
+    OBJECT_REFERENCE_METADATA_LEN, OBJECT_RELEASE_METADATA_LEN, PARTIAL_RESULT_METADATA_LEN,
+    PRESSURE_METADATA_LEN, PROGRESS_METADATA_LEN, RESULT_DROP_REASON_DEADLINE_EXPIRED,
+    RESULT_DROP_REASON_METADATA_LEN, RESULT_PUSH_METADATA_LEN, ROUTE_HINT_METADATA_LEN,
+    SCHEDULING_FLAG_EMIT_DROP_REASON, SCHEDULING_METADATA_LEN, SESSION_ACK_FLAG_RESUME_ENABLED,
+    SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_LIMIT_REACHED, SESSION_ERROR_NONE,
+    SESSION_ERROR_PROFILE_UNSUPPORTED, SESSION_ERROR_RESUME_REJECTED,
     SESSION_ERROR_SCHEMA_UNSUPPORTED, SESSION_FLAG_ALLOW_RESUME, SESSION_MIGRATE_ACK_METADATA_LEN,
     SESSION_MIGRATE_METADATA_LEN, SESSION_OPEN_ACK_METADATA_LEN, SESSION_PATCH_ACK_METADATA_LEN,
     SESSION_PATCH_METADATA_LEN,
@@ -302,12 +303,19 @@ impl NnrpServer {
 
     pub async fn accept(&self) -> Result<NnrpServerSession, RuntimeError> {
         let mut transport = self.listener.accept().await?;
-        let packet = transport.read_packet().await?;
-        if packet.header.message_type != MessageType::SessionOpen {
-            return Err(RuntimeError::UnexpectedMessage(
-                "server expected SESSION_OPEN",
-            ));
-        }
+        let packet = loop {
+            let packet = transport.read_packet().await?;
+            if packet.header.message_type == MessageType::TransportProbe {
+                respond_to_transport_probe(&mut transport, packet).await?;
+                continue;
+            }
+            if packet.header.message_type != MessageType::SessionOpen {
+                return Err(RuntimeError::UnexpectedMessage(
+                    "server expected TRANSPORT_PROBE or SESSION_OPEN",
+                ));
+            }
+            break packet;
+        };
 
         let open = SessionOpenMetadata::parse(&packet.metadata)?;
         nnrp_core::validate_session_recovery_request(&open)?;
@@ -432,6 +440,41 @@ impl NnrpServer {
             .lock()
             .map_err(|_| RuntimeError::Internal("server session registry lock poisoned"))
     }
+}
+
+async fn respond_to_transport_probe(
+    transport: &mut BoxedFramedTransport,
+    packet: RuntimePacket,
+) -> Result<(), RuntimeError> {
+    let probe = TransportProbeMetadata::parse(&packet.metadata)?;
+    if packet.body.len() != probe.probe_payload_bytes as usize {
+        return Err(nnrp_core::NnrpError::DeclaredLengthMismatch {
+            field: "transport_probe.probe_payload_bytes",
+            declared: probe.probe_payload_bytes as usize,
+            actual: packet.body.len(),
+        }
+        .into());
+    }
+    let ack = TransportProbeAckMetadata {
+        probe_id: probe.probe_id,
+        server_recv_ts_us: unix_time_us(),
+    };
+    transport
+        .write_packet(&RuntimePacket::new(
+            CommonHeader::new(MessageType::TransportProbeAck, 0, 0),
+            ack.to_bytes()?.to_vec(),
+            Vec::new(),
+        )?)
+        .await
+}
+
+fn unix_time_us() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 impl fmt::Debug for NnrpServer {
