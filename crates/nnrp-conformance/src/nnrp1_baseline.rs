@@ -22,6 +22,42 @@ use nnrp_transport_quic::{
 };
 use nnrp_transport_tcp::TcpProvider;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Preview3FrameSubmitMetadata {
+    bytes: [u8; FRAME_SUBMIT_METADATA_LEN],
+    submit_mode: SubmitMode,
+    object_ref_mask: u32,
+}
+
+impl Preview3FrameSubmitMetadata {
+    fn parse(source: &[u8]) -> Result<Self, nnrp_core::NnrpError> {
+        if source.len() < FRAME_SUBMIT_METADATA_LEN {
+            return Err(nnrp_core::NnrpError::SourceTooShort {
+                expected: FRAME_SUBMIT_METADATA_LEN,
+                actual: source.len(),
+            });
+        }
+        let mut bytes = [0u8; FRAME_SUBMIT_METADATA_LEN];
+        bytes.copy_from_slice(&source[..FRAME_SUBMIT_METADATA_LEN]);
+        Ok(Self {
+            submit_mode: SubmitMode::try_from_u8(bytes[52])?,
+            object_ref_mask: u32::from_le_bytes(bytes[56..60].try_into().expect("fixed range")),
+            bytes,
+        })
+    }
+
+    fn write(&self, destination: &mut [u8]) -> Result<(), nnrp_core::NnrpError> {
+        if destination.len() < FRAME_SUBMIT_METADATA_LEN {
+            return Err(nnrp_core::NnrpError::DestinationTooShort {
+                expected: FRAME_SUBMIT_METADATA_LEN,
+                actual: destination.len(),
+            });
+        }
+        destination[..FRAME_SUBMIT_METADATA_LEN].copy_from_slice(&self.bytes);
+        Ok(())
+    }
+}
+
 pub fn execute_nnrp1_baseline_case(case_id: &str) -> Option<Result<(), String>> {
     let result = match case_id {
         "l0.header.fixed_shape.golden" => l0_header_fixed_shape(),
@@ -103,7 +139,7 @@ fn l0_frame_submit_metadata() -> Result<(), String> {
     round_trip_metadata(
         FRAME_SUBMIT_METADATA_LEN,
         &hex_to_bytes("80026801200020005400020001020000640070170700000000000000c000000000000000000000000000000000000000000000000205ff0003000000290000001100000002000000"),
-        FrameSubmitMetadata::parse,
+        Preview3FrameSubmitMetadata::parse,
         |metadata, destination| metadata.write(destination),
     )
 }
@@ -256,7 +292,7 @@ fn l1_transport_probe_roundtrip() -> Result<(), String> {
 }
 
 fn l1_frame_submit_parse_emit() -> Result<(), String> {
-    let metadata = FrameSubmitMetadata::parse(&hex_to_bytes("80026801200020005400020001020000640070170700000000000000c000000000000000000000000000000000000000000000000205ff0003000000290000001100000002000000")).map_err(to_string)?;
+    let metadata = Preview3FrameSubmitMetadata::parse(&hex_to_bytes("80026801200020005400020001020000640070170700000000000000c000000000000000000000000000000000000000000000000205ff0003000000290000001100000002000000")).map_err(to_string)?;
     validate_submit_object_reference(metadata.submit_mode, metadata.object_ref_mask)?;
 
     let typed_descriptor = TypedPayloadDescriptor {
@@ -439,7 +475,7 @@ async fn tcp_session_smoke() -> Result<(), RuntimeError> {
 
     let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
     let mut session = client.open_session().await?;
-    let frame_id = session.submit(token_submit(), b"prompt".to_vec()).await?;
+    let frame_id = session.submit(token_submit(1), b"prompt".to_vec()).await?;
     let result = session.await_result().await?;
     if result.frame_id != frame_id || result.body != b"delta" {
         return Err(RuntimeError::UnexpectedMessage(
@@ -480,7 +516,7 @@ async fn quic_session_smoke() -> Result<(), RuntimeError> {
     )
     .await?;
     let mut session = client.open_session().await?;
-    let frame_id = session.submit(token_submit(), b"prompt".to_vec()).await?;
+    let frame_id = session.submit(token_submit(1), b"prompt".to_vec()).await?;
     let result = session.await_result().await?;
     if result.frame_id != frame_id || result.body != b"delta" {
         return Err(RuntimeError::UnexpectedMessage(
@@ -492,7 +528,7 @@ async fn quic_session_smoke() -> Result<(), RuntimeError> {
     Ok(())
 }
 
-fn token_submit() -> FrameSubmitMetadata {
+fn token_submit(operation_id: u64) -> FrameSubmitMetadata {
     FrameSubmitMetadata {
         src_width: 0,
         src_height: 0,
@@ -509,6 +545,7 @@ fn token_submit() -> FrameSubmitMetadata {
         tile_base_id: 0,
         camera_bytes: 0,
         tile_index_bytes: 0,
+        operation_id,
         submit_mode: SubmitMode::Inline,
         budget_policy: 0,
         loss_tolerance_policy: 0,
@@ -741,6 +778,27 @@ mod tests {
         l0_baseline_typed_payload_descriptor().expect("baseline descriptor should match fixture");
         l0_baseline_typed_payload_frame_regions()
             .expect("baseline typed-payload region should match fixture");
+    }
+
+    #[test]
+    fn preview3_submit_fixture_rejects_short_source_and_destination() {
+        assert_eq!(
+            Preview3FrameSubmitMetadata::parse(&[0; FRAME_SUBMIT_METADATA_LEN - 1]),
+            Err(nnrp_core::NnrpError::SourceTooShort {
+                expected: FRAME_SUBMIT_METADATA_LEN,
+                actual: FRAME_SUBMIT_METADATA_LEN - 1,
+            })
+        );
+
+        let metadata = Preview3FrameSubmitMetadata::parse(&[0; FRAME_SUBMIT_METADATA_LEN])
+            .expect("zeroed Preview3 submit metadata should parse");
+        assert_eq!(
+            metadata.write(&mut [0; FRAME_SUBMIT_METADATA_LEN - 1]),
+            Err(nnrp_core::NnrpError::DestinationTooShort {
+                expected: FRAME_SUBMIT_METADATA_LEN,
+                actual: FRAME_SUBMIT_METADATA_LEN - 1,
+            })
+        );
     }
 
     #[test]

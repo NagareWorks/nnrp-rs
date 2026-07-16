@@ -567,7 +567,7 @@ async fn reference_server_task(server: NnrpServer) -> Result<(), RuntimeError> {
 async fn target_client_task(client: NnrpClient) -> Result<(), RuntimeError> {
     let mut session = client.open_session().await?;
     let frame_id = session
-        .submit(token_submit(), REQUEST_BODY.to_vec())
+        .submit(token_submit(1_001), REQUEST_BODY.to_vec())
         .await?;
     let result = session.await_result().await?;
     if result.frame_id != frame_id || result.body != RESPONSE_BODY {
@@ -600,6 +600,7 @@ async fn run_reference_server(
         json!({
             "session_id": session_id,
             "frame_id": submit.frame_id,
+            "operation_id": submit.operation_id,
             "body_bytes": submit.body.len(),
         }),
     );
@@ -695,8 +696,9 @@ async fn run_reference_client(
             "session_id": session_id,
         }),
     );
+    let operation_id = 1_002;
     let frame_id = session
-        .submit(token_submit(), REQUEST_BODY.to_vec())
+        .submit(token_submit(operation_id), REQUEST_BODY.to_vec())
         .await?;
     frames.push(
         "suite->target",
@@ -704,6 +706,7 @@ async fn run_reference_client(
         json!({
             "session_id": session_id,
             "frame_id": frame_id,
+            "operation_id": operation_id,
             "body_bytes": REQUEST_BODY.len(),
         }),
     );
@@ -758,7 +761,7 @@ async fn reference_scenario_server_task(
             let submit = session.receive_submit().await?;
             session.receive_runtime_control().await?;
             session
-                .send_result_drop_reason(drop_reason(submit.frame_id as u64))
+                .send_result_drop_reason(drop_reason(submit.operation_id))
                 .await?;
 
             let abort_submit = session.receive_submit().await?;
@@ -784,10 +787,10 @@ async fn reference_scenario_server_task(
             session.receive_pressure_update().await?;
             session.send_backpressure(soft_backpressure()).await?;
             session
-                .send_progress(progress(submit.frame_id as u64), b"stage".to_vec())
+                .send_progress(progress(submit.operation_id), b"stage".to_vec())
                 .await?;
             session
-                .send_partial_result(partial_result(submit.frame_id as u64), b"partial".to_vec())
+                .send_partial_result(partial_result(submit.operation_id), b"partial".to_vec())
                 .await?;
             session
                 .send_result(submit.frame_id, token_result(), RESPONSE_BODY.to_vec())
@@ -795,7 +798,7 @@ async fn reference_scenario_server_task(
         }
         WireReferenceScenario::CapabilityRouteCache => {
             let submit = session.receive_submit().await?;
-            let operation_id = submit.frame_id as u64;
+            let operation_id = submit.operation_id;
             session
                 .send_capability(
                     MessageType::CapabilityNegotiation,
@@ -844,8 +847,9 @@ async fn run_reference_scenario_client(
             unreachable!("basic loopback uses run_reference_client")
         }
         WireReferenceScenario::CancelAbort => {
+            let operation_id = 101;
             let frame_id = session
-                .submit_nowait(token_submit(), REQUEST_BODY.to_vec())
+                .submit_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
                 .await?;
             frames.push(
                 "suite->target",
@@ -853,18 +857,19 @@ async fn run_reference_scenario_client(
                 json!({
                     "session_id": session_id,
                     "frame_id": frame_id,
+                    "operation_id": operation_id,
                     "body_bytes": REQUEST_BODY.len(),
                 }),
             );
             session
-                .cancel_operation(frame_id as u64, RESULT_DROP_REASON_DEADLINE_EXPIRED)
+                .cancel_operation(operation_id, RESULT_DROP_REASON_DEADLINE_EXPIRED)
                 .await?;
             frames.push(
                 "suite->target",
                 "CANCEL",
                 json!({
                     "session_id": session_id,
-                    "operation_id": frame_id,
+                    "operation_id": operation_id,
                     "reason_code": RESULT_DROP_REASON_DEADLINE_EXPIRED,
                 }),
             );
@@ -879,8 +884,9 @@ async fn run_reference_scenario_client(
                 }),
             );
 
+            let abort_operation_id = 102;
             let abort_frame_id = session
-                .submit_nowait(token_submit(), b"abort-request".to_vec())
+                .submit_nowait(token_submit(abort_operation_id), b"abort-request".to_vec())
                 .await?;
             frames.push(
                 "suite->target",
@@ -888,30 +894,31 @@ async fn run_reference_scenario_client(
                 json!({
                     "session_id": session_id,
                     "frame_id": abort_frame_id,
+                    "operation_id": abort_operation_id,
                     "body_bytes": "abort-request".len(),
                 }),
             );
             session
-                .expire_at(abort_frame_id as u64, 1_800_000_000_500)
+                .expire_at(abort_operation_id, 1_800_000_000_500)
                 .await?;
             frames.push(
                 "suite->target",
                 "EXPIRE_AT",
                 json!({
                     "session_id": session_id,
-                    "operation_id": abort_frame_id,
+                    "operation_id": abort_operation_id,
                     "expire_at_unix_ms": 1_800_000_000_500u64,
                 }),
             );
             session
-                .abort_operation(abort_frame_id as u64, RESULT_DROP_REASON_DEADLINE_EXPIRED)
+                .abort_operation(abort_operation_id, RESULT_DROP_REASON_DEADLINE_EXPIRED)
                 .await?;
             frames.push(
                 "suite->target",
                 "ABORT",
                 json!({
                     "session_id": session_id,
-                    "operation_id": abort_frame_id,
+                    "operation_id": abort_operation_id,
                     "reason_code": RESULT_DROP_REASON_DEADLINE_EXPIRED,
                 }),
             );
@@ -927,8 +934,9 @@ async fn run_reference_scenario_client(
             );
         }
         WireReferenceScenario::PriorityDeadline => {
+            let operation_id = 201;
             let frame_id = session
-                .submit_nowait(token_submit(), REQUEST_BODY.to_vec())
+                .submit_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
                 .await?;
             frames.push(
                 "suite->target",
@@ -936,29 +944,30 @@ async fn run_reference_scenario_client(
                 json!({
                     "session_id": session_id,
                     "frame_id": frame_id,
+                    "operation_id": operation_id,
                     "body_bytes": REQUEST_BODY.len(),
                 }),
             );
-            session.update_priority(frame_id as u64, 1, -2).await?;
+            session.update_priority(operation_id, 1, -2).await?;
             frames.push(
                 "suite->target",
                 "PRIORITY_UPDATE",
                 json!({
                     "session_id": session_id,
-                    "operation_id": frame_id,
+                    "operation_id": operation_id,
                     "priority_class": 1,
                     "priority_delta": -2,
                 }),
             );
             session
-                .update_deadline(frame_id as u64, 1_800_000_000_000)
+                .update_deadline(operation_id, 1_800_000_000_000)
                 .await?;
             frames.push(
                 "suite->target",
                 "DEADLINE",
                 json!({
                     "session_id": session_id,
-                    "operation_id": frame_id,
+                    "operation_id": operation_id,
                     "deadline_unix_ms": 1_800_000_000_000u64,
                 }),
             );
@@ -975,8 +984,9 @@ async fn run_reference_scenario_client(
             );
         }
         WireReferenceScenario::ProgressBackpressure => {
+            let operation_id = 301;
             let frame_id = session
-                .submit_nowait(token_submit(), REQUEST_BODY.to_vec())
+                .submit_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
                 .await?;
             frames.push(
                 "suite->target",
@@ -984,6 +994,7 @@ async fn run_reference_scenario_client(
                 json!({
                     "session_id": session_id,
                     "frame_id": frame_id,
+                    "operation_id": operation_id,
                     "body_bytes": REQUEST_BODY.len(),
                 }),
             );
@@ -1041,8 +1052,9 @@ async fn run_reference_scenario_client(
             );
         }
         WireReferenceScenario::CapabilityRouteCache => {
+            let operation_id = 401;
             let frame_id = session
-                .submit_nowait(token_submit(), REQUEST_BODY.to_vec())
+                .submit_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
                 .await?;
             frames.push(
                 "suite->target",
@@ -1050,6 +1062,7 @@ async fn run_reference_scenario_client(
                 json!({
                     "session_id": session_id,
                     "frame_id": frame_id,
+                    "operation_id": operation_id,
                     "body_bytes": REQUEST_BODY.len(),
                 }),
             );
@@ -1264,7 +1277,7 @@ async fn reference_proxy_target_server_task(
     };
     if action == ReferenceProxyAction::PerturbResultBeforeProgress {
         session
-            .send_progress(progress(submit.frame_id as u64), b"stage".to_vec())
+            .send_progress(progress(submit.operation_id), b"stage".to_vec())
             .await?;
     }
     session
@@ -1281,7 +1294,7 @@ async fn run_reference_proxy_client(
 ) -> Result<(), RuntimeError> {
     let mut session = client.open_session().await?;
     session
-        .submit_nowait(token_submit(), REQUEST_BODY.to_vec())
+        .submit_nowait(token_submit(1_301), REQUEST_BODY.to_vec())
         .await?;
     match action {
         ReferenceProxyAction::InjectBackpressure => {
@@ -1493,7 +1506,7 @@ impl ObservedFrameLog {
     }
 }
 
-fn token_submit() -> FrameSubmitMetadata {
+fn token_submit(operation_id: u64) -> FrameSubmitMetadata {
     FrameSubmitMetadata {
         src_width: 0,
         src_height: 0,
@@ -1510,6 +1523,7 @@ fn token_submit() -> FrameSubmitMetadata {
         tile_base_id: 0,
         camera_bytes: 0,
         tile_index_bytes: 0,
+        operation_id,
         submit_mode: SubmitMode::Inline,
         budget_policy: 0,
         loss_tolerance_policy: 0,

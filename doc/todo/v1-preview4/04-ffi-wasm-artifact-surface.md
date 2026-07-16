@@ -54,8 +54,8 @@
   - [x] Accept a carrier connection and perform the server handshake in `nnrp_server_accept`.
   - [x] Remove caller-injected server session/profile/schema state.
 - [ ] Route every role operation over the adopted carrier.
-  - [x] Validate, split, and send `FRAME_SUBMIT` metadata/body in one coarse call.
-  - [x] Decode inbound submit packets and create server operation handles.
+  - [x] Validate, split, and send `FRAME_SUBMIT` metadata/body with independent wire operation and frame identities in one coarse call.
+  - [x] Decode inbound submit packets and bind both wire identities to opaque server operation handles.
   - [ ] Validate, split, and send partial/terminal/drop/trace result packets.
   - [ ] Validate, split, and send control/object/cache packets.
   - [ ] Read and decode bounded client and server event batches.

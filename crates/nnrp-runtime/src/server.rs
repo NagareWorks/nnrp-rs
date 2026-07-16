@@ -185,6 +185,7 @@ pub struct NnrpServerSession {
     transport: BoxedFramedTransport,
     lifecycle: ConnectionLifecycle,
     operations: OperationRegistry,
+    frame_operations: BTreeMap<u32, u64>,
     pressure: RuntimePressureState,
     cache_objects: Vec<CacheObjectId>,
     max_cache_objects: usize,
@@ -206,6 +207,7 @@ type SharedSessionRegistry = Arc<Mutex<BTreeMap<u32, RuntimeSessionRecord>>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NnrpSubmit {
+    pub operation_id: u64,
     pub frame_id: u32,
     pub metadata: FrameSubmitMetadata,
     pub body: Vec<u8>,
@@ -363,6 +365,7 @@ impl NnrpServer {
             transport,
             lifecycle,
             operations: OperationRegistry::new(),
+            frame_operations: BTreeMap::new(),
             pressure: RuntimePressureState::default(),
             cache_objects: Vec::new(),
             max_cache_objects: self.config.max_cache_objects,
@@ -546,15 +549,24 @@ impl NnrpServerSession {
             ));
         }
 
+        let metadata = FrameSubmitMetadata::parse(&packet.metadata)?;
+        if self.frame_operations.contains_key(&packet.header.frame_id) {
+            return Err(RuntimeError::UnexpectedMessage(
+                "server received duplicate FRAME_SUBMIT frame id",
+            ));
+        }
         self.operations.register(OperationDescriptor::new(
             self.session_id,
-            packet.header.frame_id as u64,
+            metadata.operation_id,
         ))?;
-        self.update_registry_last_operation(packet.header.frame_id as u64)?;
+        self.frame_operations
+            .insert(packet.header.frame_id, metadata.operation_id);
+        self.update_registry_last_operation(metadata.operation_id)?;
 
         Ok(NnrpSubmit {
+            operation_id: metadata.operation_id,
             frame_id: packet.header.frame_id,
-            metadata: FrameSubmitMetadata::parse(&packet.metadata)?,
+            metadata,
             body: packet.body,
         })
     }
@@ -565,13 +577,14 @@ impl NnrpServerSession {
         metadata: ResultPushMetadata,
         body: Vec<u8>,
     ) -> Result<(), RuntimeError> {
+        let operation_id = self.operation_id_for_frame(frame_id)?;
         if let Some(schedule) = self
             .operations
-            .expire_if_stale(frame_id as u64, current_unix_ms())?
+            .expire_if_stale(operation_id, current_unix_ms())?
         {
             if schedule.flags & SCHEDULING_FLAG_EMIT_DROP_REASON != 0 {
                 self.send_result_drop_reason(ResultDropReasonMetadata {
-                    operation_id: frame_id as u64,
+                    operation_id,
                     result_sequence: schedule.update_sequence,
                     drop_reason_code: RESULT_DROP_REASON_DEADLINE_EXPIRED,
                     source_role: RuntimeRole::Server as u8,
@@ -586,7 +599,7 @@ impl NnrpServerSession {
             }
             .into());
         }
-        self.operations.complete(frame_id as u64)?;
+        self.operations.complete(operation_id)?;
         let mut header = CommonHeader::new(
             MessageType::ResultPush,
             RESULT_PUSH_METADATA_LEN as u32,
@@ -600,17 +613,20 @@ impl NnrpServerSession {
                 metadata.to_bytes()?.to_vec(),
                 body,
             )?)
-            .await
+            .await?;
+        Ok(())
     }
 
     pub async fn send_result_drop(&mut self, frame_id: u32) -> Result<(), RuntimeError> {
+        self.operation_id_for_frame(frame_id)?;
         let mut header = CommonHeader::new(MessageType::ResultDrop, 0, 0);
         header.session_id = self.session_id;
         header.frame_id = frame_id;
         validate_result_drop_header(&header)?;
         self.transport
             .write_packet(&RuntimePacket::new(header, Vec::new(), Vec::new())?)
-            .await
+            .await?;
+        Ok(())
     }
 
     pub async fn send_partial_result(
@@ -630,7 +646,7 @@ impl NnrpServerSession {
             body.len() as u32,
         );
         header.session_id = self.session_id;
-        header.frame_id = metadata.operation_id as u32;
+        header.frame_id = self.correlated_frame_id(metadata.operation_id)?;
         self.transport
             .write_packet(&RuntimePacket::new(
                 header,
@@ -657,7 +673,7 @@ impl NnrpServerSession {
             body.len() as u32,
         );
         header.session_id = self.session_id;
-        header.frame_id = metadata.operation_id as u32;
+        header.frame_id = self.correlated_frame_id(metadata.operation_id)?;
         self.transport
             .write_packet(&RuntimePacket::new(
                 header,
@@ -692,7 +708,7 @@ impl NnrpServerSession {
             diagnostics.len() as u32,
         );
         header.session_id = self.session_id;
-        header.frame_id = metadata.operation_id as u32;
+        header.frame_id = self.correlated_frame_id(metadata.operation_id)?;
         self.transport
             .write_packet(&RuntimePacket::new(
                 header,
@@ -761,7 +777,7 @@ impl NnrpServerSession {
             body.len() as u32,
         );
         header.session_id = self.session_id;
-        header.frame_id = metadata.operation_id as u32;
+        header.frame_id = self.correlated_frame_id(metadata.operation_id)?;
         self.transport
             .write_packet(&RuntimePacket::new(
                 header,
@@ -812,7 +828,7 @@ impl NnrpServerSession {
             body.len() as u32,
         );
         header.session_id = self.session_id;
-        header.frame_id = metadata.operation_id as u32;
+        header.frame_id = self.correlated_frame_id(metadata.operation_id)?;
         self.transport
             .write_packet(&RuntimePacket::new(
                 header,
@@ -838,7 +854,7 @@ impl NnrpServerSession {
             body.len() as u32,
         );
         header.session_id = self.session_id;
-        header.frame_id = metadata.operation_id as u32;
+        header.frame_id = self.correlated_frame_id(metadata.operation_id)?;
         self.transport
             .write_packet(&RuntimePacket::new(
                 header,
@@ -957,9 +973,10 @@ impl NnrpServerSession {
                 "server received malformed FRAME_CANCEL lengths",
             ));
         }
+        let operation_id = self.operation_id_for_frame(packet.header.frame_id)?;
         self.operations.cancel(OperationCancelRequest {
             session_id: self.session_id,
-            operation_id: packet.header.frame_id as u64,
+            operation_id,
             cancel_scope: nnrp_core::CancelScope::Operation,
         })?;
         Ok(NnrpCancel {
@@ -1265,6 +1282,25 @@ impl NnrpServerSession {
             return Err(RuntimeError::UnexpectedMessage(message));
         }
         Ok(())
+    }
+
+    fn correlated_frame_id(&self, operation_id: u64) -> Result<u32, RuntimeError> {
+        if operation_id == 0 {
+            return Ok(0);
+        }
+        self.frame_operations
+            .iter()
+            .find_map(|(frame_id, candidate)| (*candidate == operation_id).then_some(*frame_id))
+            .ok_or(nnrp_core::NnrpError::UnknownOperation(operation_id).into())
+    }
+
+    fn operation_id_for_frame(&self, frame_id: u32) -> Result<u64, RuntimeError> {
+        self.frame_operations
+            .get(&frame_id)
+            .copied()
+            .ok_or(RuntimeError::UnexpectedMessage(
+                "server frame id is not bound to an operation",
+            ))
     }
 
     fn update_registry_last_operation(&self, operation_id: u64) -> Result<(), RuntimeError> {

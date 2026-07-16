@@ -470,6 +470,7 @@ enum NnrpFfiResource {
     },
     Operation {
         session: NnrpHandle,
+        operation_id: u64,
         frame_id: u32,
         payload_len: usize,
     },
@@ -1915,14 +1916,14 @@ impl NnrpCompactResult {
         }
     }
 
-    fn from_event(status: NnrpFfiStatus, event: NnrpEvent) -> Self {
+    fn from_event(status: NnrpFfiStatus, event: NnrpEvent, operation_id: u64) -> Self {
         Self {
             status,
             has_result: 1,
             event_kind: event.kind,
             result_state: compact_result_state(status, event.kind),
             operation: event.operation,
-            operation_id: event.operation.id,
+            operation_id,
             frame_id: event.frame_id,
             payload: event.payload,
             diagnostic: event.diagnostic,
@@ -2543,15 +2544,28 @@ unsafe fn nnrp_client_submit_impl(
         Err(status) => return status,
     };
 
+    if store.entries.values().any(|entry| {
+        matches!(
+            entry.resource,
+            NnrpFfiResource::Operation {
+                session,
+                operation_id,
+                ..
+            } if session == request.session && operation_id == request.operation_id
+        )
+    }) {
+        return NnrpFfiStatus::invalid_argument(145);
+    }
     let handle = NnrpHandle::new(
         NnrpHandleKind::Operation,
-        request.operation_id,
+        next_handle_id(&store, NnrpHandleKind::Operation),
         request.session.generation,
     );
     if let Err(status) = store.insert(
         handle,
         NnrpFfiResource::Operation {
             session: request.session,
+            operation_id: request.operation_id,
             frame_id: request.frame_id,
             payload_len: request.payload.len,
         },
@@ -2589,20 +2603,12 @@ unsafe fn nnrp_client_submit_impl(
         Ok(metadata) => metadata,
         Err(error) => return NnrpFfiStatus::from_core_error(&error),
     };
+    if metadata.operation_id != request.operation_id {
+        return NnrpFfiStatus::invalid_argument(150);
+    }
     let body = payload[FRAME_SUBMIT_METADATA_LEN..].to_vec();
-    let operation = NnrpHandle::new(
-        NnrpHandleKind::Operation,
-        request.operation_id,
-        request.session.generation,
-    );
-    let session = {
+    let (session, operation) = {
         let mut store = handle_store();
-        if store
-            .entries
-            .contains_key(&(NnrpHandleKind::Operation as u32, request.operation_id))
-        {
-            return NnrpFfiStatus::invalid_argument(145);
-        }
         let session = match store.get(request.session, NnrpHandleKind::Session) {
             Ok(NnrpFfiResource::Session {
                 runtime: NnrpFfiSessionRuntime::Client(session),
@@ -2611,17 +2617,35 @@ unsafe fn nnrp_client_submit_impl(
             Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32),
             Err(status) => return status,
         };
+        if store.entries.values().any(|entry| {
+            matches!(
+                entry.resource,
+                NnrpFfiResource::Operation {
+                    session,
+                    operation_id,
+                    ..
+                } if session == request.session && operation_id == request.operation_id
+            )
+        }) {
+            return NnrpFfiStatus::invalid_argument(145);
+        }
+        let operation = NnrpHandle::new(
+            NnrpHandleKind::Operation,
+            next_handle_id(&store, NnrpHandleKind::Operation),
+            request.session.generation,
+        );
         if let Err(status) = store.insert(
             operation,
             NnrpFfiResource::Operation {
                 session: request.session,
+                operation_id: request.operation_id,
                 frame_id: request.frame_id,
                 payload_len: request.payload.len,
             },
         ) {
             return status;
         }
-        session
+        (session, operation)
     };
     let frame_id = request.frame_id;
     if let Err(status) = transport::run_role_async(
@@ -2853,7 +2877,6 @@ unsafe fn nnrp_client_submit_result_impl(
     poll_matching_operation_result(
         request.session,
         operation,
-        request.operation_id,
         request.frame_id,
         request.max_events,
         out_result,
@@ -3926,6 +3949,7 @@ unsafe fn role_server_await_events_impl(
             operation,
             NnrpFfiResource::Operation {
                 session: request.scope,
+                operation_id: submit.operation_id,
                 frame_id: submit.frame_id,
                 payload_len: payload.len(),
             },
@@ -3966,7 +3990,6 @@ const fn poll_result_none(status: NnrpFfiStatus) -> NnrpPollResult {
 unsafe fn poll_matching_operation_result(
     session: NnrpHandle,
     operation: NnrpHandle,
-    operation_id: u64,
     frame_id: u32,
     max_events: usize,
     out_result: *mut NnrpPollResult,
@@ -3982,7 +4005,7 @@ unsafe fn poll_matching_operation_result(
         match store.poll_event(connection) {
             Ok(Some(event)) => {
                 seen_events += 1;
-                if event_is_operation_result(event, session, operation, operation_id, frame_id) {
+                if event_is_operation_result(event, session, operation, frame_id) {
                     *out_result = NnrpPollResult {
                         status: NnrpFfiStatus::ok(),
                         has_event: 1,
@@ -4164,8 +4187,9 @@ unsafe fn poll_matching_operation_compact_result(
         match store.poll_event(connection) {
             Ok(Some(event)) => {
                 seen_events += 1;
-                if event_is_operation_result(event, session, operation, operation_id, frame_id) {
-                    let mut result = NnrpCompactResult::from_event(NnrpFfiStatus::ok(), event);
+                if event_is_operation_result(event, session, operation, frame_id) {
+                    let mut result =
+                        NnrpCompactResult::from_event(NnrpFfiStatus::ok(), event, operation_id);
                     result.payload = payload;
                     *out_result = result;
                     return NnrpFfiStatus::ok();
@@ -4267,7 +4291,6 @@ fn event_is_operation_result(
     event: NnrpEvent,
     session: NnrpHandle,
     operation: NnrpHandle,
-    operation_id: u64,
     frame_id: u32,
 ) -> bool {
     matches!(
@@ -4276,9 +4299,7 @@ fn event_is_operation_result(
             || value == NnrpEventKind::ResultDropped as u32
             || value == NnrpEventKind::Error as u32
     ) && event.session == session
-        && (event.operation.id == operation.id
-            || event.operation.id == operation_id
-            || event.frame_id == frame_id)
+        && (event.operation.id == operation.id || event.frame_id == frame_id)
 }
 
 fn validate_control_metadata_payload(
@@ -5371,6 +5392,7 @@ pub unsafe extern "C" fn nnrp_server_receive_submit(
         handle,
         NnrpFfiResource::Operation {
             session: request.session,
+            operation_id: request.operation_id,
             frame_id: request.frame_id,
             payload_len: request.payload.len,
         },
@@ -5512,7 +5534,14 @@ unsafe fn nnrp_server_send_partial_result_impl(
     }
 
     let metadata = PartialResultMetadata::from(request.partial_result);
-    if metadata.operation_id != request.operation.id {
+    let operation_id = match operation_wire_id(request.operation) {
+        Ok(operation_id) => operation_id,
+        Err(status) => {
+            *out_result = poll_result_none(status);
+            return status;
+        }
+    };
+    if metadata.operation_id != operation_id {
         let status = NnrpFfiStatus::invalid_argument(133);
         *out_result = poll_result_none(status);
         return status;
@@ -5578,7 +5607,14 @@ unsafe fn nnrp_server_drop_stale_result_impl(
     }
 
     let metadata = ResultDropReasonMetadata::from(request.drop_reason);
-    if metadata.operation_id != request.operation.id {
+    let operation_id = match operation_wire_id(request.operation) {
+        Ok(operation_id) => operation_id,
+        Err(status) => {
+            *out_result = poll_result_none(status);
+            return status;
+        }
+    };
+    if metadata.operation_id != operation_id {
         let status = NnrpFfiStatus::invalid_argument(135);
         *out_result = poll_result_none(status);
         return status;
@@ -5622,6 +5658,15 @@ struct OperationEventScope {
     connection: NnrpHandle,
     session: NnrpHandle,
     frame_id: u32,
+}
+
+fn operation_wire_id(operation: NnrpHandle) -> Result<u64, NnrpFfiStatus> {
+    match handle_store().get(operation, NnrpHandleKind::Operation)? {
+        NnrpFfiResource::Operation { operation_id, .. } => Ok(*operation_id),
+        _ => Err(NnrpFfiStatus::invalid_handle(
+            NnrpHandleKind::Operation as u32,
+        )),
+    }
 }
 
 fn push_operation_event(
@@ -7002,7 +7047,7 @@ mod tests {
                 NnrpFfiStatus::ok()
             );
             assert_eq!(operation.kind, NnrpHandleKind::Operation as u32);
-            assert_eq!(operation.id, 91_423);
+            assert_ne!(operation.id, 91_423);
             assert_eq!(result.has_event, 1);
             assert_eq!(result.event.kind, NnrpEventKind::ResultPushed as u32);
             assert_eq!(result.event.session, session);
@@ -7078,7 +7123,7 @@ mod tests {
             assert_eq!(result.event_kind, NnrpEventKind::ResultPushed as u32);
             assert_eq!(result.result_state, NNRP_RESULT_STATE_COMPLETED);
             assert_eq!(result.operation.kind, NnrpHandleKind::Operation as u32);
-            assert_eq!(result.operation.id, 91_428);
+            assert_ne!(result.operation.id, 91_428);
             assert_eq!(result.operation_id, 91_428);
             assert_eq!(result.frame_id, 60);
             assert_eq!(result.payload.len, result_payload.len());
@@ -7153,7 +7198,7 @@ mod tests {
             assert_eq!(result.status, NnrpFfiStatus::ok());
             assert_eq!(result.has_result, 1);
             assert_eq!(result.event_kind, NnrpEventKind::ResultPushed as u32);
-            assert_eq!(result.operation.id, 91_434);
+            assert_ne!(result.operation.id, 91_434);
             assert_eq!(result.operation_id, 91_434);
             assert_eq!(result.frame_id, 63);
             assert_eq!(result.payload.len, result_payload.len());
@@ -7373,7 +7418,7 @@ mod tests {
             assert_eq!(result.event_kind, NnrpEventKind::ResultPushed as u32);
             assert_eq!(result.result_state, NNRP_RESULT_STATE_COMPLETED);
             assert_eq!(result.operation.kind, NnrpHandleKind::Operation as u32);
-            assert_eq!(result.operation.id, 91_652);
+            assert_ne!(result.operation.id, 91_652);
             assert_eq!(result.operation_id, 91_652);
             assert_eq!(result.frame_id, 70);
             assert_eq!(result.payload.len, result_payload.len());
@@ -7554,7 +7599,7 @@ mod tests {
             let status = nnrp_client_submit_result(request, &mut operation, &mut result);
             assert_eq!(status.status_code, NnrpFfiStatusCode::WouldBlock as u32);
             assert_eq!(operation.kind, NnrpHandleKind::Operation as u32);
-            assert_eq!(operation.id, 92_433);
+            assert_ne!(operation.id, 92_433);
             assert_eq!(result.has_event, 0);
             assert_eq!(
                 nnrp_client_submit_result(
@@ -10551,7 +10596,7 @@ mod tests {
             assert_eq!(
                 nnrp_client_connect(
                     NnrpClientConnectRequest {
-                        connection_id: 91_101,
+                        connection_id: 95_101,
                         generation: 1,
                         transport_id: test_transport_id(),
                     },
@@ -10565,7 +10610,7 @@ mod tests {
                 nnrp_client_open_session(
                     NnrpSessionOpenRequest {
                         connection,
-                        requested_session_id: 91_102,
+                        requested_session_id: 95_102,
                         generation: 1,
                         profile_id: 2,
                         schema_id: 0x1001,
@@ -10582,7 +10627,7 @@ mod tests {
                 nnrp_client_submit(
                     NnrpSubmitRequest {
                         session,
-                        operation_id: 91_103,
+                        operation_id: 95_103,
                         frame_id: 7,
                         payload: NnrpBufferView {
                             ptr: payload.as_ptr(),
@@ -11334,7 +11379,7 @@ mod tests {
                     },
                     &mut result,
                 ),
-                NnrpFfiStatus::invalid_argument(133)
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Operation as u32)
             );
         }
     }

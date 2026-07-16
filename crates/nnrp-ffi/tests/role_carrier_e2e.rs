@@ -56,7 +56,7 @@ fn open_request(transport_id: TransportId, endpoint: &str) -> NnrpTransportOpenR
     }
 }
 
-fn token_submit() -> FrameSubmitMetadata {
+fn token_submit(operation_id: u64) -> FrameSubmitMetadata {
     FrameSubmitMetadata {
         src_width: 0,
         src_height: 0,
@@ -73,6 +73,7 @@ fn token_submit() -> FrameSubmitMetadata {
         tile_base_id: 0,
         camera_bytes: 0,
         tile_index_bytes: 0,
+        operation_id,
         submit_mode: SubmitMode::Inline,
         budget_policy: 0,
         loss_tolerance_policy: 0,
@@ -253,7 +254,10 @@ unsafe fn assert_role_handshake(transport_id: TransportId, listen_endpoint: &str
     assert_ne!(server_session, NnrpHandle::invalid());
 
     let submit_body = b"role-carrier-submit";
-    let mut submit_payload = token_submit().to_bytes().expect("submit metadata").to_vec();
+    let mut submit_payload = token_submit(id_base + 6)
+        .to_bytes()
+        .expect("submit metadata")
+        .to_vec();
     submit_payload.extend_from_slice(submit_body);
     let mut client_operation = NnrpHandle::invalid();
     let submit_request = NnrpSubmitRequest {
@@ -314,6 +318,7 @@ unsafe fn assert_role_handshake(transport_id: TransportId, listen_endpoint: &str
         nnrp_client_submit(submit_request, &mut client_operation),
         NnrpFfiStatus::ok()
     );
+    assert_ne!(client_operation.id, submit_request.operation_id);
     assert_eq!(
         nnrp_client_submit(submit_request, &mut NnrpHandle::invalid()),
         NnrpFfiStatus::invalid_argument(145)
@@ -424,6 +429,8 @@ unsafe fn assert_role_handshake(transport_id: TransportId, listen_endpoint: &str
     assert_eq!(server_event_count, 1);
     assert_eq!(server_event.kind, NnrpEventKind::SubmitAccepted as u32);
     assert_eq!(server_event.frame_id, 42);
+    assert_ne!(server_event.operation.id, submit_request.operation_id);
+    assert_ne!(server_event.operation, client_operation);
     assert_eq!(
         slice::from_raw_parts(server_event.payload.ptr, server_event.payload.len),
         submit_payload

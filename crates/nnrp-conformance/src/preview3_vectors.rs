@@ -3,18 +3,17 @@ use nnrp_core::{
     validate_session_recovery_ack, validate_session_recovery_request, BackpressureLevel,
     CacheDependency, CacheDependencyState, CacheLease, CacheLeaseOwnerScope, CacheObjectId,
     CacheObjectKind, CacheValidationFailure, CancelScope, ClientHelloMetadata, CommonHeader,
-    ConnectionLifecycle, FlowScopeKind, FlowUpdateMetadata, FlowUpdateReason, FrameSubmitMetadata,
-    InFlightPolicy, MessageType, OperationCancelRequest, OperationDescriptor, OperationRegistry,
-    OperationState, PayloadFamily, PayloadKindBitmap, ResultPushMetadata, SchemaRegistry,
-    SchemaRegistryFailure, ServerHelloAckMetadata, SessionCloseAckMetadata, SessionCloseMetadata,
-    SessionCloseReason, SessionCloseStatus, SessionOpenAckMetadata, SessionOpenMetadata,
-    SessionPriorityClass, SessionRecoveryOutcome, SessionStatus, TransportId,
-    TypedPayloadDescriptor, TypedPayloadRegion, FLOW_UPDATE_FLAG_CREDIT_VALID,
-    FLOW_UPDATE_FLAG_RETRY_AFTER_VALID, FLOW_UPDATE_METADATA_LEN, FRAME_SUBMIT_METADATA_LEN,
-    PROFILE_TENSOR, PROFILE_TOKEN, SESSION_ACK_FLAG_RESUME_ENABLED, SESSION_ERROR_NONE,
-    SESSION_ERROR_RESUME_REJECTED, SESSION_FLAG_ALLOW_RESUME, SESSION_OPEN_ACK_METADATA_LEN,
-    SESSION_OPEN_METADATA_LEN, STREAM_SEMANTICS_TOKEN_DELTA, TOKEN_DELTA_SCHEMA_ID,
-    TOKEN_DELTA_SCHEMA_VERSION,
+    ConnectionLifecycle, FlowScopeKind, FlowUpdateMetadata, FlowUpdateReason, InFlightPolicy,
+    MessageType, OperationCancelRequest, OperationDescriptor, OperationRegistry, OperationState,
+    PayloadFamily, PayloadKindBitmap, ResultPushMetadata, SchemaRegistry, SchemaRegistryFailure,
+    ServerHelloAckMetadata, SessionCloseAckMetadata, SessionCloseMetadata, SessionCloseReason,
+    SessionCloseStatus, SessionOpenAckMetadata, SessionOpenMetadata, SessionPriorityClass,
+    SessionRecoveryOutcome, SessionStatus, TransportId, TypedPayloadDescriptor, TypedPayloadRegion,
+    FLOW_UPDATE_FLAG_CREDIT_VALID, FLOW_UPDATE_FLAG_RETRY_AFTER_VALID, FLOW_UPDATE_METADATA_LEN,
+    FRAME_SUBMIT_METADATA_LEN, PROFILE_TENSOR, PROFILE_TOKEN, SESSION_ACK_FLAG_RESUME_ENABLED,
+    SESSION_ERROR_NONE, SESSION_ERROR_RESUME_REJECTED, SESSION_FLAG_ALLOW_RESUME,
+    SESSION_OPEN_ACK_METADATA_LEN, SESSION_OPEN_METADATA_LEN, STREAM_SEMANTICS_TOKEN_DELTA,
+    TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
 };
 use nnrp_transport_provider::{
     select_transport_with_probe, ProbeSample, RemoteTransportSupport, TransportPolicy,
@@ -639,11 +638,26 @@ fn public_submit_result_contract() -> Result<(), String> {
 }
 
 fn submit_result_metadata_contract() -> Result<(), String> {
-    let submit =
-        FrameSubmitMetadata::parse(&[0u8; FRAME_SUBMIT_METADATA_LEN]).map_err(to_string)?;
-    submit.validate_payload_shape().map_err(to_string)?;
+    validate_preview3_frame_submit(&[0u8; FRAME_SUBMIT_METADATA_LEN])?;
     let result = ResultPushMetadata::parse(&[0u8; 64]).map_err(to_string)?;
     result.validate_payload_shape().map_err(to_string)
+}
+
+fn validate_preview3_frame_submit(source: &[u8]) -> Result<(), String> {
+    if source.len() != FRAME_SUBMIT_METADATA_LEN {
+        return Err(format!(
+            "preview3 FRAME_SUBMIT length {} did not match {FRAME_SUBMIT_METADATA_LEN}",
+            source.len()
+        ));
+    }
+    let reserved_ranges = [15..16, 32..36, 40..52, 55..56, 70..72];
+    if reserved_ranges
+        .iter()
+        .any(|range| source[range.clone()].iter().any(|value| *value != 0))
+    {
+        return Err("preview3 FRAME_SUBMIT reserved field was non-zero".to_string());
+    }
+    Ok(())
 }
 
 fn public_flow_update_contract() -> Result<(), String> {
@@ -1016,5 +1030,20 @@ mod tests {
         for case_id in preview3_case_ids() {
             assert_eq!(execute_preview3_case(case_id), Some(Ok(())));
         }
+    }
+
+    #[test]
+    fn preview3_submit_fixture_rejects_wrong_length_and_reserved_data() {
+        assert!(
+            validate_preview3_frame_submit(&[0; FRAME_SUBMIT_METADATA_LEN - 1])
+                .expect_err("short Preview3 submit metadata should be rejected")
+                .contains("length")
+        );
+
+        let mut reserved = [0; FRAME_SUBMIT_METADATA_LEN];
+        reserved[40] = 1;
+        assert!(validate_preview3_frame_submit(&reserved)
+            .expect_err("non-zero Preview3 reserved data should be rejected")
+            .contains("reserved"));
     }
 }

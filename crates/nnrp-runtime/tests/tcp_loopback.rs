@@ -152,20 +152,22 @@ async fn tcp_loopback_submits_frame_receives_result_and_closes() -> Result<(), R
         assert_eq!(
             session
                 .operations()
-                .operation(submit.frame_id as u64)
+                .operation(submit.operation_id)
                 .expect("operation should be registered")
                 .state,
             OperationState::Completed
         );
         let close = session.receive_close().await?;
-        assert_eq!(close.last_operation_id, 1);
+        assert_eq!(close.last_operation_id, 101);
         session.ack_close(&close).await?;
         session.close().await
     });
 
     let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
     let mut session = client.open_session().await?;
-    let frame_id = session.submit(token_submit(), b"prompt".to_vec()).await?;
+    let frame_id = session
+        .submit(token_submit(101), b"prompt".to_vec())
+        .await?;
     assert_eq!(frame_id, 1);
 
     let result = session.await_result().await?;
@@ -185,15 +187,16 @@ async fn tcp_loopback_preserves_explicit_frame_ids_and_advances_allocator(
 
     let server_task = tokio::spawn(async move {
         let mut session = server.accept().await?;
-        for expected_frame_id in [42, 43] {
+        for (expected_frame_id, expected_operation_id) in [(42, 4_200), (43, 4_300)] {
             let submit = session.receive_submit().await?;
             assert_eq!(submit.frame_id, expected_frame_id);
+            assert_eq!(submit.operation_id, expected_operation_id);
             session
                 .send_result(submit.frame_id, token_result(), b"delta".to_vec())
                 .await?;
         }
         let close = session.receive_close().await?;
-        assert_eq!(close.last_operation_id, 43);
+        assert_eq!(close.last_operation_id, 4_300);
         session.ack_close(&close).await?;
         session.close().await
     });
@@ -202,18 +205,26 @@ async fn tcp_loopback_preserves_explicit_frame_ids_and_advances_allocator(
     let mut session = client.open_session().await?;
     assert_eq!(
         session
-            .submit_with_frame_id(42, token_submit(), b"prompt".to_vec())
+            .submit_with_frame_id(42, token_submit(4_200), b"prompt".to_vec())
             .await?,
         42
     );
     assert!(matches!(
         session
-            .submit_with_frame_id(42, token_submit(), b"duplicate".to_vec())
+            .submit_with_frame_id(42, token_submit(4_200), b"duplicate".to_vec())
+            .await,
+        Err(RuntimeError::UnexpectedMessage(_))
+    ));
+    assert!(matches!(
+        session
+            .submit_with_frame_id(43, token_submit(4_200), b"duplicate-operation".to_vec())
             .await,
         Err(RuntimeError::UnexpectedMessage(_))
     ));
     assert_eq!(
-        session.submit(token_submit(), b"prompt".to_vec()).await?,
+        session
+            .submit(token_submit(4_300), b"prompt".to_vec())
+            .await?,
         43
     );
     assert_eq!(session.await_result().await?.frame_id, 42);
@@ -232,6 +243,7 @@ async fn tcp_loopback_handles_cancel_drop_flow_and_patch() -> Result<(), Runtime
         let mut session = server.accept().await?;
         let submit = session.receive_submit().await?;
         assert_eq!(submit.frame_id, 1);
+        assert_eq!(submit.operation_id, 201);
         assert_eq!(session.operations().operation_count(), 1);
 
         let cancel = session.receive_cancel().await?;
@@ -239,7 +251,7 @@ async fn tcp_loopback_handles_cancel_drop_flow_and_patch() -> Result<(), Runtime
         assert_eq!(
             session
                 .operations()
-                .operation(submit.frame_id as u64)
+                .operation(submit.operation_id)
                 .expect("operation should be registered")
                 .state,
             OperationState::Cancelled
@@ -266,7 +278,7 @@ async fn tcp_loopback_handles_cancel_drop_flow_and_patch() -> Result<(), Runtime
     let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
     let mut session = client.open_session().await?;
     let frame_id = session
-        .submit_nowait(token_submit(), b"prompt".to_vec())
+        .submit_nowait(token_submit(201), b"prompt".to_vec())
         .await?;
     session.cancel_frame(frame_id).await?;
 
@@ -299,13 +311,14 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
         let mut session = server.accept().await?;
         let submit = session.receive_submit().await?;
         assert_eq!(submit.frame_id, 1);
+        assert_eq!(submit.operation_id, 1_001);
 
         let priority = session.receive_scheduling_update().await?;
         assert_eq!(priority.message_type, MessageType::PriorityUpdate);
-        assert_eq!(priority.metadata.operation_id, submit.frame_id as u64);
+        assert_eq!(priority.metadata.operation_id, submit.operation_id);
         let schedule = session
             .operations()
-            .operation(submit.frame_id as u64)
+            .operation(submit.operation_id)
             .expect("operation should be registered")
             .schedule;
         assert_eq!(schedule.priority_class, 1);
@@ -316,7 +329,7 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
         assert_eq!(deadline.metadata.deadline_unix_ms, 1_800_000_000_000);
         let schedule = session
             .operations()
-            .operation(submit.frame_id as u64)
+            .operation(submit.operation_id)
             .expect("operation should be registered")
             .schedule;
         assert_eq!(schedule.deadline_unix_ms, 1_800_000_000_000);
@@ -333,50 +346,51 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
         );
         assert_eq!(session.pressure_state().inbound_credit_window, 2);
         session
-            .send_progress(progress(submit.frame_id as u64), b"stage".to_vec())
+            .send_progress(progress(submit.operation_id), b"stage".to_vec())
             .await?;
         session
-            .send_partial_result(partial_result(submit.frame_id as u64), b"partial".to_vec())
+            .send_partial_result(partial_result(submit.operation_id), b"partial".to_vec())
             .await?;
 
         let control = session.receive_runtime_control().await?;
         assert_eq!(control.message_type, MessageType::Cancel);
-        assert_eq!(control.metadata.operation_id, submit.frame_id as u64);
+        assert_eq!(control.metadata.operation_id, submit.operation_id);
         assert_eq!(control.body, b"late");
         assert_eq!(
             session
                 .operations()
-                .operation(submit.frame_id as u64)
+                .operation(submit.operation_id)
                 .expect("operation should be registered")
                 .state,
             OperationState::Cancelled
         );
         session
-            .send_result_drop_reason(drop_reason(submit.frame_id as u64))
+            .send_result_drop_reason(drop_reason(submit.operation_id))
             .await?;
 
         let abort_submit = session.receive_submit().await?;
         assert_eq!(abort_submit.frame_id, 2);
+        assert_eq!(abort_submit.operation_id, 2_002);
 
         let expire = session.receive_scheduling_update().await?;
         assert_eq!(expire.message_type, MessageType::ExpireAt);
-        assert_eq!(expire.metadata.operation_id, abort_submit.frame_id as u64);
+        assert_eq!(expire.metadata.operation_id, abort_submit.operation_id);
         assert_eq!(expire.metadata.deadline_unix_ms, 1_800_000_000_500);
         let schedule = session
             .operations()
-            .operation(abort_submit.frame_id as u64)
+            .operation(abort_submit.operation_id)
             .expect("operation should be registered")
             .schedule;
         assert_eq!(schedule.expire_at_unix_ms, 1_800_000_000_500);
 
         let abort = session.receive_runtime_control().await?;
         assert_eq!(abort.message_type, MessageType::Abort);
-        assert_eq!(abort.metadata.operation_id, abort_submit.frame_id as u64);
+        assert_eq!(abort.metadata.operation_id, abort_submit.operation_id);
         assert!(abort.body.is_empty());
         assert_eq!(
             session
                 .operations()
-                .operation(abort_submit.frame_id as u64)
+                .operation(abort_submit.operation_id)
                 .expect("operation should be registered")
                 .state,
             OperationState::Failed
@@ -390,12 +404,14 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
 
     let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
     let mut session = client.open_session().await?;
+    let operation_id = 1_001;
     let frame_id = session
-        .submit_nowait(token_submit(), b"prompt".to_vec())
+        .submit_nowait(token_submit(operation_id), b"prompt".to_vec())
         .await?;
-    session.update_priority(frame_id as u64, 1, -2).await?;
+    assert_eq!(frame_id, 1);
+    session.update_priority(operation_id, 1, -2).await?;
     session
-        .update_deadline(frame_id as u64, 1_800_000_000_000)
+        .update_deadline(operation_id, 1_800_000_000_000)
         .await?;
     session.send_credit_update(credit_update()).await?;
     assert_eq!(session.pressure_state().inbound_credit_window, 9);
@@ -403,8 +419,8 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
         .send_control_request_with_diagnostics(
             MessageType::Cancel,
             ControlRequestMetadata {
-                operation_id: frame_id as u64,
-                control_sequence: frame_id as u64,
+                operation_id,
+                control_sequence: operation_id,
                 reason_code: 7,
                 source_role: RuntimeRole::Client as u8,
                 flags: 0,
@@ -428,7 +444,7 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
     }
     match session.await_event().await? {
         NnrpClientEvent::Progress { metadata, body } => {
-            assert_eq!(metadata.operation_id, frame_id as u64);
+            assert_eq!(metadata.operation_id, operation_id);
             assert_eq!(metadata.progress_sequence, 1);
             assert_eq!(metadata.percent_x100, 2_500);
             assert_eq!(body, b"stage".to_vec());
@@ -437,7 +453,7 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
     }
     match session.await_event().await? {
         NnrpClientEvent::PartialResult { metadata, body } => {
-            assert_eq!(metadata.operation_id, frame_id as u64);
+            assert_eq!(metadata.operation_id, operation_id);
             assert_eq!(body, b"partial".to_vec());
         }
         event => panic!("expected partial result, got {event:?}"),
@@ -447,20 +463,21 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
             metadata: reason,
             body,
         } => {
-            assert_eq!(reason.operation_id, frame_id as u64);
+            assert_eq!(reason.operation_id, operation_id);
             assert_eq!(reason.drop_reason_code, 7);
             assert!(body.is_empty());
         }
         event => panic!("expected drop reason, got {event:?}"),
     }
 
-    let abort_frame_id = session
-        .submit_nowait(token_submit(), b"abort-prompt".to_vec())
+    let abort_operation_id = 2_002;
+    session
+        .submit_nowait(token_submit(abort_operation_id), b"abort-prompt".to_vec())
         .await?;
     session
-        .expire_at(abort_frame_id as u64, 1_800_000_000_500)
+        .expire_at(abort_operation_id, 1_800_000_000_500)
         .await?;
-    session.abort_operation(abort_frame_id as u64, 9).await?;
+    session.abort_operation(abort_operation_id, 9).await?;
 
     match session.await_event().await? {
         NnrpClientEvent::Backpressure(pressure) => {
@@ -488,19 +505,19 @@ async fn tcp_loopback_preserves_partial_result_order_with_interleaving() -> Resu
 
         session
             .send_partial_result(
-                partial_result_sequence(first.frame_id as u64, 1, 7),
+                partial_result_sequence(first.operation_id, 1, 7),
                 b"op1-one".to_vec(),
             )
             .await?;
         session
             .send_partial_result(
-                partial_result_sequence(second.frame_id as u64, 1, 7),
+                partial_result_sequence(second.operation_id, 1, 7),
                 b"op2-one".to_vec(),
             )
             .await?;
         session
             .send_partial_result(
-                partial_result_sequence(first.frame_id as u64, 2, 7),
+                partial_result_sequence(first.operation_id, 2, 7),
                 b"op1-two".to_vec(),
             )
             .await?;
@@ -512,28 +529,30 @@ async fn tcp_loopback_preserves_partial_result_order_with_interleaving() -> Resu
 
     let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
     let mut session = client.open_session().await?;
-    let first_frame_id = session
-        .submit_nowait(token_submit(), b"first".to_vec())
+    let first_operation_id = 1_101;
+    let second_operation_id = 2_202;
+    session
+        .submit_nowait(token_submit(first_operation_id), b"first".to_vec())
         .await?;
-    let second_frame_id = session
-        .submit_nowait(token_submit(), b"second".to_vec())
+    session
+        .submit_nowait(token_submit(second_operation_id), b"second".to_vec())
         .await?;
 
     assert_partial_result_event(
         session.await_event().await?,
-        first_frame_id as u64,
+        first_operation_id,
         1,
         b"op1-one",
     );
     assert_partial_result_event(
         session.await_event().await?,
-        second_frame_id as u64,
+        second_operation_id,
         1,
         b"op2-one",
     );
     assert_partial_result_event(
         session.await_event().await?,
-        first_frame_id as u64,
+        first_operation_id,
         2,
         b"op1-two",
     );
@@ -551,7 +570,7 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
     let server_task = tokio::spawn(async move {
         let mut session = server.accept().await?;
         let submit = session.receive_submit().await?;
-        let operation_id = submit.frame_id as u64;
+        let operation_id = submit.operation_id;
 
         session
             .send_capability(
@@ -597,8 +616,9 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
 
     let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
     let mut session = client.open_session().await?;
+    let operation_id = 3_003;
     let frame_id = session
-        .submit_nowait(token_submit(), b"prompt".to_vec())
+        .submit_nowait(token_submit(operation_id), b"prompt".to_vec())
         .await?;
 
     match session.await_event().await? {
@@ -622,7 +642,7 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
             body,
         } => {
             assert_eq!(message_type, MessageType::RouteHint);
-            assert_eq!(metadata.operation_id, frame_id as u64);
+            assert_eq!(metadata.operation_id, operation_id);
             assert_eq!(metadata.route_id, 92);
             assert_eq!(metadata.executor_class, 3);
             assert_eq!(body, b"hint".to_vec());
@@ -639,7 +659,7 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
     }
     match session.await_event().await? {
         NnrpClientEvent::ObjectRef { metadata, body } => {
-            assert_eq!(metadata.operation_id, frame_id as u64);
+            assert_eq!(metadata.operation_id, operation_id);
             assert_eq!(metadata.length, 4);
             assert!(body.is_empty());
         }
@@ -701,7 +721,7 @@ async fn tcp_loopback_releases_objects_after_cancel_and_reports_cache_miss(
     let server_task = tokio::spawn(async move {
         let mut session = server.accept().await?;
         let submit = session.receive_submit().await?;
-        let operation_id = submit.frame_id as u64;
+        let operation_id = submit.operation_id;
         let control = session.receive_runtime_control().await?;
         assert_eq!(control.message_type, MessageType::Cancel);
         assert!(control.body.is_empty());
@@ -722,14 +742,15 @@ async fn tcp_loopback_releases_objects_after_cancel_and_reports_cache_miss(
 
     let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
     let mut session = client.open_session().await?;
-    let frame_id = session
-        .submit_nowait(token_submit(), b"prompt".to_vec())
+    let operation_id = 4_004;
+    session
+        .submit_nowait(token_submit(operation_id), b"prompt".to_vec())
         .await?;
-    session.cancel_operation(frame_id as u64, 7).await?;
+    session.cancel_operation(operation_id, 7).await?;
 
     match session.await_event().await? {
         NnrpClientEvent::ObjectRelease { metadata, body } => {
-            assert_eq!(metadata.operation_id, frame_id as u64);
+            assert_eq!(metadata.operation_id, operation_id);
             assert_eq!(metadata.release_reason, ObjectReleaseReason::Cancelled);
             assert_eq!(body, b"cancel".to_vec());
         }
@@ -967,7 +988,7 @@ async fn tcp_loopback_suppresses_expired_final_results() -> Result<(), RuntimeEr
         let submit = session.receive_submit().await?;
         let expire = session.receive_scheduling_update().await?;
         assert_eq!(expire.message_type, MessageType::ExpireAt);
-        assert_eq!(expire.metadata.operation_id, submit.frame_id as u64);
+        assert_eq!(expire.metadata.operation_id, submit.operation_id);
 
         let error = session
             .send_result(submit.frame_id, token_result(), b"expired".to_vec())
@@ -983,7 +1004,7 @@ async fn tcp_loopback_suppresses_expired_final_results() -> Result<(), RuntimeEr
         assert_eq!(
             session
                 .operations()
-                .operation(submit.frame_id as u64)
+                .operation(submit.operation_id)
                 .expect("operation should be registered")
                 .state,
             OperationState::Superseded
@@ -996,17 +1017,18 @@ async fn tcp_loopback_suppresses_expired_final_results() -> Result<(), RuntimeEr
 
     let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
     let mut session = client.open_session().await?;
-    let frame_id = session
-        .submit_nowait(token_submit(), b"prompt".to_vec())
+    let operation_id = 5_005;
+    session
+        .submit_nowait(token_submit(operation_id), b"prompt".to_vec())
         .await?;
-    session.expire_at(frame_id as u64, 1).await?;
+    session.expire_at(operation_id, 1).await?;
     match session.await_event().await? {
         NnrpClientEvent::ResultDropReason {
             metadata: reason,
             body,
         } => {
-            assert_eq!(reason.operation_id, frame_id as u64);
-            assert_eq!(reason.result_sequence, frame_id as u64);
+            assert_eq!(reason.operation_id, operation_id);
+            assert_eq!(reason.result_sequence, operation_id);
             assert_eq!(reason.drop_reason_code, RESULT_DROP_REASON_DEADLINE_EXPIRED);
             assert_eq!(reason.source_role, RuntimeRole::Server as u8);
             assert!(body.is_empty());
@@ -2098,7 +2120,7 @@ async fn transport_slot_rejects_config_mismatches() {
     ));
 }
 
-fn token_submit() -> FrameSubmitMetadata {
+fn token_submit(operation_id: u64) -> FrameSubmitMetadata {
     FrameSubmitMetadata {
         src_width: 0,
         src_height: 0,
@@ -2115,6 +2137,7 @@ fn token_submit() -> FrameSubmitMetadata {
         tile_base_id: 0,
         camera_bytes: 0,
         tile_index_bytes: 0,
+        operation_id,
         submit_mode: SubmitMode::Inline,
         budget_policy: 0,
         loss_tolerance_policy: 0,

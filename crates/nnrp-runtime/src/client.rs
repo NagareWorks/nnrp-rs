@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fmt;
 
 use nnrp_core::{
@@ -93,6 +94,8 @@ pub struct NnrpClient {
 pub struct NnrpClientSession {
     session_id: u32,
     next_frame_id: u32,
+    operation_ids: BTreeSet<u64>,
+    last_operation_id: u64,
     transport: BoxedFramedTransport,
     lifecycle: ConnectionLifecycle,
     pressure: RuntimePressureState,
@@ -249,6 +252,8 @@ impl NnrpClient {
         Ok(NnrpClientSession {
             session_id: ack.session_id,
             next_frame_id: 1,
+            operation_ids: BTreeSet::new(),
+            last_operation_id: 0,
             transport: self.transport,
             lifecycle: self.lifecycle,
             pressure: RuntimePressureState::default(),
@@ -319,6 +324,11 @@ impl NnrpClientSession {
                 "client frame id must not be zero, reused, or moved backward",
             ));
         }
+        if self.operation_ids.contains(&metadata.operation_id) {
+            return Err(RuntimeError::UnexpectedMessage(
+                "client operation id must not be zero or reused",
+            ));
+        }
         let next_frame_id = frame_id
             .checked_add(1)
             .ok_or(RuntimeError::FrameIdOverflow)?;
@@ -339,6 +349,8 @@ impl NnrpClientSession {
             )?)
             .await?;
         self.next_frame_id = next_frame_id;
+        self.operation_ids.insert(metadata.operation_id);
+        self.last_operation_id = self.last_operation_id.max(metadata.operation_id);
         Ok(frame_id)
     }
 
@@ -953,7 +965,7 @@ impl NnrpClientSession {
             close_reason: SessionCloseReason::ClientShutdown,
             in_flight_policy: InFlightPolicy::Drain,
             drain_timeout_ms: 0,
-            last_operation_id: self.next_frame_id.saturating_sub(1) as u64,
+            last_operation_id: self.last_operation_id,
             session_error_code: SESSION_ERROR_NONE,
             session_close_tag: self.session_id,
         };
