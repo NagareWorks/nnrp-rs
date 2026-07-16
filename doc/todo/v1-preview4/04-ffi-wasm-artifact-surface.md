@@ -42,6 +42,33 @@
 - [x] Run real Rust FFI loopbacks for TCP, QUIC, IPC, WS, and WSS.
 - [x] Load each packaged host dynamic library and run a real packet-batch loopback through exported symbols.
 
+## FFI Role Runtime Carrier Ownership
+
+- [x] Replace logical-only role connections with carrier-backed runtime resources.
+  - [x] Transfer a transport connection into `nnrp_client_connect` without exposing it after success.
+  - [x] Transfer a transport listener into `nnrp_server_bind` without exposing it after success.
+  - [x] Keep failed transfers caller-owned and close successful transfers through the role owner.
+  - [x] Reject handles from another artifact or duplicate library instance.
+- [x] Drive the canonical `nnrp-runtime` state machines from FFI role handles.
+  - [x] Perform the client `SESSION_OPEN` / `SESSION_OPEN_ACK` exchange in `nnrp_client_open_session`.
+  - [x] Accept a carrier connection and perform the server handshake in `nnrp_server_accept`.
+  - [x] Remove caller-injected server session/profile/schema state.
+- [ ] Route every role operation over the adopted carrier.
+  - [ ] Validate, split, and send `FRAME_SUBMIT` metadata/body in one coarse call.
+  - [ ] Decode inbound submit packets and create server operation handles.
+  - [ ] Validate, split, and send partial/terminal/drop/trace result packets.
+  - [ ] Validate, split, and send control/object/cache packets.
+  - [ ] Read and decode bounded client and server event batches.
+  - [ ] Preserve operation ordering, pressure state, object/cache state, and owned payload release.
+- [ ] Remove production use of local completion and event-injection helpers.
+  - [ ] Keep any synthetic loop helper explicitly benchmark-only.
+  - [ ] Reject SDK or conformance paths that never read or write the selected carrier.
+- [ ] Add same-library role/carrier E2E coverage.
+  - [ ] Cover TCP, QUIC, IPC, WebSocket, and secure variants supported by each platform.
+  - [ ] Cover handshake, submit, partial result, terminal result, control, object/cache, and close.
+  - [x] Assert successful adoption invalidates the packet-level transport handle.
+  - [ ] Run the E2E through every packaged host dynamic library before release.
+
 ## WASM Surface
 
 - [x] Add TypeScript-visible runtime control structures.
