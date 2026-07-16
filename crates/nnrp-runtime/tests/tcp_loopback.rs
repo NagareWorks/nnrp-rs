@@ -1,21 +1,22 @@
 use nnrp_core::NnrpError;
 use nnrp_core::{
-    BackpressureLevel, CacheInvalidateMetadata, CacheInvalidateScope, CacheMissMetadata,
-    CacheMissReason, CacheObjectId, CacheObjectKind, CacheReferenceMetadata, CacheReuseScope,
-    CapabilityMetadata, CommonHeader, ControlRequestMetadata, FlowScopeKind, FlowUpdateMetadata,
-    FlowUpdateReason, FrameSubmitMetadata, InFlightPolicy, InputProfile, MemoryLocationHint,
-    MessageType, ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata,
-    ObjectReleaseMetadata, ObjectReleaseReason, OperationState, OwnershipHint,
-    PartialResultMetadata, PayloadKindBitmap, PressureMetadata, ProgressMetadata, ResultClass,
-    ResultDropReasonMetadata, ResultPushMetadata, RouteHintMetadata, RuntimeObjectKind,
-    RuntimeRole, SchemaRegistry, SessionCloseMetadata, SessionCloseReason,
-    SessionMigrateAckMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
+    BackpressureLevel, BudgetMetadata, CacheInvalidateMetadata, CacheInvalidateScope,
+    CacheMissMetadata, CacheMissReason, CacheObjectId, CacheObjectKind, CacheReferenceMetadata,
+    CacheReuseScope, CapabilityMetadata, CommonHeader, ControlRequestMetadata, FlowScopeKind,
+    FlowUpdateMetadata, FlowUpdateReason, FrameSubmitMetadata, InFlightPolicy, InputProfile,
+    MemoryLocationHint, MessageType, ObjectDeltaMetadata, ObjectDescriptorMetadata,
+    ObjectReferenceMetadata, ObjectReleaseMetadata, ObjectReleaseReason, OperationState,
+    OwnershipHint, PartialResultMetadata, PayloadKindBitmap, PressureMetadata, ProgressMetadata,
+    ResultClass, ResultDropReasonMetadata, ResultPushMetadata, RouteHintMetadata,
+    RuntimeObjectKind, RuntimeRole, SchedulingMetadata, SchemaRegistry, SessionCloseMetadata,
+    SessionCloseReason, SessionMigrateAckMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
     SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata, SessionPatchRejectReason,
-    SessionPriorityClass, SessionStatus, SubmitMode, TileIndexMode, TransportId,
-    TransportProbeAckMetadata, TransportProbeMetadata, FLOW_UPDATE_FLAG_CREDIT_VALID,
-    RESULT_DROP_REASON_DEADLINE_EXPIRED, RESULT_PUSH_METADATA_LEN, SESSION_CLOSE_ACK_METADATA_LEN,
-    SESSION_ERROR_NONE, SESSION_OPEN_ACK_METADATA_LEN, SESSION_OPEN_METADATA_LEN,
-    STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
+    SessionPriorityClass, SessionStatus, SubmitMode, SupersedeMetadata, TileIndexMode,
+    TraceContextMetadata, TransportId, TransportProbeAckMetadata, TransportProbeMetadata,
+    FLOW_UPDATE_FLAG_CREDIT_VALID, RESULT_DROP_REASON_DEADLINE_EXPIRED, RESULT_PUSH_METADATA_LEN,
+    SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE, SESSION_OPEN_ACK_METADATA_LEN,
+    SESSION_OPEN_METADATA_LEN, STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID,
+    TOKEN_DELTA_SCHEMA_VERSION,
 };
 use nnrp_runtime::{
     BoxedFramedTransport, FramedListener, FramedTransport, NnrpClient, NnrpClientConfig,
@@ -593,7 +594,7 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
             .send_object_ref(object_reference(operation_id), Vec::new())
             .await?;
         session
-            .send_object_delta(object_delta(), b"abcd".to_vec())
+            .send_object_delta(MessageType::ObjectDelta, object_delta(), b"abcd".to_vec())
             .await?;
         session
             .send_cache_reference(cache_reference(), b"hint".to_vec())
@@ -666,7 +667,7 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
         event => panic!("expected object reference, got {event:?}"),
     }
     match session.await_event().await? {
-        NnrpClientEvent::ObjectDelta { metadata, body } => {
+        NnrpClientEvent::ObjectDelta { metadata, body, .. } => {
             assert_eq!(metadata.object_id, 900);
             assert_eq!(metadata.delta_bytes, 4);
             assert_eq!(body, b"abcd".to_vec());
@@ -1361,6 +1362,240 @@ async fn client_preview4_control_event_reader_rejects_malformed_packets() -> Res
 }
 
 #[tokio::test]
+async fn server_preview4_event_reader_rejects_malformed_packets() -> Result<(), RuntimeError> {
+    let trace = TraceContextMetadata {
+        trace_id: 1,
+        span_id: 2,
+        parent_span_id: 0,
+        stage_code: 1,
+        flags: 0,
+        body_bytes: 1,
+    };
+    let recoverable = nnrp_core::RecoverableErrorMetadata {
+        error_code: 1,
+        error_scope: nnrp_core::ErrorScope::Frame,
+        recovery_action: 1,
+        source_role: RuntimeRole::Client as u8,
+        flags: 0,
+        retry_after_ms: 1,
+        related_session_id: 1,
+        related_frame_id: 1,
+        related_view_id: 0,
+        diagnostic_bytes: 1,
+    };
+    let retry_after = nnrp_core::RetryAfterMetadata {
+        scope_id: 1,
+        control_sequence: 1,
+        retry_after_ms: 1,
+        jitter_ms: 0,
+        reason_code: 1,
+        source_role: RuntimeRole::Client as u8,
+        flags: 0,
+        diagnostic_bytes: 1,
+    };
+    let control = ControlRequestMetadata {
+        operation_id: 1,
+        control_sequence: 1,
+        reason_code: 1,
+        source_role: RuntimeRole::Client as u8,
+        flags: 0,
+        diagnostic_bytes: 1,
+    };
+    let scheduling = SchedulingMetadata {
+        operation_id: 1,
+        control_sequence: 1,
+        priority_class: 1,
+        priority_delta: 0,
+        deadline_unix_ms: 0,
+        flags: 0,
+    };
+
+    for packet in [
+        control_event_packet(MessageType::FrameSubmit, 1, vec![0], Vec::new())?,
+        control_event_packet(
+            MessageType::FrameSubmit,
+            2,
+            token_submit(1).to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        control_event_packet(MessageType::FrameCancel, 2, Vec::new(), Vec::new())?,
+        control_event_packet(MessageType::FrameCancel, 1, Vec::new(), b"bad".to_vec())?,
+        control_event_packet(MessageType::PartialResult, 1, vec![0], Vec::new())?,
+        control_event_packet(
+            MessageType::PartialResult,
+            1,
+            partial_result(1).to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        control_event_packet(MessageType::Progress, 1, vec![0], Vec::new())?,
+        control_event_packet(
+            MessageType::Progress,
+            1,
+            progress(1).to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        control_event_packet(MessageType::ResultDropReason, 1, vec![0], Vec::new())?,
+        control_event_packet(
+            MessageType::ResultDropReason,
+            1,
+            ResultDropReasonMetadata {
+                diagnostic_bytes: 1,
+                ..drop_reason(1)
+            }
+            .to_bytes()?
+            .to_vec(),
+            Vec::new(),
+        )?,
+        control_event_packet(MessageType::Cancel, 1, vec![0], Vec::new())?,
+        control_event_packet(
+            MessageType::Cancel,
+            1,
+            control.to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        control_event_packet(MessageType::PriorityUpdate, 1, vec![0], Vec::new())?,
+        control_event_packet(
+            MessageType::PriorityUpdate,
+            1,
+            scheduling.to_bytes()?.to_vec(),
+            b"bad".to_vec(),
+        )?,
+        control_event_packet(MessageType::Supersede, 1, vec![0], Vec::new())?,
+        control_event_packet(
+            MessageType::Supersede,
+            1,
+            SupersedeMetadata {
+                old_operation_id: 1,
+                new_operation_id: 2,
+                control_sequence: 1,
+                drop_reason_code: 1,
+                flags: 0,
+                diagnostic_bytes: 1,
+            }
+            .to_bytes()?
+            .to_vec(),
+            Vec::new(),
+        )?,
+        control_event_packet(MessageType::BudgetUpdate, 1, vec![0], Vec::new())?,
+        control_event_packet(
+            MessageType::BudgetUpdate,
+            1,
+            BudgetMetadata {
+                operation_id: 1,
+                compute_budget_units: 1,
+                memory_budget_bytes: 1,
+                bandwidth_budget_bytes: 1,
+                token_budget: 1,
+                flags: 0,
+            }
+            .to_bytes()?
+            .to_vec(),
+            b"bad".to_vec(),
+        )?,
+        control_event_packet(MessageType::Backpressure, 1, vec![0], Vec::new())?,
+        control_event_packet(
+            MessageType::CreditUpdate,
+            1,
+            credit_update().to_bytes()?.to_vec(),
+            b"bad".to_vec(),
+        )?,
+        control_event_packet(MessageType::CapabilityNegotiation, 1, vec![0], Vec::new())?,
+        control_event_packet(
+            MessageType::CapabilityNegotiation,
+            1,
+            capability_metadata().to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        control_event_packet(MessageType::RouteHint, 1, vec![0], Vec::new())?,
+        control_event_packet(
+            MessageType::RouteHint,
+            1,
+            route_hint(1).to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        control_event_packet(MessageType::TraceContext, 1, vec![0], Vec::new())?,
+        control_event_packet(
+            MessageType::TraceContext,
+            1,
+            trace.to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        control_event_packet(MessageType::ErrorRecoverable, 1, vec![0], Vec::new())?,
+        control_event_packet(
+            MessageType::ErrorRecoverable,
+            1,
+            recoverable.to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        control_event_packet(MessageType::RetryAfter, 1, vec![0], Vec::new())?,
+        control_event_packet(
+            MessageType::RetryAfter,
+            1,
+            retry_after.to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        object_event_packet(MessageType::ObjectDeclare, 1, vec![0], Vec::new())?,
+        object_event_packet(
+            MessageType::ObjectDeclare,
+            1,
+            object_descriptor().to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        object_event_packet(MessageType::ObjectRef, 1, vec![0], Vec::new())?,
+        object_event_packet(
+            MessageType::ObjectRef,
+            1,
+            object_reference(1).to_bytes()?.to_vec(),
+            b"bad".to_vec(),
+        )?,
+        object_event_packet(MessageType::ObjectRelease, 1, vec![0], Vec::new())?,
+        object_event_packet(
+            MessageType::ObjectRelease,
+            1,
+            object_release(1, ObjectReleaseReason::Completed, 1)
+                .to_bytes()?
+                .to_vec(),
+            Vec::new(),
+        )?,
+        object_event_packet(MessageType::ObjectDelta, 1, vec![0], Vec::new())?,
+        object_event_packet(
+            MessageType::ObjectDelta,
+            1,
+            object_delta().to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        object_event_packet(MessageType::CacheReference, 1, vec![0], Vec::new())?,
+        object_event_packet(
+            MessageType::CacheReference,
+            1,
+            cache_reference().to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        object_event_packet(MessageType::CacheMiss, 1, vec![0], Vec::new())?,
+        object_event_packet(
+            MessageType::CacheMiss,
+            1,
+            cache_miss().to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        object_event_packet(MessageType::CacheInvalidate, 1, vec![0], Vec::new())?,
+        object_event_packet(
+            MessageType::CacheInvalidate,
+            1,
+            cache_invalidate().to_bytes()?.to_vec(),
+            b"bad".to_vec(),
+        )?,
+    ] {
+        let error = server_await_event_error(packet).await;
+        assert!(matches!(
+            error,
+            RuntimeError::UnexpectedMessage(_) | RuntimeError::Protocol(_)
+        ));
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn client_preview4_result_drop_reason_preserves_diagnostic_body() -> Result<(), RuntimeError>
 {
     let metadata = ResultDropReasonMetadata {
@@ -1716,7 +1951,9 @@ async fn server_preview4_object_cache_senders_reject_body_mismatches() -> Result
         })
         .await,
         server_send_object_error(|mut session| async move {
-            session.send_object_delta(object_delta(), Vec::new()).await
+            session
+                .send_object_delta(MessageType::ObjectDelta, object_delta(), Vec::new())
+                .await
         })
         .await,
         server_send_object_error(|mut session| async move {
@@ -2419,6 +2656,13 @@ async fn server_receive_scheduling_update_error(packet: RuntimePacket) -> Runtim
 async fn server_receive_pressure_update_error(packet: RuntimePacket) -> RuntimeError {
     server_receive_error(packet, |mut session| async move {
         session.receive_pressure_update().await.map(|_| ())
+    })
+    .await
+}
+
+async fn server_await_event_error(packet: RuntimePacket) -> RuntimeError {
+    server_receive_error(packet, |mut session| async move {
+        session.await_event().await.map(|_| ())
     })
     .await
 }

@@ -56,16 +56,16 @@
 - [ ] Route every role operation over the adopted carrier.
   - [x] Validate, split, and send `FRAME_SUBMIT` metadata/body with independent wire operation and frame identities in one coarse call.
   - [x] Decode inbound submit packets and bind both wire identities to opaque server operation handles.
-  - [ ] Validate, split, and send partial/terminal/drop/trace result packets.
-  - [ ] Validate, split, and send control/object/cache packets.
-  - [ ] Read and decode bounded client and server event batches.
+  - [x] Validate, split, and send partial/terminal/drop/trace result packets.
+  - [x] Validate, split, and send control/object/cache packets.
+  - [x] Read and decode bounded client and server event batches.
   - [ ] Preserve operation ordering, pressure state, object/cache state, and owned payload release.
 - [ ] Remove production use of local completion and event-injection helpers.
   - [ ] Keep any synthetic loop helper explicitly benchmark-only.
   - [ ] Reject SDK or conformance paths that never read or write the selected carrier.
 - [ ] Add same-library role/carrier E2E coverage.
   - [ ] Cover TCP, QUIC, IPC, WebSocket, and secure variants supported by each platform.
-  - [ ] Cover handshake, submit, partial result, terminal result, control, object/cache, and close.
+  - [x] Cover handshake, submit, partial result, terminal result, control, object/cache, and close.
   - [x] Assert successful adoption invalidates the packet-level transport handle.
   - [ ] Run the E2E through every packaged host dynamic library before release.
 

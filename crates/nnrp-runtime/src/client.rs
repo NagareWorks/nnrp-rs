@@ -1,30 +1,32 @@
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::fmt;
 
 use nnrp_core::{
     validate_control_request_semantics, validate_partial_result_semantics,
     validate_pressure_semantics, validate_progress_semantics, validate_result_drop_header,
-    validate_result_drop_reason_semantics, validate_scheduling_semantics, CacheInvalidateMetadata,
-    CacheMissMetadata, CacheObjectKind, CacheReferenceMetadata, CapabilityMetadata, CommonHeader,
-    ConnectionLifecycle, ControlRequestMetadata, FlowUpdateMetadata, FrameSubmitMetadata,
-    InFlightPolicy, MessageType, ObjectDeltaMetadata, ObjectDescriptorMetadata,
-    ObjectReferenceMetadata, ObjectReleaseMetadata, PartialResultMetadata, PressureMetadata,
-    ProgressMetadata, ResultDropReasonMetadata, ResultPushMetadata, RouteHintMetadata,
+    validate_result_drop_reason_semantics, validate_scheduling_semantics,
+    validate_trace_context_semantics, BudgetMetadata, CacheInvalidateMetadata, CacheMissMetadata,
+    CacheObjectKind, CacheReferenceMetadata, CapabilityMetadata, CommonHeader, ConnectionLifecycle,
+    ControlRequestMetadata, FlowUpdateMetadata, FrameSubmitMetadata, InFlightPolicy, MessageType,
+    ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata, ObjectReleaseMetadata,
+    PartialResultMetadata, PressureMetadata, ProgressMetadata, RecoverableErrorMetadata,
+    ResultDropReasonMetadata, ResultPushMetadata, RetryAfterMetadata, RouteHintMetadata,
     SchedulingMetadata, SessionCloseAckMetadata, SessionCloseMetadata, SessionCloseReason,
     SessionMigrateAckMetadata, SessionMigrateMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
     SessionPatchAckMetadata, SessionPatchMetadata, SessionPriorityClass, SessionStatus,
-    TransportId, CACHE_INVALIDATE_METADATA_LEN, CACHE_MISS_METADATA_LEN,
-    CACHE_REFERENCE_METADATA_LEN, CAPABILITY_METADATA_LEN,
+    SupersedeMetadata, TraceContextMetadata, TransportId, CACHE_INVALIDATE_METADATA_LEN,
+    CACHE_MISS_METADATA_LEN, CACHE_REFERENCE_METADATA_LEN, CAPABILITY_METADATA_LEN,
     CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED, CONTROL_REQUEST_FLAG_HARD_ABORT_ALLOWED,
     CONTROL_REQUEST_METADATA_LEN, FRAME_SUBMIT_METADATA_LEN, OBJECT_DELTA_METADATA_LEN,
     OBJECT_DESCRIPTOR_METADATA_LEN, OBJECT_REFERENCE_METADATA_LEN, OBJECT_RELEASE_METADATA_LEN,
     PARTIAL_RESULT_METADATA_LEN, PRESSURE_METADATA_LEN, PROGRESS_METADATA_LEN,
-    RESULT_DROP_REASON_METADATA_LEN, RESULT_PUSH_METADATA_LEN, ROUTE_HINT_METADATA_LEN,
-    SCHEDULING_FLAG_DISCARD_STALE, SCHEDULING_FLAG_EMIT_DROP_REASON, SCHEDULING_METADATA_LEN,
-    SESSION_CLOSE_ACK_METADATA_LEN, SESSION_CLOSE_METADATA_LEN, SESSION_ERROR_NONE,
-    SESSION_MIGRATE_ACK_METADATA_LEN, SESSION_MIGRATE_METADATA_LEN, SESSION_OPEN_METADATA_LEN,
-    SESSION_PATCH_ACK_METADATA_LEN, SESSION_PATCH_METADATA_LEN, STANDARD_PROFILE_TOKEN,
-    TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
+    RECOVERABLE_ERROR_METADATA_LEN, RESULT_DROP_REASON_METADATA_LEN, RESULT_PUSH_METADATA_LEN,
+    RETRY_AFTER_METADATA_LEN, ROUTE_HINT_METADATA_LEN, SCHEDULING_FLAG_DISCARD_STALE,
+    SCHEDULING_FLAG_EMIT_DROP_REASON, SCHEDULING_METADATA_LEN, SESSION_CLOSE_ACK_METADATA_LEN,
+    SESSION_CLOSE_METADATA_LEN, SESSION_ERROR_NONE, SESSION_MIGRATE_ACK_METADATA_LEN,
+    SESSION_MIGRATE_METADATA_LEN, SESSION_OPEN_METADATA_LEN, SESSION_PATCH_ACK_METADATA_LEN,
+    SESSION_PATCH_METADATA_LEN, STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID,
+    TOKEN_DELTA_SCHEMA_VERSION, TRACE_CONTEXT_METADATA_LEN,
 };
 
 use crate::{
@@ -94,7 +96,8 @@ pub struct NnrpClient {
 pub struct NnrpClientSession {
     session_id: u32,
     next_frame_id: u32,
-    operation_ids: BTreeSet<u64>,
+    operation_frames: BTreeMap<u64, u32>,
+    frame_operations: BTreeMap<u32, u64>,
     last_operation_id: u64,
     transport: BoxedFramedTransport,
     lifecycle: ConnectionLifecycle,
@@ -119,6 +122,20 @@ pub enum NnrpClientEvent {
         metadata: ProgressMetadata,
         body: Vec<u8>,
     },
+    Control {
+        message_type: MessageType,
+        metadata: ControlRequestMetadata,
+        body: Vec<u8>,
+    },
+    Scheduling {
+        message_type: MessageType,
+        metadata: SchedulingMetadata,
+    },
+    Supersede {
+        metadata: SupersedeMetadata,
+        body: Vec<u8>,
+    },
+    Budget(BudgetMetadata),
     ResultDrop {
         frame_id: u32,
     },
@@ -142,6 +159,7 @@ pub enum NnrpClientEvent {
         body: Vec<u8>,
     },
     ObjectDelta {
+        message_type: MessageType,
         metadata: ObjectDeltaMetadata,
         body: Vec<u8>,
     },
@@ -162,6 +180,19 @@ pub enum NnrpClientEvent {
     RouteHint {
         message_type: MessageType,
         metadata: RouteHintMetadata,
+        body: Vec<u8>,
+    },
+    TraceContext {
+        frame_id: u32,
+        metadata: TraceContextMetadata,
+        body: Vec<u8>,
+    },
+    RecoverableError {
+        metadata: RecoverableErrorMetadata,
+        body: Vec<u8>,
+    },
+    RetryAfter {
+        metadata: RetryAfterMetadata,
         body: Vec<u8>,
     },
 }
@@ -252,7 +283,8 @@ impl NnrpClient {
         Ok(NnrpClientSession {
             session_id: ack.session_id,
             next_frame_id: 1,
-            operation_ids: BTreeSet::new(),
+            operation_frames: BTreeMap::new(),
+            frame_operations: BTreeMap::new(),
             last_operation_id: 0,
             transport: self.transport,
             lifecycle: self.lifecycle,
@@ -324,7 +356,7 @@ impl NnrpClientSession {
                 "client frame id must not be zero, reused, or moved backward",
             ));
         }
-        if self.operation_ids.contains(&metadata.operation_id) {
+        if self.operation_frames.contains_key(&metadata.operation_id) {
             return Err(RuntimeError::UnexpectedMessage(
                 "client operation id must not be zero or reused",
             ));
@@ -349,7 +381,10 @@ impl NnrpClientSession {
             )?)
             .await?;
         self.next_frame_id = next_frame_id;
-        self.operation_ids.insert(metadata.operation_id);
+        self.operation_frames
+            .insert(metadata.operation_id, frame_id);
+        self.frame_operations
+            .insert(frame_id, metadata.operation_id);
         self.last_operation_id = self.last_operation_id.max(metadata.operation_id);
         Ok(frame_id)
     }
@@ -376,6 +411,10 @@ impl NnrpClientSession {
                 "client expected RESULT_PUSH but received CREDIT_UPDATE",
             )),
             NnrpClientEvent::Progress { .. }
+            | NnrpClientEvent::Control { .. }
+            | NnrpClientEvent::Scheduling { .. }
+            | NnrpClientEvent::Supersede { .. }
+            | NnrpClientEvent::Budget(_)
             | NnrpClientEvent::ObjectDeclare { .. }
             | NnrpClientEvent::ObjectRef { .. }
             | NnrpClientEvent::ObjectRelease { .. }
@@ -384,8 +423,11 @@ impl NnrpClientSession {
             | NnrpClientEvent::CacheMiss { .. }
             | NnrpClientEvent::CacheInvalidate(_)
             | NnrpClientEvent::Capability { .. }
-            | NnrpClientEvent::RouteHint { .. } => Err(RuntimeError::UnexpectedMessage(
-                "client expected RESULT_PUSH but received object/cache event",
+            | NnrpClientEvent::RouteHint { .. }
+            | NnrpClientEvent::TraceContext { .. }
+            | NnrpClientEvent::RecoverableError { .. }
+            | NnrpClientEvent::RetryAfter { .. } => Err(RuntimeError::UnexpectedMessage(
+                "client expected RESULT_PUSH but received a non-terminal runtime event",
             )),
         }
     }
@@ -400,6 +442,7 @@ impl NnrpClientSession {
                         "client received malformed RESULT_PUSH metadata length",
                     ));
                 }
+                self.complete_operation_by_frame(packet.header.frame_id)?;
                 Ok(NnrpClientEvent::Result(NnrpResult {
                     frame_id: packet.header.frame_id,
                     metadata: ResultPushMetadata::parse(&packet.metadata)?,
@@ -409,6 +452,7 @@ impl NnrpClientSession {
             MessageType::ResultDrop => {
                 self.require_session_packet(&packet, "client received drop for another session")?;
                 validate_result_drop_header(&packet.header)?;
+                self.complete_operation_by_frame(packet.header.frame_id)?;
                 Ok(NnrpClientEvent::ResultDrop {
                     frame_id: packet.header.frame_id,
                 })
@@ -430,6 +474,7 @@ impl NnrpClientSession {
                     metadata.diagnostic_bytes as usize,
                     "client received RESULT_DROP_REASON body length mismatch",
                 )?;
+                self.complete_operation(metadata.operation_id)?;
                 Ok(NnrpClientEvent::ResultDropReason {
                     metadata,
                     body: packet.body,
@@ -478,6 +523,83 @@ impl NnrpClientSession {
                     metadata,
                     body: packet.body,
                 })
+            }
+            MessageType::Cancel | MessageType::Abort => {
+                self.require_session_packet(
+                    &packet,
+                    "client received control for another session",
+                )?;
+                if packet.metadata.len() != CONTROL_REQUEST_METADATA_LEN {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "client received malformed runtime control metadata length",
+                    ));
+                }
+                let metadata = ControlRequestMetadata::parse(&packet.metadata)?;
+                validate_control_request_semantics(packet.header.message_type, &metadata)?;
+                require_body_len(
+                    packet.body.len(),
+                    metadata.diagnostic_bytes as usize,
+                    "client received runtime control diagnostic body length mismatch",
+                )?;
+                Ok(NnrpClientEvent::Control {
+                    message_type: packet.header.message_type,
+                    metadata,
+                    body: packet.body,
+                })
+            }
+            MessageType::PriorityUpdate | MessageType::Deadline | MessageType::ExpireAt => {
+                self.require_session_packet(
+                    &packet,
+                    "client received scheduling update for another session",
+                )?;
+                if packet.metadata.len() != SCHEDULING_METADATA_LEN || !packet.body.is_empty() {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "client received malformed scheduling metadata length",
+                    ));
+                }
+                let metadata = SchedulingMetadata::parse(&packet.metadata)?;
+                validate_scheduling_semantics(packet.header.message_type, &metadata)?;
+                Ok(NnrpClientEvent::Scheduling {
+                    message_type: packet.header.message_type,
+                    metadata,
+                })
+            }
+            MessageType::Supersede => {
+                self.require_session_packet(
+                    &packet,
+                    "client received supersede for another session",
+                )?;
+                if packet.metadata.len() != nnrp_core::SUPERSEDE_METADATA_LEN {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "client received malformed SUPERSEDE metadata length",
+                    ));
+                }
+                let metadata = SupersedeMetadata::parse(&packet.metadata)?;
+                require_body_len(
+                    packet.body.len(),
+                    metadata.diagnostic_bytes as usize,
+                    "client received SUPERSEDE diagnostic body length mismatch",
+                )?;
+                Ok(NnrpClientEvent::Supersede {
+                    metadata,
+                    body: packet.body,
+                })
+            }
+            MessageType::BudgetUpdate => {
+                self.require_session_packet(
+                    &packet,
+                    "client received budget update for another session",
+                )?;
+                if packet.metadata.len() != nnrp_core::BUDGET_METADATA_LEN
+                    || !packet.body.is_empty()
+                {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "client received malformed BUDGET_UPDATE lengths",
+                    ));
+                }
+                Ok(NnrpClientEvent::Budget(BudgetMetadata::parse(
+                    &packet.metadata,
+                )?))
             }
             MessageType::FlowUpdate => {
                 let metadata = FlowUpdateMetadata::parse(&packet.metadata)?;
@@ -631,6 +753,7 @@ impl NnrpClientSession {
                     "client received object delta body length mismatch",
                 )?;
                 Ok(NnrpClientEvent::ObjectDelta {
+                    message_type: packet.header.message_type,
                     metadata,
                     body: packet.body,
                 })
@@ -692,6 +815,71 @@ impl NnrpClientSession {
                     CacheInvalidateMetadata::parse(&packet.metadata)?,
                 ))
             }
+            MessageType::TraceContext => {
+                self.require_optional_session_packet(
+                    &packet,
+                    "client received trace context for another session",
+                )?;
+                if packet.metadata.len() != TRACE_CONTEXT_METADATA_LEN {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "client received malformed TRACE_CONTEXT metadata length",
+                    ));
+                }
+                let metadata = TraceContextMetadata::parse(&packet.metadata)?;
+                validate_trace_context_semantics(&metadata)?;
+                require_body_len(
+                    packet.body.len(),
+                    metadata.body_bytes as usize,
+                    "client received TRACE_CONTEXT body length mismatch",
+                )?;
+                Ok(NnrpClientEvent::TraceContext {
+                    frame_id: packet.header.frame_id,
+                    metadata,
+                    body: packet.body,
+                })
+            }
+            MessageType::ErrorRecoverable => {
+                self.require_optional_session_packet(
+                    &packet,
+                    "client received recoverable error for another session",
+                )?;
+                if packet.metadata.len() != RECOVERABLE_ERROR_METADATA_LEN {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "client received malformed ERROR_RECOVERABLE metadata length",
+                    ));
+                }
+                let metadata = RecoverableErrorMetadata::parse(&packet.metadata)?;
+                require_body_len(
+                    packet.body.len(),
+                    metadata.diagnostic_bytes as usize,
+                    "client received ERROR_RECOVERABLE diagnostic body length mismatch",
+                )?;
+                Ok(NnrpClientEvent::RecoverableError {
+                    metadata,
+                    body: packet.body,
+                })
+            }
+            MessageType::RetryAfter => {
+                self.require_optional_session_packet(
+                    &packet,
+                    "client received retry-after for another session",
+                )?;
+                if packet.metadata.len() != RETRY_AFTER_METADATA_LEN {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "client received malformed RETRY_AFTER metadata length",
+                    ));
+                }
+                let metadata = RetryAfterMetadata::parse(&packet.metadata)?;
+                require_body_len(
+                    packet.body.len(),
+                    metadata.diagnostic_bytes as usize,
+                    "client received RETRY_AFTER diagnostic body length mismatch",
+                )?;
+                Ok(NnrpClientEvent::RetryAfter {
+                    metadata,
+                    body: packet.body,
+                })
+            }
             _ => Err(RuntimeError::UnexpectedMessage(
                 "client expected a runtime result or control event",
             )),
@@ -717,6 +905,29 @@ impl NnrpClientSession {
         .await
     }
 
+    fn correlated_frame_id(&self, operation_id: u64) -> Result<u32, RuntimeError> {
+        self.operation_frames
+            .get(&operation_id)
+            .copied()
+            .ok_or(RuntimeError::UnexpectedMessage(
+                "client runtime event references an unknown operation",
+            ))
+    }
+
+    fn complete_operation_by_frame(&mut self, frame_id: u32) -> Result<(), RuntimeError> {
+        if let Some(operation_id) = self.frame_operations.remove(&frame_id) {
+            self.operation_frames.remove(&operation_id);
+        }
+        Ok(())
+    }
+
+    fn complete_operation(&mut self, operation_id: u64) -> Result<(), RuntimeError> {
+        if let Some(frame_id) = self.operation_frames.remove(&operation_id) {
+            self.frame_operations.remove(&frame_id);
+        }
+        Ok(())
+    }
+
     pub async fn abort_operation(
         &mut self,
         operation_id: u64,
@@ -734,6 +945,107 @@ impl NnrpClientSession {
             },
         )
         .await
+    }
+
+    pub async fn send_progress(
+        &mut self,
+        metadata: ProgressMetadata,
+        body: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        validate_progress_semantics(&metadata)?;
+        require_body_len(
+            body.len(),
+            metadata.body_bytes as usize,
+            "client PROGRESS body length mismatch",
+        )?;
+        let frame_id = self.correlated_frame_id(metadata.operation_id)?;
+        self.write_runtime_packet(
+            MessageType::Progress,
+            frame_id,
+            metadata.to_bytes()?.to_vec(),
+            body,
+        )
+        .await
+    }
+
+    pub async fn send_partial_result(
+        &mut self,
+        metadata: PartialResultMetadata,
+        body: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        validate_partial_result_semantics(&metadata)?;
+        require_body_len(
+            body.len(),
+            metadata.body_bytes as usize,
+            "client PARTIAL_RESULT body length mismatch",
+        )?;
+        let frame_id = self.correlated_frame_id(metadata.operation_id)?;
+        self.write_runtime_packet(
+            MessageType::PartialResult,
+            frame_id,
+            metadata.to_bytes()?.to_vec(),
+            body,
+        )
+        .await
+    }
+
+    pub async fn send_result_drop_reason(
+        &mut self,
+        metadata: ResultDropReasonMetadata,
+        diagnostics: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        validate_result_drop_reason_semantics(&metadata)?;
+        require_body_len(
+            diagnostics.len(),
+            metadata.diagnostic_bytes as usize,
+            "client RESULT_DROP_REASON diagnostic body length mismatch",
+        )?;
+        let frame_id = self.correlated_frame_id(metadata.operation_id)?;
+        self.write_runtime_packet(
+            MessageType::ResultDropReason,
+            frame_id,
+            metadata.to_bytes()?.to_vec(),
+            diagnostics,
+        )
+        .await
+    }
+
+    pub async fn send_backpressure(
+        &mut self,
+        metadata: PressureMetadata,
+    ) -> Result<(), RuntimeError> {
+        validate_pressure_semantics(MessageType::Backpressure, &metadata)?;
+        self.pressure
+            .apply_outbound(MessageType::Backpressure, metadata)?;
+        self.write_runtime_packet(
+            MessageType::Backpressure,
+            0,
+            metadata.to_bytes()?.to_vec(),
+            Vec::new(),
+        )
+        .await
+    }
+
+    pub async fn send_flow_update(
+        &mut self,
+        metadata: FlowUpdateMetadata,
+    ) -> Result<(), RuntimeError> {
+        let mut header = CommonHeader::new(
+            MessageType::FlowUpdate,
+            nnrp_core::FLOW_UPDATE_METADATA_LEN as u32,
+            0,
+        );
+        if !matches!(metadata.scope_kind, nnrp_core::FlowScopeKind::Connection) {
+            header.session_id = self.session_id;
+        }
+        metadata.validate_routing(&header)?;
+        self.transport
+            .write_packet(&RuntimePacket::new(
+                header,
+                metadata.to_bytes()?.to_vec(),
+                Vec::new(),
+            )?)
+            .await
     }
 
     pub async fn send_control_request(
@@ -866,6 +1178,293 @@ impl NnrpClientSession {
             .await
     }
 
+    pub async fn supersede_operation(
+        &mut self,
+        metadata: SupersedeMetadata,
+        diagnostics: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        require_body_len(
+            diagnostics.len(),
+            metadata.diagnostic_bytes as usize,
+            "client supersede diagnostic body length mismatch",
+        )?;
+        let frame_id = self.correlated_frame_id(metadata.old_operation_id)?;
+        self.write_runtime_packet(
+            MessageType::Supersede,
+            frame_id,
+            metadata.to_bytes()?.to_vec(),
+            diagnostics,
+        )
+        .await
+    }
+
+    pub async fn update_budget(&mut self, metadata: BudgetMetadata) -> Result<(), RuntimeError> {
+        let frame_id = self.correlated_frame_id(metadata.operation_id)?;
+        self.write_runtime_packet(
+            MessageType::BudgetUpdate,
+            frame_id,
+            metadata.to_bytes()?.to_vec(),
+            Vec::new(),
+        )
+        .await
+    }
+
+    pub async fn send_capability(
+        &mut self,
+        message_type: MessageType,
+        metadata: CapabilityMetadata,
+        body: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        if !matches!(
+            message_type,
+            MessageType::CapabilityNegotiation | MessageType::DegradeProfile
+        ) {
+            return Err(RuntimeError::UnexpectedMessage(
+                "client capability send requires CAPABILITY_NEGOTIATION or DEGRADE_PROFILE",
+            ));
+        }
+        require_body_len(
+            body.len(),
+            metadata.body_bytes as usize,
+            "client capability body length mismatch",
+        )?;
+        self.write_runtime_packet(message_type, 0, metadata.to_bytes()?.to_vec(), body)
+            .await
+    }
+
+    pub async fn send_route_hint(
+        &mut self,
+        message_type: MessageType,
+        metadata: RouteHintMetadata,
+        body: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        if !matches!(
+            message_type,
+            MessageType::RouteHint | MessageType::ExecutionHint
+        ) {
+            return Err(RuntimeError::UnexpectedMessage(
+                "client route hint send requires ROUTE_HINT or EXECUTION_HINT",
+            ));
+        }
+        require_body_len(
+            body.len(),
+            metadata.body_bytes as usize,
+            "client route hint body length mismatch",
+        )?;
+        let frame_id = self.correlated_frame_id(metadata.operation_id)?;
+        self.write_runtime_packet(message_type, frame_id, metadata.to_bytes()?.to_vec(), body)
+            .await
+    }
+
+    pub async fn send_trace_context(
+        &mut self,
+        frame_id: u32,
+        metadata: TraceContextMetadata,
+        body: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        validate_trace_context_semantics(&metadata)?;
+        require_body_len(
+            body.len(),
+            metadata.body_bytes as usize,
+            "client trace context body length mismatch",
+        )?;
+        self.write_runtime_packet(
+            MessageType::TraceContext,
+            frame_id,
+            metadata.to_bytes()?.to_vec(),
+            body,
+        )
+        .await
+    }
+
+    pub async fn send_recoverable_error(
+        &mut self,
+        metadata: RecoverableErrorMetadata,
+        diagnostics: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        require_body_len(
+            diagnostics.len(),
+            metadata.diagnostic_bytes as usize,
+            "client recoverable error diagnostic body length mismatch",
+        )?;
+        self.write_runtime_packet(
+            MessageType::ErrorRecoverable,
+            metadata.related_frame_id,
+            metadata.to_bytes()?.to_vec(),
+            diagnostics,
+        )
+        .await
+    }
+
+    pub async fn send_retry_after(
+        &mut self,
+        metadata: RetryAfterMetadata,
+        diagnostics: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        require_body_len(
+            diagnostics.len(),
+            metadata.diagnostic_bytes as usize,
+            "client retry-after diagnostic body length mismatch",
+        )?;
+        self.write_runtime_packet(
+            MessageType::RetryAfter,
+            0,
+            metadata.to_bytes()?.to_vec(),
+            diagnostics,
+        )
+        .await
+    }
+
+    pub async fn send_object_declare(
+        &mut self,
+        metadata: ObjectDescriptorMetadata,
+        body: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        require_body_len(
+            body.len(),
+            metadata.metadata_bytes as usize,
+            "client OBJECT_DECLARE body length mismatch",
+        )?;
+        self.write_runtime_packet(
+            MessageType::ObjectDeclare,
+            0,
+            metadata.to_bytes()?.to_vec(),
+            body,
+        )
+        .await
+    }
+
+    pub async fn send_object_ref(
+        &mut self,
+        metadata: ObjectReferenceMetadata,
+        body: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        require_body_len(
+            body.len(),
+            metadata.metadata_bytes as usize,
+            "client OBJECT_REF body length mismatch",
+        )?;
+        let frame_id = self.correlated_frame_id(metadata.operation_id)?;
+        self.write_runtime_packet(
+            MessageType::ObjectRef,
+            frame_id,
+            metadata.to_bytes()?.to_vec(),
+            body,
+        )
+        .await
+    }
+
+    pub async fn send_object_release(
+        &mut self,
+        metadata: ObjectReleaseMetadata,
+        diagnostics: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        require_body_len(
+            diagnostics.len(),
+            metadata.diagnostic_bytes as usize,
+            "client OBJECT_RELEASE diagnostic body length mismatch",
+        )?;
+        let frame_id = self.correlated_frame_id(metadata.operation_id)?;
+        self.write_runtime_packet(
+            MessageType::ObjectRelease,
+            frame_id,
+            metadata.to_bytes()?.to_vec(),
+            diagnostics,
+        )
+        .await
+    }
+
+    pub async fn send_object_delta(
+        &mut self,
+        message_type: MessageType,
+        metadata: ObjectDeltaMetadata,
+        body: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        if !matches!(
+            message_type,
+            MessageType::ObjectPatch | MessageType::ObjectDelta
+        ) {
+            return Err(RuntimeError::UnexpectedMessage(
+                "client object delta send requires OBJECT_PATCH or OBJECT_DELTA",
+            ));
+        }
+        let expected_body_len =
+            metadata.metadata_bytes.saturating_add(metadata.delta_bytes) as usize;
+        require_body_len(
+            body.len(),
+            expected_body_len,
+            "client object delta body length mismatch",
+        )?;
+        self.write_runtime_packet(message_type, 0, metadata.to_bytes()?.to_vec(), body)
+            .await
+    }
+
+    pub async fn send_cache_reference(
+        &mut self,
+        metadata: CacheReferenceMetadata,
+        body: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        require_body_len(
+            body.len(),
+            metadata.metadata_bytes as usize,
+            "client CACHE_REFERENCE body length mismatch",
+        )?;
+        self.write_runtime_packet(
+            MessageType::CacheReference,
+            0,
+            metadata.to_bytes()?.to_vec(),
+            body,
+        )
+        .await
+    }
+
+    pub async fn send_cache_miss(
+        &mut self,
+        metadata: CacheMissMetadata,
+        diagnostics: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        require_body_len(
+            diagnostics.len(),
+            metadata.diagnostic_bytes as usize,
+            "client CACHE_MISS diagnostic body length mismatch",
+        )?;
+        self.write_runtime_packet(
+            MessageType::CacheMiss,
+            0,
+            metadata.to_bytes()?.to_vec(),
+            diagnostics,
+        )
+        .await
+    }
+
+    pub async fn send_cache_invalidate(
+        &mut self,
+        metadata: CacheInvalidateMetadata,
+    ) -> Result<(), RuntimeError> {
+        self.write_runtime_packet(
+            MessageType::CacheInvalidate,
+            0,
+            metadata.to_bytes()?.to_vec(),
+            Vec::new(),
+        )
+        .await
+    }
+
+    async fn write_runtime_packet(
+        &mut self,
+        message_type: MessageType,
+        frame_id: u32,
+        metadata: Vec<u8>,
+        body: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        let mut header = CommonHeader::new(message_type, metadata.len() as u32, body.len() as u32);
+        header.session_id = self.session_id;
+        header.frame_id = frame_id;
+        self.transport
+            .write_packet(&RuntimePacket::new(header, metadata, body)?)
+            .await
+    }
+
     pub async fn cancel_frame(&mut self, frame_id: u32) -> Result<(), RuntimeError> {
         let mut header = CommonHeader::new(MessageType::FrameCancel, 0, 0);
         header.session_id = self.session_id;
@@ -961,6 +1560,10 @@ impl NnrpClientSession {
     }
 
     pub async fn close(mut self) -> Result<(), RuntimeError> {
+        self.close_in_place().await
+    }
+
+    pub async fn close_in_place(&mut self) -> Result<(), RuntimeError> {
         let close = SessionCloseMetadata {
             close_reason: SessionCloseReason::ClientShutdown,
             in_flight_policy: InFlightPolicy::Drain,

@@ -3,18 +3,29 @@ use std::slice;
 use std::thread;
 
 use nnrp_core::{
-    FrameSubmitMetadata, InputProfile, PayloadKindBitmap, ResultClass, ResultPushMetadata,
-    SubmitMode, TileIndexMode, TransportId, PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID,
+    BackpressureLevel, BudgetMetadata, CacheInvalidateMetadata, CacheInvalidateScope,
+    CacheMissMetadata, CacheMissReason, CacheReferenceMetadata, CacheReuseScope,
+    CapabilityMetadata, ControlRequestMetadata, ErrorScope, FlowScopeKind, FlowUpdateMetadata,
+    FlowUpdateReason, FrameSubmitMetadata, InputProfile, MemoryLocationHint, MessageType,
+    ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata, ObjectReleaseMetadata,
+    ObjectReleaseReason, OwnershipHint, PartialResultMetadata, PayloadKindBitmap, PressureMetadata,
+    ProgressMetadata, RecoverableErrorMetadata, ResultClass, ResultDropReasonMetadata,
+    ResultPushMetadata, RetryAfterMetadata, RouteHintMetadata, RuntimeObjectKind, RuntimeRole,
+    SchedulingMetadata, SubmitMode, SupersedeMetadata, TileIndexMode, TraceContextMetadata,
+    TransportId, FLOW_UPDATE_FLAG_CREDIT_VALID, PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID,
     TOKEN_DELTA_SCHEMA_VERSION,
 };
 use nnrp_ffi::{
-    nnrp_buffer_release, nnrp_client_await_event, nnrp_client_await_events, nnrp_client_connect,
-    nnrp_client_open_session, nnrp_client_submit, nnrp_connection_close, nnrp_server_accept,
-    nnrp_server_await_events, nnrp_server_bind, nnrp_server_close, nnrp_server_send_result,
-    NnrpBufferView, NnrpClientConnectRequest, NnrpEvent, NnrpEventKind, NnrpFfiStatus, NnrpHandle,
-    NnrpHandleKind, NnrpPollResult, NnrpRoleEventPollRequest, NnrpServerAcceptRequest,
-    NnrpServerBindRequest, NnrpServerSendResultRequest, NnrpSessionOpenRequest, NnrpSubmitRequest,
-    NnrpTransportFrameBatch, NnrpTransportOpenRequest, NnrpTransportReadBatchRequest,
+    nnrp_buffer_release, nnrp_client_await_event, nnrp_client_await_events, nnrp_client_cancel,
+    nnrp_client_close, nnrp_client_connect, nnrp_client_open_session, nnrp_client_submit,
+    nnrp_connection_close, nnrp_runtime_frame_send, nnrp_server_accept, nnrp_server_await_events,
+    nnrp_server_bind, nnrp_server_close, nnrp_server_send_partial_result, nnrp_server_send_result,
+    NnrpBufferView, NnrpClientCancelRequest, NnrpClientConnectRequest, NnrpEvent, NnrpEventKind,
+    NnrpFfiStatus, NnrpHandle, NnrpHandleKind, NnrpPollResult, NnrpRoleEventPollRequest,
+    NnrpRuntimeFrameSendRequest, NnrpServerAcceptRequest, NnrpServerBindRequest,
+    NnrpServerSendPartialResultRequest, NnrpServerSendResultRequest, NnrpSessionOpenRequest,
+    NnrpSubmitRequest, NnrpTransportFrameBatch, NnrpTransportOpenRequest,
+    NnrpTransportReadBatchRequest,
 };
 
 unsafe extern "C" {
@@ -114,6 +125,612 @@ fn poll_request(scope: NnrpHandle) -> NnrpRoleEventPollRequest {
         flags: 0,
         reserved0: 0,
     }
+}
+
+unsafe fn poll_client_event(session: NnrpHandle) -> NnrpEvent {
+    let mut event = NnrpEvent::none();
+    let mut count = 0usize;
+    assert_eq!(
+        nnrp_client_await_events(poll_request(session), &mut event, 1, &mut count),
+        NnrpFfiStatus::ok()
+    );
+    assert_eq!(count, 1);
+    event
+}
+
+unsafe fn poll_server_event(session: NnrpHandle) -> NnrpEvent {
+    let mut event = NnrpEvent::none();
+    let mut count = 0usize;
+    assert_eq!(
+        nnrp_server_await_events(poll_request(session), &mut event, 1, &mut count),
+        NnrpFfiStatus::ok()
+    );
+    assert_eq!(count, 1);
+    event
+}
+
+unsafe fn send_runtime_frame(
+    handle: NnrpHandle,
+    message_type: MessageType,
+    frame_id: u32,
+    payload: &[u8],
+) {
+    assert_eq!(
+        nnrp_runtime_frame_send(NnrpRuntimeFrameSendRequest {
+            handle,
+            message_type: message_type as u32,
+            frame_id,
+            payload: view(payload),
+        }),
+        NnrpFfiStatus::ok(),
+        "failed to send {message_type:?}"
+    );
+}
+
+unsafe fn assert_runtime_event(
+    event: NnrpEvent,
+    message_type: MessageType,
+    expected_operation: Option<NnrpHandle>,
+    payload: &[u8],
+) {
+    assert_eq!(event.message_type, message_type as u32);
+    assert_eq!(
+        event.kind,
+        if message_type == MessageType::PartialResult {
+            NnrpEventKind::PartialResult as u32
+        } else if message_type == MessageType::ResultDropReason {
+            NnrpEventKind::ResultDropped as u32
+        } else if message_type == MessageType::FlowUpdate {
+            NnrpEventKind::FlowUpdated as u32
+        } else {
+            NnrpEventKind::RuntimeFrame as u32
+        }
+    );
+    if let Some(operation) = expected_operation {
+        assert_eq!(event.operation, operation);
+    }
+    assert_eq!(
+        slice::from_raw_parts(event.payload.ptr, event.payload.len),
+        payload
+    );
+    assert_eq!(
+        nnrp_buffer_release(event.payload_owner),
+        NnrpFfiStatus::ok()
+    );
+}
+
+fn control_payload(operation_id: u64, source_role: RuntimeRole) -> Vec<u8> {
+    ControlRequestMetadata {
+        operation_id,
+        control_sequence: 1,
+        reason_code: 1,
+        source_role: source_role as u8,
+        flags: 0,
+        diagnostic_bytes: 2,
+    }
+    .to_vec_with_diagnostics(b"ok")
+    .expect("control payload")
+}
+
+fn scheduling_payload(operation_id: u64) -> Vec<u8> {
+    SchedulingMetadata {
+        operation_id,
+        control_sequence: 2,
+        priority_class: 2,
+        priority_delta: 1,
+        deadline_unix_ms: 0,
+        flags: 0,
+    }
+    .to_bytes()
+    .expect("scheduling payload")
+    .to_vec()
+}
+
+fn supersede_payload(operation_id: u64) -> Vec<u8> {
+    SupersedeMetadata {
+        old_operation_id: operation_id,
+        new_operation_id: operation_id + 100,
+        control_sequence: 3,
+        drop_reason_code: 1,
+        flags: 0,
+        diagnostic_bytes: 2,
+    }
+    .to_vec_with_diagnostics(b"ok")
+    .expect("supersede payload")
+}
+
+fn budget_payload(operation_id: u64) -> Vec<u8> {
+    BudgetMetadata {
+        operation_id,
+        compute_budget_units: 100,
+        memory_budget_bytes: 4096,
+        bandwidth_budget_bytes: 8192,
+        token_budget: 32,
+        flags: 0,
+    }
+    .to_bytes()
+    .expect("budget payload")
+    .to_vec()
+}
+
+fn progress_payload(operation_id: u64) -> Vec<u8> {
+    ProgressMetadata {
+        operation_id,
+        progress_sequence: 1,
+        stage_code: 2,
+        percent_x100: 2500,
+        object_id: 0,
+        body_bytes: 4,
+    }
+    .to_vec_with_body(b"step")
+    .expect("progress payload")
+}
+
+fn partial_payload(operation_id: u64, sequence: u64) -> Vec<u8> {
+    PartialResultMetadata {
+        operation_id,
+        result_sequence: sequence,
+        object_id: 0,
+        delta_sequence: 0,
+        body_bytes: 4,
+        flags: 0,
+    }
+    .to_vec_with_body(b"part")
+    .expect("partial payload")
+}
+
+fn pressure_payload(backpressure: bool) -> Vec<u8> {
+    PressureMetadata {
+        scope_id: 1,
+        credit_window: if backpressure { 2 } else { 9 },
+        pressure_level: if backpressure {
+            BackpressureLevel::Soft as u16
+        } else {
+            BackpressureLevel::None as u16
+        },
+        pressure_reason: if backpressure { 1 } else { 0 },
+        retry_after_ms: if backpressure { 5 } else { 0 },
+        flags: 0,
+    }
+    .to_bytes()
+    .expect("pressure payload")
+    .to_vec()
+}
+
+fn flow_update_payload() -> Vec<u8> {
+    FlowUpdateMetadata {
+        scope_kind: FlowScopeKind::Session,
+        update_reason: FlowUpdateReason::Grant,
+        backpressure_level: BackpressureLevel::None,
+        connection_credit: 0,
+        session_credit: 7,
+        operation_credit: 0,
+        operation_id: 0,
+        retry_after_ms: 0,
+        credit_epoch: 1,
+        flow_flags: FLOW_UPDATE_FLAG_CREDIT_VALID,
+    }
+    .to_bytes()
+    .expect("flow update payload")
+    .to_vec()
+}
+
+fn capability_payload() -> Vec<u8> {
+    CapabilityMetadata {
+        profile_id: PROFILE_TOKEN,
+        capability_count: 1,
+        cost_model_id: 1,
+        preference_rank: 1,
+        limit_bytes: 4096,
+        limit_units: 8,
+        body_bytes: 4,
+        flags: 0,
+    }
+    .to_vec_with_body(b"caps")
+    .expect("capability payload")
+}
+
+fn route_payload(operation_id: u64) -> Vec<u8> {
+    RouteHintMetadata {
+        operation_id,
+        route_id: 9,
+        executor_class: 3,
+        affinity_class: 4,
+        deadline_unix_ms: 1_800_000_000_000,
+        body_bytes: 4,
+        flags: 0,
+    }
+    .to_vec_with_body(b"hint")
+    .expect("route payload")
+}
+
+fn trace_payload() -> Vec<u8> {
+    TraceContextMetadata {
+        trace_id: 11,
+        span_id: 12,
+        parent_span_id: 10,
+        stage_code: 3,
+        flags: 0,
+        body_bytes: 5,
+    }
+    .to_vec_with_body(b"trace")
+    .expect("trace payload")
+}
+
+fn drop_reason_payload(operation_id: u64, source_role: RuntimeRole) -> Vec<u8> {
+    ResultDropReasonMetadata {
+        operation_id,
+        result_sequence: 1,
+        drop_reason_code: 1,
+        source_role: source_role as u8,
+        flags: 0,
+        diagnostic_bytes: 4,
+    }
+    .to_vec_with_diagnostics(b"drop")
+    .expect("drop reason payload")
+}
+
+fn recoverable_error_payload(source_role: RuntimeRole, frame_id: u32) -> Vec<u8> {
+    RecoverableErrorMetadata {
+        error_code: 1,
+        error_scope: ErrorScope::Frame,
+        recovery_action: 1,
+        source_role: source_role as u8,
+        flags: 0,
+        retry_after_ms: 5,
+        related_session_id: 0,
+        related_frame_id: frame_id,
+        related_view_id: 0,
+        diagnostic_bytes: 3,
+    }
+    .to_vec_with_diagnostics(b"err")
+    .expect("recoverable error payload")
+}
+
+fn retry_after_payload(source_role: RuntimeRole) -> Vec<u8> {
+    RetryAfterMetadata {
+        scope_id: 1,
+        control_sequence: 4,
+        retry_after_ms: 5,
+        jitter_ms: 1,
+        reason_code: 1,
+        source_role: source_role as u8,
+        flags: 0,
+        diagnostic_bytes: 4,
+    }
+    .to_vec_with_diagnostics(b"wait")
+    .expect("retry-after payload")
+}
+
+fn object_declare_payload(
+    session_id: u32,
+    producer: RuntimeRole,
+    consumer: RuntimeRole,
+) -> Vec<u8> {
+    ObjectDescriptorMetadata {
+        object_id: 900,
+        object_kind: RuntimeObjectKind::ImageTile,
+        producer_role: producer,
+        consumer_role: consumer,
+        session_id,
+        byte_size: 4,
+        compute_cost_units: 2,
+        memory_location_hint: MemoryLocationHint::HostMemory,
+        ownership_hint: OwnershipHint::SessionOwned,
+        lifetime_hint_ms: 1_000,
+        metadata_bytes: 4,
+    }
+    .to_vec_with_extension(b"meta")
+    .expect("object declaration payload")
+}
+
+fn object_ref_payload(operation_id: u64) -> Vec<u8> {
+    ObjectReferenceMetadata {
+        object_id: 900,
+        operation_id,
+        object_version: 1,
+        offset: 0,
+        length: 4,
+        flags: 0,
+        metadata_bytes: 0,
+    }
+    .to_vec_with_extension(&[])
+    .expect("object reference payload")
+}
+
+fn object_release_payload(operation_id: u64, source_role: RuntimeRole) -> Vec<u8> {
+    ObjectReleaseMetadata {
+        object_id: 900,
+        operation_id,
+        release_reason: ObjectReleaseReason::Completed,
+        source_role,
+        flags: 0,
+        diagnostic_bytes: 0,
+    }
+    .to_vec_with_diagnostics(&[])
+    .expect("object release payload")
+}
+
+fn object_delta_payload() -> Vec<u8> {
+    let metadata = ObjectDeltaMetadata {
+        object_id: 900,
+        delta_sequence: 1,
+        region_offset: 0,
+        region_bytes: 4,
+        delta_bytes: 4,
+        flags: 0,
+        metadata_bytes: 0,
+    };
+    let mut payload = metadata.to_bytes().expect("object delta metadata").to_vec();
+    payload.extend_from_slice(b"data");
+    payload
+}
+
+fn cache_reference_payload() -> Vec<u8> {
+    CacheReferenceMetadata {
+        cache_key_hi: 0x1234,
+        cache_key_lo: 0x5678,
+        profile_id: PROFILE_TOKEN,
+        reuse_scope: CacheReuseScope::Session,
+        lease_id: 0,
+        producer_trace_id: 99,
+        expiration_hint_ms: 1_000,
+        metadata_bytes: 4,
+        flags: 0,
+    }
+    .to_vec_with_extension(b"meta")
+    .expect("cache reference payload")
+}
+
+fn cache_miss_payload() -> Vec<u8> {
+    CacheMissMetadata {
+        cache_key_hi: 0x1234,
+        cache_key_lo: 0x5678,
+        miss_reason: CacheMissReason::SchemaMismatch,
+        profile_id: PROFILE_TOKEN,
+        diagnostic_bytes: 4,
+    }
+    .to_vec_with_diagnostics(b"miss")
+    .expect("cache miss payload")
+}
+
+fn cache_invalidate_payload() -> Vec<u8> {
+    CacheInvalidateMetadata {
+        invalidate_scope: CacheInvalidateScope::ObjectKey,
+        cache_namespace: 42,
+        cache_key_hi: 0x1234,
+        cache_key_lo: 0x5678,
+        reason_code: 77,
+    }
+    .to_bytes()
+    .expect("cache invalidate payload")
+    .to_vec()
+}
+
+struct RuntimeFrameCase {
+    message_type: MessageType,
+    frame_id: u32,
+    operation_scoped: bool,
+    payload: Vec<u8>,
+}
+
+fn bidirectional_runtime_frames(
+    operation_id: u64,
+    frame_id: u32,
+    session_id: u32,
+    source_role: RuntimeRole,
+    peer_role: RuntimeRole,
+) -> Vec<RuntimeFrameCase> {
+    vec![
+        RuntimeFrameCase {
+            message_type: MessageType::PriorityUpdate,
+            frame_id,
+            operation_scoped: true,
+            payload: scheduling_payload(operation_id),
+        },
+        RuntimeFrameCase {
+            message_type: MessageType::Deadline,
+            frame_id,
+            operation_scoped: true,
+            payload: SchedulingMetadata {
+                operation_id,
+                control_sequence: 3,
+                priority_class: 0,
+                priority_delta: 0,
+                deadline_unix_ms: 1_800_000_000_000,
+                flags: 0,
+            }
+            .to_bytes()
+            .expect("deadline payload")
+            .to_vec(),
+        },
+        RuntimeFrameCase {
+            message_type: MessageType::ExpireAt,
+            frame_id,
+            operation_scoped: true,
+            payload: SchedulingMetadata {
+                operation_id,
+                control_sequence: 4,
+                priority_class: 0,
+                priority_delta: 0,
+                deadline_unix_ms: 1_800_000_000_001,
+                flags: 0,
+            }
+            .to_bytes()
+            .expect("expire-at payload")
+            .to_vec(),
+        },
+        RuntimeFrameCase {
+            message_type: MessageType::Supersede,
+            frame_id,
+            operation_scoped: true,
+            payload: supersede_payload(operation_id),
+        },
+        RuntimeFrameCase {
+            message_type: MessageType::BudgetUpdate,
+            frame_id,
+            operation_scoped: true,
+            payload: budget_payload(operation_id),
+        },
+        RuntimeFrameCase {
+            message_type: MessageType::Progress,
+            frame_id,
+            operation_scoped: true,
+            payload: progress_payload(operation_id),
+        },
+        RuntimeFrameCase {
+            message_type: MessageType::PartialResult,
+            frame_id,
+            operation_scoped: true,
+            payload: partial_payload(operation_id, 10),
+        },
+        RuntimeFrameCase {
+            message_type: MessageType::FlowUpdate,
+            frame_id: 0,
+            operation_scoped: false,
+            payload: flow_update_payload(),
+        },
+        RuntimeFrameCase {
+            message_type: MessageType::Backpressure,
+            frame_id: 0,
+            operation_scoped: false,
+            payload: pressure_payload(true),
+        },
+        RuntimeFrameCase {
+            message_type: MessageType::CreditUpdate,
+            frame_id: 0,
+            operation_scoped: false,
+            payload: pressure_payload(false),
+        },
+        RuntimeFrameCase {
+            message_type: MessageType::CapabilityNegotiation,
+            frame_id: 0,
+            operation_scoped: false,
+            payload: capability_payload(),
+        },
+        RuntimeFrameCase {
+            message_type: MessageType::DegradeProfile,
+            frame_id: 0,
+            operation_scoped: false,
+            payload: capability_payload(),
+        },
+        RuntimeFrameCase {
+            message_type: MessageType::RouteHint,
+            frame_id,
+            operation_scoped: true,
+            payload: route_payload(operation_id),
+        },
+        RuntimeFrameCase {
+            message_type: MessageType::ExecutionHint,
+            frame_id,
+            operation_scoped: true,
+            payload: route_payload(operation_id),
+        },
+        RuntimeFrameCase {
+            message_type: MessageType::TraceContext,
+            frame_id,
+            operation_scoped: true,
+            payload: trace_payload(),
+        },
+        RuntimeFrameCase {
+            message_type: MessageType::ErrorRecoverable,
+            frame_id,
+            operation_scoped: true,
+            payload: recoverable_error_payload(source_role, frame_id),
+        },
+        RuntimeFrameCase {
+            message_type: MessageType::RetryAfter,
+            frame_id: 0,
+            operation_scoped: false,
+            payload: retry_after_payload(source_role),
+        },
+        RuntimeFrameCase {
+            message_type: MessageType::ObjectDeclare,
+            frame_id: 0,
+            operation_scoped: false,
+            payload: object_declare_payload(session_id, source_role, peer_role),
+        },
+        RuntimeFrameCase {
+            message_type: MessageType::ObjectRef,
+            frame_id,
+            operation_scoped: true,
+            payload: object_ref_payload(operation_id),
+        },
+        RuntimeFrameCase {
+            message_type: MessageType::ObjectRelease,
+            frame_id,
+            operation_scoped: true,
+            payload: object_release_payload(operation_id, source_role),
+        },
+        RuntimeFrameCase {
+            message_type: MessageType::ObjectPatch,
+            frame_id: 0,
+            operation_scoped: false,
+            payload: object_delta_payload(),
+        },
+        RuntimeFrameCase {
+            message_type: MessageType::ObjectDelta,
+            frame_id: 0,
+            operation_scoped: false,
+            payload: object_delta_payload(),
+        },
+        RuntimeFrameCase {
+            message_type: MessageType::CacheReference,
+            frame_id: 0,
+            operation_scoped: false,
+            payload: cache_reference_payload(),
+        },
+        RuntimeFrameCase {
+            message_type: MessageType::CacheMiss,
+            frame_id: 0,
+            operation_scoped: false,
+            payload: cache_miss_payload(),
+        },
+        RuntimeFrameCase {
+            message_type: MessageType::CacheInvalidate,
+            frame_id: 0,
+            operation_scoped: false,
+            payload: cache_invalidate_payload(),
+        },
+    ]
+}
+
+unsafe fn submit_role_operation(
+    client_session: NnrpHandle,
+    server_session: NnrpHandle,
+    operation_id: u64,
+    frame_id: u32,
+) -> (NnrpHandle, NnrpHandle) {
+    let mut payload = token_submit(operation_id)
+        .to_bytes()
+        .expect("submit metadata")
+        .to_vec();
+    payload.extend_from_slice(b"operation");
+    let mut client_operation = NnrpHandle::invalid();
+    assert_eq!(
+        nnrp_client_submit(
+            NnrpSubmitRequest {
+                session: client_session,
+                operation_id,
+                frame_id,
+                payload: view(&payload),
+            },
+            &mut client_operation,
+        ),
+        NnrpFfiStatus::ok()
+    );
+    let server_event = poll_server_event(server_session);
+    assert_eq!(server_event.kind, NnrpEventKind::SubmitAccepted as u32);
+    assert_eq!(server_event.frame_id, frame_id);
+    assert_eq!(
+        slice::from_raw_parts(server_event.payload.ptr, server_event.payload.len),
+        payload
+    );
+    assert_eq!(
+        nnrp_buffer_release(server_event.payload_owner),
+        NnrpFfiStatus::ok()
+    );
+    (client_operation, server_event.operation)
 }
 
 unsafe fn assert_role_handshake(transport_id: TransportId, listen_endpoint: &str, id_base: u64) {
@@ -440,6 +1057,190 @@ unsafe fn assert_role_handshake(transport_id: TransportId, listen_endpoint: &str
         NnrpFfiStatus::ok()
     );
 
+    for case in bidirectional_runtime_frames(
+        submit_request.operation_id,
+        submit_request.frame_id,
+        (id_base + 3) as u32,
+        RuntimeRole::Client,
+        RuntimeRole::Server,
+    ) {
+        send_runtime_frame(
+            if case.operation_scoped {
+                client_operation
+            } else {
+                client_session
+            },
+            case.message_type,
+            case.frame_id,
+            &case.payload,
+        );
+        assert_runtime_event(
+            poll_server_event(server_session),
+            case.message_type,
+            case.operation_scoped.then_some(server_event.operation),
+            &case.payload,
+        );
+    }
+
+    let client_drop_reason = drop_reason_payload(submit_request.operation_id, RuntimeRole::Client);
+    send_runtime_frame(
+        client_operation,
+        MessageType::ResultDropReason,
+        submit_request.frame_id,
+        &client_drop_reason,
+    );
+    assert_runtime_event(
+        poll_server_event(server_session),
+        MessageType::ResultDropReason,
+        Some(server_event.operation),
+        &client_drop_reason,
+    );
+
+    for case in bidirectional_runtime_frames(
+        submit_request.operation_id,
+        submit_request.frame_id,
+        (id_base + 3) as u32,
+        RuntimeRole::Server,
+        RuntimeRole::Client,
+    ) {
+        send_runtime_frame(
+            if case.operation_scoped {
+                server_event.operation
+            } else {
+                server_session
+            },
+            case.message_type,
+            case.frame_id,
+            &case.payload,
+        );
+        assert_runtime_event(
+            poll_client_event(client_session),
+            case.message_type,
+            case.operation_scoped.then_some(client_operation),
+            &case.payload,
+        );
+    }
+
+    for message_type in [MessageType::Cancel, MessageType::Abort] {
+        let payload = control_payload(submit_request.operation_id, RuntimeRole::Server);
+        send_runtime_frame(
+            server_event.operation,
+            message_type,
+            submit_request.frame_id,
+            &payload,
+        );
+        assert_runtime_event(
+            poll_client_event(client_session),
+            message_type,
+            Some(client_operation),
+            &payload,
+        );
+    }
+
+    let partial_body = b"partial";
+    let mut partial_payload = PartialResultMetadata {
+        operation_id: submit_request.operation_id,
+        result_sequence: 1,
+        object_id: 0,
+        delta_sequence: 0,
+        body_bytes: partial_body.len() as u32,
+        flags: 0,
+    }
+    .to_bytes()
+    .expect("partial metadata")
+    .to_vec();
+    partial_payload.extend_from_slice(partial_body);
+    assert_eq!(
+        nnrp_runtime_frame_send(NnrpRuntimeFrameSendRequest {
+            handle: server_event.operation,
+            message_type: nnrp_core::MessageType::PartialResult as u32,
+            frame_id: server_event.frame_id,
+            payload: view(&partial_payload),
+        }),
+        NnrpFfiStatus::ok()
+    );
+    let mut partial_event = NnrpEvent::none();
+    let mut partial_event_count = 0usize;
+    assert_eq!(
+        nnrp_client_await_events(
+            poll_request(client_session),
+            &mut partial_event,
+            1,
+            &mut partial_event_count,
+        ),
+        NnrpFfiStatus::ok()
+    );
+    assert_eq!(partial_event_count, 1);
+    assert_eq!(partial_event.kind, NnrpEventKind::PartialResult as u32);
+    assert_eq!(partial_event.operation, client_operation);
+    assert_eq!(partial_event.frame_id, submit_request.frame_id);
+    assert_eq!(
+        slice::from_raw_parts(partial_event.payload.ptr, partial_event.payload.len),
+        partial_payload
+    );
+    assert_eq!(
+        nnrp_buffer_release(partial_event.payload_owner),
+        NnrpFfiStatus::ok()
+    );
+
+    let direct_partial_body = b"direct";
+    let direct_partial = PartialResultMetadata {
+        operation_id: submit_request.operation_id,
+        result_sequence: 2,
+        object_id: 0,
+        delta_sequence: 0,
+        body_bytes: direct_partial_body.len() as u32,
+        flags: 0,
+    };
+    let mut direct_send_result = NnrpPollResult {
+        status: NnrpFfiStatus::ok(),
+        has_event: 1,
+        event: NnrpEvent::none(),
+    };
+    assert_eq!(
+        nnrp_server_send_partial_result(
+            NnrpServerSendPartialResultRequest {
+                operation: server_event.operation,
+                partial_result: direct_partial.into(),
+                partial_body: view(direct_partial_body),
+                max_events: 1,
+            },
+            &mut direct_send_result,
+        ),
+        NnrpFfiStatus::ok()
+    );
+    assert_eq!(direct_send_result.has_event, 0);
+    let mut direct_partial_event = NnrpEvent::none();
+    let mut direct_partial_event_count = 0usize;
+    assert_eq!(
+        nnrp_client_await_events(
+            poll_request(client_session),
+            &mut direct_partial_event,
+            1,
+            &mut direct_partial_event_count,
+        ),
+        NnrpFfiStatus::ok()
+    );
+    assert_eq!(direct_partial_event_count, 1);
+    assert_eq!(
+        direct_partial_event.kind,
+        NnrpEventKind::PartialResult as u32
+    );
+    assert_eq!(direct_partial_event.operation, client_operation);
+    assert_eq!(
+        slice::from_raw_parts(
+            direct_partial_event.payload.ptr,
+            direct_partial_event.payload.len,
+        ),
+        direct_partial
+            .to_vec_with_body(direct_partial_body)
+            .expect("direct partial payload")
+    );
+    assert_eq!(
+        nnrp_buffer_release(direct_partial_event.payload_owner),
+        NnrpFfiStatus::ok()
+    );
+
     let result_body = b"role-carrier-result";
     let mut result_payload = token_result().to_bytes().expect("result metadata").to_vec();
     result_payload.extend_from_slice(result_body);
@@ -502,7 +1303,83 @@ unsafe fn assert_role_handshake(transport_id: TransportId, listen_endpoint: &str
         NnrpFfiStatus::ok()
     );
 
+    for (offset, message_type) in [MessageType::Cancel, MessageType::Abort]
+        .into_iter()
+        .enumerate()
+    {
+        let operation_id = id_base + 20 + offset as u64;
+        let frame_id = 50 + offset as u32;
+        let (client_control_operation, server_control_operation) =
+            submit_role_operation(client_session, server_session, operation_id, frame_id);
+        let payload = control_payload(operation_id, RuntimeRole::Client);
+        send_runtime_frame(client_control_operation, message_type, frame_id, &payload);
+        assert_runtime_event(
+            poll_server_event(server_session),
+            message_type,
+            Some(server_control_operation),
+            &payload,
+        );
+    }
+
+    let frame_cancel_id = 59;
+    let (_client_frame_cancel_operation, server_frame_cancel_operation) = submit_role_operation(
+        client_session,
+        server_session,
+        id_base + 29,
+        frame_cancel_id,
+    );
+    assert_eq!(
+        nnrp_client_cancel(NnrpClientCancelRequest {
+            session: client_session,
+            frame_id: frame_cancel_id,
+        }),
+        NnrpFfiStatus::ok()
+    );
+    let frame_cancel_event = poll_server_event(server_session);
+    assert_eq!(frame_cancel_event.kind, NnrpEventKind::Control as u32);
+    assert_eq!(
+        frame_cancel_event.message_type,
+        MessageType::FrameCancel as u32
+    );
+    assert_eq!(frame_cancel_event.operation, server_frame_cancel_operation);
+    assert_eq!(frame_cancel_event.frame_id, frame_cancel_id);
+    assert_eq!(frame_cancel_event.payload.len, 0);
+
+    let drop_operation_id = id_base + 30;
+    let drop_frame_id = 60;
+    let (client_drop_operation, server_drop_operation) = submit_role_operation(
+        client_session,
+        server_session,
+        drop_operation_id,
+        drop_frame_id,
+    );
+    let server_drop_reason = drop_reason_payload(drop_operation_id, RuntimeRole::Server);
+    send_runtime_frame(
+        server_drop_operation,
+        MessageType::ResultDropReason,
+        drop_frame_id,
+        &server_drop_reason,
+    );
+    assert_runtime_event(
+        poll_client_event(client_session),
+        MessageType::ResultDropReason,
+        Some(client_drop_operation),
+        &server_drop_reason,
+    );
+
+    let client_close = thread::spawn(move || nnrp_client_close(client_session));
+    let close_event = poll_server_event(server_session);
+    assert_eq!(close_event.kind, NnrpEventKind::SessionClosed as u32);
+    assert_eq!(close_event.message_type, MessageType::SessionClose as u32);
+    assert_eq!(
+        nnrp_buffer_release(close_event.payload_owner),
+        NnrpFfiStatus::ok()
+    );
     assert_eq!(nnrp_server_close(server_session), NnrpFfiStatus::ok());
+    assert_eq!(
+        client_close.join().expect("client close thread joins"),
+        NnrpFfiStatus::ok()
+    );
     assert_eq!(nnrp_connection_close(client), NnrpFfiStatus::ok());
     assert_eq!(nnrp_connection_close(server), NnrpFfiStatus::ok());
 }

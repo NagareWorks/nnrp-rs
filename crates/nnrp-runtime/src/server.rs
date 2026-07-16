@@ -7,28 +7,31 @@ use nnrp_core::{
     validate_control_request_semantics, validate_partial_result_semantics,
     validate_pressure_semantics, validate_profile_assignment, validate_progress_semantics,
     validate_result_drop_header, validate_result_drop_reason_semantics,
-    validate_scheduling_semantics, CacheInvalidateMetadata, CacheMissMetadata, CacheObjectId,
-    CacheObjectKind, CacheReferenceMetadata, CapabilityMetadata, CommonHeader, ConnectionLifecycle,
+    validate_scheduling_semantics, validate_trace_context_semantics, BudgetMetadata,
+    CacheInvalidateMetadata, CacheMissMetadata, CacheObjectId, CacheObjectKind,
+    CacheReferenceMetadata, CapabilityMetadata, CommonHeader, ConnectionLifecycle,
     ControlRequestMetadata, FlowUpdateMetadata, FrameSubmitMetadata, MessageType,
     ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata, ObjectReleaseMetadata,
     OperationCancelRequest, OperationDescriptor, OperationRegistry, PartialResultMetadata,
-    PressureMetadata, ProgressMetadata, ResultDropReasonMetadata, ResultPushMetadata,
-    RouteHintMetadata, RuntimeRole, SchedulingMetadata, SchemaRegistry, SessionCloseAckMetadata,
-    SessionCloseMetadata, SessionCloseStatus, SessionMigrateAckMetadata, SessionMigrateMetadata,
-    SessionOpenAckMetadata, SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchMetadata,
-    SessionStatus, TransportProbeAckMetadata, TransportProbeMetadata,
+    PressureMetadata, ProgressMetadata, RecoverableErrorMetadata, ResultDropReasonMetadata,
+    ResultPushMetadata, RetryAfterMetadata, RouteHintMetadata, RuntimeRole, SchedulingMetadata,
+    SchemaRegistry, SessionCloseAckMetadata, SessionCloseMetadata, SessionCloseStatus,
+    SessionMigrateAckMetadata, SessionMigrateMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
+    SessionPatchAckMetadata, SessionPatchMetadata, SessionStatus, SupersedeMetadata,
+    TraceContextMetadata, TransportProbeAckMetadata, TransportProbeMetadata, BUDGET_METADATA_LEN,
     CACHE_INVALIDATE_METADATA_LEN, CACHE_MISS_METADATA_LEN, CACHE_REFERENCE_METADATA_LEN,
     CAPABILITY_METADATA_LEN, CONTROL_REQUEST_METADATA_LEN, FLOW_UPDATE_METADATA_LEN,
     FRAME_SUBMIT_METADATA_LEN, OBJECT_DELTA_METADATA_LEN, OBJECT_DESCRIPTOR_METADATA_LEN,
     OBJECT_REFERENCE_METADATA_LEN, OBJECT_RELEASE_METADATA_LEN, PARTIAL_RESULT_METADATA_LEN,
-    PRESSURE_METADATA_LEN, PROGRESS_METADATA_LEN, RESULT_DROP_REASON_DEADLINE_EXPIRED,
-    RESULT_DROP_REASON_METADATA_LEN, RESULT_PUSH_METADATA_LEN, ROUTE_HINT_METADATA_LEN,
-    SCHEDULING_FLAG_EMIT_DROP_REASON, SCHEDULING_METADATA_LEN, SESSION_ACK_FLAG_RESUME_ENABLED,
-    SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_LIMIT_REACHED, SESSION_ERROR_NONE,
-    SESSION_ERROR_PROFILE_UNSUPPORTED, SESSION_ERROR_RESUME_REJECTED,
-    SESSION_ERROR_SCHEMA_UNSUPPORTED, SESSION_FLAG_ALLOW_RESUME, SESSION_MIGRATE_ACK_METADATA_LEN,
-    SESSION_MIGRATE_METADATA_LEN, SESSION_OPEN_ACK_METADATA_LEN, SESSION_PATCH_ACK_METADATA_LEN,
-    SESSION_PATCH_METADATA_LEN,
+    PRESSURE_METADATA_LEN, PROGRESS_METADATA_LEN, RECOVERABLE_ERROR_METADATA_LEN,
+    RESULT_DROP_REASON_DEADLINE_EXPIRED, RESULT_DROP_REASON_METADATA_LEN, RESULT_PUSH_METADATA_LEN,
+    RETRY_AFTER_METADATA_LEN, ROUTE_HINT_METADATA_LEN, SCHEDULING_FLAG_EMIT_DROP_REASON,
+    SCHEDULING_METADATA_LEN, SESSION_ACK_FLAG_RESUME_ENABLED, SESSION_CLOSE_ACK_METADATA_LEN,
+    SESSION_ERROR_LIMIT_REACHED, SESSION_ERROR_NONE, SESSION_ERROR_PROFILE_UNSUPPORTED,
+    SESSION_ERROR_RESUME_REJECTED, SESSION_ERROR_SCHEMA_UNSUPPORTED, SESSION_FLAG_ALLOW_RESUME,
+    SESSION_MIGRATE_ACK_METADATA_LEN, SESSION_MIGRATE_METADATA_LEN, SESSION_OPEN_ACK_METADATA_LEN,
+    SESSION_PATCH_ACK_METADATA_LEN, SESSION_PATCH_METADATA_LEN, SUPERSEDE_METADATA_LEN,
+    TRACE_CONTEXT_METADATA_LEN,
 };
 use tokio::net::TcpListener;
 
@@ -190,6 +193,7 @@ pub struct NnrpServerSession {
     cache_objects: Vec<CacheObjectId>,
     max_cache_objects: usize,
     sessions: SharedSessionRegistry,
+    pending_close: Option<SessionCloseMetadata>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,6 +244,83 @@ pub struct NnrpSchedulingUpdate {
 pub struct NnrpPressureUpdate {
     pub message_type: MessageType,
     pub metadata: PressureMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NnrpServerEvent {
+    Submit(NnrpSubmit),
+    FrameCancel(NnrpCancel),
+    PartialResult {
+        metadata: PartialResultMetadata,
+        body: Vec<u8>,
+    },
+    Progress {
+        metadata: ProgressMetadata,
+        body: Vec<u8>,
+    },
+    ResultDropReason {
+        metadata: ResultDropReasonMetadata,
+        body: Vec<u8>,
+    },
+    Control(NnrpRuntimeControl),
+    Scheduling(NnrpSchedulingUpdate),
+    Supersede {
+        metadata: SupersedeMetadata,
+        body: Vec<u8>,
+    },
+    Budget(BudgetMetadata),
+    FlowUpdate(FlowUpdateMetadata),
+    Pressure(NnrpPressureUpdate),
+    Capability {
+        message_type: MessageType,
+        metadata: CapabilityMetadata,
+        body: Vec<u8>,
+    },
+    RouteHint {
+        message_type: MessageType,
+        metadata: RouteHintMetadata,
+        body: Vec<u8>,
+    },
+    TraceContext {
+        frame_id: u32,
+        metadata: TraceContextMetadata,
+        body: Vec<u8>,
+    },
+    RecoverableError {
+        metadata: RecoverableErrorMetadata,
+        body: Vec<u8>,
+    },
+    RetryAfter {
+        metadata: RetryAfterMetadata,
+        body: Vec<u8>,
+    },
+    ObjectDeclare {
+        metadata: ObjectDescriptorMetadata,
+        body: Vec<u8>,
+    },
+    ObjectRef {
+        metadata: ObjectReferenceMetadata,
+        body: Vec<u8>,
+    },
+    ObjectRelease {
+        metadata: ObjectReleaseMetadata,
+        body: Vec<u8>,
+    },
+    ObjectDelta {
+        message_type: MessageType,
+        metadata: ObjectDeltaMetadata,
+        body: Vec<u8>,
+    },
+    CacheReference {
+        metadata: CacheReferenceMetadata,
+        body: Vec<u8>,
+    },
+    CacheMiss {
+        metadata: CacheMissMetadata,
+        body: Vec<u8>,
+    },
+    CacheInvalidate(CacheInvalidateMetadata),
+    Close(SessionCloseMetadata),
 }
 
 impl NnrpServer {
@@ -370,6 +451,7 @@ impl NnrpServer {
             cache_objects: Vec::new(),
             max_cache_objects: self.config.max_cache_objects,
             sessions: Arc::clone(&self.sessions),
+            pending_close: None,
         })
     }
 
@@ -571,6 +653,500 @@ impl NnrpServerSession {
         })
     }
 
+    pub async fn await_event(&mut self) -> Result<NnrpServerEvent, RuntimeError> {
+        let packet = self.transport.read_packet().await?;
+        match packet.header.message_type {
+            MessageType::FrameSubmit => {
+                self.require_session_packet(&packet, "server received submit for another session")?;
+                if packet.metadata.len() != FRAME_SUBMIT_METADATA_LEN {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "server received malformed FRAME_SUBMIT metadata length",
+                    ));
+                }
+                let metadata = FrameSubmitMetadata::parse(&packet.metadata)?;
+                if self.frame_operations.contains_key(&packet.header.frame_id) {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "server received duplicate FRAME_SUBMIT frame id",
+                    ));
+                }
+                self.operations.register(OperationDescriptor::new(
+                    self.session_id,
+                    metadata.operation_id,
+                ))?;
+                self.frame_operations
+                    .insert(packet.header.frame_id, metadata.operation_id);
+                self.update_registry_last_operation(metadata.operation_id)?;
+                Ok(NnrpServerEvent::Submit(NnrpSubmit {
+                    operation_id: metadata.operation_id,
+                    frame_id: packet.header.frame_id,
+                    metadata,
+                    body: packet.body,
+                }))
+            }
+            MessageType::FrameCancel => {
+                self.require_session_packet(&packet, "server received cancel for another session")?;
+                if !packet.metadata.is_empty() || !packet.body.is_empty() {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "server received malformed FRAME_CANCEL lengths",
+                    ));
+                }
+                let operation_id = self.operation_id_for_frame(packet.header.frame_id)?;
+                self.operations.cancel(OperationCancelRequest {
+                    session_id: self.session_id,
+                    operation_id,
+                    cancel_scope: nnrp_core::CancelScope::Operation,
+                })?;
+                Ok(NnrpServerEvent::FrameCancel(NnrpCancel {
+                    frame_id: packet.header.frame_id,
+                }))
+            }
+            MessageType::PartialResult => {
+                self.require_session_packet(
+                    &packet,
+                    "server received partial result for another session",
+                )?;
+                if packet.metadata.len() != PARTIAL_RESULT_METADATA_LEN {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "server received malformed PARTIAL_RESULT metadata length",
+                    ));
+                }
+                let metadata = PartialResultMetadata::parse(&packet.metadata)?;
+                validate_partial_result_semantics(&metadata)?;
+                require_body_len(
+                    packet.body.len(),
+                    metadata.body_bytes as usize,
+                    "server received PARTIAL_RESULT body length mismatch",
+                )?;
+                Ok(NnrpServerEvent::PartialResult {
+                    metadata,
+                    body: packet.body,
+                })
+            }
+            MessageType::Progress => {
+                self.require_session_packet(
+                    &packet,
+                    "server received progress for another session",
+                )?;
+                if packet.metadata.len() != PROGRESS_METADATA_LEN {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "server received malformed PROGRESS metadata length",
+                    ));
+                }
+                let metadata = ProgressMetadata::parse(&packet.metadata)?;
+                validate_progress_semantics(&metadata)?;
+                require_body_len(
+                    packet.body.len(),
+                    metadata.body_bytes as usize,
+                    "server received PROGRESS body length mismatch",
+                )?;
+                Ok(NnrpServerEvent::Progress {
+                    metadata,
+                    body: packet.body,
+                })
+            }
+            MessageType::ResultDropReason => {
+                self.require_session_packet(
+                    &packet,
+                    "server received drop reason for another session",
+                )?;
+                if packet.metadata.len() != RESULT_DROP_REASON_METADATA_LEN {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "server received malformed RESULT_DROP_REASON metadata length",
+                    ));
+                }
+                let metadata = ResultDropReasonMetadata::parse(&packet.metadata)?;
+                validate_result_drop_reason_semantics(&metadata)?;
+                require_body_len(
+                    packet.body.len(),
+                    metadata.diagnostic_bytes as usize,
+                    "server received RESULT_DROP_REASON body length mismatch",
+                )?;
+                Ok(NnrpServerEvent::ResultDropReason {
+                    metadata,
+                    body: packet.body,
+                })
+            }
+            MessageType::Cancel | MessageType::Abort => {
+                self.require_session_packet(
+                    &packet,
+                    "server received control for another session",
+                )?;
+                if packet.metadata.len() != CONTROL_REQUEST_METADATA_LEN {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "server received malformed runtime control lengths",
+                    ));
+                }
+                let metadata = ControlRequestMetadata::parse(&packet.metadata)?;
+                validate_control_request_semantics(packet.header.message_type, &metadata)?;
+                require_body_len(
+                    packet.body.len(),
+                    metadata.diagnostic_bytes as usize,
+                    "server received runtime control diagnostic body length mismatch",
+                )?;
+                match packet.header.message_type {
+                    MessageType::Cancel => {
+                        self.operations.cancel(OperationCancelRequest {
+                            session_id: self.session_id,
+                            operation_id: metadata.operation_id,
+                            cancel_scope: nnrp_core::CancelScope::Operation,
+                        })?;
+                    }
+                    MessageType::Abort => self.operations.abort(metadata.operation_id)?,
+                    _ => unreachable!("runtime control message type was matched earlier"),
+                }
+                Ok(NnrpServerEvent::Control(NnrpRuntimeControl {
+                    message_type: packet.header.message_type,
+                    metadata,
+                    body: packet.body,
+                }))
+            }
+            MessageType::PriorityUpdate | MessageType::Deadline | MessageType::ExpireAt => {
+                self.require_session_packet(
+                    &packet,
+                    "server received scheduling update for another session",
+                )?;
+                if packet.metadata.len() != SCHEDULING_METADATA_LEN || !packet.body.is_empty() {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "server received malformed scheduling metadata length",
+                    ));
+                }
+                let metadata = SchedulingMetadata::parse(&packet.metadata)?;
+                validate_scheduling_semantics(packet.header.message_type, &metadata)?;
+                self.operations.apply_scheduling_update(
+                    self.session_id,
+                    packet.header.message_type,
+                    metadata,
+                )?;
+                Ok(NnrpServerEvent::Scheduling(NnrpSchedulingUpdate {
+                    message_type: packet.header.message_type,
+                    metadata,
+                }))
+            }
+            MessageType::Supersede => {
+                self.require_session_packet(
+                    &packet,
+                    "server received supersede for another session",
+                )?;
+                if packet.metadata.len() != SUPERSEDE_METADATA_LEN {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "server received malformed SUPERSEDE metadata length",
+                    ));
+                }
+                let metadata = SupersedeMetadata::parse(&packet.metadata)?;
+                require_body_len(
+                    packet.body.len(),
+                    metadata.diagnostic_bytes as usize,
+                    "server received SUPERSEDE diagnostic body length mismatch",
+                )?;
+                Ok(NnrpServerEvent::Supersede {
+                    metadata,
+                    body: packet.body,
+                })
+            }
+            MessageType::BudgetUpdate => {
+                self.require_session_packet(
+                    &packet,
+                    "server received budget update for another session",
+                )?;
+                if packet.metadata.len() != BUDGET_METADATA_LEN || !packet.body.is_empty() {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "server received malformed BUDGET_UPDATE lengths",
+                    ));
+                }
+                Ok(NnrpServerEvent::Budget(BudgetMetadata::parse(
+                    &packet.metadata,
+                )?))
+            }
+            MessageType::FlowUpdate => {
+                let metadata = FlowUpdateMetadata::parse(&packet.metadata)?;
+                self.lifecycle
+                    .validate_flow_update(&packet.header, &metadata)?;
+                Ok(NnrpServerEvent::FlowUpdate(metadata))
+            }
+            MessageType::Backpressure | MessageType::CreditUpdate => {
+                self.require_optional_session_packet(
+                    &packet,
+                    "server received pressure update for another session",
+                )?;
+                if packet.metadata.len() != PRESSURE_METADATA_LEN || !packet.body.is_empty() {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "server received malformed pressure metadata length",
+                    ));
+                }
+                let metadata = PressureMetadata::parse(&packet.metadata)?;
+                validate_pressure_semantics(packet.header.message_type, &metadata)?;
+                self.pressure
+                    .apply_inbound(packet.header.message_type, metadata)?;
+                Ok(NnrpServerEvent::Pressure(NnrpPressureUpdate {
+                    message_type: packet.header.message_type,
+                    metadata,
+                }))
+            }
+            MessageType::CapabilityNegotiation | MessageType::DegradeProfile => {
+                self.require_optional_session_packet(
+                    &packet,
+                    "server received capability update for another session",
+                )?;
+                if packet.metadata.len() != CAPABILITY_METADATA_LEN {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "server received malformed capability metadata length",
+                    ));
+                }
+                let metadata = CapabilityMetadata::parse(&packet.metadata)?;
+                require_body_len(
+                    packet.body.len(),
+                    metadata.body_bytes as usize,
+                    "server received capability body length mismatch",
+                )?;
+                Ok(NnrpServerEvent::Capability {
+                    message_type: packet.header.message_type,
+                    metadata,
+                    body: packet.body,
+                })
+            }
+            MessageType::RouteHint | MessageType::ExecutionHint => {
+                self.require_optional_session_packet(
+                    &packet,
+                    "server received route hint for another session",
+                )?;
+                if packet.metadata.len() != ROUTE_HINT_METADATA_LEN {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "server received malformed route hint metadata length",
+                    ));
+                }
+                let metadata = RouteHintMetadata::parse(&packet.metadata)?;
+                require_body_len(
+                    packet.body.len(),
+                    metadata.body_bytes as usize,
+                    "server received route hint body length mismatch",
+                )?;
+                Ok(NnrpServerEvent::RouteHint {
+                    message_type: packet.header.message_type,
+                    metadata,
+                    body: packet.body,
+                })
+            }
+            MessageType::TraceContext => {
+                self.require_optional_session_packet(
+                    &packet,
+                    "server received trace context for another session",
+                )?;
+                if packet.metadata.len() != TRACE_CONTEXT_METADATA_LEN {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "server received malformed TRACE_CONTEXT metadata length",
+                    ));
+                }
+                let metadata = TraceContextMetadata::parse(&packet.metadata)?;
+                validate_trace_context_semantics(&metadata)?;
+                require_body_len(
+                    packet.body.len(),
+                    metadata.body_bytes as usize,
+                    "server received TRACE_CONTEXT body length mismatch",
+                )?;
+                Ok(NnrpServerEvent::TraceContext {
+                    frame_id: packet.header.frame_id,
+                    metadata,
+                    body: packet.body,
+                })
+            }
+            MessageType::ErrorRecoverable => {
+                self.require_optional_session_packet(
+                    &packet,
+                    "server received recoverable error for another session",
+                )?;
+                if packet.metadata.len() != RECOVERABLE_ERROR_METADATA_LEN {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "server received malformed ERROR_RECOVERABLE metadata length",
+                    ));
+                }
+                let metadata = RecoverableErrorMetadata::parse(&packet.metadata)?;
+                require_body_len(
+                    packet.body.len(),
+                    metadata.diagnostic_bytes as usize,
+                    "server received ERROR_RECOVERABLE diagnostic body length mismatch",
+                )?;
+                Ok(NnrpServerEvent::RecoverableError {
+                    metadata,
+                    body: packet.body,
+                })
+            }
+            MessageType::RetryAfter => {
+                self.require_optional_session_packet(
+                    &packet,
+                    "server received retry-after for another session",
+                )?;
+                if packet.metadata.len() != RETRY_AFTER_METADATA_LEN {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "server received malformed RETRY_AFTER metadata length",
+                    ));
+                }
+                let metadata = RetryAfterMetadata::parse(&packet.metadata)?;
+                require_body_len(
+                    packet.body.len(),
+                    metadata.diagnostic_bytes as usize,
+                    "server received RETRY_AFTER diagnostic body length mismatch",
+                )?;
+                Ok(NnrpServerEvent::RetryAfter {
+                    metadata,
+                    body: packet.body,
+                })
+            }
+            MessageType::ObjectDeclare => {
+                self.require_session_packet(
+                    &packet,
+                    "server received object declaration for another session",
+                )?;
+                if packet.metadata.len() != OBJECT_DESCRIPTOR_METADATA_LEN {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "server received malformed OBJECT_DECLARE metadata length",
+                    ));
+                }
+                let metadata = ObjectDescriptorMetadata::parse(&packet.metadata)?;
+                require_body_len(
+                    packet.body.len(),
+                    metadata.metadata_bytes as usize,
+                    "server received OBJECT_DECLARE body length mismatch",
+                )?;
+                Ok(NnrpServerEvent::ObjectDeclare {
+                    metadata,
+                    body: packet.body,
+                })
+            }
+            MessageType::ObjectRef => {
+                self.require_session_packet(
+                    &packet,
+                    "server received object reference for another session",
+                )?;
+                if packet.metadata.len() != OBJECT_REFERENCE_METADATA_LEN {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "server received malformed OBJECT_REF metadata length",
+                    ));
+                }
+                let metadata = ObjectReferenceMetadata::parse(&packet.metadata)?;
+                require_body_len(
+                    packet.body.len(),
+                    metadata.metadata_bytes as usize,
+                    "server received OBJECT_REF body length mismatch",
+                )?;
+                Ok(NnrpServerEvent::ObjectRef {
+                    metadata,
+                    body: packet.body,
+                })
+            }
+            MessageType::ObjectRelease => {
+                self.require_session_packet(
+                    &packet,
+                    "server received object release for another session",
+                )?;
+                if packet.metadata.len() != OBJECT_RELEASE_METADATA_LEN {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "server received malformed OBJECT_RELEASE metadata length",
+                    ));
+                }
+                let metadata = ObjectReleaseMetadata::parse(&packet.metadata)?;
+                require_body_len(
+                    packet.body.len(),
+                    metadata.diagnostic_bytes as usize,
+                    "server received OBJECT_RELEASE body length mismatch",
+                )?;
+                Ok(NnrpServerEvent::ObjectRelease {
+                    metadata,
+                    body: packet.body,
+                })
+            }
+            MessageType::ObjectPatch | MessageType::ObjectDelta => {
+                self.require_session_packet(
+                    &packet,
+                    "server received object delta for another session",
+                )?;
+                if packet.metadata.len() != OBJECT_DELTA_METADATA_LEN {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "server received malformed object delta metadata length",
+                    ));
+                }
+                let metadata = ObjectDeltaMetadata::parse(&packet.metadata)?;
+                require_body_len(
+                    packet.body.len(),
+                    metadata.metadata_bytes.saturating_add(metadata.delta_bytes) as usize,
+                    "server received object delta body length mismatch",
+                )?;
+                Ok(NnrpServerEvent::ObjectDelta {
+                    message_type: packet.header.message_type,
+                    metadata,
+                    body: packet.body,
+                })
+            }
+            MessageType::CacheReference => {
+                self.require_session_packet(
+                    &packet,
+                    "server received cache reference for another session",
+                )?;
+                if packet.metadata.len() != CACHE_REFERENCE_METADATA_LEN {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "server received malformed CACHE_REFERENCE metadata length",
+                    ));
+                }
+                let metadata = CacheReferenceMetadata::parse(&packet.metadata)?;
+                require_body_len(
+                    packet.body.len(),
+                    metadata.metadata_bytes as usize,
+                    "server received CACHE_REFERENCE body length mismatch",
+                )?;
+                Ok(NnrpServerEvent::CacheReference {
+                    metadata,
+                    body: packet.body,
+                })
+            }
+            MessageType::CacheMiss => {
+                self.require_session_packet(
+                    &packet,
+                    "server received cache miss for another session",
+                )?;
+                if packet.metadata.len() != CACHE_MISS_METADATA_LEN {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "server received malformed CACHE_MISS metadata length",
+                    ));
+                }
+                let metadata = CacheMissMetadata::parse(&packet.metadata)?;
+                require_body_len(
+                    packet.body.len(),
+                    metadata.diagnostic_bytes as usize,
+                    "server received CACHE_MISS diagnostic body length mismatch",
+                )?;
+                Ok(NnrpServerEvent::CacheMiss {
+                    metadata,
+                    body: packet.body,
+                })
+            }
+            MessageType::CacheInvalidate => {
+                self.require_session_packet(
+                    &packet,
+                    "server received cache invalidate for another session",
+                )?;
+                if packet.metadata.len() != CACHE_INVALIDATE_METADATA_LEN || !packet.body.is_empty()
+                {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "server received malformed CACHE_INVALIDATE lengths",
+                    ));
+                }
+                Ok(NnrpServerEvent::CacheInvalidate(
+                    CacheInvalidateMetadata::parse(&packet.metadata)?,
+                ))
+            }
+            MessageType::SessionClose => {
+                self.require_session_packet(&packet, "server received close for another session")?;
+                let metadata = SessionCloseMetadata::parse(&packet.metadata)?;
+                self.lifecycle
+                    .begin_session_close(&packet.header, &metadata)?;
+                self.pending_close = Some(metadata);
+                Ok(NnrpServerEvent::Close(metadata))
+            }
+            _ => Err(RuntimeError::UnexpectedMessage(
+                "server expected a submit, control, object, cache, or close event",
+            )),
+        }
+    }
+
     pub async fn send_result(
         &mut self,
         frame_id: u32,
@@ -716,6 +1292,75 @@ impl NnrpServerSession {
                 diagnostics,
             )?)
             .await
+    }
+
+    pub async fn send_control_request(
+        &mut self,
+        message_type: MessageType,
+        metadata: ControlRequestMetadata,
+        diagnostics: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        validate_control_request_semantics(message_type, &metadata)?;
+        require_body_len(
+            diagnostics.len(),
+            metadata.diagnostic_bytes as usize,
+            "server runtime control diagnostic body length mismatch",
+        )?;
+        let frame_id = self.correlated_frame_id(metadata.operation_id)?;
+        self.write_runtime_packet(
+            message_type,
+            frame_id,
+            metadata.to_bytes()?.to_vec(),
+            diagnostics,
+        )
+        .await
+    }
+
+    pub async fn send_scheduling_update(
+        &mut self,
+        message_type: MessageType,
+        metadata: SchedulingMetadata,
+    ) -> Result<(), RuntimeError> {
+        validate_scheduling_semantics(message_type, &metadata)?;
+        let frame_id = self.correlated_frame_id(metadata.operation_id)?;
+        self.write_runtime_packet(
+            message_type,
+            frame_id,
+            metadata.to_bytes()?.to_vec(),
+            Vec::new(),
+        )
+        .await
+    }
+
+    pub async fn supersede_operation(
+        &mut self,
+        metadata: SupersedeMetadata,
+        diagnostics: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        require_body_len(
+            diagnostics.len(),
+            metadata.diagnostic_bytes as usize,
+            "server SUPERSEDE diagnostic body length mismatch",
+        )?;
+        let frame_id = self.correlated_frame_id(metadata.old_operation_id)?;
+        self.write_runtime_packet(
+            MessageType::Supersede,
+            frame_id,
+            metadata.to_bytes()?.to_vec(),
+            diagnostics,
+        )
+        .await
+    }
+
+    pub async fn update_budget(&mut self, metadata: BudgetMetadata) -> Result<(), RuntimeError> {
+        let frame_id = self.correlated_frame_id(metadata.operation_id)?;
+        self.write_runtime_packet(
+            MessageType::BudgetUpdate,
+            frame_id,
+            metadata.to_bytes()?.to_vec(),
+            Vec::new(),
+        )
+        .await
     }
 
     pub async fn send_capability(
@@ -866,9 +1511,18 @@ impl NnrpServerSession {
 
     pub async fn send_object_delta(
         &mut self,
+        message_type: MessageType,
         metadata: ObjectDeltaMetadata,
         body: Vec<u8>,
     ) -> Result<(), RuntimeError> {
+        if !matches!(
+            message_type,
+            MessageType::ObjectPatch | MessageType::ObjectDelta
+        ) {
+            return Err(RuntimeError::UnexpectedMessage(
+                "server object delta send requires OBJECT_PATCH or OBJECT_DELTA",
+            ));
+        }
         let expected_body_len =
             metadata.metadata_bytes.saturating_add(metadata.delta_bytes) as usize;
         require_body_len(
@@ -877,7 +1531,7 @@ impl NnrpServerSession {
             "server object delta body length mismatch",
         )?;
         let mut header = CommonHeader::new(
-            MessageType::ObjectDelta,
+            message_type,
             OBJECT_DELTA_METADATA_LEN as u32,
             body.len() as u32,
         );
@@ -1112,6 +1766,96 @@ impl NnrpServerSession {
             .await
     }
 
+    pub async fn send_credit_update(
+        &mut self,
+        metadata: PressureMetadata,
+    ) -> Result<(), RuntimeError> {
+        validate_pressure_semantics(MessageType::CreditUpdate, &metadata)?;
+        self.pressure
+            .apply_outbound(MessageType::CreditUpdate, metadata)?;
+        self.write_runtime_packet(
+            MessageType::CreditUpdate,
+            0,
+            metadata.to_bytes()?.to_vec(),
+            Vec::new(),
+        )
+        .await
+    }
+
+    pub async fn send_trace_context(
+        &mut self,
+        frame_id: u32,
+        metadata: TraceContextMetadata,
+        body: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        validate_trace_context_semantics(&metadata)?;
+        require_body_len(
+            body.len(),
+            metadata.body_bytes as usize,
+            "server trace context body length mismatch",
+        )?;
+        self.write_runtime_packet(
+            MessageType::TraceContext,
+            frame_id,
+            metadata.to_bytes()?.to_vec(),
+            body,
+        )
+        .await
+    }
+
+    pub async fn send_recoverable_error(
+        &mut self,
+        metadata: RecoverableErrorMetadata,
+        diagnostics: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        require_body_len(
+            diagnostics.len(),
+            metadata.diagnostic_bytes as usize,
+            "server recoverable error diagnostic body length mismatch",
+        )?;
+        self.write_runtime_packet(
+            MessageType::ErrorRecoverable,
+            metadata.related_frame_id,
+            metadata.to_bytes()?.to_vec(),
+            diagnostics,
+        )
+        .await
+    }
+
+    pub async fn send_retry_after(
+        &mut self,
+        metadata: RetryAfterMetadata,
+        diagnostics: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        require_body_len(
+            diagnostics.len(),
+            metadata.diagnostic_bytes as usize,
+            "server retry-after diagnostic body length mismatch",
+        )?;
+        self.write_runtime_packet(
+            MessageType::RetryAfter,
+            0,
+            metadata.to_bytes()?.to_vec(),
+            diagnostics,
+        )
+        .await
+    }
+
+    async fn write_runtime_packet(
+        &mut self,
+        message_type: MessageType,
+        frame_id: u32,
+        metadata: Vec<u8>,
+        body: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        let mut header = CommonHeader::new(message_type, metadata.len() as u32, body.len() as u32);
+        header.session_id = self.session_id;
+        header.frame_id = frame_id;
+        self.transport
+            .write_packet(&RuntimePacket::new(header, metadata, body)?)
+            .await
+    }
+
     pub fn track_cache_object(&mut self, object_id: CacheObjectId) -> Result<(), RuntimeError> {
         if self.cache_objects.contains(&object_id) {
             return Ok(());
@@ -1232,6 +1976,7 @@ impl NnrpServerSession {
         }
         let close = SessionCloseMetadata::parse(&packet.metadata)?;
         self.lifecycle.begin_session_close(&packet.header, &close)?;
+        self.pending_close = Some(close);
         Ok(close)
     }
 
@@ -1254,10 +1999,21 @@ impl NnrpServerSession {
                 ack.to_bytes()?.to_vec(),
                 Vec::new(),
             )?)
-            .await
+            .await?;
+        if self.pending_close == Some(*close) {
+            self.pending_close = None;
+        }
+        Ok(())
     }
 
     pub async fn close(mut self) -> Result<(), RuntimeError> {
+        self.close_in_place().await
+    }
+
+    pub async fn close_in_place(&mut self) -> Result<(), RuntimeError> {
+        if let Some(close) = self.pending_close.take() {
+            self.ack_close(&close).await?;
+        }
         self.remove_from_registry()?;
         self.transport.close().await
     }

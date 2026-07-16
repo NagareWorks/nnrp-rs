@@ -521,11 +521,6 @@ typedef struct NnrpClientRuntimeObjectLoopRequest {
   uintptr_t max_events;
 } NnrpClientRuntimeObjectLoopRequest;
 
-typedef struct NnrpServerFlowUpdateRequest {
-  NnrpHandle session;
-  uint32_t frame_id;
-} NnrpServerFlowUpdateRequest;
-
 typedef struct NnrpControlRequest {
   NnrpHandle handle;
   uint32_t control_code;
@@ -564,7 +559,6 @@ NnrpFfiStatus nnrp_client_submit_result_compact(NnrpClientSubmitResultRequest re
 NnrpFfiStatus nnrp_client_submit_result_compact_batch(NnrpClientSubmitResultBatchRequest request, NnrpCompactResult *out_last_result, uintptr_t *out_completed);
 NnrpFfiStatus nnrp_client_submit_runtime_object_loop_compact(NnrpClientRuntimeObjectLoopRequest request, NnrpCompactResult *out_result);
 NnrpFfiStatus nnrp_client_submit_control(NnrpClientSubmitControlRequest request, NnrpPollResult *out_result);
-NnrpFfiStatus nnrp_client_send_flow_update(NnrpServerFlowUpdateRequest request);
 NnrpFfiStatus nnrp_client_send_result_hint(NnrpControlRequest request);
 NnrpFfiStatus nnrp_client_await_event(NnrpHandle connection, NnrpPollResult *out_result);
 NnrpFfiStatus nnrp_client_await_events(NnrpRoleEventPollRequest request, NnrpEvent *out_events, uintptr_t event_capacity, uintptr_t *out_event_count);
@@ -616,7 +610,6 @@ NnrpFfiStatus nnrp_server_bind(NnrpServerBindRequest request, NnrpHandle *out_se
 NnrpFfiStatus nnrp_server_accept(NnrpServerAcceptRequest request, NnrpHandle *out_session);
 NnrpFfiStatus nnrp_server_await_events(NnrpRoleEventPollRequest request, NnrpEvent *out_events, uintptr_t event_capacity, uintptr_t *out_event_count);
 NnrpFfiStatus nnrp_server_send_result(NnrpServerSendResultRequest request);
-NnrpFfiStatus nnrp_server_send_flow_update(NnrpServerFlowUpdateRequest request);
 NnrpFfiStatus nnrp_server_close(NnrpHandle session);
 NnrpFfiStatus nnrp_control(NnrpControlRequest request);
 NnrpFfiStatus nnrp_runtime_frame_send(NnrpRuntimeFrameSendRequest request);
