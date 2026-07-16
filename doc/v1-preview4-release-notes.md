@@ -8,6 +8,10 @@ The native FFI ABI is `2.0.0`. Production transport artifacts no longer export c
 submit/result helpers that synthesized terminal events without reading a peer result from the selected carrier. The
 retired feature-flag bits remain reserved and are not reused.
 
+Raw `nnrp_control`, `nnrp_client_submit_control`, and `nnrp_client_send_result_hint` event-injection exports are also
+removed. Inherited `RESULT_HINT` is sent by a server and decoded by a client through the same carrier-backed
+`nnrp_runtime_frame_send` and role event path as typed Preview4 control frames.
+
 Synthetic FFI loops are available only from an explicit `benchmark-ffi` build under the
 `nnrp_benchmark_*` namespace. Their declarations live in `benchmarks/include/nnrp/nnrp_ffi_benchmark.h`; the
 production package builder rejects both the retired symbols and benchmark-only symbols.

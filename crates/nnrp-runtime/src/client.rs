@@ -10,17 +10,18 @@ use nnrp_core::{
     ControlRequestMetadata, FlowUpdateMetadata, FrameSubmitMetadata, InFlightPolicy, MessageType,
     ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata, ObjectReleaseMetadata,
     PartialResultMetadata, PressureMetadata, ProgressMetadata, RecoverableErrorMetadata,
-    ResultDropReasonMetadata, ResultPushMetadata, RetryAfterMetadata, RouteHintMetadata,
-    SchedulingMetadata, SessionCloseAckMetadata, SessionCloseMetadata, SessionCloseReason,
-    SessionMigrateAckMetadata, SessionMigrateMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
-    SessionPatchAckMetadata, SessionPatchMetadata, SessionPriorityClass, SessionStatus,
-    SupersedeMetadata, TraceContextMetadata, TransportId, CACHE_INVALIDATE_METADATA_LEN,
-    CACHE_MISS_METADATA_LEN, CACHE_REFERENCE_METADATA_LEN, CAPABILITY_METADATA_LEN,
-    CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED, CONTROL_REQUEST_FLAG_HARD_ABORT_ALLOWED,
-    CONTROL_REQUEST_METADATA_LEN, FRAME_SUBMIT_METADATA_LEN, OBJECT_DELTA_METADATA_LEN,
-    OBJECT_DESCRIPTOR_METADATA_LEN, OBJECT_REFERENCE_METADATA_LEN, OBJECT_RELEASE_METADATA_LEN,
-    PARTIAL_RESULT_METADATA_LEN, PRESSURE_METADATA_LEN, PROGRESS_METADATA_LEN,
-    RECOVERABLE_ERROR_METADATA_LEN, RESULT_DROP_REASON_METADATA_LEN, RESULT_PUSH_METADATA_LEN,
+    ResultDropReasonMetadata, ResultHintMetadata, ResultPushMetadata, RetryAfterMetadata,
+    RouteHintMetadata, SchedulingMetadata, SessionCloseAckMetadata, SessionCloseMetadata,
+    SessionCloseReason, SessionMigrateAckMetadata, SessionMigrateMetadata, SessionOpenAckMetadata,
+    SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchMetadata, SessionPriorityClass,
+    SessionStatus, SupersedeMetadata, TraceContextMetadata, TransportId,
+    CACHE_INVALIDATE_METADATA_LEN, CACHE_MISS_METADATA_LEN, CACHE_REFERENCE_METADATA_LEN,
+    CAPABILITY_METADATA_LEN, CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED,
+    CONTROL_REQUEST_FLAG_HARD_ABORT_ALLOWED, CONTROL_REQUEST_METADATA_LEN,
+    FRAME_SUBMIT_METADATA_LEN, OBJECT_DELTA_METADATA_LEN, OBJECT_DESCRIPTOR_METADATA_LEN,
+    OBJECT_REFERENCE_METADATA_LEN, OBJECT_RELEASE_METADATA_LEN, PARTIAL_RESULT_METADATA_LEN,
+    PRESSURE_METADATA_LEN, PROGRESS_METADATA_LEN, RECOVERABLE_ERROR_METADATA_LEN,
+    RESULT_DROP_REASON_METADATA_LEN, RESULT_HINT_METADATA_LEN, RESULT_PUSH_METADATA_LEN,
     RETRY_AFTER_METADATA_LEN, ROUTE_HINT_METADATA_LEN, SCHEDULING_FLAG_DISCARD_STALE,
     SCHEDULING_FLAG_EMIT_DROP_REASON, SCHEDULING_METADATA_LEN, SESSION_CLOSE_ACK_METADATA_LEN,
     SESSION_CLOSE_METADATA_LEN, SESSION_ERROR_NONE, SESSION_MIGRATE_ACK_METADATA_LEN,
@@ -195,6 +196,7 @@ pub enum NnrpClientEvent {
         metadata: RetryAfterMetadata,
         body: Vec<u8>,
     },
+    ResultHint(ResultHintMetadata),
 }
 
 impl NnrpClient {
@@ -426,7 +428,8 @@ impl NnrpClientSession {
             | NnrpClientEvent::RouteHint { .. }
             | NnrpClientEvent::TraceContext { .. }
             | NnrpClientEvent::RecoverableError { .. }
-            | NnrpClientEvent::RetryAfter { .. } => Err(RuntimeError::UnexpectedMessage(
+            | NnrpClientEvent::RetryAfter { .. }
+            | NnrpClientEvent::ResultHint(_) => Err(RuntimeError::UnexpectedMessage(
                 "client expected RESULT_PUSH but received a non-terminal runtime event",
             )),
         }
@@ -879,6 +882,20 @@ impl NnrpClientSession {
                     metadata,
                     body: packet.body,
                 })
+            }
+            MessageType::ResultHint => {
+                self.require_session_packet(
+                    &packet,
+                    "client received result hint for another session",
+                )?;
+                if packet.metadata.len() != RESULT_HINT_METADATA_LEN || !packet.body.is_empty() {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "client received malformed RESULT_HINT payload",
+                    ));
+                }
+                Ok(NnrpClientEvent::ResultHint(ResultHintMetadata::parse(
+                    &packet.metadata,
+                )?))
             }
             _ => Err(RuntimeError::UnexpectedMessage(
                 "client expected a runtime result or control event",

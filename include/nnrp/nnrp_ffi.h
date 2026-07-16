@@ -458,23 +458,12 @@ typedef struct NnrpPartialResultDescriptor {
   uint32_t flags;
 } NnrpPartialResultDescriptor;
 
-typedef struct NnrpControlRequest {
-  NnrpHandle handle;
-  uint32_t control_code;
-  NnrpBufferView payload;
-} NnrpControlRequest;
-
 typedef struct NnrpRuntimeFrameSendRequest {
   NnrpHandle handle;
   uint32_t message_type;
   uint32_t frame_id;
   NnrpBufferView payload;
 } NnrpRuntimeFrameSendRequest;
-
-typedef struct NnrpClientSubmitControlRequest {
-  NnrpControlRequest control;
-  uintptr_t max_events;
-} NnrpClientSubmitControlRequest;
 
 NnrpProtocolVersion nnrp_current_protocol_version(void);
 NnrpRuntimeCapabilities nnrp_runtime_capabilities(void);
@@ -489,8 +478,6 @@ NnrpFfiStatus nnrp_client_close(NnrpHandle session);
 NnrpFfiStatus nnrp_connection_close(NnrpHandle connection);
 NnrpFfiStatus nnrp_client_close_connection(NnrpHandle connection);
 NnrpFfiStatus nnrp_client_cancel(NnrpClientCancelRequest request);
-NnrpFfiStatus nnrp_client_submit_control(NnrpClientSubmitControlRequest request, NnrpPollResult *out_result);
-NnrpFfiStatus nnrp_client_send_result_hint(NnrpControlRequest request);
 NnrpFfiStatus nnrp_client_await_event(NnrpHandle connection, NnrpPollResult *out_result);
 NnrpFfiStatus nnrp_client_await_events(NnrpRoleEventPollRequest request, NnrpEvent *out_events, uintptr_t event_capacity, uintptr_t *out_event_count);
 NnrpFfiStatus nnrp_schema_descriptor_parse(NnrpBufferView source, NnrpSchemaDescriptorHeader *out_descriptor);
@@ -542,7 +529,6 @@ NnrpFfiStatus nnrp_server_accept(NnrpServerAcceptRequest request, NnrpHandle *ou
 NnrpFfiStatus nnrp_server_await_events(NnrpRoleEventPollRequest request, NnrpEvent *out_events, uintptr_t event_capacity, uintptr_t *out_event_count);
 NnrpFfiStatus nnrp_server_send_result(NnrpServerSendResultRequest request);
 NnrpFfiStatus nnrp_server_close(NnrpHandle session);
-NnrpFfiStatus nnrp_control(NnrpControlRequest request);
 NnrpFfiStatus nnrp_runtime_frame_send(NnrpRuntimeFrameSendRequest request);
 NnrpFfiStatus nnrp_poll_empty(NnrpPollResult *out_result);
 NnrpFfiStatus nnrp_dispatch_event(NnrpCallbackSink sink, const NnrpEvent *event);

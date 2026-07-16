@@ -1,5 +1,7 @@
 use core::ffi::c_void;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
+#[cfg(any(test, feature = "benchmark-ffi"))]
+use std::collections::VecDeque;
 #[cfg(not(test))]
 use std::sync::Arc;
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -525,9 +527,11 @@ struct NnrpFfiResourceEntry {
 #[derive(Default)]
 struct NnrpFfiHandleStore {
     entries: BTreeMap<(u32, u64), NnrpFfiResourceEntry>,
+    #[cfg(any(test, feature = "benchmark-ffi"))]
     events: VecDeque<NnrpQueuedEvent>,
 }
 
+#[cfg(any(test, feature = "benchmark-ffi"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct NnrpQueuedEvent {
     kind: u32,
@@ -539,6 +543,7 @@ struct NnrpQueuedEvent {
     payload_owner: NnrpHandle,
 }
 
+#[cfg(any(test, feature = "benchmark-ffi"))]
 impl NnrpQueuedEvent {
     const fn plain(
         kind: NnrpEventKind,
@@ -693,26 +698,31 @@ impl NnrpFfiHandleStore {
             _ => true,
         });
         self.entries.remove(&(connection.kind, connection.id));
-        let payload_owners: Vec<NnrpHandle> = self
-            .events
-            .iter()
-            .filter_map(|event| {
-                (event.connection == connection
-                    && event.payload_owner.kind == NnrpHandleKind::Buffer as u32)
-                    .then_some(event.payload_owner)
-            })
-            .collect();
-        self.events.retain(|event| event.connection != connection);
-        for owner in payload_owners {
-            self.entries.remove(&(owner.kind, owner.id));
+        #[cfg(any(test, feature = "benchmark-ffi"))]
+        {
+            let payload_owners: Vec<NnrpHandle> = self
+                .events
+                .iter()
+                .filter_map(|event| {
+                    (event.connection == connection
+                        && event.payload_owner.kind == NnrpHandleKind::Buffer as u32)
+                        .then_some(event.payload_owner)
+                })
+                .collect();
+            self.events.retain(|event| event.connection != connection);
+            for owner in payload_owners {
+                self.entries.remove(&(owner.kind, owner.id));
+            }
         }
         Ok(())
     }
 
+    #[cfg(any(test, feature = "benchmark-ffi"))]
     fn push_event(&mut self, event: NnrpQueuedEvent) {
         self.events.push_back(event);
     }
 
+    #[cfg(any(test, feature = "benchmark-ffi"))]
     fn poll_event(&mut self, connection: NnrpHandle) -> Result<Option<NnrpEvent>, NnrpFfiStatus> {
         self.get(connection, NnrpHandleKind::Connection)?;
         let Some(index) = self
@@ -2157,6 +2167,7 @@ pub struct NnrpClientRuntimeObjectLoopRequest {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(test)]
 pub struct NnrpControlRequest {
     pub handle: NnrpHandle,
     pub control_code: u32,
@@ -2174,6 +2185,7 @@ pub struct NnrpRuntimeFrameSendRequest {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(test)]
 pub struct NnrpClientSubmitControlRequest {
     pub control: NnrpControlRequest,
     pub max_events: usize,
@@ -2264,13 +2276,6 @@ pub unsafe extern "C" fn nnrp_client_connect(
             return status;
         }
 
-        store.push_event(NnrpQueuedEvent::plain(
-            NnrpEventKind::ConnectionOpened,
-            handle,
-            NnrpHandle::invalid(),
-            NnrpHandle::invalid(),
-            0,
-        ));
         *out_connection = handle;
         NnrpFfiStatus::ok()
     }
@@ -2421,13 +2426,6 @@ pub unsafe extern "C" fn nnrp_client_open_session(
             return status;
         }
 
-        store.push_event(NnrpQueuedEvent::plain(
-            NnrpEventKind::SessionOpened,
-            request.connection,
-            handle,
-            NnrpHandle::invalid(),
-            0,
-        ));
         *out_session = handle;
         NnrpFfiStatus::ok()
     }
@@ -3077,20 +3075,12 @@ unsafe fn validate_runtime_object_loop_request(
     Ok(())
 }
 
-#[no_mangle]
-/// # Safety
-///
-/// `request.payload` must remain readable for `request.payload.len` bytes for
-/// the duration of the call and must contain a valid `RESULT_HINT` metadata
-/// payload.
-#[rustfmt::skip]
-pub unsafe extern "C" fn nnrp_client_send_result_hint(request: NnrpControlRequest) -> NnrpFfiStatus { nnrp_client_send_result_hint_impl(request) }
-
-unsafe fn nnrp_client_send_result_hint_impl(request: NnrpControlRequest) -> NnrpFfiStatus {
+#[cfg(test)]
+unsafe fn test_client_send_result_hint(request: NnrpControlRequest) -> NnrpFfiStatus {
     if request.control_code != MessageType::ResultHint as u32 {
         return NnrpFfiStatus::invalid_argument(34);
     }
-    nnrp_control_impl(request)
+    test_control_event_injection(request)
 }
 
 #[no_mangle]
@@ -3984,6 +3974,17 @@ fn client_role_event(
                 .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
             false,
         ),
+        NnrpClientEvent::ResultHint(metadata) => (
+            NnrpEventKind::ResultHint,
+            0,
+            None,
+            MessageType::ResultHint,
+            metadata
+                .to_bytes()
+                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?
+                .to_vec(),
+            false,
+        ),
         NnrpClientEvent::ObjectDeclare { metadata, body } => (
             NnrpEventKind::RuntimeFrame,
             0,
@@ -4737,6 +4738,7 @@ unsafe fn poll_matching_operation_event_from_scope(
     status
 }
 
+#[cfg(test)]
 unsafe fn poll_matching_control_event(
     handle: NnrpHandle,
     event_kind: NnrpEventKind,
@@ -5042,6 +5044,9 @@ fn validate_runtime_frame_payload(
         | MessageType::RetryAfter => {
             validate_control_metadata_payload(message_type as u32, payload)
         }
+        MessageType::ResultHint => ResultHintMetadata::parse(bytes)
+            .map(|_| ())
+            .map_err(|error| NnrpFfiStatus::from_core_error(&error)),
         MessageType::FlowUpdate => FlowUpdateMetadata::parse(bytes)
             .map(|_| ())
             .map_err(|error| NnrpFfiStatus::from_core_error(&error)),
@@ -5096,12 +5101,20 @@ fn validate_object_delta_payload(bytes: &[u8]) -> Result<(), NnrpFfiStatus> {
 }
 
 fn validate_runtime_frame_direction(
-    _role: NnrpFfiConnectionRole,
-    _message_type: MessageType,
+    role: NnrpFfiConnectionRole,
+    message_type: MessageType,
 ) -> Result<(), NnrpFfiStatus> {
+    if message_type == MessageType::ResultHint && role != NnrpFfiConnectionRole::Server {
+        return Err(NnrpFfiStatus::from_core_error(
+            &NnrpError::InvalidProtocolCombination {
+                rule: "RESULT_HINT is sent from server to client",
+            },
+        ));
+    }
     Ok(())
 }
 
+#[cfg(test)]
 fn control_event_kind(control_code: u32) -> NnrpEventKind {
     if control_code == MessageType::ResultHint as u32 {
         NnrpEventKind::ResultHint
@@ -5844,13 +5857,6 @@ pub unsafe extern "C" fn nnrp_server_bind(
             let _ = store.remove(handle, NnrpHandleKind::Connection);
             return status;
         }
-        store.push_event(NnrpQueuedEvent::plain(
-            NnrpEventKind::ConnectionOpened,
-            handle,
-            NnrpHandle::invalid(),
-            NnrpHandle::invalid(),
-            0,
-        ));
         *out_server = handle;
         NnrpFfiStatus::ok()
     }
@@ -5955,13 +5961,6 @@ pub unsafe extern "C" fn nnrp_server_accept(
         ) {
             return status;
         }
-        store.push_event(NnrpQueuedEvent::plain(
-            NnrpEventKind::SessionOpened,
-            request.server,
-            handle,
-            NnrpHandle::invalid(),
-            0,
-        ));
         *out_session = handle;
         NnrpFfiStatus::ok()
     }
@@ -6837,6 +6836,11 @@ async fn send_server_runtime_frame(
             let (metadata, body) = RetryAfterMetadata::parse_with_diagnostics(&payload)?;
             session.send_retry_after(metadata, body.to_vec()).await
         }
+        MessageType::ResultHint => {
+            session
+                .send_result_hint(ResultHintMetadata::parse(&payload)?)
+                .await
+        }
         MessageType::ObjectDeclare => {
             let (metadata, body) = ObjectDescriptorMetadata::parse_with_extension(&payload)?;
             session.send_object_declare(metadata, body.to_vec()).await
@@ -6878,15 +6882,8 @@ async fn send_server_runtime_frame(
     }
 }
 
-#[no_mangle]
-/// # Safety
-///
-/// `request.payload` must remain readable for `request.payload.len` bytes for
-/// the duration of the call.
-#[rustfmt::skip]
-pub unsafe extern "C" fn nnrp_control(request: NnrpControlRequest) -> NnrpFfiStatus { nnrp_control_impl(request) }
-
-unsafe fn nnrp_control_impl(request: NnrpControlRequest) -> NnrpFfiStatus {
+#[cfg(test)]
+unsafe fn test_control_event_injection(request: NnrpControlRequest) -> NnrpFfiStatus {
     if request.handle.kind == NnrpHandleKind::Invalid as u32 {
         return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Invalid as u32);
     }
@@ -6951,21 +6948,8 @@ unsafe fn nnrp_control_impl(request: NnrpControlRequest) -> NnrpFfiStatus {
     NnrpFfiStatus::ok()
 }
 
-#[no_mangle]
-/// # Safety
-///
-/// `request.control.payload` must remain readable for `payload.len` bytes for
-/// the duration of the call. `out_result` must point to one caller-owned
-/// writable `NnrpPollResult`. This helper validates control metadata, queues
-/// the control event, and polls the matching event in one ABI call.
-pub unsafe extern "C" fn nnrp_client_submit_control(
-    request: NnrpClientSubmitControlRequest,
-    out_result: *mut NnrpPollResult,
-) -> NnrpFfiStatus {
-    nnrp_client_submit_control_impl(request, out_result)
-}
-
-unsafe fn nnrp_client_submit_control_impl(
+#[cfg(test)]
+unsafe fn test_client_submit_control(
     request: NnrpClientSubmitControlRequest,
     out_result: *mut NnrpPollResult,
 ) -> NnrpFfiStatus {
@@ -6981,7 +6965,7 @@ unsafe fn nnrp_client_submit_control_impl(
     }
 
     let event_kind = control_event_kind(request.control.control_code);
-    let submit_status = nnrp_control_impl(request.control);
+    let submit_status = test_control_event_injection(request.control);
     if submit_status.status_code != NnrpFfiStatusCode::Ok as u32 {
         *out_result = poll_result_none(submit_status);
         return submit_status;
@@ -8821,7 +8805,7 @@ mod tests {
             .to_bytes()
             .expect("result hint metadata should encode");
             assert_eq!(
-                nnrp_client_send_result_hint(NnrpControlRequest {
+                test_client_send_result_hint(NnrpControlRequest {
                     handle: session,
                     control_code: MessageType::ResultHint as u32,
                     payload: NnrpBufferView {
@@ -8832,7 +8816,7 @@ mod tests {
                 NnrpFfiStatus::ok()
             );
             assert_eq!(
-                nnrp_client_send_result_hint(NnrpControlRequest {
+                test_client_send_result_hint(NnrpControlRequest {
                     handle: session,
                     control_code: MessageType::FlowUpdate as u32,
                     payload: NnrpBufferView::empty(),
@@ -8904,7 +8888,7 @@ mod tests {
             .expect("progress metadata should encode");
             let mut progress_result = empty_poll_result();
             assert_eq!(
-                nnrp_client_submit_control(
+                test_client_submit_control(
                     NnrpClientSubmitControlRequest {
                         control: NnrpControlRequest {
                             handle: session,
@@ -8937,7 +8921,7 @@ mod tests {
             .expect("result hint metadata should encode");
             let mut hint_result = empty_poll_result();
             assert_eq!(
-                nnrp_client_submit_control(
+                test_client_submit_control(
                     NnrpClientSubmitControlRequest {
                         control: NnrpControlRequest {
                             handle: session,
@@ -9013,7 +8997,7 @@ mod tests {
                 max_events: 0,
             };
             let mut result = empty_poll_result();
-            let status = nnrp_client_submit_control(request, &mut result);
+            let status = test_client_submit_control(request, &mut result);
             assert_eq!(status.status_code, NnrpFfiStatusCode::ProtocolError as u32);
             assert_eq!(status.error_family, NnrpErrorFamily::Lifecycle as u32);
             assert_eq!(result.status, status);
@@ -9021,7 +9005,7 @@ mod tests {
 
             let mut invalid_code_result = empty_poll_result();
             assert_eq!(
-                nnrp_client_submit_control(
+                test_client_submit_control(
                     NnrpClientSubmitControlRequest {
                         control: NnrpControlRequest {
                             handle: session,
@@ -9041,7 +9025,7 @@ mod tests {
             assert_eq!(invalid_code_result.has_event, 0);
 
             assert_eq!(
-                nnrp_client_submit_control(request, core::ptr::null_mut()),
+                test_client_submit_control(request, core::ptr::null_mut()),
                 NnrpFfiStatus::invalid_argument(127)
             );
         }
@@ -9473,7 +9457,7 @@ mod tests {
             .expect("operation-scoped progress should encode");
             let mut operation_result = empty_poll_result();
             assert_eq!(
-                nnrp_client_submit_control(
+                test_client_submit_control(
                     NnrpClientSubmitControlRequest {
                         control: NnrpControlRequest {
                             handle: operation,
@@ -11004,7 +10988,7 @@ mod tests {
             .to_bytes()
             .unwrap();
             assert_eq!(
-                nnrp_control(NnrpControlRequest {
+                test_control_event_injection(NnrpControlRequest {
                     handle: operation,
                     control_code: MessageType::ResultHint as u32,
                     payload: NnrpBufferView {
@@ -11032,7 +11016,7 @@ mod tests {
             assert_eq!(events[3].operation, operation);
 
             assert_eq!(
-                nnrp_control(NnrpControlRequest {
+                test_control_event_injection(NnrpControlRequest {
                     handle: operation,
                     control_code: MessageType::ResultHint as u32,
                     payload: NnrpBufferView::empty(),
@@ -11042,7 +11026,7 @@ mod tests {
             );
 
             assert_eq!(
-                nnrp_control(NnrpControlRequest {
+                test_control_event_injection(NnrpControlRequest {
                     handle: connection,
                     control_code: MessageType::Ping as u32,
                     payload: NnrpBufferView::empty(),
@@ -11050,7 +11034,7 @@ mod tests {
                 NnrpFfiStatus::ok()
             );
             assert_eq!(
-                nnrp_control(NnrpControlRequest {
+                test_control_event_injection(NnrpControlRequest {
                     handle: session,
                     control_code: MessageType::Pong as u32,
                     payload: NnrpBufferView::empty(),
@@ -11058,7 +11042,7 @@ mod tests {
                 NnrpFfiStatus::ok()
             );
             assert_eq!(
-                nnrp_control(NnrpControlRequest {
+                test_control_event_injection(NnrpControlRequest {
                     handle: NnrpHandle::invalid(),
                     control_code: MessageType::Pong as u32,
                     payload: NnrpBufferView::empty(),
@@ -11066,7 +11050,7 @@ mod tests {
                 NnrpFfiStatus::invalid_handle(NnrpHandleKind::Invalid as u32)
             );
             assert_eq!(
-                nnrp_control(NnrpControlRequest {
+                test_control_event_injection(NnrpControlRequest {
                     handle: operation,
                     control_code: MessageType::Pong as u32,
                     payload: NnrpBufferView {
@@ -11235,7 +11219,7 @@ mod tests {
             );
 
             assert_eq!(
-                nnrp_control(NnrpControlRequest {
+                test_control_event_injection(NnrpControlRequest {
                     handle: connection_handle,
                     control_code: MessageType::Ping as u32,
                     payload: NnrpBufferView::empty(),
@@ -11243,7 +11227,7 @@ mod tests {
                 NnrpFfiStatus::invalid_handle(NnrpHandleKind::Connection as u32)
             );
             assert_eq!(
-                nnrp_control(NnrpControlRequest {
+                test_control_event_injection(NnrpControlRequest {
                     handle: session_handle,
                     control_code: MessageType::Ping as u32,
                     payload: NnrpBufferView::empty(),
@@ -11251,7 +11235,7 @@ mod tests {
                 NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32)
             );
             assert_eq!(
-                nnrp_control(NnrpControlRequest {
+                test_control_event_injection(NnrpControlRequest {
                     handle: operation_handle,
                     control_code: MessageType::Ping as u32,
                     payload: NnrpBufferView::empty(),
@@ -11259,7 +11243,7 @@ mod tests {
                 NnrpFfiStatus::invalid_handle(NnrpHandleKind::Operation as u32)
             );
             assert_eq!(
-                nnrp_control(NnrpControlRequest {
+                test_control_event_injection(NnrpControlRequest {
                     handle: NnrpHandle::new(NnrpHandleKind::CacheLease, 991, 1),
                     control_code: MessageType::Ping as u32,
                     payload: NnrpBufferView::empty(),

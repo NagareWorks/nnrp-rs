@@ -10,6 +10,7 @@ use nnrp_core::{
     ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata, ObjectReleaseMetadata,
     ObjectReleaseReason, OwnershipHint, PartialResultMetadata, PayloadKindBitmap, PressureMetadata,
     ProgressMetadata, RecoverableErrorMetadata, ResultClass, ResultDropReasonMetadata,
+    ResultHintBudgetPolicy, ResultHintCongestionState, ResultHintMetadata, ResultHintReason,
     ResultPushMetadata, RetryAfterMetadata, RouteHintMetadata, RuntimeObjectKind, RuntimeRole,
     SchedulingMetadata, SubmitMode, SupersedeMetadata, TileIndexMode, TraceContextMetadata,
     TransportId, FLOW_UPDATE_FLAG_CREDIT_VALID, PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID,
@@ -182,6 +183,8 @@ unsafe fn assert_runtime_event(
             NnrpEventKind::ResultDropped as u32
         } else if message_type == MessageType::FlowUpdate {
             NnrpEventKind::FlowUpdated as u32
+        } else if message_type == MessageType::ResultHint {
+            NnrpEventKind::ResultHint as u32
         } else {
             NnrpEventKind::RuntimeFrame as u32
         }
@@ -400,6 +403,18 @@ fn retry_after_payload(source_role: RuntimeRole) -> Vec<u8> {
     }
     .to_vec_with_diagnostics(b"wait")
     .expect("retry-after payload")
+}
+
+fn result_hint_payload() -> Vec<u8> {
+    ResultHintMetadata {
+        applied_budget_policy: ResultHintBudgetPolicy::Partial,
+        congestion_state: ResultHintCongestionState::Elevated,
+        reason: ResultHintReason::ServerBusy,
+        retry_after_ms: 8,
+    }
+    .to_bytes()
+    .expect("result hint payload")
+    .to_vec()
 }
 
 fn object_declare_payload(
@@ -1120,6 +1135,24 @@ unsafe fn assert_role_handshake(transport_id: TransportId, listen_endpoint: &str
             &case.payload,
         );
     }
+
+    let result_hint = result_hint_payload();
+    assert_ne!(
+        nnrp_runtime_frame_send(NnrpRuntimeFrameSendRequest {
+            handle: client_session,
+            message_type: MessageType::ResultHint as u32,
+            frame_id: 0,
+            payload: view(&result_hint),
+        }),
+        NnrpFfiStatus::ok()
+    );
+    send_runtime_frame(server_session, MessageType::ResultHint, 0, &result_hint);
+    assert_runtime_event(
+        poll_client_event(client_session),
+        MessageType::ResultHint,
+        None,
+        &result_hint,
+    );
 
     for message_type in [MessageType::Cancel, MessageType::Abort] {
         let payload = control_payload(submit_request.operation_id, RuntimeRole::Server);

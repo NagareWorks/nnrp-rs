@@ -14,24 +14,24 @@ use nnrp_core::{
     ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata, ObjectReleaseMetadata,
     OperationCancelRequest, OperationDescriptor, OperationRegistry, PartialResultMetadata,
     PressureMetadata, ProgressMetadata, RecoverableErrorMetadata, ResultDropReasonMetadata,
-    ResultPushMetadata, RetryAfterMetadata, RouteHintMetadata, RuntimeRole, SchedulingMetadata,
-    SchemaRegistry, SessionCloseAckMetadata, SessionCloseMetadata, SessionCloseStatus,
-    SessionMigrateAckMetadata, SessionMigrateMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
-    SessionPatchAckMetadata, SessionPatchMetadata, SessionStatus, SupersedeMetadata,
-    TraceContextMetadata, TransportProbeAckMetadata, TransportProbeMetadata, BUDGET_METADATA_LEN,
-    CACHE_INVALIDATE_METADATA_LEN, CACHE_MISS_METADATA_LEN, CACHE_REFERENCE_METADATA_LEN,
-    CAPABILITY_METADATA_LEN, CONTROL_REQUEST_METADATA_LEN, FLOW_UPDATE_METADATA_LEN,
-    FRAME_SUBMIT_METADATA_LEN, OBJECT_DELTA_METADATA_LEN, OBJECT_DESCRIPTOR_METADATA_LEN,
-    OBJECT_REFERENCE_METADATA_LEN, OBJECT_RELEASE_METADATA_LEN, PARTIAL_RESULT_METADATA_LEN,
-    PRESSURE_METADATA_LEN, PROGRESS_METADATA_LEN, RECOVERABLE_ERROR_METADATA_LEN,
-    RESULT_DROP_REASON_DEADLINE_EXPIRED, RESULT_DROP_REASON_METADATA_LEN, RESULT_PUSH_METADATA_LEN,
-    RETRY_AFTER_METADATA_LEN, ROUTE_HINT_METADATA_LEN, SCHEDULING_FLAG_EMIT_DROP_REASON,
-    SCHEDULING_METADATA_LEN, SESSION_ACK_FLAG_RESUME_ENABLED, SESSION_CLOSE_ACK_METADATA_LEN,
-    SESSION_ERROR_LIMIT_REACHED, SESSION_ERROR_NONE, SESSION_ERROR_PROFILE_UNSUPPORTED,
-    SESSION_ERROR_RESUME_REJECTED, SESSION_ERROR_SCHEMA_UNSUPPORTED, SESSION_FLAG_ALLOW_RESUME,
-    SESSION_MIGRATE_ACK_METADATA_LEN, SESSION_MIGRATE_METADATA_LEN, SESSION_OPEN_ACK_METADATA_LEN,
-    SESSION_PATCH_ACK_METADATA_LEN, SESSION_PATCH_METADATA_LEN, SUPERSEDE_METADATA_LEN,
-    TRACE_CONTEXT_METADATA_LEN,
+    ResultHintMetadata, ResultPushMetadata, RetryAfterMetadata, RouteHintMetadata, RuntimeRole,
+    SchedulingMetadata, SchemaRegistry, SessionCloseAckMetadata, SessionCloseMetadata,
+    SessionCloseStatus, SessionMigrateAckMetadata, SessionMigrateMetadata, SessionOpenAckMetadata,
+    SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchMetadata, SessionStatus,
+    SupersedeMetadata, TraceContextMetadata, TransportProbeAckMetadata, TransportProbeMetadata,
+    BUDGET_METADATA_LEN, CACHE_INVALIDATE_METADATA_LEN, CACHE_MISS_METADATA_LEN,
+    CACHE_REFERENCE_METADATA_LEN, CAPABILITY_METADATA_LEN, CONTROL_REQUEST_METADATA_LEN,
+    FLOW_UPDATE_METADATA_LEN, FRAME_SUBMIT_METADATA_LEN, OBJECT_DELTA_METADATA_LEN,
+    OBJECT_DESCRIPTOR_METADATA_LEN, OBJECT_REFERENCE_METADATA_LEN, OBJECT_RELEASE_METADATA_LEN,
+    PARTIAL_RESULT_METADATA_LEN, PRESSURE_METADATA_LEN, PROGRESS_METADATA_LEN,
+    RECOVERABLE_ERROR_METADATA_LEN, RESULT_DROP_REASON_DEADLINE_EXPIRED,
+    RESULT_DROP_REASON_METADATA_LEN, RESULT_PUSH_METADATA_LEN, RETRY_AFTER_METADATA_LEN,
+    ROUTE_HINT_METADATA_LEN, SCHEDULING_FLAG_EMIT_DROP_REASON, SCHEDULING_METADATA_LEN,
+    SESSION_ACK_FLAG_RESUME_ENABLED, SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_LIMIT_REACHED,
+    SESSION_ERROR_NONE, SESSION_ERROR_PROFILE_UNSUPPORTED, SESSION_ERROR_RESUME_REJECTED,
+    SESSION_ERROR_SCHEMA_UNSUPPORTED, SESSION_FLAG_ALLOW_RESUME, SESSION_MIGRATE_ACK_METADATA_LEN,
+    SESSION_MIGRATE_METADATA_LEN, SESSION_OPEN_ACK_METADATA_LEN, SESSION_PATCH_ACK_METADATA_LEN,
+    SESSION_PATCH_METADATA_LEN, SUPERSEDE_METADATA_LEN, TRACE_CONTEXT_METADATA_LEN,
 };
 use tokio::net::TcpListener;
 
@@ -1837,6 +1837,19 @@ impl NnrpServerSession {
             0,
             metadata.to_bytes()?.to_vec(),
             diagnostics,
+        )
+        .await
+    }
+
+    pub async fn send_result_hint(
+        &mut self,
+        metadata: ResultHintMetadata,
+    ) -> Result<(), RuntimeError> {
+        self.write_runtime_packet(
+            MessageType::ResultHint,
+            0,
+            metadata.to_bytes()?.to_vec(),
+            Vec::new(),
         )
         .await
     }

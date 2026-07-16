@@ -32,7 +32,6 @@ EXPECTED_EXPORTS = [
     "nnrp_session_close",
     "nnrp_client_close",
     "nnrp_client_cancel",
-    "nnrp_client_send_result_hint",
     "nnrp_client_await_event",
     "nnrp_client_await_events",
     "nnrp_server_bind",
@@ -41,7 +40,6 @@ EXPECTED_EXPORTS = [
     "nnrp_server_send_result",
     "nnrp_server_close",
     "nnrp_runtime_frame_send",
-    "nnrp_control",
     "nnrp_poll_empty",
     "nnrp_dispatch_event",
 ]
@@ -53,6 +51,9 @@ RETIRED_SYNTHETIC_EXPORTS = [
     "nnrp_client_submit_result_compact",
     "nnrp_client_submit_result_compact_batch",
     "nnrp_client_submit_runtime_object_loop_compact",
+    "nnrp_client_send_result_hint",
+    "nnrp_client_submit_control",
+    "nnrp_control",
 ]
 
 BENCHMARK_ONLY_EXPORTS = [
