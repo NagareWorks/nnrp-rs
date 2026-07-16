@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PROTOCOL_VERSION = "NNRP/1"
-FFI_ABI_VERSION = "1.13.0"
+FFI_ABI_VERSION = "2.0.0"
 EXPECTED_EXPORTS = [
     "nnrp_current_protocol_version",
     "nnrp_runtime_capabilities",
@@ -32,8 +32,6 @@ EXPECTED_EXPORTS = [
     "nnrp_session_close",
     "nnrp_client_close",
     "nnrp_client_cancel",
-    "nnrp_client_complete_operation",
-    "nnrp_client_drop_operation",
     "nnrp_client_send_result_hint",
     "nnrp_client_await_event",
     "nnrp_client_await_events",
@@ -47,6 +45,23 @@ EXPECTED_EXPORTS = [
     "nnrp_poll_empty",
     "nnrp_dispatch_event",
 ]
+
+RETIRED_SYNTHETIC_EXPORTS = [
+    "nnrp_client_complete_operation",
+    "nnrp_client_drop_operation",
+    "nnrp_client_submit_result",
+    "nnrp_client_submit_result_compact",
+    "nnrp_client_submit_result_compact_batch",
+    "nnrp_client_submit_runtime_object_loop_compact",
+]
+
+BENCHMARK_ONLY_EXPORTS = [
+    "nnrp_benchmark_client_submit_result_compact",
+    "nnrp_benchmark_client_submit_result_compact_batch",
+    "nnrp_benchmark_client_runtime_object_loop_compact",
+]
+
+FORBIDDEN_EXPORTS = RETIRED_SYNTHETIC_EXPORTS + BENCHMARK_ONLY_EXPORTS
 
 TARGETS = {
     "x86_64-unknown-linux-gnu": ("linux", "x86_64", "dynamic"),
@@ -229,6 +244,11 @@ def verify_exports(library: Path, os_name: str, library_kind: str) -> None:
     if missing:
         raise SystemExit(
             "native library is missing expected exports: " + ", ".join(missing)
+        )
+    forbidden = [symbol for symbol in FORBIDDEN_EXPORTS if symbol in exports]
+    if forbidden:
+        raise SystemExit(
+            "native library exposes non-production exports: " + ", ".join(forbidden)
         )
 
 

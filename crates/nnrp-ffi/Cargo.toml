@@ -18,6 +18,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 
 [features]
 default = ["transport-tcp", "transport-quic"]
+benchmark-ffi = []
 transport-tcp = ["dep:nnrp-transport-tcp"]
 transport-quic = ["dep:nnrp-transport-quic"]
 transport-ipc = ["dep:nnrp-transport-ipc"]

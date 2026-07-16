@@ -42,8 +42,8 @@ mod transport;
 mod transport_exports;
 pub use transport::*;
 
-pub const NNRP_FFI_ABI_MAJOR: u16 = 1;
-pub const NNRP_FFI_ABI_MINOR: u16 = 13;
+pub const NNRP_FFI_ABI_MAJOR: u16 = 2;
+pub const NNRP_FFI_ABI_MINOR: u16 = 0;
 pub const NNRP_FFI_ABI_PATCH: u16 = 0;
 
 pub const NNRP_TRANSPORT_SLOT_QUIC: u32 = 0x0000_0001;
@@ -73,9 +73,6 @@ pub const NNRP_RUNTIME_FEATURE_CACHE_LEASE_OPS: u64 = 0x0000_0000_0000_0400;
 pub const NNRP_RUNTIME_FEATURE_SCHEMA_REGISTRY_HANDLES: u64 = 0x0000_0000_0000_0800;
 pub const NNRP_RUNTIME_FEATURE_BUFFER_HANDLES: u64 = 0x0000_0000_0000_1000;
 pub const NNRP_RUNTIME_FEATURE_EXECUTABLE_RESUME: u64 = 0x0000_0000_0000_2000;
-pub const NNRP_RUNTIME_FEATURE_CLIENT_COMPLETION_HELPERS: u64 = 0x0000_0000_0000_4000;
-pub const NNRP_RUNTIME_FEATURE_CLIENT_COARSE_RESULT_HELPERS: u64 = 0x0000_0000_0000_8000;
-pub const NNRP_RUNTIME_FEATURE_CLIENT_COMPACT_RESULT_HELPERS: u64 = 0x0000_0000_0001_0000;
 pub const NNRP_RUNTIME_FEATURE_PREVIEW4_CONTROL_EVENTS: u64 = 0x0000_0000_0002_0000;
 pub const NNRP_RUNTIME_FEATURE_PREVIEW4_OBJECT_CACHE_EVENTS: u64 = 0x0000_0000_0004_0000;
 pub const NNRP_RUNTIME_FEATURE_PREVIEW4_RUNTIME_FRAME_SEND: u64 = 0x0000_0000_0008_0000;
@@ -175,9 +172,6 @@ pub fn runtime_capabilities() -> NnrpRuntimeCapabilities {
             | NNRP_RUNTIME_FEATURE_SCHEMA_REGISTRY_HANDLES
             | NNRP_RUNTIME_FEATURE_BUFFER_HANDLES
             | NNRP_RUNTIME_FEATURE_EXECUTABLE_RESUME
-            | NNRP_RUNTIME_FEATURE_CLIENT_COMPLETION_HELPERS
-            | NNRP_RUNTIME_FEATURE_CLIENT_COARSE_RESULT_HELPERS
-            | NNRP_RUNTIME_FEATURE_CLIENT_COMPACT_RESULT_HELPERS
             | NNRP_RUNTIME_FEATURE_PREVIEW4_CONTROL_EVENTS
             | NNRP_RUNTIME_FEATURE_PREVIEW4_OBJECT_CACHE_EVENTS
             | NNRP_RUNTIME_FEATURE_PREVIEW4_RUNTIME_FRAME_SEND
@@ -1923,6 +1917,7 @@ impl NnrpCompactResult {
         }
     }
 
+    #[cfg(any(test, feature = "benchmark-ffi"))]
     fn from_event(status: NnrpFfiStatus, event: NnrpEvent, operation_id: u64) -> Self {
         Self {
             status,
@@ -2802,16 +2797,8 @@ pub unsafe extern "C" fn nnrp_client_cancel(request: NnrpClientCancelRequest) ->
     }
 }
 
-#[no_mangle]
-/// # Safety
-///
-/// `request.payload` must remain readable for `request.payload.len` bytes for
-/// the duration of the call. This helper completes a client-owned operation and
-/// queues a `RESULT_PUSHED` event on the owning client connection.
-#[rustfmt::skip]
-pub unsafe extern "C" fn nnrp_client_complete_operation(request: NnrpClientCompleteOperationRequest) -> NnrpFfiStatus { nnrp_client_complete_operation_impl(request) }
-
-unsafe fn nnrp_client_complete_operation_impl(
+#[cfg(any(test, feature = "benchmark-ffi"))]
+unsafe fn benchmark_client_complete_operation(
     request: NnrpClientCompleteOperationRequest,
 ) -> NnrpFfiStatus {
     if let Err(status) = request.payload.validate() {
@@ -2820,82 +2807,72 @@ unsafe fn nnrp_client_complete_operation_impl(
     push_operation_event(request.operation, NnrpEventKind::ResultPushed, true)
 }
 
-#[no_mangle]
-/// # Safety
-///
-/// The operation handle is copied by value. This helper drops a client-owned
-/// operation and queues a `RESULT_DROPPED` event on the owning client connection.
-#[rustfmt::skip]
-pub unsafe extern "C" fn nnrp_client_drop_operation(request: NnrpClientDropOperationRequest) -> NnrpFfiStatus { nnrp_client_drop_operation_impl(request) }
-
-fn nnrp_client_drop_operation_impl(request: NnrpClientDropOperationRequest) -> NnrpFfiStatus {
+#[cfg(test)]
+fn benchmark_client_drop_operation(request: NnrpClientDropOperationRequest) -> NnrpFfiStatus {
     push_operation_event(request.operation, NnrpEventKind::ResultDropped, true)
 }
 
-#[no_mangle]
-/// # Safety
-///
-/// `request.submit_payload` and `request.result_payload` must remain readable
-/// for their declared lengths for the duration of the call. `out_operation`
-/// and `out_result` must be either null or valid writable pointers to one
-/// value each. The helper submits, completes, and polls the matching result
-/// event in one ABI call.
-pub unsafe extern "C" fn nnrp_client_submit_result(
+#[cfg(test)]
+unsafe fn benchmark_client_submit_result(
     request: NnrpClientSubmitResultRequest,
     out_operation: *mut NnrpHandle,
     out_result: *mut NnrpPollResult,
 ) -> NnrpFfiStatus {
-    nnrp_client_submit_result_impl(request, out_operation, out_result)
+    benchmark_client_submit_result_impl(request, out_operation, out_result)
 }
 
-#[no_mangle]
+#[cfg(any(test, feature = "benchmark-ffi"))]
+#[cfg_attr(feature = "benchmark-ffi", no_mangle)]
 /// # Safety
 ///
 /// `request.submit_payload` and `request.result_payload` must remain readable
 /// for their declared lengths for the duration of the call. `out_result` must
-/// point to one caller-owned writable `NnrpCompactResult`. This helper submits,
-/// completes, and polls the matching terminal result in one ABI call while
-/// returning only the compact fields needed by hot host-language paths.
-pub unsafe extern "C" fn nnrp_client_submit_result_compact(
+/// point to one caller-owned writable `NnrpCompactResult`. This benchmark-only
+/// helper synthesizes completion after submission to measure host FFI overhead.
+pub unsafe extern "C" fn nnrp_benchmark_client_submit_result_compact(
     request: NnrpClientSubmitResultRequest,
     out_result: *mut NnrpCompactResult,
 ) -> NnrpFfiStatus {
-    nnrp_client_submit_result_compact_impl(request, out_result)
+    benchmark_client_submit_result_compact_impl(request, out_result)
 }
 
-#[no_mangle]
+#[cfg(any(test, feature = "benchmark-ffi"))]
+#[cfg_attr(feature = "benchmark-ffi", no_mangle)]
 /// # Safety
 ///
 /// `request.submit_payload` and `request.result_payload` must remain readable
 /// for their declared lengths for the duration of the call. `out_last_result`
 /// must point to one caller-owned writable `NnrpCompactResult`; `out_completed`
 /// must point to one caller-owned writable `uintptr_t`. This helper repeats the
-/// compact submit/result operation in one ABI call so host language bindings can
-/// amortize FFI boundary overhead without changing protocol semantics.
-pub unsafe extern "C" fn nnrp_client_submit_result_compact_batch(
+/// synthetic compact submit/result operation in one ABI call. This symbol is
+/// exported only by an explicit `benchmark-ffi` build.
+pub unsafe extern "C" fn nnrp_benchmark_client_submit_result_compact_batch(
     request: NnrpClientSubmitResultBatchRequest,
     out_last_result: *mut NnrpCompactResult,
     out_completed: *mut usize,
 ) -> NnrpFfiStatus {
-    nnrp_client_submit_result_compact_batch_impl(request, out_last_result, out_completed)
+    benchmark_client_submit_result_compact_batch_impl(request, out_last_result, out_completed)
 }
 
-#[no_mangle]
+#[cfg(any(test, feature = "benchmark-ffi"))]
+#[cfg_attr(feature = "benchmark-ffi", no_mangle)]
 /// # Safety
 ///
 /// All buffer views in `request` must remain readable for their declared
 /// lengths for the duration of the call. `out_result` must point to one
 /// caller-owned writable `NnrpCompactResult`. This helper validates the
 /// runtime-object declare/cache/progress/partial-result/release metadata and
-/// then executes the compact submit/result path in one ABI call.
-pub unsafe extern "C" fn nnrp_client_submit_runtime_object_loop_compact(
+/// then executes a synthetic compact submit/result path. This symbol is
+/// exported only by an explicit `benchmark-ffi` build.
+pub unsafe extern "C" fn nnrp_benchmark_client_runtime_object_loop_compact(
     request: NnrpClientRuntimeObjectLoopRequest,
     out_result: *mut NnrpCompactResult,
 ) -> NnrpFfiStatus {
-    nnrp_client_submit_runtime_object_loop_compact_impl(request, out_result)
+    benchmark_client_runtime_object_loop_compact_impl(request, out_result)
 }
 
-unsafe fn nnrp_client_submit_result_impl(
+#[cfg(test)]
+unsafe fn benchmark_client_submit_result_impl(
     request: NnrpClientSubmitResultRequest,
     out_operation: *mut NnrpHandle,
     out_result: *mut NnrpPollResult,
@@ -2918,7 +2895,7 @@ unsafe fn nnrp_client_submit_result_impl(
         return submit_status;
     }
     *out_operation = operation;
-    let complete_status = nnrp_client_complete_operation_impl(NnrpClientCompleteOperationRequest {
+    let complete_status = benchmark_client_complete_operation(NnrpClientCompleteOperationRequest {
         operation,
         payload: request.result_payload,
     });
@@ -2935,7 +2912,8 @@ unsafe fn nnrp_client_submit_result_impl(
     )
 }
 
-unsafe fn nnrp_client_submit_result_compact_impl(
+#[cfg(any(test, feature = "benchmark-ffi"))]
+unsafe fn benchmark_client_submit_result_compact_impl(
     request: NnrpClientSubmitResultRequest,
     out_result: *mut NnrpCompactResult,
 ) -> NnrpFfiStatus {
@@ -2957,7 +2935,7 @@ unsafe fn nnrp_client_submit_result_compact_impl(
         *out_result = NnrpCompactResult::none(submit_status);
         return submit_status;
     }
-    let complete_status = nnrp_client_complete_operation_impl(NnrpClientCompleteOperationRequest {
+    let complete_status = benchmark_client_complete_operation(NnrpClientCompleteOperationRequest {
         operation,
         payload: request.result_payload,
     });
@@ -2977,7 +2955,8 @@ unsafe fn nnrp_client_submit_result_compact_impl(
     )
 }
 
-unsafe fn nnrp_client_submit_result_compact_batch_impl(
+#[cfg(any(test, feature = "benchmark-ffi"))]
+unsafe fn benchmark_client_submit_result_compact_batch_impl(
     request: NnrpClientSubmitResultBatchRequest,
     out_last_result: *mut NnrpCompactResult,
     out_completed: *mut usize,
@@ -3002,7 +2981,7 @@ unsafe fn nnrp_client_submit_result_compact_batch_impl(
         let frame_id = request
             .frame_id_start
             .wrapping_add((index as u32).wrapping_mul(stride));
-        let status = nnrp_client_submit_result_compact_impl(
+        let status = benchmark_client_submit_result_compact_impl(
             NnrpClientSubmitResultRequest {
                 session: request.session,
                 operation_id: request.operation_id_start.wrapping_add(index as u64),
@@ -3026,7 +3005,8 @@ unsafe fn nnrp_client_submit_result_compact_batch_impl(
     NnrpFfiStatus::ok()
 }
 
-unsafe fn nnrp_client_submit_runtime_object_loop_compact_impl(
+#[cfg(any(test, feature = "benchmark-ffi"))]
+unsafe fn benchmark_client_runtime_object_loop_compact_impl(
     request: NnrpClientRuntimeObjectLoopRequest,
     out_result: *mut NnrpCompactResult,
 ) -> NnrpFfiStatus {
@@ -3038,7 +3018,7 @@ unsafe fn nnrp_client_submit_runtime_object_loop_compact_impl(
         return status;
     }
 
-    nnrp_client_submit_result_compact_impl(
+    benchmark_client_submit_result_compact_impl(
         NnrpClientSubmitResultRequest {
             session: request.session,
             operation_id: request.operation_id,
@@ -3051,6 +3031,7 @@ unsafe fn nnrp_client_submit_runtime_object_loop_compact_impl(
     )
 }
 
+#[cfg(any(test, feature = "benchmark-ffi"))]
 unsafe fn validate_runtime_object_loop_request(
     request: NnrpClientRuntimeObjectLoopRequest,
 ) -> Result<(), NnrpFfiStatus> {
@@ -4641,6 +4622,7 @@ const fn poll_result_none(status: NnrpFfiStatus) -> NnrpPollResult {
     }
 }
 
+#[cfg(test)]
 unsafe fn poll_matching_operation_result(
     session: NnrpHandle,
     operation: NnrpHandle,
@@ -4815,6 +4797,7 @@ unsafe fn poll_matching_control_event(
     status
 }
 
+#[cfg(any(test, feature = "benchmark-ffi"))]
 unsafe fn poll_matching_operation_compact_result(
     session: NnrpHandle,
     operation: NnrpHandle,
@@ -4927,6 +4910,7 @@ fn event_scope_for_handle(
     }
 }
 
+#[cfg(any(test, feature = "benchmark-ffi"))]
 fn compact_result_state(status: NnrpFfiStatus, event_kind: u32) -> u32 {
     if status.status_code != NnrpFfiStatusCode::Ok as u32
         || event_kind == NnrpEventKind::Error as u32
@@ -4942,6 +4926,7 @@ fn compact_result_state(status: NnrpFfiStatus, event_kind: u32) -> u32 {
     NNRP_RESULT_STATE_NONE
 }
 
+#[cfg(any(test, feature = "benchmark-ffi"))]
 fn event_is_operation_result(
     event: NnrpEvent,
     session: NnrpHandle,
@@ -6385,6 +6370,7 @@ fn server_runtime_for_operation(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(test, feature = "benchmark-ffi"))]
 struct OperationEventScope {
     connection: NnrpHandle,
     session: NnrpHandle,
@@ -6400,6 +6386,7 @@ fn operation_wire_id(operation: NnrpHandle) -> Result<u64, NnrpFfiStatus> {
     }
 }
 
+#[cfg(any(test, feature = "benchmark-ffi"))]
 fn push_operation_event(
     operation: NnrpHandle,
     event_kind: NnrpEventKind,
@@ -6410,6 +6397,7 @@ fn push_operation_event(
         .unwrap_or_else(|status| status)
 }
 
+#[cfg(any(test, feature = "benchmark-ffi"))]
 fn push_operation_event_with_scope(
     operation: NnrpHandle,
     event_kind: NnrpEventKind,
@@ -7263,18 +7251,6 @@ mod tests {
             0
         );
         assert_ne!(
-            capabilities.feature_flags & NNRP_RUNTIME_FEATURE_CLIENT_COMPLETION_HELPERS,
-            0
-        );
-        assert_ne!(
-            capabilities.feature_flags & NNRP_RUNTIME_FEATURE_CLIENT_COARSE_RESULT_HELPERS,
-            0
-        );
-        assert_ne!(
-            capabilities.feature_flags & NNRP_RUNTIME_FEATURE_CLIENT_COMPACT_RESULT_HELPERS,
-            0
-        );
-        assert_ne!(
             capabilities.feature_flags & NNRP_RUNTIME_FEATURE_PREVIEW4_CONTROL_EVENTS,
             0
         );
@@ -8010,7 +7986,7 @@ mod tests {
             );
             drain_events(connection);
             assert_eq!(
-                nnrp_client_complete_operation(NnrpClientCompleteOperationRequest {
+                benchmark_client_complete_operation(NnrpClientCompleteOperationRequest {
                     operation: completed_operation,
                     payload: NnrpBufferView {
                         ptr: payload.as_ptr(),
@@ -8030,7 +8006,7 @@ mod tests {
             assert_eq!(result.event.operation, completed_operation);
             assert_eq!(result.event.frame_id, 55);
             assert_eq!(
-                nnrp_client_complete_operation(NnrpClientCompleteOperationRequest {
+                benchmark_client_complete_operation(NnrpClientCompleteOperationRequest {
                     operation: completed_operation,
                     payload: NnrpBufferView::empty(),
                 }),
@@ -8052,7 +8028,7 @@ mod tests {
             );
             drain_events(connection);
             assert_eq!(
-                nnrp_client_drop_operation(NnrpClientDropOperationRequest {
+                benchmark_client_drop_operation(NnrpClientDropOperationRequest {
                     operation: dropped_operation,
                 }),
                 NnrpFfiStatus::ok()
@@ -8068,7 +8044,7 @@ mod tests {
     }
 
     #[test]
-    fn ffi_client_submit_result_coalesces_hot_path() {
+    fn benchmark_ffi_client_submit_result_coalesces_hot_path() {
         unsafe {
             let mut connection = NnrpHandle::invalid();
             assert_eq!(
@@ -8104,7 +8080,7 @@ mod tests {
             let mut operation = NnrpHandle::invalid();
             let mut result = empty_poll_result();
             assert_eq!(
-                nnrp_client_submit_result(
+                benchmark_client_submit_result(
                     NnrpClientSubmitResultRequest {
                         session,
                         operation_id: 91_423,
@@ -8132,7 +8108,7 @@ mod tests {
             assert_eq!(result.event.operation, operation);
             assert_eq!(result.event.frame_id, 58);
             assert_eq!(
-                nnrp_client_complete_operation(NnrpClientCompleteOperationRequest {
+                benchmark_client_complete_operation(NnrpClientCompleteOperationRequest {
                     operation,
                     payload: NnrpBufferView::empty(),
                 }),
@@ -8142,7 +8118,7 @@ mod tests {
     }
 
     #[test]
-    fn ffi_client_submit_result_compact_coalesces_hot_path() {
+    fn benchmark_ffi_client_submit_result_compact_coalesces_hot_path() {
         unsafe {
             let mut connection = NnrpHandle::invalid();
             assert_eq!(
@@ -8177,7 +8153,7 @@ mod tests {
             let result_payload = [4u8, 5, 6];
             let mut result = NnrpCompactResult::none(NnrpFfiStatus::ok());
             assert_eq!(
-                nnrp_client_submit_result_compact(
+                nnrp_benchmark_client_submit_result_compact(
                     NnrpClientSubmitResultRequest {
                         session,
                         operation_id: 91_428,
@@ -8214,7 +8190,7 @@ mod tests {
     }
 
     #[test]
-    fn ffi_client_submit_result_compact_batch_amortizes_hot_path() {
+    fn benchmark_ffi_client_submit_result_compact_batch_amortizes_hot_path() {
         unsafe {
             let mut connection = NnrpHandle::invalid();
             assert_eq!(
@@ -8250,7 +8226,7 @@ mod tests {
             let mut result = NnrpCompactResult::none(NnrpFfiStatus::ok());
             let mut completed = 0usize;
             assert_eq!(
-                nnrp_client_submit_result_compact_batch(
+                nnrp_benchmark_client_submit_result_compact_batch(
                     NnrpClientSubmitResultBatchRequest {
                         session,
                         operation_id_start: 91_431,
@@ -8284,7 +8260,7 @@ mod tests {
             completed = usize::MAX;
             result = NnrpCompactResult::none(NnrpFfiStatus::invalid_argument(1));
             assert_eq!(
-                nnrp_client_submit_result_compact_batch(
+                nnrp_benchmark_client_submit_result_compact_batch(
                     NnrpClientSubmitResultBatchRequest {
                         session,
                         operation_id_start: 91_500,
@@ -8312,7 +8288,7 @@ mod tests {
 
             completed = usize::MAX;
             assert_eq!(
-                nnrp_client_submit_result_compact_batch(
+                nnrp_benchmark_client_submit_result_compact_batch(
                     NnrpClientSubmitResultBatchRequest {
                         session,
                         operation_id_start: 91_600,
@@ -8338,7 +8314,7 @@ mod tests {
 
             let mut null_completed_result = NnrpCompactResult::none(NnrpFfiStatus::ok());
             assert_eq!(
-                nnrp_client_submit_result_compact_batch(
+                nnrp_benchmark_client_submit_result_compact_batch(
                     NnrpClientSubmitResultBatchRequest {
                         session,
                         operation_id_start: 91_601,
@@ -8364,7 +8340,7 @@ mod tests {
     }
 
     #[test]
-    fn ffi_client_runtime_object_loop_compact_coalesces_metadata_validation_and_result() {
+    fn benchmark_ffi_client_runtime_object_loop_compact_coalesces_metadata_validation_and_result() {
         unsafe {
             let mut connection = NnrpHandle::invalid();
             assert_eq!(
@@ -8404,7 +8380,7 @@ mod tests {
             let result_payload = [4u8, 5, 6, 7];
             let mut result = NnrpCompactResult::none(NnrpFfiStatus::ok());
             assert_eq!(
-                nnrp_client_submit_runtime_object_loop_compact(
+                nnrp_benchmark_client_runtime_object_loop_compact(
                     NnrpClientRuntimeObjectLoopRequest {
                         session,
                         operation_id: 91_652,
@@ -8508,7 +8484,7 @@ mod tests {
     }
 
     #[test]
-    fn ffi_client_runtime_object_loop_compact_rejects_declared_length_mismatch() {
+    fn benchmark_ffi_client_runtime_object_loop_compact_rejects_declared_length_mismatch() {
         unsafe {
             let mut connection = NnrpHandle::invalid();
             assert_eq!(
@@ -8541,7 +8517,7 @@ mod tests {
 
             let payload = [1u8];
             let mut result = NnrpCompactResult::none(NnrpFfiStatus::ok());
-            let status = nnrp_client_submit_runtime_object_loop_compact(
+            let status = nnrp_benchmark_client_runtime_object_loop_compact(
                 NnrpClientRuntimeObjectLoopRequest {
                     session,
                     operation_id: 91_658,
@@ -8629,7 +8605,7 @@ mod tests {
     }
 
     #[test]
-    fn ffi_client_submit_result_reports_argument_and_poll_failures() {
+    fn benchmark_ffi_client_submit_result_reports_argument_and_poll_failures() {
         unsafe {
             let mut connection = NnrpHandle::invalid();
             assert_eq!(
@@ -8671,16 +8647,16 @@ mod tests {
                 max_events: 1,
             };
             assert_eq!(
-                nnrp_client_submit_result(request, ptr::null_mut(), &mut result),
+                benchmark_client_submit_result(request, ptr::null_mut(), &mut result),
                 NnrpFfiStatus::invalid_argument(47)
             );
-            let status = nnrp_client_submit_result(request, &mut operation, &mut result);
+            let status = benchmark_client_submit_result(request, &mut operation, &mut result);
             assert_eq!(status.status_code, NnrpFfiStatusCode::WouldBlock as u32);
             assert_eq!(operation.kind, NnrpHandleKind::Operation as u32);
             assert_ne!(operation.id, 92_433);
             assert_eq!(result.has_event, 0);
             assert_eq!(
-                nnrp_client_submit_result(
+                benchmark_client_submit_result(
                     NnrpClientSubmitResultRequest {
                         operation_id: 0,
                         ..request
@@ -8700,18 +8676,22 @@ mod tests {
             };
             let previous_operation = operation;
             assert_eq!(
-                nnrp_client_submit_result(invalid_payload_request, &mut operation, &mut result),
+                benchmark_client_submit_result(
+                    invalid_payload_request,
+                    &mut operation,
+                    &mut result
+                ),
                 NnrpFfiStatus::invalid_argument(1)
             );
             assert_eq!(operation, previous_operation);
             drain_events(connection);
             let mut compact_result = NnrpCompactResult::none(NnrpFfiStatus::ok());
             assert_eq!(
-                nnrp_client_submit_result_compact(request, ptr::null_mut()),
+                nnrp_benchmark_client_submit_result_compact(request, ptr::null_mut()),
                 NnrpFfiStatus::invalid_argument(48)
             );
             assert_eq!(
-                nnrp_client_submit_result_compact(
+                nnrp_benchmark_client_submit_result_compact(
                     NnrpClientSubmitResultRequest {
                         operation_id: 92_435,
                         result_payload: NnrpBufferView {
@@ -8725,7 +8705,7 @@ mod tests {
                 NnrpFfiStatus::invalid_argument(1)
             );
             assert_eq!(
-                nnrp_client_submit_result_compact(
+                nnrp_benchmark_client_submit_result_compact(
                     NnrpClientSubmitResultRequest {
                         operation_id: 0,
                         ..request
@@ -8737,7 +8717,7 @@ mod tests {
             assert_eq!(compact_result.status, NnrpFfiStatus::invalid_argument(12));
             assert_eq!(compact_result.has_result, 0);
             assert_eq!(
-                nnrp_client_submit_result_compact(
+                nnrp_benchmark_client_submit_result_compact(
                     NnrpClientSubmitResultRequest {
                         session: NnrpHandle::new(NnrpHandleKind::Operation, 92_436, 1),
                         operation_id: 92_436,
@@ -8752,7 +8732,7 @@ mod tests {
                 NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32)
             );
             assert_eq!(compact_result.has_result, 0);
-            let status = nnrp_client_submit_result_compact(
+            let status = nnrp_benchmark_client_submit_result_compact(
                 NnrpClientSubmitResultRequest {
                     operation_id: 92_437,
                     max_events: 1,

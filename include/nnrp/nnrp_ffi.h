@@ -13,8 +13,8 @@ typedef struct NnrpProtocolVersion {
   uint8_t wire_format;
 } NnrpProtocolVersion;
 
-#define NNRP_FFI_ABI_MAJOR 1
-#define NNRP_FFI_ABI_MINOR 13
+#define NNRP_FFI_ABI_MAJOR 2
+#define NNRP_FFI_ABI_MINOR 0
 #define NNRP_FFI_ABI_PATCH 0
 
 #define NNRP_TRANSPORT_SLOT_QUIC 0x00000001u
@@ -36,9 +36,6 @@ typedef struct NnrpProtocolVersion {
 #define NNRP_RUNTIME_FEATURE_SCHEMA_REGISTRY_HANDLES 0x0000000000000800ull
 #define NNRP_RUNTIME_FEATURE_BUFFER_HANDLES 0x0000000000001000ull
 #define NNRP_RUNTIME_FEATURE_EXECUTABLE_RESUME 0x0000000000002000ull
-#define NNRP_RUNTIME_FEATURE_CLIENT_COMPLETION_HELPERS 0x0000000000004000ull
-#define NNRP_RUNTIME_FEATURE_CLIENT_COARSE_RESULT_HELPERS 0x0000000000008000ull
-#define NNRP_RUNTIME_FEATURE_CLIENT_COMPACT_RESULT_HELPERS 0x0000000000010000ull
 #define NNRP_RUNTIME_FEATURE_PREVIEW4_CONTROL_EVENTS 0x0000000000020000ull
 #define NNRP_RUNTIME_FEATURE_PREVIEW4_OBJECT_CACHE_EVENTS 0x0000000000040000ull
 #define NNRP_RUNTIME_FEATURE_PREVIEW4_RUNTIME_FRAME_SEND 0x0000000000080000ull
@@ -325,18 +322,6 @@ typedef struct NnrpPollResult {
   NnrpEvent event;
 } NnrpPollResult;
 
-typedef struct NnrpCompactResult {
-  NnrpFfiStatus status;
-  uint8_t has_result;
-  uint32_t event_kind;
-  uint32_t result_state;
-  NnrpHandle operation;
-  uint64_t operation_id;
-  uint32_t frame_id;
-  NnrpBufferView payload;
-  NnrpFfiDiagnostic diagnostic;
-} NnrpCompactResult;
-
 typedef struct NnrpClientConnectRequest {
   uint64_t connection_id;
   uint32_t generation;
@@ -391,35 +376,6 @@ typedef struct NnrpServerSendResultRequest {
   NnrpHandle operation;
   NnrpBufferView payload;
 } NnrpServerSendResultRequest;
-
-typedef struct NnrpClientCompleteOperationRequest {
-  NnrpHandle operation;
-  NnrpBufferView payload;
-} NnrpClientCompleteOperationRequest;
-
-typedef struct NnrpClientDropOperationRequest {
-  NnrpHandle operation;
-} NnrpClientDropOperationRequest;
-
-typedef struct NnrpClientSubmitResultRequest {
-  NnrpHandle session;
-  uint64_t operation_id;
-  uint32_t frame_id;
-  NnrpBufferView submit_payload;
-  NnrpBufferView result_payload;
-  uintptr_t max_events;
-} NnrpClientSubmitResultRequest;
-
-typedef struct NnrpClientSubmitResultBatchRequest {
-  NnrpHandle session;
-  uint64_t operation_id_start;
-  uint32_t frame_id_start;
-  uint32_t frame_id_stride;
-  NnrpBufferView submit_payload;
-  NnrpBufferView result_payload;
-  uintptr_t max_events;
-  uintptr_t iterations;
-} NnrpClientSubmitResultBatchRequest;
 
 typedef struct NnrpRuntimeObjectDescriptor {
   uint64_t object_id;
@@ -502,25 +458,6 @@ typedef struct NnrpPartialResultDescriptor {
   uint32_t flags;
 } NnrpPartialResultDescriptor;
 
-typedef struct NnrpClientRuntimeObjectLoopRequest {
-  NnrpHandle session;
-  uint64_t operation_id;
-  uint32_t frame_id;
-  NnrpBufferView submit_payload;
-  NnrpRuntimeObjectDescriptor object_descriptor;
-  NnrpBufferView object_metadata;
-  NnrpCacheReferenceDescriptor cache_reference;
-  NnrpBufferView cache_reference_metadata;
-  NnrpProgressDescriptor progress;
-  NnrpBufferView progress_body;
-  NnrpPartialResultDescriptor partial_result;
-  NnrpBufferView partial_body;
-  NnrpObjectReleaseDescriptor object_release;
-  NnrpBufferView release_diagnostics;
-  NnrpBufferView result_payload;
-  uintptr_t max_events;
-} NnrpClientRuntimeObjectLoopRequest;
-
 typedef struct NnrpControlRequest {
   NnrpHandle handle;
   uint32_t control_code;
@@ -552,12 +489,6 @@ NnrpFfiStatus nnrp_client_close(NnrpHandle session);
 NnrpFfiStatus nnrp_connection_close(NnrpHandle connection);
 NnrpFfiStatus nnrp_client_close_connection(NnrpHandle connection);
 NnrpFfiStatus nnrp_client_cancel(NnrpClientCancelRequest request);
-NnrpFfiStatus nnrp_client_complete_operation(NnrpClientCompleteOperationRequest request);
-NnrpFfiStatus nnrp_client_drop_operation(NnrpClientDropOperationRequest request);
-NnrpFfiStatus nnrp_client_submit_result(NnrpClientSubmitResultRequest request, NnrpHandle *out_operation, NnrpPollResult *out_result);
-NnrpFfiStatus nnrp_client_submit_result_compact(NnrpClientSubmitResultRequest request, NnrpCompactResult *out_result);
-NnrpFfiStatus nnrp_client_submit_result_compact_batch(NnrpClientSubmitResultBatchRequest request, NnrpCompactResult *out_last_result, uintptr_t *out_completed);
-NnrpFfiStatus nnrp_client_submit_runtime_object_loop_compact(NnrpClientRuntimeObjectLoopRequest request, NnrpCompactResult *out_result);
 NnrpFfiStatus nnrp_client_submit_control(NnrpClientSubmitControlRequest request, NnrpPollResult *out_result);
 NnrpFfiStatus nnrp_client_send_result_hint(NnrpControlRequest request);
 NnrpFfiStatus nnrp_client_await_event(NnrpHandle connection, NnrpPollResult *out_result);

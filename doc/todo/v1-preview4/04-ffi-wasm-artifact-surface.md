@@ -61,7 +61,7 @@
   - [x] Read and decode bounded client and server event batches.
   - [ ] Preserve operation ordering, pressure state, object/cache state, and owned payload release.
 - [ ] Remove production use of local completion and event-injection helpers.
-  - [ ] Keep any synthetic loop helper explicitly benchmark-only.
+  - [x] Keep any synthetic loop helper explicitly benchmark-only.
   - [ ] Reject SDK or conformance paths that never read or write the selected carrier.
 - [ ] Add same-library role/carrier E2E coverage.
   - [ ] Cover TCP, QUIC, IPC, WebSocket, and secure variants supported by each platform.

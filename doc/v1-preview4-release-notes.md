@@ -2,6 +2,20 @@
 
 Preview4 moves the Rust workspace beyond token-stream transport substitution and into runtime orchestration features that help SDKs model cancellation, priority, progress, partial results, cache references, route hints, trace context, result drop reasons, IPC, and WebSocket endpoints directly.
 
+## Unreleased Preview4 ABI Correction
+
+The native FFI ABI is `2.0.0`. Production transport artifacts no longer export client completion, drop, or
+submit/result helpers that synthesized terminal events without reading a peer result from the selected carrier. The
+retired feature-flag bits remain reserved and are not reused.
+
+Synthetic FFI loops are available only from an explicit `benchmark-ffi` build under the
+`nnrp_benchmark_*` namespace. Their declarations live in `benchmarks/include/nnrp/nnrp_ffi_benchmark.h`; the
+production package builder rejects both the retired symbols and benchmark-only symbols.
+
+```bash
+cargo build -p nnrp-ffi --release --no-default-features --features transport-tcp,benchmark-ffi
+```
+
 ## 1.0.0-preview.4.4
 
 This revision makes every transport-scoped native artifact reachable through the frozen coarse transport FFI. TCP,
@@ -74,4 +88,4 @@ Rust owns a repeatable Preview4 benchmark entrypoint:
 cargo run -p nnrp-conformance --bin nnrp-preview4-benchmarks -- --iterations 100000 --transport-iterations 1000
 ```
 
-The JSON report includes control-frame hot-path encode/decode, runtime object declare/ref/release metadata, IPC loopback, and WebSocket loopback cases. Downstream SDK benchmark comparisons should use this Rust report as the artifact-set baseline for Python cffi and JavaScript native/WASM hot paths.
+The JSON report includes control-frame hot-path encode/decode, runtime object declare/ref/release metadata, IPC loopback, and WebSocket loopback cases. Downstream SDK benchmark comparisons should use this Rust report as the artifact-set baseline for Python cffi and JavaScript native/WASM hot paths. Synthetic host-FFI measurements must load an explicit `benchmark-ffi` build and must not be reported as live carrier results.
