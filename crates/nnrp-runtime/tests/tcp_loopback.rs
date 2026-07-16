@@ -178,6 +178,52 @@ async fn tcp_loopback_submits_frame_receives_result_and_closes() -> Result<(), R
 }
 
 #[tokio::test]
+async fn tcp_loopback_preserves_explicit_frame_ids_and_advances_allocator(
+) -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        for expected_frame_id in [42, 43] {
+            let submit = session.receive_submit().await?;
+            assert_eq!(submit.frame_id, expected_frame_id);
+            session
+                .send_result(submit.frame_id, token_result(), b"delta".to_vec())
+                .await?;
+        }
+        let close = session.receive_close().await?;
+        assert_eq!(close.last_operation_id, 43);
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let mut session = client.open_session().await?;
+    assert_eq!(
+        session
+            .submit_with_frame_id(42, token_submit(), b"prompt".to_vec())
+            .await?,
+        42
+    );
+    assert!(matches!(
+        session
+            .submit_with_frame_id(42, token_submit(), b"duplicate".to_vec())
+            .await,
+        Err(RuntimeError::UnexpectedMessage(_))
+    ));
+    assert_eq!(
+        session.submit(token_submit(), b"prompt".to_vec()).await?,
+        43
+    );
+    assert_eq!(session.await_result().await?.frame_id, 42);
+    assert_eq!(session.await_result().await?.frame_id, 43);
+    session.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn tcp_loopback_handles_cancel_drop_flow_and_patch() -> Result<(), RuntimeError> {
     let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
     let addr = server.local_addr()?;

@@ -305,8 +305,21 @@ impl NnrpClientSession {
         body: Vec<u8>,
     ) -> Result<u32, RuntimeError> {
         let frame_id = self.next_frame_id;
-        self.next_frame_id = self
-            .next_frame_id
+        self.submit_with_frame_id(frame_id, metadata, body).await
+    }
+
+    pub async fn submit_with_frame_id(
+        &mut self,
+        frame_id: u32,
+        metadata: FrameSubmitMetadata,
+        body: Vec<u8>,
+    ) -> Result<u32, RuntimeError> {
+        if frame_id == 0 || frame_id < self.next_frame_id {
+            return Err(RuntimeError::UnexpectedMessage(
+                "client frame id must not be zero, reused, or moved backward",
+            ));
+        }
+        let next_frame_id = frame_id
             .checked_add(1)
             .ok_or(RuntimeError::FrameIdOverflow)?;
 
@@ -325,6 +338,7 @@ impl NnrpClientSession {
                 body,
             )?)
             .await?;
+        self.next_frame_id = next_frame_id;
         Ok(frame_id)
     }
 
