@@ -26,9 +26,13 @@ use nnrp_core::{
     SESSION_ERROR_SCHEMA_UNSUPPORTED, SESSION_FLAG_ALLOW_RESUME,
 };
 #[cfg(not(test))]
+use nnrp_core::{
+    FrameSubmitMetadata, ResultPushMetadata, FRAME_SUBMIT_METADATA_LEN, RESULT_PUSH_METADATA_LEN,
+};
+#[cfg(not(test))]
 use nnrp_runtime::{
-    BoxedFramedTransport, NnrpClient, NnrpClientConfig, NnrpClientSession, NnrpServer,
-    NnrpServerConfig, NnrpServerSession, RuntimeTransportKind,
+    BoxedFramedTransport, NnrpClient, NnrpClientConfig, NnrpClientEvent, NnrpClientSession,
+    NnrpServer, NnrpServerConfig, NnrpServerSession, RuntimeTransportKind,
 };
 #[cfg(not(test))]
 use tokio::sync::Mutex as AsyncMutex;
@@ -38,8 +42,8 @@ mod transport_exports;
 pub use transport::*;
 
 pub const NNRP_FFI_ABI_MAJOR: u16 = 1;
-pub const NNRP_FFI_ABI_MINOR: u16 = 12;
-pub const NNRP_FFI_ABI_PATCH: u16 = 1;
+pub const NNRP_FFI_ABI_MINOR: u16 = 13;
+pub const NNRP_FFI_ABI_PATCH: u16 = 0;
 
 pub const NNRP_TRANSPORT_SLOT_QUIC: u32 = 0x0000_0001;
 pub const NNRP_TRANSPORT_SLOT_TCP: u32 = 0x0000_0002;
@@ -2009,6 +2013,17 @@ pub struct NnrpServerAcceptRequest {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpRoleEventPollRequest {
+    pub scope: NnrpHandle,
+    pub max_events: u32,
+    pub timeout_ms: u32,
+    pub flags: u32,
+    pub reserved0: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(test)]
 pub struct NnrpServerReceiveSubmitRequest {
     pub session: NnrpHandle,
     pub operation_id: u64,
@@ -2507,6 +2522,14 @@ pub unsafe extern "C" fn nnrp_client_submit(
     request: NnrpSubmitRequest,
     out_operation: *mut NnrpHandle,
 ) -> NnrpFfiStatus {
+    nnrp_client_submit_impl(request, out_operation)
+}
+
+#[cfg(test)]
+unsafe fn nnrp_client_submit_impl(
+    request: NnrpSubmitRequest,
+    out_operation: *mut NnrpHandle,
+) -> NnrpFfiStatus {
     if out_operation.is_null() || request.operation_id == 0 {
         return NnrpFfiStatus::invalid_argument(12);
     }
@@ -2544,6 +2567,78 @@ pub unsafe extern "C" fn nnrp_client_submit(
         request.frame_id,
     ));
     *out_operation = handle;
+    NnrpFfiStatus::ok()
+}
+
+#[cfg(not(test))]
+unsafe fn nnrp_client_submit_impl(
+    request: NnrpSubmitRequest,
+    out_operation: *mut NnrpHandle,
+) -> NnrpFfiStatus {
+    if out_operation.is_null() || request.operation_id == 0 || request.frame_id == 0 {
+        return NnrpFfiStatus::invalid_argument(12);
+    }
+    if let Err(status) = request.payload.validate() {
+        return status;
+    }
+    let payload = ffi_read_slice(request.payload);
+    if payload.len() < FRAME_SUBMIT_METADATA_LEN {
+        return NnrpFfiStatus::invalid_argument(144);
+    }
+    let metadata = match FrameSubmitMetadata::parse(&payload[..FRAME_SUBMIT_METADATA_LEN]) {
+        Ok(metadata) => metadata,
+        Err(error) => return NnrpFfiStatus::from_core_error(&error),
+    };
+    let body = payload[FRAME_SUBMIT_METADATA_LEN..].to_vec();
+    let operation = NnrpHandle::new(
+        NnrpHandleKind::Operation,
+        request.operation_id,
+        request.session.generation,
+    );
+    let session = {
+        let mut store = handle_store();
+        if store
+            .entries
+            .contains_key(&(NnrpHandleKind::Operation as u32, request.operation_id))
+        {
+            return NnrpFfiStatus::invalid_argument(145);
+        }
+        let session = match store.get(request.session, NnrpHandleKind::Session) {
+            Ok(NnrpFfiResource::Session {
+                runtime: NnrpFfiSessionRuntime::Client(session),
+                ..
+            }) => Arc::clone(session),
+            Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32),
+            Err(status) => return status,
+        };
+        if let Err(status) = store.insert(
+            operation,
+            NnrpFfiResource::Operation {
+                session: request.session,
+                frame_id: request.frame_id,
+                payload_len: request.payload.len,
+            },
+        ) {
+            return status;
+        }
+        session
+    };
+    let frame_id = request.frame_id;
+    if let Err(status) = transport::run_role_async(
+        async move {
+            session
+                .lock()
+                .await
+                .submit_with_frame_id(frame_id, metadata, body)
+                .await
+                .map(|_| ())
+        },
+        0,
+    ) {
+        let _ = handle_store().remove(operation, NnrpHandleKind::Operation);
+        return status;
+    }
+    *out_operation = operation;
     NnrpFfiStatus::ok()
 }
 
@@ -2959,40 +3054,72 @@ unsafe fn nnrp_client_send_result_hint_impl(request: NnrpControlRequest) -> Nnrp
 ///
 /// `out_result` must be either null or a valid writable pointer to one
 /// `NnrpPollResult`. When non-null, the pointed memory must be owned by the caller.
+#[allow(clippy::needless_return)]
 pub unsafe extern "C" fn nnrp_client_await_event(
-    connection: NnrpHandle,
+    scope: NnrpHandle,
     out_result: *mut NnrpPollResult,
 ) -> NnrpFfiStatus {
-    if out_result.is_null() {
-        return NnrpFfiStatus::invalid_argument(17);
+    #[cfg(not(test))]
+    {
+        if out_result.is_null() {
+            return NnrpFfiStatus::invalid_argument(17);
+        }
+        let mut event = NnrpEvent::none();
+        let mut count = 0usize;
+        let status = role_client_await_events_impl(
+            NnrpRoleEventPollRequest {
+                scope,
+                max_events: 1,
+                timeout_ms: 0,
+                flags: 0,
+                reserved0: 0,
+            },
+            &mut event,
+            1,
+            &mut count,
+        );
+        *out_result = NnrpPollResult {
+            status,
+            has_event: u8::from(count == 1),
+            event,
+        };
+        return status;
     }
-    let mut store = handle_store();
-    match store.poll_event(connection) {
-        Ok(Some(event)) => {
-            *out_result = NnrpPollResult {
-                status: NnrpFfiStatus::ok(),
-                has_event: 1,
-                event,
-            };
-            NnrpFfiStatus::ok()
+
+    #[cfg(test)]
+    {
+        if out_result.is_null() {
+            return NnrpFfiStatus::invalid_argument(17);
         }
-        Ok(None) => {
-            *out_result = NnrpPollResult {
-                status: NnrpFfiStatus {
-                    status_code: NnrpFfiStatusCode::WouldBlock as u32,
-                    error_family: NnrpErrorFamily::None as u32,
-                    protocol_error_code: 0,
-                    detail_code: 0,
-                },
-                has_event: 0,
-                event: NnrpEvent::none(),
-            };
-            (*out_result).status
+        let mut store = handle_store();
+        match store.poll_event(scope) {
+            Ok(Some(event)) => {
+                *out_result = NnrpPollResult {
+                    status: NnrpFfiStatus::ok(),
+                    has_event: 1,
+                    event,
+                };
+                NnrpFfiStatus::ok()
+            }
+            Ok(None) => {
+                *out_result = NnrpPollResult {
+                    status: NnrpFfiStatus {
+                        status_code: NnrpFfiStatusCode::WouldBlock as u32,
+                        error_family: NnrpErrorFamily::None as u32,
+                        protocol_error_code: 0,
+                        detail_code: 0,
+                    },
+                    has_event: 0,
+                    event: NnrpEvent::none(),
+                };
+                (*out_result).status
+            }
+            Err(status) => status,
         }
-        Err(status) => status,
     }
 }
 
+#[cfg(test)]
 #[no_mangle]
 /// # Safety
 ///
@@ -3007,6 +3134,24 @@ pub unsafe extern "C" fn nnrp_client_await_events(
     out_event_count: *mut usize,
 ) -> NnrpFfiStatus {
     client_await_events_impl(connection, out_events, event_capacity, out_event_count)
+}
+
+#[cfg(not(test))]
+#[no_mangle]
+/// Reads and decodes a bounded client event batch from a live role session.
+///
+/// # Safety
+///
+/// `out_events` must point to `event_capacity` writable `NnrpEvent` entries
+/// when `event_capacity` is non-zero. `out_event_count` must point to one
+/// writable `usize`.
+pub unsafe extern "C" fn nnrp_client_await_events(
+    request: NnrpRoleEventPollRequest,
+    out_events: *mut NnrpEvent,
+    event_capacity: usize,
+    out_event_count: *mut usize,
+) -> NnrpFfiStatus {
+    role_client_await_events_impl(request, out_events, event_capacity, out_event_count)
 }
 
 #[no_mangle]
@@ -3521,6 +3666,7 @@ unsafe fn typed_payload_validate_binding_impl(
         .unwrap_or_else(schema_registry_failure_status)
 }
 
+#[cfg(test)]
 unsafe fn client_await_events_impl(
     connection: NnrpHandle,
     out_events: *mut NnrpEvent,
@@ -3559,6 +3705,253 @@ unsafe fn client_await_events_impl(
         }
     }
 
+    NnrpFfiStatus::ok()
+}
+
+#[cfg(not(test))]
+fn validate_role_event_poll(
+    request: NnrpRoleEventPollRequest,
+    out_events: *mut NnrpEvent,
+    event_capacity: usize,
+    out_event_count: *mut usize,
+) -> Result<usize, NnrpFfiStatus> {
+    if out_event_count.is_null() {
+        return Err(NnrpFfiStatus::invalid_argument(31));
+    }
+    if event_capacity == 0 || out_events.is_null() {
+        return Err(NnrpFfiStatus::invalid_argument(32));
+    }
+    if request.flags != 0 || request.reserved0 != 0 {
+        return Err(NnrpFfiStatus::invalid_argument(146));
+    }
+    let requested = if request.max_events == 0 {
+        16usize
+    } else {
+        request.max_events as usize
+    };
+    Ok(requested.min(event_capacity))
+}
+
+#[cfg(not(test))]
+fn client_role_event(
+    scope: NnrpHandle,
+    event: NnrpClientEvent,
+) -> Result<NnrpEvent, NnrpFfiStatus> {
+    let (connection, frame_id, message_type, payload) = match event {
+        NnrpClientEvent::Result(result) => {
+            let mut payload = result
+                .metadata
+                .to_bytes()
+                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?
+                .to_vec();
+            payload.extend_from_slice(&result.body);
+            (
+                role_session_connection(scope, NnrpFfiConnectionRole::Client)?,
+                result.frame_id,
+                MessageType::ResultPush,
+                payload,
+            )
+        }
+        _ => {
+            return Err(NnrpFfiStatus {
+                status_code: NnrpFfiStatusCode::InvalidState as u32,
+                error_family: NnrpErrorFamily::Operation as u32,
+                protocol_error_code: 0,
+                detail_code: 147,
+            })
+        }
+    };
+
+    let mut store = handle_store();
+    let operation = store
+        .entries
+        .iter()
+        .find_map(|((kind, id), entry)| match &entry.resource {
+            NnrpFfiResource::Operation {
+                session,
+                frame_id: owned_frame,
+                ..
+            } if *session == scope && *owned_frame == frame_id => Some(NnrpHandle {
+                kind: *kind,
+                id: *id,
+                generation: entry.generation,
+                flags: 0,
+            }),
+            _ => None,
+        })
+        .ok_or_else(|| NnrpFfiStatus::invalid_handle(NnrpHandleKind::Operation as u32))?;
+    let (payload_owner, payload_view) = insert_owned_buffer(&mut store, payload)?;
+    Ok(NnrpEvent {
+        kind: NnrpEventKind::ResultPushed as u32,
+        message_type: message_type as u32,
+        connection,
+        session: scope,
+        operation,
+        frame_id,
+        payload_owner,
+        payload: payload_view,
+        ..NnrpEvent::none()
+    })
+}
+
+#[cfg(not(test))]
+fn role_session_connection(
+    session: NnrpHandle,
+    expected_role: NnrpFfiConnectionRole,
+) -> Result<NnrpHandle, NnrpFfiStatus> {
+    let store = handle_store();
+    let connection = match store.get(session, NnrpHandleKind::Session)? {
+        NnrpFfiResource::Session { connection, .. } => *connection,
+        _ => {
+            return Err(NnrpFfiStatus::invalid_handle(
+                NnrpHandleKind::Session as u32,
+            ))
+        }
+    };
+    if store.get_connection_role(connection)? != expected_role {
+        return Err(NnrpFfiStatus::invalid_handle(
+            NnrpHandleKind::Session as u32,
+        ));
+    }
+    Ok(connection)
+}
+
+#[cfg(not(test))]
+unsafe fn role_client_await_events_impl(
+    request: NnrpRoleEventPollRequest,
+    out_events: *mut NnrpEvent,
+    event_capacity: usize,
+    out_event_count: *mut usize,
+) -> NnrpFfiStatus {
+    let limit = match validate_role_event_poll(request, out_events, event_capacity, out_event_count)
+    {
+        Ok(limit) => limit,
+        Err(status) => return status,
+    };
+    *out_event_count = 0;
+    let session = {
+        let store = handle_store();
+        match store.get(request.scope, NnrpHandleKind::Session) {
+            Ok(NnrpFfiResource::Session {
+                runtime: NnrpFfiSessionRuntime::Client(session),
+                ..
+            }) => Arc::clone(session),
+            Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32),
+            Err(status) => return status,
+        }
+    };
+
+    for index in 0..limit {
+        let timeout_ms = if index == 0 { request.timeout_ms } else { 1 };
+        let runtime = Arc::clone(&session);
+        let event = match transport::run_role_async(
+            async move { runtime.lock().await.await_event().await },
+            timeout_ms,
+        ) {
+            Ok(event) => event,
+            Err(status)
+                if index > 0 && status.status_code == NnrpFfiStatusCode::WouldBlock as u32 =>
+            {
+                break;
+            }
+            Err(status) => return status,
+        };
+        let event = match client_role_event(request.scope, event) {
+            Ok(event) => event,
+            Err(status) => return status,
+        };
+        *out_events.add(index) = event;
+        *out_event_count += 1;
+    }
+    NnrpFfiStatus::ok()
+}
+
+#[cfg(not(test))]
+unsafe fn role_server_await_events_impl(
+    request: NnrpRoleEventPollRequest,
+    out_events: *mut NnrpEvent,
+    event_capacity: usize,
+    out_event_count: *mut usize,
+) -> NnrpFfiStatus {
+    let limit = match validate_role_event_poll(request, out_events, event_capacity, out_event_count)
+    {
+        Ok(limit) => limit,
+        Err(status) => return status,
+    };
+    *out_event_count = 0;
+    let (session, connection) = {
+        let store = handle_store();
+        match store.get(request.scope, NnrpHandleKind::Session) {
+            Ok(NnrpFfiResource::Session {
+                connection,
+                runtime: NnrpFfiSessionRuntime::Server(session),
+                ..
+            }) => (Arc::clone(session), *connection),
+            Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32),
+            Err(status) => return status,
+        }
+    };
+    if let Err(status) = role_session_connection(request.scope, NnrpFfiConnectionRole::Server) {
+        return status;
+    }
+
+    for index in 0..limit {
+        let timeout_ms = if index == 0 { request.timeout_ms } else { 1 };
+        let runtime = Arc::clone(&session);
+        let submit = match transport::run_role_async(
+            async move { runtime.lock().await.receive_submit().await },
+            timeout_ms,
+        ) {
+            Ok(submit) => submit,
+            Err(status)
+                if index > 0 && status.status_code == NnrpFfiStatusCode::WouldBlock as u32 =>
+            {
+                break;
+            }
+            Err(status) => return status,
+        };
+        let mut payload = match submit.metadata.to_bytes() {
+            Ok(metadata) => metadata.to_vec(),
+            Err(error) => return NnrpFfiStatus::from_core_error(&error),
+        };
+        payload.extend_from_slice(&submit.body);
+
+        let mut store = handle_store();
+        let operation = NnrpHandle::new(
+            NnrpHandleKind::Operation,
+            next_handle_id(&store, NnrpHandleKind::Operation),
+            request.scope.generation,
+        );
+        if let Err(status) = store.insert(
+            operation,
+            NnrpFfiResource::Operation {
+                session: request.scope,
+                frame_id: submit.frame_id,
+                payload_len: payload.len(),
+            },
+        ) {
+            return status;
+        }
+        let (payload_owner, payload_view) = match insert_owned_buffer(&mut store, payload) {
+            Ok(value) => value,
+            Err(status) => {
+                store.entries.remove(&(operation.kind, operation.id));
+                return status;
+            }
+        };
+        *out_events.add(index) = NnrpEvent {
+            kind: NnrpEventKind::SubmitAccepted as u32,
+            message_type: MessageType::FrameSubmit as u32,
+            connection,
+            session: request.scope,
+            operation,
+            frame_id: submit.frame_id,
+            payload_owner,
+            payload: payload_view,
+            ..NnrpEvent::none()
+        };
+        *out_event_count += 1;
+    }
     NnrpFfiStatus::ok()
 }
 
@@ -4938,6 +5331,7 @@ pub unsafe extern "C" fn nnrp_server_accept(
     }
 }
 
+#[cfg(test)]
 #[no_mangle]
 /// # Safety
 ///
@@ -4994,6 +5388,25 @@ pub unsafe extern "C" fn nnrp_server_receive_submit(
     NnrpFfiStatus::ok()
 }
 
+#[cfg(not(test))]
+#[no_mangle]
+/// Reads and decodes a bounded server event batch from a live role session.
+/// Inbound submits create operation handles owned by the server session.
+///
+/// # Safety
+///
+/// `out_events` must point to `event_capacity` writable `NnrpEvent` entries
+/// when `event_capacity` is non-zero. `out_event_count` must point to one
+/// writable `usize`.
+pub unsafe extern "C" fn nnrp_server_await_events(
+    request: NnrpRoleEventPollRequest,
+    out_events: *mut NnrpEvent,
+    event_capacity: usize,
+    out_event_count: *mut usize,
+) -> NnrpFfiStatus {
+    role_server_await_events_impl(request, out_events, event_capacity, out_event_count)
+}
+
 #[no_mangle]
 /// # Safety
 ///
@@ -5002,10 +5415,74 @@ pub unsafe extern "C" fn nnrp_server_receive_submit(
 pub unsafe extern "C" fn nnrp_server_send_result(
     request: NnrpServerSendResultRequest,
 ) -> NnrpFfiStatus {
+    #[cfg(test)]
+    {
+        if let Err(status) = request.payload.validate() {
+            return status;
+        }
+        push_operation_event(request.operation, NnrpEventKind::ResultPushed, false)
+    }
+
+    #[cfg(not(test))]
+    {
+        nnrp_server_send_result_impl(request)
+    }
+}
+
+#[cfg(not(test))]
+unsafe fn nnrp_server_send_result_impl(request: NnrpServerSendResultRequest) -> NnrpFfiStatus {
     if let Err(status) = request.payload.validate() {
         return status;
     }
-    push_operation_event(request.operation, NnrpEventKind::ResultPushed, false)
+    let payload = ffi_read_slice(request.payload);
+    if payload.len() < RESULT_PUSH_METADATA_LEN {
+        return NnrpFfiStatus::invalid_argument(148);
+    }
+    let metadata = match ResultPushMetadata::parse(&payload[..RESULT_PUSH_METADATA_LEN]) {
+        Ok(metadata) => metadata,
+        Err(error) => return NnrpFfiStatus::from_core_error(&error),
+    };
+    let body = payload[RESULT_PUSH_METADATA_LEN..].to_vec();
+    let (session_handle, frame_id, session) = {
+        let store = handle_store();
+        let (session_handle, frame_id) =
+            match store.get(request.operation, NnrpHandleKind::Operation) {
+                Ok(NnrpFfiResource::Operation {
+                    session, frame_id, ..
+                }) => (*session, *frame_id),
+                Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Operation as u32),
+                Err(status) => return status,
+            };
+        let session = match store.get(session_handle, NnrpHandleKind::Session) {
+            Ok(NnrpFfiResource::Session {
+                runtime: NnrpFfiSessionRuntime::Server(session),
+                ..
+            }) => Arc::clone(session),
+            Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32),
+            Err(status) => return status,
+        };
+        (session_handle, frame_id, session)
+    };
+    if let Err(status) = role_session_connection(session_handle, NnrpFfiConnectionRole::Server) {
+        return status;
+    }
+    if let Err(status) = transport::run_role_async(
+        async move {
+            session
+                .lock()
+                .await
+                .send_result(frame_id, metadata, body)
+                .await
+        },
+        0,
+    ) {
+        return status;
+    }
+    let mut store = handle_store();
+    match store.remove(request.operation, NnrpHandleKind::Operation) {
+        Ok(()) => NnrpFfiStatus::ok(),
+        Err(status) => status,
+    }
 }
 
 #[no_mangle]

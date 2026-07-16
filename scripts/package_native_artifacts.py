@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PROTOCOL_VERSION = "NNRP/1"
-FFI_ABI_VERSION = "1.12.1"
+FFI_ABI_VERSION = "1.13.0"
 EXPECTED_EXPORTS = [
     "nnrp_current_protocol_version",
     "nnrp_runtime_capabilities",
@@ -37,9 +37,10 @@ EXPECTED_EXPORTS = [
     "nnrp_client_send_flow_update",
     "nnrp_client_send_result_hint",
     "nnrp_client_await_event",
+    "nnrp_client_await_events",
     "nnrp_server_bind",
     "nnrp_server_accept",
-    "nnrp_server_receive_submit",
+    "nnrp_server_await_events",
     "nnrp_server_send_result",
     "nnrp_server_send_flow_update",
     "nnrp_server_close",

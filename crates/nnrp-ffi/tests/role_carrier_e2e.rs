@@ -1,13 +1,20 @@
+use std::ptr;
 use std::slice;
 use std::thread;
 
-use nnrp_core::{TransportId, PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION};
+use nnrp_core::{
+    FrameSubmitMetadata, InputProfile, PayloadKindBitmap, ResultClass, ResultPushMetadata,
+    SubmitMode, TileIndexMode, TransportId, PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID,
+    TOKEN_DELTA_SCHEMA_VERSION,
+};
 use nnrp_ffi::{
-    nnrp_buffer_release, nnrp_client_connect, nnrp_client_open_session, nnrp_connection_close,
-    nnrp_server_accept, nnrp_server_bind, nnrp_server_close, NnrpBufferView,
-    NnrpClientConnectRequest, NnrpFfiStatus, NnrpHandle, NnrpHandleKind, NnrpServerAcceptRequest,
-    NnrpServerBindRequest, NnrpSessionOpenRequest, NnrpTransportFrameBatch,
-    NnrpTransportOpenRequest, NnrpTransportReadBatchRequest,
+    nnrp_buffer_release, nnrp_client_await_event, nnrp_client_await_events, nnrp_client_connect,
+    nnrp_client_open_session, nnrp_client_submit, nnrp_connection_close, nnrp_server_accept,
+    nnrp_server_await_events, nnrp_server_bind, nnrp_server_close, nnrp_server_send_result,
+    NnrpBufferView, NnrpClientConnectRequest, NnrpEvent, NnrpEventKind, NnrpFfiStatus, NnrpHandle,
+    NnrpHandleKind, NnrpPollResult, NnrpRoleEventPollRequest, NnrpServerAcceptRequest,
+    NnrpServerBindRequest, NnrpServerSendResultRequest, NnrpSessionOpenRequest, NnrpSubmitRequest,
+    NnrpTransportFrameBatch, NnrpTransportOpenRequest, NnrpTransportReadBatchRequest,
 };
 
 unsafe extern "C" {
@@ -45,6 +52,65 @@ fn open_request(transport_id: TransportId, endpoint: &str) -> NnrpTransportOpenR
         config: NnrpHandle::invalid(),
         max_packet_bytes: 0,
         timeout_ms: 5_000,
+        reserved0: 0,
+    }
+}
+
+fn token_submit() -> FrameSubmitMetadata {
+    FrameSubmitMetadata {
+        src_width: 0,
+        src_height: 0,
+        tile_width: 0,
+        tile_height: 0,
+        tile_count: 0,
+        section_count: 0,
+        frame_class: 0,
+        input_profile: InputProfile::Unspecified,
+        tile_index_mode: TileIndexMode::DenseRange,
+        latency_budget_ms: 25,
+        target_fps_x100: 0,
+        retry_of_frame: 0,
+        tile_base_id: 0,
+        camera_bytes: 0,
+        tile_index_bytes: 0,
+        submit_mode: SubmitMode::Inline,
+        budget_policy: 0,
+        loss_tolerance_policy: 0,
+        object_ref_mask: 0,
+        dependency_frame_id: 0,
+        payload_kind_bitmap: PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),
+        payload_frame_count: 1,
+    }
+}
+
+fn token_result() -> ResultPushMetadata {
+    ResultPushMetadata {
+        status_code: 200,
+        result_flags: 0,
+        section_count: 0,
+        tile_count: 0,
+        active_profile_id: PROFILE_TOKEN,
+        inference_ms: 3,
+        queue_ms: 1,
+        server_total_ms: 4,
+        tile_base_id: 0,
+        tile_index_bytes: 0,
+        result_class: ResultClass::Complete,
+        applied_budget_policy: 0,
+        reused_frame_id: 0,
+        covered_tile_count: 0,
+        dropped_tile_count: 0,
+        payload_kind_bitmap: PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),
+        payload_frame_count: 1,
+    }
+}
+
+fn poll_request(scope: NnrpHandle) -> NnrpRoleEventPollRequest {
+    NnrpRoleEventPollRequest {
+        scope,
+        max_events: 1,
+        timeout_ms: 5_000,
+        flags: 0,
         reserved0: 0,
     }
 }
@@ -185,6 +251,249 @@ unsafe fn assert_role_handshake(transport_id: TransportId, listen_endpoint: &str
     assert_eq!(server_status, NnrpFfiStatus::ok());
     assert_ne!(client_session, NnrpHandle::invalid());
     assert_ne!(server_session, NnrpHandle::invalid());
+
+    let submit_body = b"role-carrier-submit";
+    let mut submit_payload = token_submit().to_bytes().expect("submit metadata").to_vec();
+    submit_payload.extend_from_slice(submit_body);
+    let mut client_operation = NnrpHandle::invalid();
+    let submit_request = NnrpSubmitRequest {
+        session: client_session,
+        operation_id: id_base + 6,
+        frame_id: 42,
+        payload: view(&submit_payload),
+    };
+    assert_eq!(
+        nnrp_client_submit(submit_request, ptr::null_mut()),
+        NnrpFfiStatus::invalid_argument(12)
+    );
+    assert_eq!(
+        nnrp_client_submit(
+            NnrpSubmitRequest {
+                payload: NnrpBufferView {
+                    ptr: ptr::null(),
+                    len: 1,
+                },
+                ..submit_request
+            },
+            &mut client_operation,
+        ),
+        NnrpFfiStatus::invalid_argument(1)
+    );
+    assert_eq!(
+        nnrp_client_submit(
+            NnrpSubmitRequest {
+                payload: view(&submit_payload[..1]),
+                ..submit_request
+            },
+            &mut client_operation,
+        ),
+        NnrpFfiStatus::invalid_argument(144)
+    );
+    let malformed_submit = [u8::MAX; 72];
+    assert_ne!(
+        nnrp_client_submit(
+            NnrpSubmitRequest {
+                payload: view(&malformed_submit),
+                ..submit_request
+            },
+            &mut client_operation,
+        ),
+        NnrpFfiStatus::ok()
+    );
+    assert_ne!(
+        nnrp_client_submit(
+            NnrpSubmitRequest {
+                session: NnrpHandle::invalid(),
+                ..submit_request
+            },
+            &mut client_operation,
+        ),
+        NnrpFfiStatus::ok()
+    );
+    assert_eq!(
+        nnrp_client_submit(submit_request, &mut client_operation),
+        NnrpFfiStatus::ok()
+    );
+    assert_eq!(
+        nnrp_client_submit(submit_request, &mut NnrpHandle::invalid()),
+        NnrpFfiStatus::invalid_argument(145)
+    );
+    assert_ne!(
+        nnrp_client_submit(
+            NnrpSubmitRequest {
+                operation_id: id_base + 7,
+                frame_id: 41,
+                ..submit_request
+            },
+            &mut NnrpHandle::invalid(),
+        ),
+        NnrpFfiStatus::ok()
+    );
+
+    let mut event_count = 0usize;
+    assert_eq!(
+        nnrp_client_await_event(client_session, ptr::null_mut()),
+        NnrpFfiStatus::invalid_argument(17)
+    );
+    assert_eq!(
+        nnrp_client_await_events(
+            poll_request(client_session),
+            ptr::null_mut(),
+            0,
+            &mut event_count,
+        ),
+        NnrpFfiStatus::invalid_argument(32)
+    );
+    assert_eq!(
+        nnrp_client_await_events(
+            poll_request(client_session),
+            &mut NnrpEvent::none(),
+            1,
+            ptr::null_mut(),
+        ),
+        NnrpFfiStatus::invalid_argument(31)
+    );
+    assert_eq!(
+        nnrp_client_await_events(
+            NnrpRoleEventPollRequest {
+                flags: 1,
+                ..poll_request(client_session)
+            },
+            &mut NnrpEvent::none(),
+            1,
+            &mut event_count,
+        ),
+        NnrpFfiStatus::invalid_argument(146)
+    );
+    assert_ne!(
+        nnrp_client_await_events(
+            poll_request(server_session),
+            &mut NnrpEvent::none(),
+            1,
+            &mut event_count,
+        ),
+        NnrpFfiStatus::ok()
+    );
+    assert_ne!(
+        nnrp_client_await_events(
+            NnrpRoleEventPollRequest {
+                scope: NnrpHandle::invalid(),
+                max_events: 0,
+                ..poll_request(client_session)
+            },
+            &mut NnrpEvent::none(),
+            1,
+            &mut event_count,
+        ),
+        NnrpFfiStatus::ok()
+    );
+    let mut invalid_poll = NnrpPollResult {
+        status: NnrpFfiStatus::ok(),
+        has_event: 0,
+        event: NnrpEvent::none(),
+    };
+    let invalid_poll_status = nnrp_client_await_event(NnrpHandle::invalid(), &mut invalid_poll);
+    assert_ne!(invalid_poll_status, NnrpFfiStatus::ok());
+    assert_eq!(invalid_poll.status, invalid_poll_status);
+    assert_eq!(invalid_poll.has_event, 0);
+    assert_eq!(
+        nnrp_server_await_events(
+            poll_request(server_session),
+            ptr::null_mut(),
+            0,
+            &mut event_count,
+        ),
+        NnrpFfiStatus::invalid_argument(32)
+    );
+
+    let mut server_events = [NnrpEvent::none(); 2];
+    let mut server_event_count = 0usize;
+    assert_eq!(
+        nnrp_server_await_events(
+            NnrpRoleEventPollRequest {
+                max_events: 2,
+                ..poll_request(server_session)
+            },
+            server_events.as_mut_ptr(),
+            server_events.len(),
+            &mut server_event_count,
+        ),
+        NnrpFfiStatus::ok()
+    );
+    let server_event = server_events[0];
+    assert_eq!(server_event_count, 1);
+    assert_eq!(server_event.kind, NnrpEventKind::SubmitAccepted as u32);
+    assert_eq!(server_event.frame_id, 42);
+    assert_eq!(
+        slice::from_raw_parts(server_event.payload.ptr, server_event.payload.len),
+        submit_payload
+    );
+    assert_eq!(
+        nnrp_buffer_release(server_event.payload_owner),
+        NnrpFfiStatus::ok()
+    );
+
+    let result_body = b"role-carrier-result";
+    let mut result_payload = token_result().to_bytes().expect("result metadata").to_vec();
+    result_payload.extend_from_slice(result_body);
+    assert_eq!(
+        nnrp_server_send_result(NnrpServerSendResultRequest {
+            operation: NnrpHandle::invalid(),
+            payload: view(&result_payload),
+        })
+        .status_code,
+        nnrp_ffi::NnrpFfiStatusCode::InvalidHandle as u32
+    );
+    assert_eq!(
+        nnrp_server_send_result(NnrpServerSendResultRequest {
+            operation: server_event.operation,
+            payload: view(&result_payload[..1]),
+        }),
+        NnrpFfiStatus::invalid_argument(148)
+    );
+    let malformed_result = [u8::MAX; 64];
+    assert_ne!(
+        nnrp_server_send_result(NnrpServerSendResultRequest {
+            operation: server_event.operation,
+            payload: view(&malformed_result),
+        }),
+        NnrpFfiStatus::ok()
+    );
+    assert_eq!(
+        nnrp_server_send_result(NnrpServerSendResultRequest {
+            operation: server_event.operation,
+            payload: view(&result_payload),
+        }),
+        NnrpFfiStatus::ok()
+    );
+
+    let mut client_events = [NnrpEvent::none(); 2];
+    let mut client_event_count = 0usize;
+    assert_eq!(
+        nnrp_client_await_events(
+            NnrpRoleEventPollRequest {
+                max_events: 2,
+                ..poll_request(client_session)
+            },
+            client_events.as_mut_ptr(),
+            client_events.len(),
+            &mut client_event_count,
+        ),
+        NnrpFfiStatus::ok()
+    );
+    let client_event = client_events[0];
+    assert_eq!(client_event_count, 1);
+    assert_eq!(client_event.kind, NnrpEventKind::ResultPushed as u32);
+    assert_eq!(client_event.operation, client_operation);
+    assert_eq!(client_event.frame_id, 42);
+    assert_eq!(
+        slice::from_raw_parts(client_event.payload.ptr, client_event.payload.len),
+        result_payload
+    );
+    assert_eq!(
+        nnrp_buffer_release(client_event.payload_owner),
+        NnrpFfiStatus::ok()
+    );
 
     assert_eq!(nnrp_server_close(server_session), NnrpFfiStatus::ok());
     assert_eq!(nnrp_connection_close(client), NnrpFfiStatus::ok());

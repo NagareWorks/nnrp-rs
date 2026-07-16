@@ -14,8 +14,8 @@ typedef struct NnrpProtocolVersion {
 } NnrpProtocolVersion;
 
 #define NNRP_FFI_ABI_MAJOR 1
-#define NNRP_FFI_ABI_MINOR 12
-#define NNRP_FFI_ABI_PATCH 1
+#define NNRP_FFI_ABI_MINOR 13
+#define NNRP_FFI_ABI_PATCH 0
 
 #define NNRP_TRANSPORT_SLOT_QUIC 0x00000001u
 #define NNRP_TRANSPORT_SLOT_TCP 0x00000002u
@@ -337,22 +337,18 @@ typedef struct NnrpCompactResult {
   NnrpFfiDiagnostic diagnostic;
 } NnrpCompactResult;
 
-typedef struct NnrpConnectionBootstrap {
-  uint64_t connection_id;
-  uint32_t generation;
-  uint32_t transport_id;
-} NnrpConnectionBootstrap;
-
 typedef struct NnrpClientConnectRequest {
   uint64_t connection_id;
   uint32_t generation;
-  uint32_t transport_id;
+  uint32_t reserved0;
+  NnrpHandle transport_connection;
 } NnrpClientConnectRequest;
 
 typedef struct NnrpServerBindRequest {
   uint64_t server_id;
   uint32_t generation;
-  uint32_t transport_id;
+  uint32_t reserved0;
+  NnrpHandle transport_listener;
 } NnrpServerBindRequest;
 
 typedef struct NnrpSessionOpenRequest {
@@ -378,19 +374,18 @@ typedef struct NnrpClientCancelRequest {
 
 typedef struct NnrpServerAcceptRequest {
   NnrpHandle server;
-  uint32_t session_id;
+  uint64_t session_handle_id;
   uint32_t generation;
-  uint16_t profile_id;
-  uint32_t schema_id;
-  uint32_t schema_version;
+  uint32_t timeout_ms;
 } NnrpServerAcceptRequest;
 
-typedef struct NnrpServerReceiveSubmitRequest {
-  NnrpHandle session;
-  uint64_t operation_id;
-  uint32_t frame_id;
-  NnrpBufferView payload;
-} NnrpServerReceiveSubmitRequest;
+typedef struct NnrpRoleEventPollRequest {
+  NnrpHandle scope;
+  uint32_t max_events;
+  uint32_t timeout_ms;
+  uint32_t flags;
+  uint32_t reserved0;
+} NnrpRoleEventPollRequest;
 
 typedef struct NnrpServerSendResultRequest {
   NnrpHandle operation;
@@ -551,7 +546,6 @@ typedef struct NnrpClientSubmitControlRequest {
 
 NnrpProtocolVersion nnrp_current_protocol_version(void);
 NnrpRuntimeCapabilities nnrp_runtime_capabilities(void);
-NnrpFfiStatus nnrp_connection_bootstrap(NnrpConnectionBootstrap request, NnrpHandle *out_connection);
 NnrpFfiStatus nnrp_client_connect(NnrpClientConnectRequest request, NnrpHandle *out_connection);
 NnrpFfiStatus nnrp_session_open(NnrpSessionOpenRequest request, NnrpHandle *out_session);
 NnrpFfiStatus nnrp_client_open_session(NnrpSessionOpenRequest request, NnrpHandle *out_session);
@@ -573,7 +567,7 @@ NnrpFfiStatus nnrp_client_submit_control(NnrpClientSubmitControlRequest request,
 NnrpFfiStatus nnrp_client_send_flow_update(NnrpServerFlowUpdateRequest request);
 NnrpFfiStatus nnrp_client_send_result_hint(NnrpControlRequest request);
 NnrpFfiStatus nnrp_client_await_event(NnrpHandle connection, NnrpPollResult *out_result);
-NnrpFfiStatus nnrp_client_await_events(NnrpHandle connection, NnrpEvent *out_events, uintptr_t event_capacity, uintptr_t *out_event_count);
+NnrpFfiStatus nnrp_client_await_events(NnrpRoleEventPollRequest request, NnrpEvent *out_events, uintptr_t event_capacity, uintptr_t *out_event_count);
 NnrpFfiStatus nnrp_schema_descriptor_parse(NnrpBufferView source, NnrpSchemaDescriptorHeader *out_descriptor);
 NnrpFfiStatus nnrp_schema_descriptor_write(NnrpSchemaDescriptorHeader descriptor, NnrpBufferViewMut destination);
 NnrpFfiStatus nnrp_token_delta_schema_descriptor(NnrpSchemaDescriptorHeader *out_descriptor);
@@ -620,7 +614,7 @@ NnrpFfiStatus nnrp_cache_prefetch(NnrpHandle owner, const NnrpCacheObjectId *obj
 NnrpFfiStatus nnrp_cache_release(NnrpHandle lease_handle, NnrpCacheLeaseResult *out_result);
 NnrpFfiStatus nnrp_server_bind(NnrpServerBindRequest request, NnrpHandle *out_server);
 NnrpFfiStatus nnrp_server_accept(NnrpServerAcceptRequest request, NnrpHandle *out_session);
-NnrpFfiStatus nnrp_server_receive_submit(NnrpServerReceiveSubmitRequest request, NnrpHandle *out_operation);
+NnrpFfiStatus nnrp_server_await_events(NnrpRoleEventPollRequest request, NnrpEvent *out_events, uintptr_t event_capacity, uintptr_t *out_event_count);
 NnrpFfiStatus nnrp_server_send_result(NnrpServerSendResultRequest request);
 NnrpFfiStatus nnrp_server_send_flow_update(NnrpServerFlowUpdateRequest request);
 NnrpFfiStatus nnrp_server_close(NnrpHandle session);
