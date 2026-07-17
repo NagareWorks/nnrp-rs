@@ -6,7 +6,7 @@ use crate::{
 pub const FRAME_SUBMIT_METADATA_LEN: usize = 72;
 pub const RESULT_PUSH_METADATA_LEN: usize = 64;
 pub const BODY_REGION_PRELUDE_LEN: usize = 32;
-pub const OBJECT_REFERENCE_BLOCK_LEN: usize = 16;
+pub const OBJECT_REFERENCE_BLOCK_LEN: usize = 24;
 
 pub const BUDGET_POLICY_KNOWN_MASK: u8 = 0x0f;
 pub const RESULT_FLAGS_KNOWN_MASK: u16 = 0x0007;
@@ -199,6 +199,7 @@ pub struct FrameSubmitMetadata {
     pub tile_base_id: u32,
     pub camera_bytes: u32,
     pub tile_index_bytes: u32,
+    pub operation_id: u64,
     pub submit_mode: SubmitMode,
     pub budget_policy: u8,
     pub loss_tolerance_policy: u8,
@@ -212,11 +213,10 @@ impl FrameSubmitMetadata {
     pub fn parse(source: &[u8]) -> Result<Self, NnrpError> {
         require_len(source, FRAME_SUBMIT_METADATA_LEN)?;
         validate_zero_u8("frame_submit.reserved0", source[15])?;
-        validate_zero_u64("frame_submit.reserved1", read_u64(source, 32))?;
-        validate_zero_u64("frame_submit.reserved2", read_u64(source, 40))?;
-        validate_zero_u32("frame_submit.reserved3", read_u32(source, 48))?;
-        validate_zero_u8("frame_submit.reserved4", source[55])?;
-        validate_zero_u16("frame_submit.reserved5", read_u16(source, 70))?;
+        validate_zero_u32("frame_submit.reserved1", read_u32(source, 36))?;
+        validate_zero_u32("frame_submit.reserved2", read_u32(source, 48))?;
+        validate_zero_u8("frame_submit.reserved3", source[55])?;
+        validate_zero_u16("frame_submit.reserved4", read_u16(source, 70))?;
 
         let budget_policy = source[53];
         validate_mask_u8(budget_policy, BUDGET_POLICY_KNOWN_MASK)?;
@@ -238,7 +238,8 @@ impl FrameSubmitMetadata {
             retry_of_frame: read_u32(source, 20),
             tile_base_id: read_u32(source, 24),
             camera_bytes: read_u32(source, 28),
-            tile_index_bytes: read_u32(source, 36),
+            tile_index_bytes: read_u32(source, 32),
+            operation_id: read_u64(source, 40),
             submit_mode: SubmitMode::try_from_u8(source[52])?,
             budget_policy,
             loss_tolerance_policy: source[54],
@@ -272,7 +273,8 @@ impl FrameSubmitMetadata {
         write_u32(destination, 20, self.retry_of_frame);
         write_u32(destination, 24, self.tile_base_id);
         write_u32(destination, 28, self.camera_bytes);
-        write_u32(destination, 36, self.tile_index_bytes);
+        write_u32(destination, 32, self.tile_index_bytes);
+        write_u64(destination, 40, self.operation_id);
         destination[52] = self.submit_mode as u8;
         destination[53] = self.budget_policy;
         destination[54] = self.loss_tolerance_policy;
@@ -290,6 +292,11 @@ impl FrameSubmitMetadata {
     }
 
     pub fn validate_payload_shape(&self) -> Result<(), NnrpError> {
+        if self.operation_id == 0 {
+            return Err(NnrpError::InvalidProtocolCombination {
+                rule: "FRAME_SUBMIT operation_id must not be zero",
+            });
+        }
         if self.payload_kind_bitmap.contains_tensor() {
             return Ok(());
         }
@@ -509,8 +516,8 @@ pub struct ObjectReferenceBlock {
     pub object_kind: CacheObjectKind,
     pub ref_flags: u16,
     pub cache_namespace: u32,
-    pub cache_key_hi: u32,
-    pub cache_key_lo: u32,
+    pub cache_key_hi: u64,
+    pub cache_key_lo: u64,
 }
 
 impl ObjectReferenceBlock {
@@ -523,8 +530,8 @@ impl ObjectReferenceBlock {
             object_kind: CacheObjectKind::try_from_u32(read_u16(source, 0) as u32)?,
             ref_flags,
             cache_namespace: read_u32(source, 4),
-            cache_key_hi: read_u32(source, 8),
-            cache_key_lo: read_u32(source, 12),
+            cache_key_hi: read_u64(source, 8),
+            cache_key_lo: read_u64(source, 16),
         })
     }
 
@@ -535,8 +542,8 @@ impl ObjectReferenceBlock {
         destination[..OBJECT_REFERENCE_BLOCK_LEN].fill(0);
         write_u16(destination, 0, self.object_kind as u16);
         write_u32(destination, 4, self.cache_namespace);
-        write_u32(destination, 8, self.cache_key_hi);
-        write_u32(destination, 12, self.cache_key_lo);
+        write_u64(destination, 8, self.cache_key_hi);
+        write_u64(destination, 16, self.cache_key_lo);
         Ok(())
     }
 
@@ -1005,12 +1012,16 @@ fn write_u32(destination: &mut [u8], offset: usize, value: u32) {
     destination[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
 
+fn write_u64(destination: &mut [u8], offset: usize, value: u64) {
+    destination[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn frame_submit_metadata_round_trips_current_v2_layout() {
+    fn frame_submit_metadata_round_trips_frozen_layout() {
         let metadata = FrameSubmitMetadata {
             src_width: 640,
             src_height: 360,
@@ -1026,7 +1037,8 @@ mod tests {
             retry_of_frame: 7,
             tile_base_id: 0,
             camera_bytes: 192,
-            tile_index_bytes: 0,
+            tile_index_bytes: 24,
+            operation_id: 0x0102_0304_0506_0708,
             submit_mode: SubmitMode::Mixed,
             budget_policy: 0x05,
             loss_tolerance_policy: 0xff,
@@ -1040,7 +1052,58 @@ mod tests {
         let bytes = metadata.to_bytes().unwrap();
 
         assert_eq!(bytes.len(), FRAME_SUBMIT_METADATA_LEN);
+        assert_eq!(&bytes[32..36], &24u32.to_le_bytes());
+        assert_eq!(&bytes[36..40], &[0; 4]);
+        assert_eq!(&bytes[40..48], &0x0102_0304_0506_0708u64.to_le_bytes());
         assert_eq!(FrameSubmitMetadata::parse(&bytes).unwrap(), metadata);
+    }
+
+    #[test]
+    fn frame_submit_rejects_reserved_bytes_and_zero_operation_id() {
+        let metadata = FrameSubmitMetadata {
+            src_width: 0,
+            src_height: 0,
+            tile_width: 0,
+            tile_height: 0,
+            tile_count: 0,
+            section_count: 0,
+            frame_class: 0,
+            input_profile: InputProfile::Unspecified,
+            tile_index_mode: TileIndexMode::DenseRange,
+            latency_budget_ms: 0,
+            target_fps_x100: 0,
+            retry_of_frame: 0,
+            tile_base_id: 0,
+            camera_bytes: 0,
+            tile_index_bytes: 0,
+            operation_id: 1,
+            submit_mode: SubmitMode::Inline,
+            budget_policy: 0,
+            loss_tolerance_policy: 0,
+            object_ref_mask: 0,
+            dependency_frame_id: 0,
+            payload_kind_bitmap: PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),
+            payload_frame_count: 1,
+        };
+        let mut bytes = metadata.to_bytes().unwrap();
+        bytes[36] = 1;
+        assert_eq!(
+            FrameSubmitMetadata::parse(&bytes),
+            Err(NnrpError::NonZeroReservedField {
+                field: "frame_submit.reserved1",
+            })
+        );
+
+        assert_eq!(
+            FrameSubmitMetadata {
+                operation_id: 0,
+                ..metadata
+            }
+            .to_bytes(),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "FRAME_SUBMIT operation_id must not be zero"
+            })
+        );
     }
 
     #[test]
@@ -1072,6 +1135,7 @@ mod tests {
             tile_base_id: 0,
             camera_bytes: 0,
             tile_index_bytes: 0,
+            operation_id: 1,
             submit_mode: SubmitMode::Inline,
             budget_policy: 0,
             loss_tolerance_policy: 0xff,
@@ -1089,7 +1153,7 @@ mod tests {
     }
 
     #[test]
-    fn result_push_metadata_round_trips_current_v2_layout() {
+    fn result_push_metadata_round_trips_frozen_layout() {
         let metadata = ResultPushMetadata {
             status_code: 0,
             result_flags: 0x0004,
@@ -1197,14 +1261,14 @@ mod tests {
         let prelude_bytes = prelude.to_bytes().unwrap();
 
         assert_eq!(BodyRegionPrelude::parse(&prelude_bytes).unwrap(), prelude);
-        assert_eq!(prelude.total_region_bytes().unwrap(), 120);
+        assert_eq!(prelude.total_region_bytes().unwrap(), 128);
 
         let object_ref = ObjectReferenceBlock {
             object_kind: CacheObjectKind::TileIndexBlock,
             ref_flags: 0,
             cache_namespace: 7,
-            cache_key_hi: 0x1122_3344,
-            cache_key_lo: 0x5566_7788,
+            cache_key_hi: 0x1122_3344_5566_7788,
+            cache_key_lo: 0x99aa_bbcc_ddee_ff00,
         };
         let object_ref_bytes = object_ref.to_bytes().unwrap();
 

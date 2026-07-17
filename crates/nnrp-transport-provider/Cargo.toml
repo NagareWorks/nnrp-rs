@@ -23,5 +23,5 @@ native-loader = []
 wasm = []
 
 [dependencies]
-nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.4.4" }
+nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.4.5" }
 thiserror.workspace = true

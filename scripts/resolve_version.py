@@ -11,6 +11,7 @@ import tomllib
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 WORKSPACE_TOML_PATH = REPO_ROOT / "Cargo.toml"
 CRATE_TOML_PATHS = sorted((REPO_ROOT / "crates").glob("*/Cargo.toml"))
+SDK_VERSION_HEADER_PATH = REPO_ROOT / "include" / "nnrp" / "nnrp_version.h"
 
 
 def read_release_version() -> str:
@@ -23,9 +24,32 @@ def build_package_version(release_version: str, version_date: str | None, run_nu
         return release_version
 
     normalized_date = version_date or dt.datetime.utcnow().strftime("%Y%m%d")
+    if re.fullmatch(r"\d{8}", normalized_date) is None:
+        raise ValueError(f"version date must use YYYYMMDD digits: {normalized_date}")
+    if re.fullmatch(r"\d+", run_number) is None:
+        raise ValueError(f"run number must contain decimal digits: {run_number}")
     normalized_run = str(int(run_number))
     separator = "." if "-" in release_version else "-dev."
     return f"{release_version}{separator}{normalized_date}.{normalized_run}"
+
+
+def parse_sdk_version_components(version: str) -> tuple[int, int, int, int, int]:
+    preview_match = re.fullmatch(
+        r"(\d+)\.(\d+)\.(\d+)-preview\.(\d+)\.(\d+)(?:\.\d{8}\.\d+)?",
+        version,
+    )
+    if preview_match is not None:
+        return tuple(int(component) for component in preview_match.groups())
+
+    stable_match = re.fullmatch(
+        r"(\d+)\.(\d+)\.(\d+)(?:-dev\.\d{8}\.\d+)?",
+        version,
+    )
+    if stable_match is not None:
+        major, minor, patch = (int(component) for component in stable_match.groups())
+        return major, minor, patch, 0, 0
+
+    raise ValueError(f"unsupported SDK version format: {version}")
 
 
 def write_outputs(values: dict[str, str], github_output: bool) -> None:
@@ -62,7 +86,25 @@ def cmd_show(args: argparse.Namespace) -> None:
 
 def cmd_apply(args: argparse.Namespace) -> None:
     package_version = args.package_version
+    major, minor, patch, preview, revision = parse_sdk_version_components(package_version)
     replace_once(WORKSPACE_TOML_PATH, r'^version = "[^"]+"$', f'version = "{package_version}"')
+    replace_once(
+        SDK_VERSION_HEADER_PATH,
+        r'^#define NNRP_SDK_VERSION "[^"]+"$',
+        f'#define NNRP_SDK_VERSION "{package_version}"',
+    )
+    for name, value in (
+        ("MAJOR", major),
+        ("MINOR", minor),
+        ("PATCH", patch),
+        ("PREVIEW", preview),
+        ("REVISION", revision),
+    ):
+        replace_once(
+            SDK_VERSION_HEADER_PATH,
+            rf"^#define NNRP_SDK_VERSION_{name} \d+$",
+            f"#define NNRP_SDK_VERSION_{name} {value}",
+        )
 
     dependency_pattern = r'^(nnrp-[a-z-]+ = \{ path = "\.\./nnrp-[a-z-]+", version = ")[^"]+(".*\})$'
     for path in CRATE_TOML_PATHS:

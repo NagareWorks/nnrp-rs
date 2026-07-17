@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PROTOCOL_VERSION = "NNRP/1"
-FFI_ABI_VERSION = "1.12.1"
+FFI_ABI_VERSION = "3.0.0"
 EXPECTED_EXPORTS = [
     "nnrp_current_protocol_version",
     "nnrp_runtime_capabilities",
@@ -24,7 +24,6 @@ EXPECTED_EXPORTS = [
     "nnrp_transport_write_batch",
     "nnrp_transport_read_batch",
     "nnrp_transport_close",
-    "nnrp_connection_bootstrap",
     "nnrp_client_connect",
     "nnrp_session_open",
     "nnrp_client_open_session",
@@ -33,22 +32,41 @@ EXPECTED_EXPORTS = [
     "nnrp_session_close",
     "nnrp_client_close",
     "nnrp_client_cancel",
-    "nnrp_client_complete_operation",
-    "nnrp_client_drop_operation",
-    "nnrp_client_send_flow_update",
-    "nnrp_client_send_result_hint",
     "nnrp_client_await_event",
+    "nnrp_client_await_events",
     "nnrp_server_bind",
     "nnrp_server_accept",
-    "nnrp_server_receive_submit",
+    "nnrp_server_await_events",
     "nnrp_server_send_result",
-    "nnrp_server_send_flow_update",
     "nnrp_server_close",
     "nnrp_runtime_frame_send",
-    "nnrp_control",
     "nnrp_poll_empty",
     "nnrp_dispatch_event",
 ]
+
+RETIRED_ABI_EXPORTS = [
+    "nnrp_connection_bootstrap",
+    "nnrp_client_complete_operation",
+    "nnrp_client_drop_operation",
+    "nnrp_client_send_flow_update",
+    "nnrp_client_submit_result",
+    "nnrp_client_submit_result_compact",
+    "nnrp_client_submit_result_compact_batch",
+    "nnrp_client_submit_runtime_object_loop_compact",
+    "nnrp_client_send_result_hint",
+    "nnrp_client_submit_control",
+    "nnrp_server_receive_submit",
+    "nnrp_server_send_flow_update",
+    "nnrp_control",
+]
+
+BENCHMARK_ONLY_EXPORTS = [
+    "nnrp_benchmark_client_submit_result_compact",
+    "nnrp_benchmark_client_submit_result_compact_batch",
+    "nnrp_benchmark_client_runtime_object_loop_compact",
+]
+
+FORBIDDEN_EXPORTS = RETIRED_ABI_EXPORTS + BENCHMARK_ONLY_EXPORTS
 
 TARGETS = {
     "x86_64-unknown-linux-gnu": ("linux", "x86_64", "dynamic"),
@@ -231,6 +249,11 @@ def verify_exports(library: Path, os_name: str, library_kind: str) -> None:
     if missing:
         raise SystemExit(
             "native library is missing expected exports: " + ", ".join(missing)
+        )
+    forbidden = [symbol for symbol in FORBIDDEN_EXPORTS if symbol in exports]
+    if forbidden:
+        raise SystemExit(
+            "native library exposes non-production exports: " + ", ".join(forbidden)
         )
 
 

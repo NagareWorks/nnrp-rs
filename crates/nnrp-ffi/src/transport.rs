@@ -21,15 +21,11 @@ use nnrp_core::{
     CommonHeader, MessageType, TransportId, TransportProbeAckMetadata, TransportProbeMetadata,
     COMMON_HEADER_LEN, TRANSPORT_PROBE_METADATA_LEN,
 };
-#[cfg(any(
-    feature = "transport-tcp",
-    feature = "transport-quic",
-    feature = "transport-websocket"
-))]
-use nnrp_runtime::FramedListener;
+#[cfg(not(test))]
+use nnrp_runtime::RuntimeTransportKind;
 use nnrp_runtime::{
-    BoxedFramedListener, BoxedFramedTransport, FramedTransport, RuntimeError, RuntimeFrameLimits,
-    RuntimePacket,
+    BoxedFramedListener, BoxedFramedTransport, FramedListener, FramedTransport, RuntimeError,
+    RuntimeFrameLimits, RuntimePacket,
 };
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -50,6 +46,8 @@ type SharedConnection = Arc<AsyncMutex<TransportConnectionState>>;
 type SharedListener = Arc<BoxedFramedListener>;
 
 struct TransportConnectionState {
+    #[cfg(not(test))]
+    kind: RuntimeTransportKind,
     transport: BoxedFramedTransport,
     pending: VecDeque<RuntimePacket>,
     max_packet_bytes: usize,
@@ -199,7 +197,7 @@ impl TransportStore {
                 .checked_add(1)
                 .expect("exhausted transport slots are not reusable");
             slot.resource = Some(resource);
-            return NnrpHandle::new(kind, id, slot.generation);
+            return transport_handle(kind, id, slot.generation);
         }
 
         let handle = next_handle(kind);
@@ -214,6 +212,9 @@ impl TransportStore {
     }
 
     fn get(&self, handle: NnrpHandle) -> Option<&TransportResource> {
+        if handle.flags != transport_instance_cookie() {
+            return None;
+        }
         let slot = self.slots.get(&(handle.kind, handle.id))?;
         if slot.generation != handle.generation {
             return None;
@@ -222,6 +223,9 @@ impl TransportStore {
     }
 
     fn close(&mut self, handle: NnrpHandle) -> Result<Option<TransportResource>, NnrpFfiStatus> {
+        if handle.flags != transport_instance_cookie() {
+            return Err(NnrpFfiStatus::invalid_handle(handle.kind));
+        }
         let (resource, reusable) = {
             let slot = self
                 .slots
@@ -250,6 +254,20 @@ impl TransportStore {
 static TRANSPORT_STORE: OnceLock<Mutex<TransportStore>> = OnceLock::new();
 static NEXT_TRANSPORT_HANDLE: AtomicU64 = AtomicU64::new(1);
 static TRANSPORT_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+static TRANSPORT_INSTANCE_MARKER: u8 = 0;
+
+fn transport_instance_cookie() -> u32 {
+    let address = (&TRANSPORT_INSTANCE_MARKER as *const u8 as usize) as u64;
+    let mixed = address ^ address.rotate_left(17) ^ 0x4e4e_5250_5452_4e53;
+    let cookie = (mixed ^ (mixed >> 32)) as u32;
+    cookie.max(1)
+}
+
+fn transport_handle(kind: NnrpHandleKind, id: u64, generation: u32) -> NnrpHandle {
+    let mut handle = NnrpHandle::new(kind, id, generation);
+    handle.flags = transport_instance_cookie();
+    handle
+}
 
 fn transport_store() -> &'static Mutex<TransportStore> {
     TRANSPORT_STORE.get_or_init(|| Mutex::new(TransportStore::default()))
@@ -272,6 +290,15 @@ where
     T: Send + 'static,
 {
     run_async_mapped(future, timeout_ms, status_from_runtime_error)
+}
+
+#[cfg(not(test))]
+pub(super) fn run_role_async<F, T>(future: F, timeout_ms: u32) -> Result<T, NnrpFfiStatus>
+where
+    F: Future<Output = Result<T, RuntimeError>> + Send + 'static,
+    T: Send + 'static,
+{
+    run_async(future, timeout_ms)
 }
 
 fn run_async_mapped<F, T, E, M>(
@@ -340,6 +367,11 @@ fn status_from_runtime_error(error: RuntimeError) -> NnrpFfiStatus {
     }
 }
 
+#[cfg(not(test))]
+pub(super) fn role_status_from_runtime_error(error: RuntimeError) -> NnrpFfiStatus {
+    status_from_runtime_error(error)
+}
+
 fn parse_transport_id(value: u32) -> Result<TransportId, NnrpFfiStatus> {
     let transport =
         TransportId::try_from_u32(value).map_err(|_| NnrpFfiStatus::invalid_argument(107))?;
@@ -380,7 +412,7 @@ unsafe fn copied_utf8(view: NnrpBufferView, detail: u32) -> Result<String, NnrpF
 }
 
 fn next_handle(kind: NnrpHandleKind) -> NnrpHandle {
-    NnrpHandle::new(
+    transport_handle(
         kind,
         NEXT_TRANSPORT_HANDLE.fetch_add(1, Ordering::Relaxed),
         1,
@@ -559,11 +591,115 @@ fn unix_time_us() -> u64 {
 }
 
 fn wrap_connection(connection: BoxedFramedTransport, max_packet_bytes: usize) -> SharedConnection {
+    #[cfg(not(test))]
+    let kind = connection.transport_kind();
     Arc::new(AsyncMutex::new(TransportConnectionState {
+        #[cfg(not(test))]
+        kind,
         transport: Box::new(ProbeAwareTransport::new(connection)),
         pending: VecDeque::new(),
         max_packet_bytes,
     }))
+}
+
+#[cfg(not(test))]
+struct RoleTransport {
+    connection: SharedConnection,
+    kind: RuntimeTransportKind,
+}
+
+#[async_trait::async_trait]
+#[cfg(not(test))]
+impl FramedTransport for RoleTransport {
+    fn transport_kind(&self) -> RuntimeTransportKind {
+        self.kind
+    }
+
+    async fn read_packet(&mut self) -> Result<RuntimePacket, RuntimeError> {
+        let mut connection = self.connection.lock().await;
+        if let Some(packet) = connection.pending.pop_front() {
+            return Ok(packet);
+        }
+        connection.transport.read_packet().await
+    }
+
+    async fn write_packet(&mut self, packet: &RuntimePacket) -> Result<(), RuntimeError> {
+        self.connection
+            .lock()
+            .await
+            .transport
+            .write_packet(packet)
+            .await
+    }
+
+    async fn close(&mut self) -> Result<(), RuntimeError> {
+        self.connection.lock().await.transport.close().await
+    }
+}
+
+#[cfg(not(test))]
+struct RoleListener {
+    listener: SharedListener,
+}
+
+#[async_trait::async_trait]
+#[cfg(not(test))]
+impl FramedListener for RoleListener {
+    fn transport_kind(&self) -> RuntimeTransportKind {
+        self.listener.transport_kind()
+    }
+
+    fn local_addr(&self) -> Result<std::net::SocketAddr, RuntimeError> {
+        self.listener.local_addr()
+    }
+
+    async fn accept(&self) -> Result<BoxedFramedTransport, RuntimeError> {
+        self.listener.accept().await
+    }
+}
+
+#[cfg(not(test))]
+pub(super) fn role_transport(handle: NnrpHandle) -> Result<BoxedFramedTransport, NnrpFfiStatus> {
+    let connection = get_connection(handle)?;
+    let kind = connection
+        .try_lock()
+        .map_err(|_| transport_status(NnrpFfiStatusCode::InvalidState, 137))?
+        .kind;
+    Ok(Box::new(RoleTransport { connection, kind }))
+}
+
+#[cfg(not(test))]
+pub(super) fn role_listener(handle: NnrpHandle) -> Result<BoxedFramedListener, NnrpFfiStatus> {
+    let (listener, _) = get_listener(handle)?;
+    Ok(Box::new(RoleListener { listener }))
+}
+
+#[cfg(not(test))]
+pub(super) fn consume_role_transport(handle: NnrpHandle) -> Result<(), NnrpFfiStatus> {
+    let resource = transport_store()
+        .lock()
+        .map_err(|_| transport_status(NnrpFfiStatusCode::InternalError, 138))?
+        .close(handle)?;
+    match resource {
+        Some(TransportResource::Connection(_)) => Ok(()),
+        _ => Err(NnrpFfiStatus::invalid_handle(
+            NnrpHandleKind::TransportConnection as u32,
+        )),
+    }
+}
+
+#[cfg(not(test))]
+pub(super) fn consume_role_listener(handle: NnrpHandle) -> Result<(), NnrpFfiStatus> {
+    let resource = transport_store()
+        .lock()
+        .map_err(|_| transport_status(NnrpFfiStatusCode::InternalError, 139))?
+        .close(handle)?;
+    match resource {
+        Some(TransportResource::Listener { .. }) => Ok(()),
+        _ => Err(NnrpFfiStatus::invalid_handle(
+            NnrpHandleKind::TransportListener as u32,
+        )),
+    }
 }
 
 #[cfg(any(

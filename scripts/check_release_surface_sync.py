@@ -152,10 +152,28 @@ def check_abi_version() -> None:
 def check_sdk_version_header() -> None:
     workspace = tomllib.loads(read_text("Cargo.toml"))
     header = read_text("include/nnrp/nnrp_version.h")
+    version = workspace["workspace"]["package"]["version"]
+    resolver = load_script(ROOT / "scripts" / "resolve_version.py")
     require_equal(
         header_define_string(header, "NNRP_SDK_VERSION"),
-        workspace["workspace"]["package"]["version"],
+        version,
         "include/nnrp/nnrp_version.h SDK version",
+    )
+    expected_components = resolver.parse_sdk_version_components(version)
+    actual_components = tuple(
+        header_define_int(header, name)
+        for name in (
+            "NNRP_SDK_VERSION_MAJOR",
+            "NNRP_SDK_VERSION_MINOR",
+            "NNRP_SDK_VERSION_PATCH",
+            "NNRP_SDK_VERSION_PREVIEW",
+            "NNRP_SDK_VERSION_REVISION",
+        )
+    )
+    require_equal(
+        actual_components,
+        expected_components,
+        "include/nnrp/nnrp_version.h SDK version components",
     )
 
 
@@ -277,6 +295,36 @@ def check_expected_exports_are_declared() -> None:
         )
 
 
+def check_benchmark_exports_are_isolated() -> None:
+    native = load_script(ROOT / "scripts" / "package_native_artifacts.py")
+    production_declarations = declared_ffi_functions(read_text("include/nnrp/nnrp_ffi.h"))
+    benchmark_declarations = declared_ffi_functions(
+        read_text("benchmarks/include/nnrp/nnrp_ffi_benchmark.h")
+    )
+    rust = read_text("crates/nnrp-ffi/src/lib.rs")
+
+    require_equal(
+        benchmark_declarations,
+        set(native.BENCHMARK_ONLY_EXPORTS),
+        "benchmark-only FFI declarations",
+    )
+    leaked = sorted(set(native.FORBIDDEN_EXPORTS) & production_declarations)
+    if leaked:
+        raise SystemExit(
+            "production FFI header declares non-production functions: " + ", ".join(leaked)
+        )
+    missing_rust = sorted(
+        symbol
+        for symbol in native.BENCHMARK_ONLY_EXPORTS
+        if re.search(rf"\bfn\s+{re.escape(symbol)}\s*\(", rust) is None
+    )
+    if missing_rust:
+        raise SystemExit(
+            "benchmark FFI header declares functions missing from Rust: "
+            + ", ".join(missing_rust)
+        )
+
+
 def main() -> None:
     check_abi_version()
     check_sdk_version_header()
@@ -284,6 +332,7 @@ def main() -> None:
     check_native_manifests()
     check_wasm_manifest()
     check_expected_exports_are_declared()
+    check_benchmark_exports_are_isolated()
 
 
 if __name__ == "__main__":

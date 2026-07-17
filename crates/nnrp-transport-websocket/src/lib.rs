@@ -665,6 +665,7 @@ mod tests {
             tile_base_id: 0,
             camera_bytes: 0,
             tile_index_bytes: 0,
+            operation_id: 1,
             submit_mode: SubmitMode::Inline,
             budget_policy: 0,
             loss_tolerance_policy: 0,

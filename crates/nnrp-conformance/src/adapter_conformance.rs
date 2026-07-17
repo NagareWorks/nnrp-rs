@@ -225,8 +225,12 @@ mod tests {
 
         let results = report["results"].as_array().expect("results array");
         assert_eq!(results.len(), mandatory_cases.len());
-        for result in results {
-            assert_eq!(result["outcome"], Value::String("pass".to_string()));
+        for (case_id, result) in mandatory_cases.iter().zip(results) {
+            assert_eq!(
+                result["outcome"],
+                Value::String("pass".to_string()),
+                "mandatory baseline case {case_id} failed: {result}"
+            );
             assert!(result.get("failure_kind").is_none());
         }
     }

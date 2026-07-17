@@ -215,6 +215,7 @@ fn bench_runtime_objects(iterations: u64) -> Result<BenchCase, Box<dyn Error>> {
     };
     let cache_meta = br#"{"tenant":"bench"}"#;
     let cache = CacheReferenceMetadata {
+        cache_namespace: 42,
         cache_key_hi: 1,
         cache_key_lo: 2,
         profile_id: STANDARD_PROFILE_TOKEN,
@@ -227,6 +228,7 @@ fn bench_runtime_objects(iterations: u64) -> Result<BenchCase, Box<dyn Error>> {
     };
     let miss_diag = b"not-found";
     let miss = CacheMissMetadata {
+        cache_namespace: 42,
         cache_key_hi: 1,
         cache_key_lo: 3,
         miss_reason: CacheMissReason::NotFound,
@@ -285,8 +287,10 @@ async fn bench_ipc_loopback(iterations: u64) -> Result<BenchCase, Box<dyn Error>
     let start = Instant::now();
     let client = connect_ipc_client_with_retry(&endpoint).await?;
     let mut session = client.open_session().await?;
-    for _ in 0..iterations {
-        session.submit(token_submit(), b"hello".to_vec()).await?;
+    for operation_id in 1..=iterations {
+        session
+            .submit(token_submit(operation_id), b"hello".to_vec())
+            .await?;
         let NnrpResult { body, .. } = session.await_result().await?;
         black_box(body);
     }
@@ -318,8 +322,10 @@ async fn bench_websocket_loopback(iterations: u64) -> Result<BenchCase, Box<dyn 
     let start = Instant::now();
     let client = WebSocketProvider::connect(&endpoint, NnrpClientConfig::default()).await?;
     let mut session = client.open_session().await?;
-    for _ in 0..iterations {
-        session.submit(token_submit(), b"hello".to_vec()).await?;
+    for operation_id in 1..=iterations {
+        session
+            .submit(token_submit(operation_id), b"hello".to_vec())
+            .await?;
         let NnrpResult { body, .. } = session.await_result().await?;
         black_box(body);
     }
@@ -333,7 +339,7 @@ async fn bench_websocket_loopback(iterations: u64) -> Result<BenchCase, Box<dyn 
     })
 }
 
-fn token_submit() -> FrameSubmitMetadata {
+fn token_submit(operation_id: u64) -> FrameSubmitMetadata {
     FrameSubmitMetadata {
         src_width: 0,
         src_height: 0,
@@ -350,6 +356,7 @@ fn token_submit() -> FrameSubmitMetadata {
         tile_base_id: 0,
         camera_bytes: 0,
         tile_index_bytes: 0,
+        operation_id,
         submit_mode: SubmitMode::Inline,
         budget_policy: 0,
         loss_tolerance_policy: 0,
