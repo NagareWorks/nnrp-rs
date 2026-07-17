@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use nnrp_core::{
@@ -99,6 +99,7 @@ pub struct NnrpClientSession {
     next_frame_id: u32,
     operation_frames: BTreeMap<u64, u32>,
     frame_operations: BTreeMap<u32, u64>,
+    seen_operation_ids: BTreeSet<u64>,
     last_operation_id: u64,
     transport: BoxedFramedTransport,
     lifecycle: ConnectionLifecycle,
@@ -287,6 +288,7 @@ impl NnrpClient {
             next_frame_id: 1,
             operation_frames: BTreeMap::new(),
             frame_operations: BTreeMap::new(),
+            seen_operation_ids: BTreeSet::new(),
             last_operation_id: 0,
             transport: self.transport,
             lifecycle: self.lifecycle,
@@ -358,7 +360,7 @@ impl NnrpClientSession {
                 "client frame id must not be zero, reused, or moved backward",
             ));
         }
-        if self.operation_frames.contains_key(&metadata.operation_id) {
+        if metadata.operation_id == 0 || self.seen_operation_ids.contains(&metadata.operation_id) {
             return Err(RuntimeError::UnexpectedMessage(
                 "client operation id must not be zero or reused",
             ));
@@ -387,6 +389,7 @@ impl NnrpClientSession {
             .insert(metadata.operation_id, frame_id);
         self.frame_operations
             .insert(frame_id, metadata.operation_id);
+        self.seen_operation_ids.insert(metadata.operation_id);
         self.last_operation_id = self.last_operation_id.max(metadata.operation_id);
         Ok(frame_id)
     }
@@ -445,10 +448,11 @@ impl NnrpClientSession {
                         "client received malformed RESULT_PUSH metadata length",
                     ));
                 }
+                let metadata = ResultPushMetadata::parse(&packet.metadata)?;
                 self.complete_operation_by_frame(packet.header.frame_id)?;
                 Ok(NnrpClientEvent::Result(NnrpResult {
                     frame_id: packet.header.frame_id,
-                    metadata: ResultPushMetadata::parse(&packet.metadata)?,
+                    metadata,
                     body: packet.body,
                 }))
             }
@@ -477,7 +481,7 @@ impl NnrpClientSession {
                     metadata.diagnostic_bytes as usize,
                     "client received RESULT_DROP_REASON body length mismatch",
                 )?;
-                self.complete_operation(metadata.operation_id)?;
+                self.complete_operation(metadata.operation_id, packet.header.frame_id)?;
                 Ok(NnrpClientEvent::ResultDropReason {
                     metadata,
                     body: packet.body,
@@ -500,6 +504,7 @@ impl NnrpClientSession {
                         "client received PARTIAL_RESULT body length mismatch",
                     ));
                 }
+                self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
                 Ok(NnrpClientEvent::PartialResult {
                     metadata,
                     body: packet.body,
@@ -522,6 +527,7 @@ impl NnrpClientSession {
                         "client received PROGRESS body length mismatch",
                     ));
                 }
+                self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
                 Ok(NnrpClientEvent::Progress {
                     metadata,
                     body: packet.body,
@@ -544,6 +550,7 @@ impl NnrpClientSession {
                     metadata.diagnostic_bytes as usize,
                     "client received runtime control diagnostic body length mismatch",
                 )?;
+                self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
                 Ok(NnrpClientEvent::Control {
                     message_type: packet.header.message_type,
                     metadata,
@@ -562,6 +569,7 @@ impl NnrpClientSession {
                 }
                 let metadata = SchedulingMetadata::parse(&packet.metadata)?;
                 validate_scheduling_semantics(packet.header.message_type, &metadata)?;
+                self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
                 Ok(NnrpClientEvent::Scheduling {
                     message_type: packet.header.message_type,
                     metadata,
@@ -583,6 +591,7 @@ impl NnrpClientSession {
                     metadata.diagnostic_bytes as usize,
                     "client received SUPERSEDE diagnostic body length mismatch",
                 )?;
+                self.require_operation_frame(metadata.old_operation_id, packet.header.frame_id)?;
                 Ok(NnrpClientEvent::Supersede {
                     metadata,
                     body: packet.body,
@@ -600,11 +609,18 @@ impl NnrpClientSession {
                         "client received malformed BUDGET_UPDATE lengths",
                     ));
                 }
-                Ok(NnrpClientEvent::Budget(BudgetMetadata::parse(
-                    &packet.metadata,
-                )?))
+                let metadata = BudgetMetadata::parse(&packet.metadata)?;
+                self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
+                Ok(NnrpClientEvent::Budget(metadata))
             }
             MessageType::FlowUpdate => {
+                if packet.metadata.len() != nnrp_core::FLOW_UPDATE_METADATA_LEN
+                    || !packet.body.is_empty()
+                {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "client received malformed FLOW_UPDATE lengths",
+                    ));
+                }
                 let metadata = FlowUpdateMetadata::parse(&packet.metadata)?;
                 self.lifecycle
                     .validate_flow_update(&packet.header, &metadata)?;
@@ -668,6 +684,7 @@ impl NnrpClientSession {
                     metadata.body_bytes as usize,
                     "client received route hint body length mismatch",
                 )?;
+                self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
                 Ok(NnrpClientEvent::RouteHint {
                     message_type: packet.header.message_type,
                     metadata,
@@ -711,6 +728,7 @@ impl NnrpClientSession {
                     metadata.metadata_bytes as usize,
                     "client received OBJECT_REF body length mismatch",
                 )?;
+                self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
                 Ok(NnrpClientEvent::ObjectRef {
                     metadata,
                     body: packet.body,
@@ -732,6 +750,7 @@ impl NnrpClientSession {
                     metadata.diagnostic_bytes as usize,
                     "client received OBJECT_RELEASE body length mismatch",
                 )?;
+                self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
                 Ok(NnrpClientEvent::ObjectRelease {
                     metadata,
                     body: packet.body,
@@ -931,17 +950,34 @@ impl NnrpClientSession {
             ))
     }
 
-    fn complete_operation_by_frame(&mut self, frame_id: u32) -> Result<(), RuntimeError> {
-        if let Some(operation_id) = self.frame_operations.remove(&frame_id) {
-            self.operation_frames.remove(&operation_id);
+    fn require_operation_frame(
+        &self,
+        operation_id: u64,
+        frame_id: u32,
+    ) -> Result<(), RuntimeError> {
+        if self.correlated_frame_id(operation_id)? != frame_id {
+            return Err(RuntimeError::UnexpectedMessage(
+                "client runtime event frame id does not match its operation",
+            ));
         }
         Ok(())
     }
 
-    fn complete_operation(&mut self, operation_id: u64) -> Result<(), RuntimeError> {
-        if let Some(frame_id) = self.operation_frames.remove(&operation_id) {
-            self.frame_operations.remove(&frame_id);
-        }
+    fn complete_operation_by_frame(&mut self, frame_id: u32) -> Result<(), RuntimeError> {
+        let operation_id =
+            self.frame_operations
+                .remove(&frame_id)
+                .ok_or(RuntimeError::UnexpectedMessage(
+                    "client terminal event references an unknown frame",
+                ))?;
+        self.operation_frames.remove(&operation_id);
+        Ok(())
+    }
+
+    fn complete_operation(&mut self, operation_id: u64, frame_id: u32) -> Result<(), RuntimeError> {
+        self.require_operation_frame(operation_id, frame_id)?;
+        self.operation_frames.remove(&operation_id);
+        self.frame_operations.remove(&frame_id);
         Ok(())
     }
 
@@ -1092,6 +1128,7 @@ impl NnrpClientSession {
             diagnostics.len() as u32,
         );
         header.session_id = self.session_id;
+        header.frame_id = self.correlated_frame_id(metadata.operation_id)?;
         self.transport
             .write_packet(&RuntimePacket::new(
                 header,
@@ -1167,6 +1204,7 @@ impl NnrpClientSession {
         validate_scheduling_semantics(message_type, &metadata)?;
         let mut header = CommonHeader::new(message_type, SCHEDULING_METADATA_LEN as u32, 0);
         header.session_id = self.session_id;
+        header.frame_id = self.correlated_frame_id(metadata.operation_id)?;
         self.transport
             .write_packet(&RuntimePacket::new(
                 header,

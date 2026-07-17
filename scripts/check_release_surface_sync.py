@@ -152,10 +152,28 @@ def check_abi_version() -> None:
 def check_sdk_version_header() -> None:
     workspace = tomllib.loads(read_text("Cargo.toml"))
     header = read_text("include/nnrp/nnrp_version.h")
+    version = workspace["workspace"]["package"]["version"]
+    resolver = load_script(ROOT / "scripts" / "resolve_version.py")
     require_equal(
         header_define_string(header, "NNRP_SDK_VERSION"),
-        workspace["workspace"]["package"]["version"],
+        version,
         "include/nnrp/nnrp_version.h SDK version",
+    )
+    expected_components = resolver.parse_sdk_version_components(version)
+    actual_components = tuple(
+        header_define_int(header, name)
+        for name in (
+            "NNRP_SDK_VERSION_MAJOR",
+            "NNRP_SDK_VERSION_MINOR",
+            "NNRP_SDK_VERSION_PATCH",
+            "NNRP_SDK_VERSION_PREVIEW",
+            "NNRP_SDK_VERSION_REVISION",
+        )
+    )
+    require_equal(
+        actual_components,
+        expected_components,
+        "include/nnrp/nnrp_version.h SDK version components",
     )
 
 

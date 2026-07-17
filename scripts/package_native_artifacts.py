@@ -44,15 +44,19 @@ EXPECTED_EXPORTS = [
     "nnrp_dispatch_event",
 ]
 
-RETIRED_SYNTHETIC_EXPORTS = [
+RETIRED_ABI_EXPORTS = [
+    "nnrp_connection_bootstrap",
     "nnrp_client_complete_operation",
     "nnrp_client_drop_operation",
+    "nnrp_client_send_flow_update",
     "nnrp_client_submit_result",
     "nnrp_client_submit_result_compact",
     "nnrp_client_submit_result_compact_batch",
     "nnrp_client_submit_runtime_object_loop_compact",
     "nnrp_client_send_result_hint",
     "nnrp_client_submit_control",
+    "nnrp_server_receive_submit",
+    "nnrp_server_send_flow_update",
     "nnrp_control",
 ]
 
@@ -62,7 +66,7 @@ BENCHMARK_ONLY_EXPORTS = [
     "nnrp_benchmark_client_runtime_object_loop_compact",
 ]
 
-FORBIDDEN_EXPORTS = RETIRED_SYNTHETIC_EXPORTS + BENCHMARK_ONLY_EXPORTS
+FORBIDDEN_EXPORTS = RETIRED_ABI_EXPORTS + BENCHMARK_ONLY_EXPORTS
 
 TARGETS = {
     "x86_64-unknown-linux-gnu": ("linux", "x86_64", "dynamic"),

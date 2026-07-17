@@ -189,6 +189,7 @@ pub struct NnrpServerSession {
     lifecycle: ConnectionLifecycle,
     operations: OperationRegistry,
     frame_operations: BTreeMap<u32, u64>,
+    operation_frames: BTreeMap<u64, u32>,
     pressure: RuntimePressureState,
     cache_objects: Vec<CacheObjectId>,
     max_cache_objects: usize,
@@ -447,6 +448,7 @@ impl NnrpServer {
             lifecycle,
             operations: OperationRegistry::new(),
             frame_operations: BTreeMap::new(),
+            operation_frames: BTreeMap::new(),
             pressure: RuntimePressureState::default(),
             cache_objects: Vec::new(),
             max_cache_objects: self.config.max_cache_objects,
@@ -615,6 +617,13 @@ impl NnrpServerSession {
 
     pub async fn receive_submit(&mut self) -> Result<NnrpSubmit, RuntimeError> {
         let packet = self.transport.read_packet().await?;
+        self.handle_frame_submit_packet(packet)
+    }
+
+    fn handle_frame_submit_packet(
+        &mut self,
+        packet: RuntimePacket,
+    ) -> Result<NnrpSubmit, RuntimeError> {
         if packet.header.message_type != MessageType::FrameSubmit {
             return Err(RuntimeError::UnexpectedMessage(
                 "server expected FRAME_SUBMIT",
@@ -643,6 +652,8 @@ impl NnrpServerSession {
         ))?;
         self.frame_operations
             .insert(packet.header.frame_id, metadata.operation_id);
+        self.operation_frames
+            .insert(metadata.operation_id, packet.header.frame_id);
         self.update_registry_last_operation(metadata.operation_id)?;
 
         Ok(NnrpSubmit {
@@ -656,33 +667,9 @@ impl NnrpServerSession {
     pub async fn await_event(&mut self) -> Result<NnrpServerEvent, RuntimeError> {
         let packet = self.transport.read_packet().await?;
         match packet.header.message_type {
-            MessageType::FrameSubmit => {
-                self.require_session_packet(&packet, "server received submit for another session")?;
-                if packet.metadata.len() != FRAME_SUBMIT_METADATA_LEN {
-                    return Err(RuntimeError::UnexpectedMessage(
-                        "server received malformed FRAME_SUBMIT metadata length",
-                    ));
-                }
-                let metadata = FrameSubmitMetadata::parse(&packet.metadata)?;
-                if self.frame_operations.contains_key(&packet.header.frame_id) {
-                    return Err(RuntimeError::UnexpectedMessage(
-                        "server received duplicate FRAME_SUBMIT frame id",
-                    ));
-                }
-                self.operations.register(OperationDescriptor::new(
-                    self.session_id,
-                    metadata.operation_id,
-                ))?;
-                self.frame_operations
-                    .insert(packet.header.frame_id, metadata.operation_id);
-                self.update_registry_last_operation(metadata.operation_id)?;
-                Ok(NnrpServerEvent::Submit(NnrpSubmit {
-                    operation_id: metadata.operation_id,
-                    frame_id: packet.header.frame_id,
-                    metadata,
-                    body: packet.body,
-                }))
-            }
+            MessageType::FrameSubmit => self
+                .handle_frame_submit_packet(packet)
+                .map(NnrpServerEvent::Submit),
             MessageType::FrameCancel => {
                 self.require_session_packet(&packet, "server received cancel for another session")?;
                 if !packet.metadata.is_empty() || !packet.body.is_empty() {
@@ -717,6 +704,7 @@ impl NnrpServerSession {
                     metadata.body_bytes as usize,
                     "server received PARTIAL_RESULT body length mismatch",
                 )?;
+                self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
                 Ok(NnrpServerEvent::PartialResult {
                     metadata,
                     body: packet.body,
@@ -739,6 +727,7 @@ impl NnrpServerSession {
                     metadata.body_bytes as usize,
                     "server received PROGRESS body length mismatch",
                 )?;
+                self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
                 Ok(NnrpServerEvent::Progress {
                     metadata,
                     body: packet.body,
@@ -761,6 +750,7 @@ impl NnrpServerSession {
                     metadata.diagnostic_bytes as usize,
                     "server received RESULT_DROP_REASON body length mismatch",
                 )?;
+                self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
                 Ok(NnrpServerEvent::ResultDropReason {
                     metadata,
                     body: packet.body,
@@ -783,6 +773,7 @@ impl NnrpServerSession {
                     metadata.diagnostic_bytes as usize,
                     "server received runtime control diagnostic body length mismatch",
                 )?;
+                self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
                 match packet.header.message_type {
                     MessageType::Cancel => {
                         self.operations.cancel(OperationCancelRequest {
@@ -812,6 +803,7 @@ impl NnrpServerSession {
                 }
                 let metadata = SchedulingMetadata::parse(&packet.metadata)?;
                 validate_scheduling_semantics(packet.header.message_type, &metadata)?;
+                self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
                 self.operations.apply_scheduling_update(
                     self.session_id,
                     packet.header.message_type,
@@ -838,6 +830,7 @@ impl NnrpServerSession {
                     metadata.diagnostic_bytes as usize,
                     "server received SUPERSEDE diagnostic body length mismatch",
                 )?;
+                self.require_operation_frame(metadata.old_operation_id, packet.header.frame_id)?;
                 Ok(NnrpServerEvent::Supersede {
                     metadata,
                     body: packet.body,
@@ -853,11 +846,16 @@ impl NnrpServerSession {
                         "server received malformed BUDGET_UPDATE lengths",
                     ));
                 }
-                Ok(NnrpServerEvent::Budget(BudgetMetadata::parse(
-                    &packet.metadata,
-                )?))
+                let metadata = BudgetMetadata::parse(&packet.metadata)?;
+                self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
+                Ok(NnrpServerEvent::Budget(metadata))
             }
             MessageType::FlowUpdate => {
+                if packet.metadata.len() != FLOW_UPDATE_METADATA_LEN || !packet.body.is_empty() {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "server received malformed FLOW_UPDATE lengths",
+                    ));
+                }
                 let metadata = FlowUpdateMetadata::parse(&packet.metadata)?;
                 self.lifecycle
                     .validate_flow_update(&packet.header, &metadata)?;
@@ -920,6 +918,7 @@ impl NnrpServerSession {
                     metadata.body_bytes as usize,
                     "server received route hint body length mismatch",
                 )?;
+                self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
                 Ok(NnrpServerEvent::RouteHint {
                     message_type: packet.header.message_type,
                     metadata,
@@ -1028,6 +1027,7 @@ impl NnrpServerSession {
                     metadata.metadata_bytes as usize,
                     "server received OBJECT_REF body length mismatch",
                 )?;
+                self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
                 Ok(NnrpServerEvent::ObjectRef {
                     metadata,
                     body: packet.body,
@@ -1049,6 +1049,7 @@ impl NnrpServerSession {
                     metadata.diagnostic_bytes as usize,
                     "server received OBJECT_RELEASE body length mismatch",
                 )?;
+                self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
                 Ok(NnrpServerEvent::ObjectRelease {
                     metadata,
                     body: packet.body,
@@ -1662,6 +1663,7 @@ impl NnrpServerSession {
             metadata.diagnostic_bytes as usize,
             "server received runtime control diagnostic body length mismatch",
         )?;
+        self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
         match packet.header.message_type {
             MessageType::Cancel => {
                 self.operations.cancel(OperationCancelRequest {
@@ -1706,6 +1708,7 @@ impl NnrpServerSession {
 
         let metadata = SchedulingMetadata::parse(&packet.metadata)?;
         validate_scheduling_semantics(packet.header.message_type, &metadata)?;
+        self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
         self.operations.apply_scheduling_update(
             self.session_id,
             packet.header.message_type,
@@ -2057,10 +2060,23 @@ impl NnrpServerSession {
         if operation_id == 0 {
             return Ok(0);
         }
-        self.frame_operations
-            .iter()
-            .find_map(|(frame_id, candidate)| (*candidate == operation_id).then_some(*frame_id))
+        self.operation_frames
+            .get(&operation_id)
+            .copied()
             .ok_or(nnrp_core::NnrpError::UnknownOperation(operation_id).into())
+    }
+
+    fn require_operation_frame(
+        &self,
+        operation_id: u64,
+        frame_id: u32,
+    ) -> Result<(), RuntimeError> {
+        if self.correlated_frame_id(operation_id)? != frame_id {
+            return Err(RuntimeError::UnexpectedMessage(
+                "server runtime event frame id does not match its operation",
+            ));
+        }
+        Ok(())
     }
 
     fn operation_id_for_frame(&self, frame_id: u32) -> Result<u64, RuntimeError> {

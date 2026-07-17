@@ -2,11 +2,27 @@
 
 Preview4 moves the Rust workspace beyond token-stream transport substitution and into runtime orchestration features that help SDKs model cancellation, priority, progress, partial results, cache references, route hints, trace context, result drop reasons, IPC, and WebSocket endpoints directly.
 
-## Unreleased Preview4 ABI Correction
+## 1.0.0-preview.4.5
 
-The native FFI ABI is `2.0.0`. Production transport artifacts no longer export client completion, drop, or
-submit/result helpers that synthesized terminal events without reading a peer result from the selected carrier. The
-retired feature-flag bits remain reserved and are not reused.
+The native FFI ABI is `3.0.0`. Cache identities now use the frozen `(cache_namespace: u32, cache_key_hi: u64,
+cache_key_lo: u64)` representation across protocol metadata, native FFI, WASM, conformance vectors, and downstream SDK
+bindings. `ObjectReferenceBlock`, `CACHE_PUT`, `CACHE_ACK`, `CACHE_INVALIDATE`, `CACHE_REFERENCE`, and `CACHE_MISS`
+therefore have one canonical little-endian wire layout, including the frozen invalidation-scope zeroing rules.
+
+WASM JSON surfaces encode every runtime-control and runtime-object `u64` as an unsigned decimal JSON string and reject
+JSON numbers, preserving all 64 bits when JavaScript maps the values to `bigint`.
+
+Native FFI resource handles now use monotonic per-kind identities. Releasing a resource cannot make a stale handle
+valid again when another thread allocates a resource with the same generation.
+
+Client sessions reject operation identifier reuse for their full lifetime. Server runtime-event correlation maintains
+both frame-to-operation and operation-to-frame indexes, avoiding linear scans on progress and partial-result hot paths.
+Both peers reject operation-scoped events whose header frame identity does not match the operation identity in fixed
+metadata; client control and scheduling senders populate the correlated frame identity on the wire.
+
+Production transport artifacts no longer export client completion, drop, or submit/result helpers that synthesized
+terminal events without reading a peer result from the selected carrier. The retired feature-flag bits remain reserved
+and are not reused.
 
 Raw `nnrp_control`, `nnrp_client_submit_control`, and `nnrp_client_send_result_hint` event-injection exports are also
 removed. Inherited `RESULT_HINT` is sent by a server and decoded by a client through the same carrier-backed

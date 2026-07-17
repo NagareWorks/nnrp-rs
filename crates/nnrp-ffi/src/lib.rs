@@ -527,6 +527,7 @@ struct NnrpFfiResourceEntry {
 #[derive(Default)]
 struct NnrpFfiHandleStore {
     entries: BTreeMap<(u32, u64), NnrpFfiResourceEntry>,
+    next_ids: BTreeMap<u32, u64>,
     #[cfg(any(test, feature = "benchmark-ffi"))]
     events: VecDeque<NnrpQueuedEvent>,
 }
@@ -2557,7 +2558,7 @@ unsafe fn nnrp_client_submit_impl(
     }
     let handle = NnrpHandle::new(
         NnrpHandleKind::Operation,
-        next_handle_id(&store, NnrpHandleKind::Operation),
+        next_handle_id(&mut store, NnrpHandleKind::Operation),
         request.session.generation,
     );
     if let Err(status) = store.insert(
@@ -2630,7 +2631,7 @@ unsafe fn nnrp_client_submit_impl(
         }
         let operation = NnrpHandle::new(
             NnrpHandleKind::Operation,
-            next_handle_id(&store, NnrpHandleKind::Operation),
+            next_handle_id(&mut store, NnrpHandleKind::Operation),
             request.session.generation,
         );
         if let Err(status) = store.insert(
@@ -3367,7 +3368,7 @@ unsafe fn nnrp_schema_registry_create_impl(out_registry: *mut NnrpHandle) -> Nnr
         return NnrpFfiStatus::invalid_argument(40);
     }
     let mut store = handle_store();
-    let id = next_handle_id(&store, NnrpHandleKind::SchemaRegistry);
+    let id = next_handle_id(&mut store, NnrpHandleKind::SchemaRegistry);
     let handle = NnrpHandle::new(NnrpHandleKind::SchemaRegistry, id, 1);
     if let Err(status) = store.insert(
         handle,
@@ -4565,7 +4566,7 @@ fn server_role_event(
     let operation = if create_operation {
         let operation = NnrpHandle::new(
             NnrpHandleKind::Operation,
-            next_handle_id(&store, NnrpHandleKind::Operation),
+            next_handle_id(&mut store, NnrpHandleKind::Operation),
             scope.generation,
         );
         store.insert(
@@ -5145,14 +5146,15 @@ unsafe fn ffi_write_slice<'a>(view: NnrpBufferViewMut) -> &'a mut [u8] {
     }
 }
 
-fn next_handle_id(store: &NnrpFfiHandleStore, kind: NnrpHandleKind) -> u64 {
-    store
-        .entries
-        .keys()
-        .filter_map(|(stored_kind, id)| (*stored_kind == kind as u32).then_some(*id))
-        .max()
-        .unwrap_or(0)
-        .saturating_add(1)
+fn next_handle_id(store: &mut NnrpFfiHandleStore, kind: NnrpHandleKind) -> u64 {
+    let kind = kind as u32;
+    let next_id = store.next_ids.entry(kind).or_default();
+    loop {
+        *next_id = next_id.wrapping_add(1);
+        if *next_id != 0 && !store.entries.contains_key(&(kind, *next_id)) {
+            return *next_id;
+        }
+    }
 }
 
 #[no_mangle]
@@ -5322,7 +5324,7 @@ unsafe fn nnrp_object_descriptor_create_impl(
     };
     let metadata = ffi_read_slice(metadata).to_vec();
     let mut store = handle_store();
-    let id = next_handle_id(&store, NnrpHandleKind::ObjectDescriptor);
+    let id = next_handle_id(&mut store, NnrpHandleKind::ObjectDescriptor);
     let handle = NnrpHandle::new(NnrpHandleKind::ObjectDescriptor, id, 1);
     if let Err(status) = store.insert(
         handle,
@@ -5459,7 +5461,7 @@ unsafe fn nnrp_cache_reference_descriptor_create_impl(
     };
     let metadata = ffi_read_slice(metadata).to_vec();
     let mut store = handle_store();
-    let id = next_handle_id(&store, NnrpHandleKind::CacheReferenceDescriptor);
+    let id = next_handle_id(&mut store, NnrpHandleKind::CacheReferenceDescriptor);
     let handle = NnrpHandle::new(NnrpHandleKind::CacheReferenceDescriptor, id, 1);
     if let Err(status) = store.insert(
         handle,
@@ -5750,7 +5752,7 @@ unsafe fn cache_query_impl(
         return NnrpFfiStatus::ok();
     }
 
-    let id = next_handle_id(&store, NnrpHandleKind::CacheLease);
+    let id = next_handle_id(&mut store, NnrpHandleKind::CacheLease);
     let handle = NnrpHandle::new(NnrpHandleKind::CacheLease, id, 1);
     let lease = CacheLease {
         object_id,
@@ -7740,6 +7742,57 @@ mod tests {
                 NnrpHandleKind::Connection as u32
             ))
         );
+    }
+
+    #[test]
+    fn ffi_handle_ids_do_not_reanimate_released_handles() {
+        let mut store = NnrpFfiHandleStore::default();
+        let session = NnrpHandle::new(NnrpHandleKind::Session, 1, 1);
+        let first = NnrpHandle::new(
+            NnrpHandleKind::Operation,
+            next_handle_id(&mut store, NnrpHandleKind::Operation),
+            session.generation,
+        );
+        store
+            .insert(
+                first,
+                NnrpFfiResource::Operation {
+                    session,
+                    operation_id: 1,
+                    frame_id: 1,
+                    payload_len: 0,
+                },
+            )
+            .expect("first operation should be inserted");
+        store
+            .remove(first, NnrpHandleKind::Operation)
+            .expect("first operation should be released");
+
+        let second = NnrpHandle::new(
+            NnrpHandleKind::Operation,
+            next_handle_id(&mut store, NnrpHandleKind::Operation),
+            session.generation,
+        );
+        store
+            .insert(
+                second,
+                NnrpFfiResource::Operation {
+                    session,
+                    operation_id: 2,
+                    frame_id: 2,
+                    payload_len: 0,
+                },
+            )
+            .expect("second operation should be inserted");
+
+        assert_ne!(first.id, second.id);
+        assert!(matches!(
+            store.get(first, NnrpHandleKind::Operation),
+            Err(status)
+                if status
+                    == NnrpFfiStatus::invalid_handle(NnrpHandleKind::Operation as u32)
+        ));
+        assert!(store.get(second, NnrpHandleKind::Operation).is_ok());
     }
 
     #[test]

@@ -45,7 +45,7 @@ pub enum ReferenceProxyAction {
     InjectBackpressure,
     DelayForward,
     CloseAfterSubmit,
-    PerturbResultBeforeProgress,
+    PerturbPartialBeforeProgress,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,7 +113,7 @@ impl ReferenceProxyAction {
             Self::InjectBackpressure => "inject-backpressure",
             Self::DelayForward => "delay-forward",
             Self::CloseAfterSubmit => "close-after-submit",
-            Self::PerturbResultBeforeProgress => "perturb-result-before-progress",
+            Self::PerturbPartialBeforeProgress => "perturb-partial-before-progress",
         }
     }
 }
@@ -1208,17 +1208,19 @@ async fn reference_tcp_proxy_task(
         json!({ "forwarded_message_type": wire_message_name(submit.header.message_type) }),
     );
 
-    if action == ReferenceProxyAction::PerturbResultBeforeProgress {
+    if action == ReferenceProxyAction::PerturbPartialBeforeProgress {
         let progress = target.read_packet().await?;
+        let partial = target.read_packet().await?;
         let result = target.read_packet().await?;
         record_proxy_packet(&mut frames, "target->proxy", &progress);
+        record_proxy_packet(&mut frames, "target->proxy", &partial);
         record_proxy_packet(&mut frames, "target->proxy", &result);
-        client.write_packet(&result).await?;
+        client.write_packet(&partial).await?;
         frames.push(
             "proxy->client",
             "FRAME_ORDER_PERTURBATION",
             json!({
-                "first_forwarded_message_type": wire_message_name(result.header.message_type),
+                "first_forwarded_message_type": wire_message_name(partial.header.message_type),
                 "held_message_type": wire_message_name(progress.header.message_type),
             }),
         );
@@ -1227,6 +1229,12 @@ async fn reference_tcp_proxy_task(
             "proxy->client",
             "FORWARD",
             json!({ "forwarded_message_type": wire_message_name(progress.header.message_type) }),
+        );
+        client.write_packet(&result).await?;
+        frames.push(
+            "proxy->client",
+            "FORWARD",
+            json!({ "forwarded_message_type": wire_message_name(result.header.message_type) }),
         );
     } else {
         let result = target.read_packet().await?;
@@ -1275,9 +1283,12 @@ async fn reference_proxy_target_server_task(
         Err(_) if action == ReferenceProxyAction::CloseAfterSubmit => return Ok(()),
         Err(error) => return Err(error),
     };
-    if action == ReferenceProxyAction::PerturbResultBeforeProgress {
+    if action == ReferenceProxyAction::PerturbPartialBeforeProgress {
         session
             .send_progress(progress(submit.operation_id), b"stage".to_vec())
+            .await?;
+        session
+            .send_partial_result(partial_result(submit.operation_id), b"partial".to_vec())
             .await?;
     }
     session
@@ -1306,14 +1317,20 @@ async fn run_reference_proxy_client(
                 ));
             }
         }
-        ReferenceProxyAction::PerturbResultBeforeProgress => {
+        ReferenceProxyAction::PerturbPartialBeforeProgress => {
+            let (_, partial_body) = expect_partial_result(session.await_event().await?)?;
+            if partial_body != b"partial" {
+                return Err(RuntimeError::UnexpectedMessage(
+                    "wire proxy perturbation client received unexpected partial body",
+                ));
+            }
+            expect_progress(session.await_event().await?)?;
             let result = session.await_result().await?;
             if result.body != RESPONSE_BODY {
                 return Err(RuntimeError::UnexpectedMessage(
                     "wire proxy perturbation client received unexpected response body",
                 ));
             }
-            expect_progress(session.await_event().await?)?;
         }
         ReferenceProxyAction::CloseAfterSubmit => {
             let error = session.await_result().await.expect_err(
@@ -1382,6 +1399,7 @@ fn wire_message_name(message_type: MessageType) -> &'static str {
         MessageType::SessionOpenAck => "SESSION_OPEN_ACK",
         MessageType::FrameSubmit => "FRAME_SUBMIT",
         MessageType::ResultPush => "RESULT_PUSH",
+        MessageType::PartialResult => "PARTIAL_RESULT",
         MessageType::Progress => "PROGRESS",
         MessageType::Backpressure => "BACKPRESSURE",
         MessageType::SessionClose => "SESSION_CLOSE",
@@ -1984,13 +2002,18 @@ mod tests {
     #[tokio::test]
     async fn suite_as_proxy_reference_perturbs_frame_order() {
         let report =
-            run_suite_as_proxy_reference(ReferenceProxyAction::PerturbResultBeforeProgress)
+            run_suite_as_proxy_reference(ReferenceProxyAction::PerturbPartialBeforeProgress)
                 .await
                 .expect("proxy frame-order action should run");
         assert_proxy_report(
             &report,
-            "perturb-result-before-progress",
-            &["PROGRESS", "RESULT_PUSH", "FRAME_ORDER_PERTURBATION"],
+            "perturb-partial-before-progress",
+            &[
+                "PROGRESS",
+                "PARTIAL_RESULT",
+                "RESULT_PUSH",
+                "FRAME_ORDER_PERTURBATION",
+            ],
         );
     }
 
