@@ -483,6 +483,7 @@ fn object_delta_payload() -> Vec<u8> {
 
 fn cache_reference_payload() -> Vec<u8> {
     CacheReferenceMetadata {
+        cache_namespace: 42,
         cache_key_hi: 0x1234,
         cache_key_lo: 0x5678,
         profile_id: PROFILE_TOKEN,
@@ -499,6 +500,7 @@ fn cache_reference_payload() -> Vec<u8> {
 
 fn cache_miss_payload() -> Vec<u8> {
     CacheMissMetadata {
+        cache_namespace: 42,
         cache_key_hi: 0x1234,
         cache_key_lo: 0x5678,
         miss_reason: CacheMissReason::SchemaMismatch,

@@ -13,7 +13,7 @@ typedef struct NnrpProtocolVersion {
   uint8_t wire_format;
 } NnrpProtocolVersion;
 
-#define NNRP_FFI_ABI_MAJOR 2
+#define NNRP_FFI_ABI_MAJOR 3
 #define NNRP_FFI_ABI_MINOR 0
 #define NNRP_FFI_ABI_PATCH 0
 
@@ -265,9 +265,9 @@ typedef struct NnrpSessionRecoveryOutcome {
 
 typedef struct NnrpCacheObjectId {
   uint32_t cache_namespace;
-  uint32_t cache_key_hi;
-  uint32_t cache_key_lo;
   uint32_t object_kind;
+  uint64_t cache_key_hi;
+  uint64_t cache_key_lo;
 } NnrpCacheObjectId;
 
 typedef struct NnrpCacheLeaseRequest {
@@ -421,10 +421,11 @@ typedef struct NnrpObjectDeltaDescriptor {
 } NnrpObjectDeltaDescriptor;
 
 typedef struct NnrpCacheReferenceDescriptor {
-  uint64_t cache_key_hi;
-  uint64_t cache_key_lo;
+  uint32_t cache_namespace;
   uint16_t profile_id;
   uint16_t reuse_scope;
+  uint64_t cache_key_hi;
+  uint64_t cache_key_lo;
   uint64_t lease_id;
   uint64_t producer_trace_id;
   uint32_t expiration_hint_ms;
@@ -433,10 +434,11 @@ typedef struct NnrpCacheReferenceDescriptor {
 } NnrpCacheReferenceDescriptor;
 
 typedef struct NnrpCacheMissDescriptor {
-  uint64_t cache_key_hi;
-  uint64_t cache_key_lo;
+  uint32_t cache_namespace;
   uint16_t miss_reason;
   uint16_t profile_id;
+  uint64_t cache_key_hi;
+  uint64_t cache_key_lo;
   uint32_t diagnostic_bytes;
 } NnrpCacheMissDescriptor;
 

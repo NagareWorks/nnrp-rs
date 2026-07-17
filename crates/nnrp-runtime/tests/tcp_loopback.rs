@@ -2777,7 +2777,7 @@ fn close_request() -> SessionCloseMetadata {
     }
 }
 
-fn cache_object_id(cache_key_lo: u32) -> CacheObjectId {
+fn cache_object_id(cache_key_lo: u64) -> CacheObjectId {
     CacheObjectId {
         cache_namespace: 7,
         cache_key_hi: 0,
@@ -2997,6 +2997,7 @@ fn object_release(
 
 fn cache_reference() -> CacheReferenceMetadata {
     CacheReferenceMetadata {
+        cache_namespace: 42,
         cache_key_hi: 0x1234,
         cache_key_lo: 0x5678,
         profile_id: STANDARD_PROFILE_TOKEN,
@@ -3011,6 +3012,7 @@ fn cache_reference() -> CacheReferenceMetadata {
 
 fn cache_miss() -> CacheMissMetadata {
     CacheMissMetadata {
+        cache_namespace: 42,
         cache_key_hi: 0x1234,
         cache_key_lo: 0x5678,
         miss_reason: CacheMissReason::SchemaMismatch,

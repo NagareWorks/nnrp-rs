@@ -141,8 +141,8 @@ export interface DecodedMetadata<T> {
 }
 
 export interface ControlRequestMetadata {
-  operation_id: number;
-  control_sequence: number;
+  operation_id: string;
+  control_sequence: string;
   reason_code: number;
   source_role: number;
   flags: number;
@@ -150,53 +150,53 @@ export interface ControlRequestMetadata {
 }
 
 export interface SchedulingMetadata {
-  operation_id: number;
-  control_sequence: number;
+  operation_id: string;
+  control_sequence: string;
   priority_class: number;
   priority_delta: number;
-  deadline_unix_ms: number;
+  deadline_unix_ms: string;
   flags: number;
 }
 
 export interface SupersedeMetadata {
-  old_operation_id: number;
-  new_operation_id: number;
-  control_sequence: number;
+  old_operation_id: string;
+  new_operation_id: string;
+  control_sequence: string;
   drop_reason_code: number;
   flags: number;
   diagnostic_bytes: number;
 }
 
 export interface BudgetMetadata {
-  operation_id: number;
-  compute_budget_units: number;
-  memory_budget_bytes: number;
-  bandwidth_budget_bytes: number;
+  operation_id: string;
+  compute_budget_units: string;
+  memory_budget_bytes: string;
+  bandwidth_budget_bytes: string;
   token_budget: number;
   flags: number;
 }
 
 export interface ProgressMetadata {
-  operation_id: number;
-  progress_sequence: number;
+  operation_id: string;
+  progress_sequence: string;
   stage_code: number;
   percent_x100: number;
-  object_id: number;
+  object_id: string;
   body_bytes: number;
 }
 
 export interface PartialResultMetadata {
-  operation_id: number;
-  result_sequence: number;
-  object_id: number;
-  delta_sequence: number;
+  operation_id: string;
+  result_sequence: string;
+  object_id: string;
+  delta_sequence: string;
   body_bytes: number;
   flags: number;
 }
 
 export interface PressureMetadata {
-  scope_id: number;
-  credit_window: number;
+  scope_id: string;
+  credit_window: string;
   pressure_level: number;
   pressure_reason: number;
   retry_after_ms: number;
@@ -208,34 +208,34 @@ export interface CapabilityMetadata {
   capability_count: number;
   cost_model_id: number;
   preference_rank: number;
-  limit_bytes: number;
-  limit_units: number;
+  limit_bytes: string;
+  limit_units: string;
   body_bytes: number;
   flags: number;
 }
 
 export interface RouteHintMetadata {
-  operation_id: number;
+  operation_id: string;
   route_id: number;
   executor_class: number;
   affinity_class: number;
-  deadline_unix_ms: number;
+  deadline_unix_ms: string;
   body_bytes: number;
   flags: number;
 }
 
 export interface TraceContextMetadata {
-  trace_id: number;
-  span_id: number;
-  parent_span_id: number;
+  trace_id: string;
+  span_id: string;
+  parent_span_id: string;
   stage_code: number;
   flags: number;
   body_bytes: number;
 }
 
 export interface ResultDropReasonMetadata {
-  operation_id: number;
-  result_sequence: number;
+  operation_id: string;
+  result_sequence: string;
   drop_reason_code: number;
   source_role: number;
   flags: number;
@@ -256,8 +256,8 @@ export interface RecoverableErrorMetadata {
 }
 
 export interface RetryAfterMetadata {
-  scope_id: number;
-  control_sequence: number;
+  scope_id: string;
+  control_sequence: string;
   retry_after_ms: number;
   jitter_ms: number;
   reason_code: number;
@@ -267,12 +267,12 @@ export interface RetryAfterMetadata {
 }
 
 export interface ObjectDescriptorMetadata {
-  object_id: number;
+  object_id: string;
   object_kind: number;
   producer_role: number;
   consumer_role: number;
   session_id: number;
-  byte_size: number;
+  byte_size: string;
   compute_cost_units: number;
   memory_location_hint: number;
   ownership_hint: number;
@@ -281,18 +281,18 @@ export interface ObjectDescriptorMetadata {
 }
 
 export interface ObjectReferenceMetadata {
-  object_id: number;
-  operation_id: number;
-  object_version: number;
-  offset: number;
-  length: number;
+  object_id: string;
+  operation_id: string;
+  object_version: string;
+  offset: string;
+  length: string;
   flags: number;
   metadata_bytes: number;
 }
 
 export interface ObjectReleaseMetadata {
-  object_id: number;
-  operation_id: number;
+  object_id: string;
+  operation_id: string;
   release_reason: number;
   source_role: number;
   flags: number;
@@ -300,9 +300,9 @@ export interface ObjectReleaseMetadata {
 }
 
 export interface ObjectDeltaMetadata {
-  object_id: number;
-  delta_sequence: number;
-  region_offset: number;
+  object_id: string;
+  delta_sequence: string;
+  region_offset: string;
   region_bytes: number;
   delta_bytes: number;
   flags: number;
@@ -310,20 +310,22 @@ export interface ObjectDeltaMetadata {
 }
 
 export interface CacheReferenceMetadata {
-  cache_key_hi: number;
-  cache_key_lo: number;
+  cache_namespace: number;
+  cache_key_hi: string;
+  cache_key_lo: string;
   profile_id: number;
   reuse_scope: number;
-  lease_id: number;
-  producer_trace_id: number;
+  lease_id: string;
+  producer_trace_id: string;
   expiration_hint_ms: number;
   metadata_bytes: number;
   flags: number;
 }
 
 export interface CacheMissMetadata {
-  cache_key_hi: number;
-  cache_key_lo: number;
+  cache_namespace: number;
+  cache_key_hi: string;
+  cache_key_lo: string;
   miss_reason: number;
   profile_id: number;
   diagnostic_bytes: number;

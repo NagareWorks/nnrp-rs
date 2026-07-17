@@ -215,6 +215,7 @@ fn bench_runtime_objects(iterations: u64) -> Result<BenchCase, Box<dyn Error>> {
     };
     let cache_meta = br#"{"tenant":"bench"}"#;
     let cache = CacheReferenceMetadata {
+        cache_namespace: 42,
         cache_key_hi: 1,
         cache_key_lo: 2,
         profile_id: STANDARD_PROFILE_TOKEN,
@@ -227,6 +228,7 @@ fn bench_runtime_objects(iterations: u64) -> Result<BenchCase, Box<dyn Error>> {
     };
     let miss_diag = b"not-found";
     let miss = CacheMissMetadata {
+        cache_namespace: 42,
         cache_key_hi: 1,
         cache_key_lo: 3,
         miss_reason: CacheMissReason::NotFound,

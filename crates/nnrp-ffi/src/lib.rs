@@ -44,7 +44,7 @@ mod transport;
 mod transport_exports;
 pub use transport::*;
 
-pub const NNRP_FFI_ABI_MAJOR: u16 = 2;
+pub const NNRP_FFI_ABI_MAJOR: u16 = 3;
 pub const NNRP_FFI_ABI_MINOR: u16 = 0;
 pub const NNRP_FFI_ABI_PATCH: u16 = 0;
 
@@ -894,9 +894,9 @@ pub struct NnrpTypedPayloadDescriptor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NnrpCacheObjectId {
     pub cache_namespace: u32,
-    pub cache_key_hi: u32,
-    pub cache_key_lo: u32,
     pub object_kind: u32,
+    pub cache_key_hi: u64,
+    pub cache_key_lo: u64,
 }
 
 impl NnrpCacheObjectId {
@@ -1146,10 +1146,11 @@ impl From<NnrpObjectDeltaDescriptor> for ObjectDeltaMetadata {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NnrpCacheReferenceDescriptor {
-    pub cache_key_hi: u64,
-    pub cache_key_lo: u64,
+    pub cache_namespace: u32,
     pub profile_id: u16,
     pub reuse_scope: u16,
+    pub cache_key_hi: u64,
+    pub cache_key_lo: u64,
     pub lease_id: u64,
     pub producer_trace_id: u64,
     pub expiration_hint_ms: u32,
@@ -1160,6 +1161,7 @@ pub struct NnrpCacheReferenceDescriptor {
 impl NnrpCacheReferenceDescriptor {
     pub fn to_core(self) -> Result<CacheReferenceMetadata, NnrpFfiStatus> {
         Ok(CacheReferenceMetadata {
+            cache_namespace: self.cache_namespace,
             cache_key_hi: self.cache_key_hi,
             cache_key_lo: self.cache_key_lo,
             profile_id: self.profile_id,
@@ -1177,6 +1179,7 @@ impl NnrpCacheReferenceDescriptor {
 impl From<CacheReferenceMetadata> for NnrpCacheReferenceDescriptor {
     fn from(value: CacheReferenceMetadata) -> Self {
         Self {
+            cache_namespace: value.cache_namespace,
             cache_key_hi: value.cache_key_hi,
             cache_key_lo: value.cache_key_lo,
             profile_id: value.profile_id,
@@ -1193,16 +1196,18 @@ impl From<CacheReferenceMetadata> for NnrpCacheReferenceDescriptor {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NnrpCacheMissDescriptor {
-    pub cache_key_hi: u64,
-    pub cache_key_lo: u64,
+    pub cache_namespace: u32,
     pub miss_reason: u16,
     pub profile_id: u16,
+    pub cache_key_hi: u64,
+    pub cache_key_lo: u64,
     pub diagnostic_bytes: u32,
 }
 
 impl NnrpCacheMissDescriptor {
     pub fn to_core(self) -> Result<CacheMissMetadata, NnrpFfiStatus> {
         Ok(CacheMissMetadata {
+            cache_namespace: self.cache_namespace,
             cache_key_hi: self.cache_key_hi,
             cache_key_lo: self.cache_key_lo,
             miss_reason: CacheMissReason::try_from_u16(self.miss_reason)
@@ -1216,6 +1221,7 @@ impl NnrpCacheMissDescriptor {
 impl From<CacheMissMetadata> for NnrpCacheMissDescriptor {
     fn from(value: CacheMissMetadata) -> Self {
         Self {
+            cache_namespace: value.cache_namespace,
             cache_key_hi: value.cache_key_hi,
             cache_key_lo: value.cache_key_lo,
             miss_reason: value.miss_reason as u16,
@@ -7138,6 +7144,83 @@ mod tests {
     }
 
     #[test]
+    fn ffi_cache_identity_layout_is_frozen_for_abi_v3() {
+        assert_eq!(core::mem::size_of::<NnrpCacheObjectId>(), 24);
+        assert_eq!(core::mem::offset_of!(NnrpCacheObjectId, cache_namespace), 0);
+        assert_eq!(core::mem::offset_of!(NnrpCacheObjectId, object_kind), 4);
+        assert_eq!(core::mem::offset_of!(NnrpCacheObjectId, cache_key_hi), 8);
+        assert_eq!(core::mem::offset_of!(NnrpCacheObjectId, cache_key_lo), 16);
+
+        assert_eq!(core::mem::size_of::<NnrpCacheReferenceDescriptor>(), 56);
+        assert_eq!(
+            core::mem::offset_of!(NnrpCacheReferenceDescriptor, cache_namespace),
+            0
+        );
+        assert_eq!(
+            core::mem::offset_of!(NnrpCacheReferenceDescriptor, profile_id),
+            4
+        );
+        assert_eq!(
+            core::mem::offset_of!(NnrpCacheReferenceDescriptor, reuse_scope),
+            6
+        );
+        assert_eq!(
+            core::mem::offset_of!(NnrpCacheReferenceDescriptor, cache_key_hi),
+            8
+        );
+        assert_eq!(
+            core::mem::offset_of!(NnrpCacheReferenceDescriptor, cache_key_lo),
+            16
+        );
+        assert_eq!(
+            core::mem::offset_of!(NnrpCacheReferenceDescriptor, lease_id),
+            24
+        );
+        assert_eq!(
+            core::mem::offset_of!(NnrpCacheReferenceDescriptor, producer_trace_id),
+            32
+        );
+        assert_eq!(
+            core::mem::offset_of!(NnrpCacheReferenceDescriptor, expiration_hint_ms),
+            40
+        );
+        assert_eq!(
+            core::mem::offset_of!(NnrpCacheReferenceDescriptor, metadata_bytes),
+            44
+        );
+        assert_eq!(
+            core::mem::offset_of!(NnrpCacheReferenceDescriptor, flags),
+            48
+        );
+
+        assert_eq!(core::mem::size_of::<NnrpCacheMissDescriptor>(), 32);
+        assert_eq!(
+            core::mem::offset_of!(NnrpCacheMissDescriptor, cache_namespace),
+            0
+        );
+        assert_eq!(
+            core::mem::offset_of!(NnrpCacheMissDescriptor, miss_reason),
+            4
+        );
+        assert_eq!(
+            core::mem::offset_of!(NnrpCacheMissDescriptor, profile_id),
+            6
+        );
+        assert_eq!(
+            core::mem::offset_of!(NnrpCacheMissDescriptor, cache_key_hi),
+            8
+        );
+        assert_eq!(
+            core::mem::offset_of!(NnrpCacheMissDescriptor, cache_key_lo),
+            16
+        );
+        assert_eq!(
+            core::mem::offset_of!(NnrpCacheMissDescriptor, diagnostic_bytes),
+            24
+        );
+    }
+
+    #[test]
     fn ffi_runtime_capabilities_report_stable_probe_contract() {
         let capabilities = runtime_capabilities();
         assert_eq!(nnrp_runtime_capabilities(), capabilities);
@@ -7302,6 +7385,7 @@ mod tests {
         assert_eq!(ObjectDeltaMetadata::from(ffi_delta), delta);
 
         let cache_ref = CacheReferenceMetadata {
+            cache_namespace: 7,
             cache_key_hi: 0x1122,
             cache_key_lo: 0x3344,
             profile_id: 3,
@@ -7316,6 +7400,7 @@ mod tests {
         assert_eq!(ffi_cache_ref.to_core().unwrap(), cache_ref);
 
         let miss = CacheMissMetadata {
+            cache_namespace: 7,
             cache_key_hi: 0x1122,
             cache_key_lo: 0x3344,
             miss_reason: CacheMissReason::SchemaMismatch,
@@ -8391,6 +8476,7 @@ mod tests {
                             len: object_metadata.len(),
                         },
                         cache_reference: NnrpCacheReferenceDescriptor {
+                            cache_namespace: 7,
                             cache_key_hi: 0xaaa,
                             cache_key_lo: 0xbbb,
                             profile_id: 2,
@@ -8528,6 +8614,7 @@ mod tests {
                         len: payload.len(),
                     },
                     cache_reference: NnrpCacheReferenceDescriptor {
+                        cache_namespace: 7,
                         cache_key_hi: 1,
                         cache_key_lo: 2,
                         profile_id: 2,
@@ -9291,8 +9378,9 @@ mod tests {
         assert_valid(MessageType::ObjectDelta, &delta);
 
         let cache_reference = CacheReferenceMetadata {
-            cache_key_hi: 0x1122,
-            cache_key_lo: 0x3344,
+            cache_namespace: 7,
+            cache_key_hi: 0x1122_3344_5566_7788,
+            cache_key_lo: 0x99aa_bbcc_ddee_ff00,
             profile_id: 3,
             reuse_scope: CacheReuseScope::Session,
             lease_id: 5,
@@ -9306,8 +9394,9 @@ mod tests {
         assert_valid(MessageType::CacheReference, &cache_reference);
 
         let cache_miss = CacheMissMetadata {
-            cache_key_hi: 0x1122,
-            cache_key_lo: 0x3344,
+            cache_namespace: 7,
+            cache_key_hi: 0x1122_3344_5566_7788,
+            cache_key_lo: 0x99aa_bbcc_ddee_ff00,
             miss_reason: CacheMissReason::SchemaMismatch,
             profile_id: 3,
             diagnostic_bytes: 1,
@@ -10216,6 +10305,7 @@ mod tests {
 
             let cache_metadata = br#"{"reuse":"same-scene"}"#;
             let cache_descriptor = NnrpCacheReferenceDescriptor {
+                cache_namespace: 7,
                 cache_key_hi: 1,
                 cache_key_lo: 2,
                 profile_id: 0x1001,
@@ -10314,6 +10404,7 @@ mod tests {
             );
 
             let cache_descriptor = NnrpCacheReferenceDescriptor {
+                cache_namespace: 7,
                 cache_key_hi: 1,
                 cache_key_lo: 2,
                 profile_id: 0x1001,
@@ -10407,6 +10498,7 @@ mod tests {
 
             let cache_metadata = br#"{"cache":"snapshot-ref"}"#;
             let cache_descriptor = NnrpCacheReferenceDescriptor {
+                cache_namespace: 7,
                 cache_key_hi: 3,
                 cache_key_lo: 4,
                 profile_id: 0x1001,

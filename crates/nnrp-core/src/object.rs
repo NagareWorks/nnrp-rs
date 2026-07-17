@@ -4,7 +4,7 @@ pub const OBJECT_DESCRIPTOR_METADATA_LEN: usize = 48;
 pub const OBJECT_REFERENCE_METADATA_LEN: usize = 48;
 pub const OBJECT_RELEASE_METADATA_LEN: usize = 32;
 pub const OBJECT_DELTA_METADATA_LEN: usize = 40;
-pub const CACHE_REFERENCE_METADATA_LEN: usize = 48;
+pub const CACHE_REFERENCE_METADATA_LEN: usize = 56;
 pub const CACHE_MISS_METADATA_LEN: usize = 32;
 
 pub const OBJECT_REFERENCE_FLAGS_KNOWN_MASK: u32 = 0x0000_0007;
@@ -610,6 +610,7 @@ pub fn object_delta_packet_bytes(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CacheReferenceMetadata {
+    pub cache_namespace: u32,
     pub cache_key_hi: u64,
     pub cache_key_lo: u64,
     pub profile_id: u16,
@@ -624,17 +625,19 @@ pub struct CacheReferenceMetadata {
 impl CacheReferenceMetadata {
     pub fn parse(source: &[u8]) -> Result<Self, NnrpError> {
         require_len(source, CACHE_REFERENCE_METADATA_LEN)?;
-        let flags = read_u32(source, 44);
+        let flags = read_u32(source, 48);
         validate_mask_u32(flags, CACHE_REFERENCE_FLAGS_KNOWN_MASK)?;
+        validate_zero_u32("cache_reference.reserved", read_u32(source, 52))?;
         Ok(Self {
-            cache_key_hi: read_u64(source, 0),
-            cache_key_lo: read_u64(source, 8),
-            profile_id: read_u16(source, 16),
-            reuse_scope: CacheReuseScope::try_from_u16(read_u16(source, 18))?,
-            lease_id: read_u64(source, 20),
-            producer_trace_id: read_u64(source, 28),
-            expiration_hint_ms: read_u32(source, 36),
-            metadata_bytes: read_u32(source, 40),
+            cache_namespace: read_u32(source, 0),
+            profile_id: read_u16(source, 4),
+            reuse_scope: CacheReuseScope::try_from_u16(read_u16(source, 6))?,
+            cache_key_hi: read_u64(source, 8),
+            cache_key_lo: read_u64(source, 16),
+            lease_id: read_u64(source, 24),
+            producer_trace_id: read_u64(source, 32),
+            expiration_hint_ms: read_u32(source, 40),
+            metadata_bytes: read_u32(source, 44),
             flags,
         })
     }
@@ -642,15 +645,17 @@ impl CacheReferenceMetadata {
     pub fn write(&self, destination: &mut [u8]) -> Result<(), NnrpError> {
         require_destination_len(destination, CACHE_REFERENCE_METADATA_LEN)?;
         validate_mask_u32(self.flags, CACHE_REFERENCE_FLAGS_KNOWN_MASK)?;
-        write_u64(destination, 0, self.cache_key_hi);
-        write_u64(destination, 8, self.cache_key_lo);
-        write_u16(destination, 16, self.profile_id);
-        write_u16(destination, 18, self.reuse_scope as u16);
-        write_u64(destination, 20, self.lease_id);
-        write_u64(destination, 28, self.producer_trace_id);
-        write_u32(destination, 36, self.expiration_hint_ms);
-        write_u32(destination, 40, self.metadata_bytes);
-        write_u32(destination, 44, self.flags);
+        destination[..CACHE_REFERENCE_METADATA_LEN].fill(0);
+        write_u32(destination, 0, self.cache_namespace);
+        write_u16(destination, 4, self.profile_id);
+        write_u16(destination, 6, self.reuse_scope as u16);
+        write_u64(destination, 8, self.cache_key_hi);
+        write_u64(destination, 16, self.cache_key_lo);
+        write_u64(destination, 24, self.lease_id);
+        write_u64(destination, 32, self.producer_trace_id);
+        write_u32(destination, 40, self.expiration_hint_ms);
+        write_u32(destination, 44, self.metadata_bytes);
+        write_u32(destination, 48, self.flags);
         Ok(())
     }
 
@@ -685,6 +690,7 @@ impl CacheReferenceMetadata {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CacheMissMetadata {
+    pub cache_namespace: u32,
     pub cache_key_hi: u64,
     pub cache_key_lo: u64,
     pub miss_reason: CacheMissReason,
@@ -695,24 +701,26 @@ pub struct CacheMissMetadata {
 impl CacheMissMetadata {
     pub fn parse(source: &[u8]) -> Result<Self, NnrpError> {
         require_len(source, CACHE_MISS_METADATA_LEN)?;
-        validate_zero_u64("cache_miss.reserved", read_u64(source, 24))?;
+        validate_zero_u32("cache_miss.reserved", read_u32(source, 28))?;
         Ok(Self {
-            cache_key_hi: read_u64(source, 0),
-            cache_key_lo: read_u64(source, 8),
-            miss_reason: CacheMissReason::try_from_u16(read_u16(source, 16))?,
-            profile_id: read_u16(source, 18),
-            diagnostic_bytes: read_u32(source, 20),
+            cache_namespace: read_u32(source, 0),
+            profile_id: read_u16(source, 4),
+            miss_reason: CacheMissReason::try_from_u16(read_u16(source, 6))?,
+            cache_key_hi: read_u64(source, 8),
+            cache_key_lo: read_u64(source, 16),
+            diagnostic_bytes: read_u32(source, 24),
         })
     }
 
     pub fn write(&self, destination: &mut [u8]) -> Result<(), NnrpError> {
         require_destination_len(destination, CACHE_MISS_METADATA_LEN)?;
         destination[..CACHE_MISS_METADATA_LEN].fill(0);
-        write_u64(destination, 0, self.cache_key_hi);
-        write_u64(destination, 8, self.cache_key_lo);
-        write_u16(destination, 16, self.miss_reason as u16);
-        write_u16(destination, 18, self.profile_id);
-        write_u32(destination, 20, self.diagnostic_bytes);
+        write_u32(destination, 0, self.cache_namespace);
+        write_u16(destination, 4, self.profile_id);
+        write_u16(destination, 6, self.miss_reason as u16);
+        write_u64(destination, 8, self.cache_key_hi);
+        write_u64(destination, 16, self.cache_key_lo);
+        write_u32(destination, 24, self.diagnostic_bytes);
         Ok(())
     }
 
@@ -832,6 +840,13 @@ fn validate_zero_u64(field: &'static str, value: u64) -> Result<(), NnrpError> {
     Ok(())
 }
 
+fn validate_zero_u32(field: &'static str, value: u32) -> Result<(), NnrpError> {
+    if value != 0 {
+        return Err(NnrpError::NonZeroReservedField { field });
+    }
+    Ok(())
+}
+
 fn read_u16(source: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes(source[offset..offset + 2].try_into().expect("slice length"))
 }
@@ -922,8 +937,9 @@ mod tests {
         );
 
         let cache_ref = CacheReferenceMetadata {
-            cache_key_hi: 0x1122,
-            cache_key_lo: 0x3344,
+            cache_namespace: 7,
+            cache_key_hi: 0x1122_3344_5566_7788,
+            cache_key_lo: 0x99aa_bbcc_ddee_ff00,
             profile_id: 3,
             reuse_scope: CacheReuseScope::Session,
             lease_id: 5,
@@ -938,8 +954,9 @@ mod tests {
         );
 
         let miss = CacheMissMetadata {
-            cache_key_hi: 0x1122,
-            cache_key_lo: 0x3344,
+            cache_namespace: 7,
+            cache_key_hi: 0x1122_3344_5566_7788,
+            cache_key_lo: 0x99aa_bbcc_ddee_ff00,
             miss_reason: CacheMissReason::SchemaMismatch,
             profile_id: 3,
             diagnostic_bytes: 9,
@@ -1016,6 +1033,7 @@ mod tests {
         );
 
         let cache_ref = CacheReferenceMetadata {
+            cache_namespace: 7,
             cache_key_hi: 0x1122,
             cache_key_lo: 0x3344,
             profile_id: 3,
@@ -1033,6 +1051,7 @@ mod tests {
         );
 
         let miss = CacheMissMetadata {
+            cache_namespace: 7,
             cache_key_hi: 0x1122,
             cache_key_lo: 0x3344,
             miss_reason: CacheMissReason::SchemaMismatch,
@@ -1136,6 +1155,7 @@ mod tests {
 
         assert_eq!(
             CacheReferenceMetadata {
+                cache_namespace: 7,
                 cache_key_hi: 1,
                 cache_key_lo: 2,
                 profile_id: 3,
@@ -1154,6 +1174,7 @@ mod tests {
         );
 
         let mut miss = CacheMissMetadata {
+            cache_namespace: 7,
             cache_key_hi: 1,
             cache_key_lo: 2,
             miss_reason: CacheMissReason::NotFound,
@@ -1162,7 +1183,7 @@ mod tests {
         }
         .to_bytes()
         .unwrap();
-        write_u64(&mut miss, 24, 1);
+        write_u32(&mut miss, 28, 1);
         assert_eq!(
             CacheMissMetadata::parse(&miss),
             Err(NnrpError::NonZeroReservedField {
@@ -1268,6 +1289,7 @@ mod tests {
         );
 
         let miss = CacheMissMetadata {
+            cache_namespace: 7,
             cache_key_hi: 0x1122,
             cache_key_lo: 0x3344,
             miss_reason: CacheMissReason::SchemaMismatch,
@@ -1324,6 +1346,7 @@ mod tests {
         );
 
         let cache_miss = CacheMissMetadata {
+            cache_namespace: 7,
             cache_key_hi: 1,
             cache_key_lo: 2,
             miss_reason: CacheMissReason::NotFound,

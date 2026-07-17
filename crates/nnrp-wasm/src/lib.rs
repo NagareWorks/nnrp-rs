@@ -568,7 +568,9 @@ fn decoded_metadata_with_tail_json<T: Serialize>(
 
 #[derive(Debug, Deserialize, Serialize)]
 struct WasmControlRequest {
+    #[serde(with = "canonical_u64")]
     operation_id: u64,
+    #[serde(with = "canonical_u64")]
     control_sequence: u64,
     reason_code: u16,
     source_role: u8,
@@ -602,10 +604,13 @@ impl WasmControlRequest {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct WasmScheduling {
+    #[serde(with = "canonical_u64")]
     operation_id: u64,
+    #[serde(with = "canonical_u64")]
     control_sequence: u64,
     priority_class: u16,
     priority_delta: i16,
+    #[serde(with = "canonical_u64")]
     deadline_unix_ms: u64,
     flags: u32,
 }
@@ -636,8 +641,11 @@ impl WasmScheduling {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct WasmSupersede {
+    #[serde(with = "canonical_u64")]
     old_operation_id: u64,
+    #[serde(with = "canonical_u64")]
     new_operation_id: u64,
+    #[serde(with = "canonical_u64")]
     control_sequence: u64,
     drop_reason_code: u16,
     flags: u16,
@@ -670,9 +678,13 @@ impl WasmSupersede {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct WasmBudget {
+    #[serde(with = "canonical_u64")]
     operation_id: u64,
+    #[serde(with = "canonical_u64")]
     compute_budget_units: u64,
+    #[serde(with = "canonical_u64")]
     memory_budget_bytes: u64,
+    #[serde(with = "canonical_u64")]
     bandwidth_budget_bytes: u64,
     token_budget: u32,
     flags: u32,
@@ -704,10 +716,13 @@ impl WasmBudget {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct WasmProgress {
+    #[serde(with = "canonical_u64")]
     operation_id: u64,
+    #[serde(with = "canonical_u64")]
     progress_sequence: u64,
     stage_code: u16,
     percent_x100: u16,
+    #[serde(with = "canonical_u64")]
     object_id: u64,
     body_bytes: u32,
 }
@@ -738,9 +753,13 @@ impl WasmProgress {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct WasmPartialResult {
+    #[serde(with = "canonical_u64")]
     operation_id: u64,
+    #[serde(with = "canonical_u64")]
     result_sequence: u64,
+    #[serde(with = "canonical_u64")]
     object_id: u64,
+    #[serde(with = "canonical_u64")]
     delta_sequence: u64,
     body_bytes: u32,
     flags: u32,
@@ -772,7 +791,9 @@ impl WasmPartialResult {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct WasmPressure {
+    #[serde(with = "canonical_u64")]
     scope_id: u64,
+    #[serde(with = "canonical_u64")]
     credit_window: u64,
     pressure_level: u16,
     pressure_reason: u16,
@@ -810,7 +831,9 @@ struct WasmCapability {
     capability_count: u16,
     cost_model_id: u16,
     preference_rank: u16,
+    #[serde(with = "canonical_u64")]
     limit_bytes: u64,
+    #[serde(with = "canonical_u64")]
     limit_units: u64,
     body_bytes: u32,
     flags: u32,
@@ -846,10 +869,12 @@ impl WasmCapability {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct WasmRouteHint {
+    #[serde(with = "canonical_u64")]
     operation_id: u64,
     route_id: u32,
     executor_class: u16,
     affinity_class: u16,
+    #[serde(with = "canonical_u64")]
     deadline_unix_ms: u64,
     body_bytes: u32,
     flags: u32,
@@ -883,8 +908,11 @@ impl WasmRouteHint {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct WasmTraceContext {
+    #[serde(with = "canonical_u64")]
     trace_id: u64,
+    #[serde(with = "canonical_u64")]
     span_id: u64,
+    #[serde(with = "canonical_u64")]
     parent_span_id: u64,
     stage_code: u16,
     flags: u16,
@@ -917,7 +945,9 @@ impl WasmTraceContext {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct WasmResultDropReason {
+    #[serde(with = "canonical_u64")]
     operation_id: u64,
+    #[serde(with = "canonical_u64")]
     result_sequence: u64,
     drop_reason_code: u16,
     source_role: u8,
@@ -998,7 +1028,9 @@ impl WasmRecoverableError {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct WasmRetryAfter {
+    #[serde(with = "canonical_u64")]
     scope_id: u64,
+    #[serde(with = "canonical_u64")]
     control_sequence: u64,
     retry_after_ms: u32,
     jitter_ms: u32,
@@ -1038,11 +1070,13 @@ impl WasmRetryAfter {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct WasmObjectDescriptor {
+    #[serde(with = "canonical_u64")]
     object_id: u64,
     object_kind: u16,
     producer_role: u8,
     consumer_role: u8,
     session_id: u32,
+    #[serde(with = "canonical_u64")]
     byte_size: u64,
     compute_cost_units: u32,
     memory_location_hint: u16,
@@ -1090,10 +1124,15 @@ impl WasmObjectDescriptor {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct WasmObjectReference {
+    #[serde(with = "canonical_u64")]
     object_id: u64,
+    #[serde(with = "canonical_u64")]
     operation_id: u64,
+    #[serde(with = "canonical_u64")]
     object_version: u64,
+    #[serde(with = "canonical_u64")]
     offset: u64,
+    #[serde(with = "canonical_u64")]
     length: u64,
     flags: u32,
     metadata_bytes: u32,
@@ -1127,7 +1166,9 @@ impl WasmObjectReference {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct WasmObjectRelease {
+    #[serde(with = "canonical_u64")]
     object_id: u64,
+    #[serde(with = "canonical_u64")]
     operation_id: u64,
     release_reason: u16,
     source_role: u8,
@@ -1162,8 +1203,11 @@ impl WasmObjectRelease {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct WasmObjectDelta {
+    #[serde(with = "canonical_u64")]
     object_id: u64,
+    #[serde(with = "canonical_u64")]
     delta_sequence: u64,
+    #[serde(with = "canonical_u64")]
     region_offset: u64,
     region_bytes: u32,
     delta_bytes: u32,
@@ -1199,11 +1243,16 @@ impl WasmObjectDelta {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct WasmCacheReference {
+    cache_namespace: u32,
+    #[serde(with = "canonical_u64")]
     cache_key_hi: u64,
+    #[serde(with = "canonical_u64")]
     cache_key_lo: u64,
     profile_id: u16,
     reuse_scope: u16,
+    #[serde(with = "canonical_u64")]
     lease_id: u64,
+    #[serde(with = "canonical_u64")]
     producer_trace_id: u64,
     expiration_hint_ms: u32,
     metadata_bytes: u32,
@@ -1213,6 +1262,7 @@ struct WasmCacheReference {
 impl WasmCacheReference {
     fn into_core(self) -> Result<CacheReferenceMetadata, JsValue> {
         Ok(CacheReferenceMetadata {
+            cache_namespace: self.cache_namespace,
             cache_key_hi: self.cache_key_hi,
             cache_key_lo: self.cache_key_lo,
             profile_id: self.profile_id,
@@ -1227,6 +1277,7 @@ impl WasmCacheReference {
 
     fn from_core(value: CacheReferenceMetadata) -> Self {
         Self {
+            cache_namespace: value.cache_namespace,
             cache_key_hi: value.cache_key_hi,
             cache_key_lo: value.cache_key_lo,
             profile_id: value.profile_id,
@@ -1242,7 +1293,10 @@ impl WasmCacheReference {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct WasmCacheMiss {
+    cache_namespace: u32,
+    #[serde(with = "canonical_u64")]
     cache_key_hi: u64,
+    #[serde(with = "canonical_u64")]
     cache_key_lo: u64,
     miss_reason: u16,
     profile_id: u16,
@@ -1252,6 +1306,7 @@ struct WasmCacheMiss {
 impl WasmCacheMiss {
     fn into_core(self) -> Result<CacheMissMetadata, JsValue> {
         Ok(CacheMissMetadata {
+            cache_namespace: self.cache_namespace,
             cache_key_hi: self.cache_key_hi,
             cache_key_lo: self.cache_key_lo,
             miss_reason: CacheMissReason::try_from_u16(self.miss_reason).map_err(js_nnrp_error)?,
@@ -1262,6 +1317,7 @@ impl WasmCacheMiss {
 
     fn from_core(value: CacheMissMetadata) -> Self {
         Self {
+            cache_namespace: value.cache_namespace,
             cache_key_hi: value.cache_key_hi,
             cache_key_lo: value.cache_key_lo,
             miss_reason: value.miss_reason as u16,
@@ -1537,17 +1593,40 @@ fn parse_policy(value: &str) -> Result<TransportPolicy, JsValue> {
     }
 }
 
-fn parse_canonical_u64(value: &str) -> Result<u64, JsValue> {
+fn parse_canonical_u64_value(value: &str) -> Result<u64, &'static str> {
     let canonical = value == "0"
         || (!value.is_empty()
             && !value.starts_with('0')
             && value.bytes().all(|byte| byte.is_ascii_digit()));
     if !canonical {
-        return Err(js_error("value must be a canonical decimal u64 string"));
+        return Err("value must be a canonical decimal u64 string");
     }
     value
         .parse::<u64>()
-        .map_err(|_| js_error("value exceeds the u64 range"))
+        .map_err(|_| "value exceeds the u64 range")
+}
+
+fn parse_canonical_u64(value: &str) -> Result<u64, JsValue> {
+    parse_canonical_u64_value(value).map_err(js_error)
+}
+
+mod canonical_u64 {
+    use serde::{de::Error, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &u64, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&value.to_string())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<u64, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        super::parse_canonical_u64_value(&value).map_err(D::Error::custom)
+    }
 }
 
 fn parse_provider_limitation(value: &str) -> Result<ProviderLimitation, JsValue> {
@@ -1751,7 +1830,7 @@ mod tests {
 
     #[test]
     fn wasm_runtime_control_metadata_json_round_trips_progress() {
-        let metadata = r#"{"operation_id":7,"progress_sequence":2,"stage_code":3,"percent_x100":4200,"object_id":11,"body_bytes":2}"#;
+        let metadata = r#"{"operation_id":"7","progress_sequence":"2","stage_code":3,"percent_x100":4200,"object_id":"11","body_bytes":2}"#;
         let body = [9_u8, 8];
 
         let encoded =
@@ -1761,8 +1840,8 @@ mod tests {
             .expect("progress metadata should decode");
         let decoded = serde_json::from_str::<serde_json::Value>(&decoded).unwrap();
 
-        assert_eq!(decoded["metadata"]["operation_id"], 7);
-        assert_eq!(decoded["metadata"]["progress_sequence"], 2);
+        assert_eq!(decoded["metadata"]["operation_id"], "7");
+        assert_eq!(decoded["metadata"]["progress_sequence"], "2");
         assert_eq!(decoded["metadata"]["percent_x100"], 4200);
         assert_eq!(decoded["tail_len"], body.len());
         assert_eq!(decoded["tail_offset"], encoded.len() - body.len());
@@ -1771,7 +1850,7 @@ mod tests {
 
     #[test]
     fn wasm_runtime_control_metadata_json_rejects_tail_for_fixed_metadata() {
-        let scheduling = r#"{"operation_id":7,"control_sequence":1,"priority_class":2,"priority_delta":-1,"deadline_unix_ms":1000,"flags":0}"#;
+        let scheduling = r#"{"operation_id":"7","control_sequence":"1","priority_class":2,"priority_delta":-1,"deadline_unix_ms":"1000","flags":0}"#;
 
         assert!(encode_runtime_control_metadata_json(
             MessageType::PriorityUpdate as u8,
@@ -1792,122 +1871,122 @@ mod tests {
         let cases = [
             (
                 MessageType::Cancel,
-                r#"{"operation_id":10,"control_sequence":1,"reason_code":2,"source_role":1,"flags":0,"diagnostic_bytes":2}"#,
+                r#"{"operation_id":"10","control_sequence":"1","reason_code":2,"source_role":1,"flags":0,"diagnostic_bytes":2}"#,
                 &[1_u8, 2][..],
                 "operation_id",
-                10_u64,
+                serde_json::json!("10"),
             ),
             (
                 MessageType::Abort,
-                r#"{"operation_id":11,"control_sequence":2,"reason_code":3,"source_role":2,"flags":0,"diagnostic_bytes":1}"#,
+                r#"{"operation_id":"11","control_sequence":"2","reason_code":3,"source_role":2,"flags":0,"diagnostic_bytes":1}"#,
                 &[3_u8][..],
                 "operation_id",
-                11_u64,
+                serde_json::json!("11"),
             ),
             (
                 MessageType::Deadline,
-                r#"{"operation_id":12,"control_sequence":3,"priority_class":4,"priority_delta":-2,"deadline_unix_ms":5000,"flags":0}"#,
+                r#"{"operation_id":"12","control_sequence":"3","priority_class":4,"priority_delta":-2,"deadline_unix_ms":"5000","flags":0}"#,
                 &[][..],
                 "operation_id",
-                12_u64,
+                serde_json::json!("12"),
             ),
             (
                 MessageType::ExpireAt,
-                r#"{"operation_id":13,"control_sequence":4,"priority_class":5,"priority_delta":2,"deadline_unix_ms":6000,"flags":0}"#,
+                r#"{"operation_id":"13","control_sequence":"4","priority_class":5,"priority_delta":2,"deadline_unix_ms":"6000","flags":0}"#,
                 &[][..],
                 "operation_id",
-                13_u64,
+                serde_json::json!("13"),
             ),
             (
                 MessageType::Supersede,
-                r#"{"old_operation_id":14,"new_operation_id":15,"control_sequence":5,"drop_reason_code":6,"flags":0,"diagnostic_bytes":3}"#,
+                r#"{"old_operation_id":"14","new_operation_id":"15","control_sequence":"5","drop_reason_code":6,"flags":0,"diagnostic_bytes":3}"#,
                 &[4_u8, 5, 6][..],
                 "new_operation_id",
-                15_u64,
+                serde_json::json!("15"),
             ),
             (
                 MessageType::BudgetUpdate,
-                r#"{"operation_id":16,"compute_budget_units":17,"memory_budget_bytes":18,"bandwidth_budget_bytes":19,"token_budget":20,"flags":0}"#,
+                r#"{"operation_id":"16","compute_budget_units":"17","memory_budget_bytes":"18","bandwidth_budget_bytes":"19","token_budget":20,"flags":0}"#,
                 &[][..],
                 "operation_id",
-                16_u64,
+                serde_json::json!("16"),
             ),
             (
                 MessageType::PartialResult,
-                r#"{"operation_id":21,"result_sequence":22,"object_id":23,"delta_sequence":24,"body_bytes":2,"flags":0}"#,
+                r#"{"operation_id":"21","result_sequence":"22","object_id":"23","delta_sequence":"24","body_bytes":2,"flags":0}"#,
                 &[7_u8, 8][..],
                 "object_id",
-                23_u64,
+                serde_json::json!("23"),
             ),
             (
                 MessageType::Backpressure,
-                r#"{"scope_id":25,"credit_window":26,"pressure_level":27,"pressure_reason":28,"retry_after_ms":29,"flags":0}"#,
+                r#"{"scope_id":"25","credit_window":"26","pressure_level":27,"pressure_reason":28,"retry_after_ms":29,"flags":0}"#,
                 &[][..],
                 "scope_id",
-                25_u64,
+                serde_json::json!("25"),
             ),
             (
                 MessageType::CreditUpdate,
-                r#"{"scope_id":30,"credit_window":31,"pressure_level":32,"pressure_reason":33,"retry_after_ms":34,"flags":0}"#,
+                r#"{"scope_id":"30","credit_window":"31","pressure_level":32,"pressure_reason":33,"retry_after_ms":34,"flags":0}"#,
                 &[][..],
                 "scope_id",
-                30_u64,
+                serde_json::json!("30"),
             ),
             (
                 MessageType::CapabilityNegotiation,
-                r#"{"profile_id":35,"capability_count":36,"cost_model_id":37,"preference_rank":38,"limit_bytes":39,"limit_units":40,"body_bytes":2,"flags":0}"#,
+                r#"{"profile_id":35,"capability_count":36,"cost_model_id":37,"preference_rank":38,"limit_bytes":"39","limit_units":"40","body_bytes":2,"flags":0}"#,
                 &[9_u8, 10][..],
                 "profile_id",
-                35_u64,
+                serde_json::json!(35),
             ),
             (
                 MessageType::DegradeProfile,
-                r#"{"profile_id":41,"capability_count":42,"cost_model_id":43,"preference_rank":44,"limit_bytes":45,"limit_units":46,"body_bytes":1,"flags":0}"#,
+                r#"{"profile_id":41,"capability_count":42,"cost_model_id":43,"preference_rank":44,"limit_bytes":"45","limit_units":"46","body_bytes":1,"flags":0}"#,
                 &[11_u8][..],
                 "profile_id",
-                41_u64,
+                serde_json::json!(41),
             ),
             (
                 MessageType::RouteHint,
-                r#"{"operation_id":47,"route_id":48,"executor_class":49,"affinity_class":50,"deadline_unix_ms":51,"body_bytes":2,"flags":0}"#,
+                r#"{"operation_id":"47","route_id":48,"executor_class":49,"affinity_class":50,"deadline_unix_ms":"51","body_bytes":2,"flags":0}"#,
                 &[12_u8, 13][..],
                 "operation_id",
-                47_u64,
+                serde_json::json!("47"),
             ),
             (
                 MessageType::ExecutionHint,
-                r#"{"operation_id":52,"route_id":53,"executor_class":54,"affinity_class":55,"deadline_unix_ms":56,"body_bytes":1,"flags":0}"#,
+                r#"{"operation_id":"52","route_id":53,"executor_class":54,"affinity_class":55,"deadline_unix_ms":"56","body_bytes":1,"flags":0}"#,
                 &[14_u8][..],
                 "operation_id",
-                52_u64,
+                serde_json::json!("52"),
             ),
             (
                 MessageType::TraceContext,
-                r#"{"trace_id":57,"span_id":58,"parent_span_id":59,"stage_code":60,"flags":0,"body_bytes":2}"#,
+                r#"{"trace_id":"57","span_id":"58","parent_span_id":"59","stage_code":60,"flags":0,"body_bytes":2}"#,
                 &[15_u8, 16][..],
                 "trace_id",
-                57_u64,
+                serde_json::json!("57"),
             ),
             (
                 MessageType::ResultDropReason,
-                r#"{"operation_id":61,"result_sequence":62,"drop_reason_code":63,"source_role":1,"flags":0,"diagnostic_bytes":2}"#,
+                r#"{"operation_id":"61","result_sequence":"62","drop_reason_code":63,"source_role":1,"flags":0,"diagnostic_bytes":2}"#,
                 &[17_u8, 18][..],
                 "operation_id",
-                61_u64,
+                serde_json::json!("61"),
             ),
             (
                 MessageType::ErrorRecoverable,
                 r#"{"error_code":64,"error_scope":1,"recovery_action":65,"source_role":2,"flags":0,"retry_after_ms":66,"related_session_id":67,"related_frame_id":68,"related_view_id":69,"diagnostic_bytes":1}"#,
                 &[19_u8][..],
                 "error_code",
-                64_u64,
+                serde_json::json!(64),
             ),
             (
                 MessageType::RetryAfter,
-                r#"{"scope_id":70,"control_sequence":71,"retry_after_ms":72,"jitter_ms":73,"reason_code":74,"source_role":3,"flags":0,"diagnostic_bytes":2}"#,
+                r#"{"scope_id":"70","control_sequence":"71","retry_after_ms":72,"jitter_ms":73,"reason_code":74,"source_role":3,"flags":0,"diagnostic_bytes":2}"#,
                 &[20_u8, 21][..],
                 "scope_id",
-                70_u64,
+                serde_json::json!("70"),
             ),
         ];
 
@@ -1929,7 +2008,7 @@ mod tests {
 
     #[test]
     fn wasm_runtime_object_metadata_json_round_trips_object_declare() {
-        let metadata = r#"{"object_id":15,"object_kind":1,"producer_role":3,"consumer_role":1,"session_id":9,"byte_size":4096,"compute_cost_units":17,"memory_location_hint":2,"ownership_hint":4,"lifetime_hint_ms":250,"metadata_bytes":3}"#;
+        let metadata = r#"{"object_id":"15","object_kind":1,"producer_role":3,"consumer_role":1,"session_id":9,"byte_size":"4096","compute_cost_units":17,"memory_location_hint":2,"ownership_hint":4,"lifetime_hint_ms":250,"metadata_bytes":3}"#;
         let extension = [1_u8, 2, 3];
 
         let encoded = encode_runtime_object_metadata_json(
@@ -1943,7 +2022,7 @@ mod tests {
                 .expect("object metadata should decode");
         let decoded = serde_json::from_str::<serde_json::Value>(&decoded).unwrap();
 
-        assert_eq!(decoded["metadata"]["object_id"], 15);
+        assert_eq!(decoded["metadata"]["object_id"], "15");
         assert_eq!(decoded["metadata"]["object_kind"], 1);
         assert_eq!(decoded["metadata"]["producer_role"], 3);
         assert_eq!(decoded["metadata"]["consumer_role"], 1);
@@ -1957,45 +2036,45 @@ mod tests {
         let cases = [
             (
                 MessageType::ObjectRef,
-                r#"{"object_id":21,"operation_id":22,"object_version":23,"offset":24,"length":25,"flags":0,"metadata_bytes":2}"#,
+                r#"{"object_id":"21","operation_id":"22","object_version":"23","offset":"24","length":"25","flags":0,"metadata_bytes":2}"#,
                 &[1_u8, 2][..],
                 "object_id",
-                21_u64,
+                serde_json::json!("21"),
             ),
             (
                 MessageType::ObjectRelease,
-                r#"{"object_id":26,"operation_id":27,"release_reason":1,"source_role":1,"flags":0,"diagnostic_bytes":1}"#,
+                r#"{"object_id":"26","operation_id":"27","release_reason":1,"source_role":1,"flags":0,"diagnostic_bytes":1}"#,
                 &[3_u8][..],
                 "operation_id",
-                27_u64,
+                serde_json::json!("27"),
             ),
             (
                 MessageType::ObjectPatch,
-                r#"{"object_id":28,"delta_sequence":29,"region_offset":30,"region_bytes":31,"delta_bytes":32,"flags":0,"metadata_bytes":2}"#,
+                r#"{"object_id":"28","delta_sequence":"29","region_offset":"30","region_bytes":31,"delta_bytes":32,"flags":0,"metadata_bytes":2}"#,
                 &[4_u8, 5][..],
                 "object_id",
-                28_u64,
+                serde_json::json!("28"),
             ),
             (
                 MessageType::ObjectDelta,
-                r#"{"object_id":33,"delta_sequence":34,"region_offset":35,"region_bytes":36,"delta_bytes":37,"flags":0,"metadata_bytes":1}"#,
+                r#"{"object_id":"33","delta_sequence":"34","region_offset":"35","region_bytes":36,"delta_bytes":37,"flags":0,"metadata_bytes":1}"#,
                 &[6_u8][..],
                 "delta_sequence",
-                34_u64,
+                serde_json::json!("34"),
             ),
             (
                 MessageType::CacheReference,
-                r#"{"cache_key_hi":38,"cache_key_lo":39,"profile_id":40,"reuse_scope":1,"lease_id":41,"producer_trace_id":42,"expiration_hint_ms":43,"metadata_bytes":2,"flags":0}"#,
+                r#"{"cache_namespace":37,"cache_key_hi":"18446744073709551615","cache_key_lo":"39","profile_id":40,"reuse_scope":1,"lease_id":"41","producer_trace_id":"42","expiration_hint_ms":43,"metadata_bytes":2,"flags":0}"#,
                 &[7_u8, 8][..],
                 "cache_key_hi",
-                38_u64,
+                serde_json::json!("18446744073709551615"),
             ),
             (
                 MessageType::CacheMiss,
-                r#"{"cache_key_hi":44,"cache_key_lo":45,"miss_reason":1,"profile_id":46,"diagnostic_bytes":1}"#,
+                r#"{"cache_namespace":43,"cache_key_hi":"44","cache_key_lo":"18446744073709551615","miss_reason":1,"profile_id":46,"diagnostic_bytes":1}"#,
                 &[9_u8][..],
                 "cache_key_lo",
-                45_u64,
+                serde_json::json!("18446744073709551615"),
             ),
         ];
 
@@ -2023,30 +2102,51 @@ mod tests {
         .is_err());
         assert!(encode_runtime_object_metadata_json(
             MessageType::ObjectDeclare as u8,
-            r#"{"object_id":1,"object_kind":99,"producer_role":3,"consumer_role":1,"session_id":2,"byte_size":3,"compute_cost_units":4,"memory_location_hint":2,"ownership_hint":4,"lifetime_hint_ms":5,"metadata_bytes":0}"#,
+            r#"{"object_id":"1","object_kind":99,"producer_role":3,"consumer_role":1,"session_id":2,"byte_size":"3","compute_cost_units":4,"memory_location_hint":2,"ownership_hint":4,"lifetime_hint_ms":5,"metadata_bytes":0}"#,
             &[],
         )
         .is_err());
         assert!(encode_runtime_object_metadata_json(
             MessageType::ObjectRelease as u8,
-            r#"{"object_id":1,"operation_id":2,"release_reason":99,"source_role":1,"flags":0,"diagnostic_bytes":0}"#,
+            r#"{"object_id":"1","operation_id":"2","release_reason":99,"source_role":1,"flags":0,"diagnostic_bytes":0}"#,
             &[],
         )
         .is_err());
         assert!(encode_runtime_object_metadata_json(
             MessageType::CacheReference as u8,
-            r#"{"cache_key_hi":1,"cache_key_lo":2,"profile_id":3,"reuse_scope":99,"lease_id":4,"producer_trace_id":5,"expiration_hint_ms":6,"metadata_bytes":0,"flags":0}"#,
+            r#"{"cache_namespace":1,"cache_key_hi":"1","cache_key_lo":"2","profile_id":3,"reuse_scope":99,"lease_id":"4","producer_trace_id":"5","expiration_hint_ms":6,"metadata_bytes":0,"flags":0}"#,
             &[],
         )
         .is_err());
         assert!(encode_runtime_object_metadata_json(
             MessageType::CacheMiss as u8,
-            r#"{"cache_key_hi":1,"cache_key_lo":2,"miss_reason":99,"profile_id":3,"diagnostic_bytes":0}"#,
+            r#"{"cache_namespace":1,"cache_key_hi":"1","cache_key_lo":"2","miss_reason":99,"profile_id":3,"diagnostic_bytes":0}"#,
             &[],
         )
         .is_err());
         assert!(decode_runtime_control_metadata_json(MessageType::FrameSubmit as u8, &[]).is_err());
         assert!(decode_runtime_object_metadata_json(MessageType::FrameSubmit as u8, &[]).is_err());
+    }
+
+    #[test]
+    fn wasm_runtime_metadata_json_rejects_noncanonical_u64_values() {
+        let numeric = r#"{"operation_id":1,"progress_sequence":"2","stage_code":3,"percent_x100":4200,"object_id":"11","body_bytes":0}"#;
+        assert!(
+            encode_runtime_control_metadata_json(MessageType::Progress as u8, numeric, &[],)
+                .is_err()
+        );
+
+        for value in ["-1", "01", "+1", "", "18446744073709551616"] {
+            let metadata = format!(
+                r#"{{"cache_namespace":1,"cache_key_hi":"{value}","cache_key_lo":"2","miss_reason":1,"profile_id":3,"diagnostic_bytes":0}}"#
+            );
+            assert!(encode_runtime_object_metadata_json(
+                MessageType::CacheMiss as u8,
+                &metadata,
+                &[],
+            )
+            .is_err());
+        }
     }
 
     #[cfg(all(feature = "transport-tcp", feature = "transport-quic"))]

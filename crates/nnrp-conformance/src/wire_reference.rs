@@ -1638,6 +1638,7 @@ fn route_hint(operation_id: u64) -> RouteHintMetadata {
 
 fn cache_reference() -> CacheReferenceMetadata {
     CacheReferenceMetadata {
+        cache_namespace: 42,
         cache_key_hi: 0x1234,
         cache_key_lo: 0x5678,
         profile_id: STANDARD_PROFILE_TOKEN,

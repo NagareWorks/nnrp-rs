@@ -6,7 +6,7 @@ use crate::{
 pub const FRAME_SUBMIT_METADATA_LEN: usize = 72;
 pub const RESULT_PUSH_METADATA_LEN: usize = 64;
 pub const BODY_REGION_PRELUDE_LEN: usize = 32;
-pub const OBJECT_REFERENCE_BLOCK_LEN: usize = 16;
+pub const OBJECT_REFERENCE_BLOCK_LEN: usize = 24;
 
 pub const BUDGET_POLICY_KNOWN_MASK: u8 = 0x0f;
 pub const RESULT_FLAGS_KNOWN_MASK: u16 = 0x0007;
@@ -516,8 +516,8 @@ pub struct ObjectReferenceBlock {
     pub object_kind: CacheObjectKind,
     pub ref_flags: u16,
     pub cache_namespace: u32,
-    pub cache_key_hi: u32,
-    pub cache_key_lo: u32,
+    pub cache_key_hi: u64,
+    pub cache_key_lo: u64,
 }
 
 impl ObjectReferenceBlock {
@@ -530,8 +530,8 @@ impl ObjectReferenceBlock {
             object_kind: CacheObjectKind::try_from_u32(read_u16(source, 0) as u32)?,
             ref_flags,
             cache_namespace: read_u32(source, 4),
-            cache_key_hi: read_u32(source, 8),
-            cache_key_lo: read_u32(source, 12),
+            cache_key_hi: read_u64(source, 8),
+            cache_key_lo: read_u64(source, 16),
         })
     }
 
@@ -542,8 +542,8 @@ impl ObjectReferenceBlock {
         destination[..OBJECT_REFERENCE_BLOCK_LEN].fill(0);
         write_u16(destination, 0, self.object_kind as u16);
         write_u32(destination, 4, self.cache_namespace);
-        write_u32(destination, 8, self.cache_key_hi);
-        write_u32(destination, 12, self.cache_key_lo);
+        write_u64(destination, 8, self.cache_key_hi);
+        write_u64(destination, 16, self.cache_key_lo);
         Ok(())
     }
 
@@ -1261,14 +1261,14 @@ mod tests {
         let prelude_bytes = prelude.to_bytes().unwrap();
 
         assert_eq!(BodyRegionPrelude::parse(&prelude_bytes).unwrap(), prelude);
-        assert_eq!(prelude.total_region_bytes().unwrap(), 120);
+        assert_eq!(prelude.total_region_bytes().unwrap(), 128);
 
         let object_ref = ObjectReferenceBlock {
             object_kind: CacheObjectKind::TileIndexBlock,
             ref_flags: 0,
             cache_namespace: 7,
-            cache_key_hi: 0x1122_3344,
-            cache_key_lo: 0x5566_7788,
+            cache_key_hi: 0x1122_3344_5566_7788,
+            cache_key_lo: 0x99aa_bbcc_ddee_ff00,
         };
         let object_ref_bytes = object_ref.to_bytes().unwrap();
 

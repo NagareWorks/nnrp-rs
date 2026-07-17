@@ -73,6 +73,7 @@
 
 - [x] Add TypeScript-visible runtime control structures.
 - [x] Add TypeScript-visible runtime object structures.
+- [x] Encode every runtime control/object `u64` as a canonical decimal JSON string and reject lossy JSON numbers.
 - [x] Add WASM event polling batch calls.
 - [x] Add WASM helpers for browser WebSocket binary frame mapping.
 - [x] Keep browser APIs aligned with native role package semantics.

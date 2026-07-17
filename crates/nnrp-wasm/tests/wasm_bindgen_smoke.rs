@@ -2,8 +2,9 @@
 
 use nnrp_core::MessageType;
 use nnrp_wasm::{
-    decode_websocket_binary_frame_batch_json, decode_websocket_binary_frame_json,
-    encode_runtime_control_metadata_json, encode_websocket_binary_frame_json,
+    decode_runtime_control_metadata_json, decode_websocket_binary_frame_batch_json,
+    decode_websocket_binary_frame_json, encode_runtime_control_metadata_json,
+    encode_websocket_binary_frame_json,
 };
 use serde_json::Value;
 use wasm_bindgen_test::wasm_bindgen_test;
@@ -72,12 +73,17 @@ fn wasm_bindgen_websocket_frame_batch_reports_offsets_and_limits() {
 
 #[wasm_bindgen_test]
 fn wasm_bindgen_runtime_control_metadata_encodes_progress_tail() {
-    let progress = r#"{"operation_id":42,"progress_sequence":7,"stage_code":8,"percent_x100":9000,"object_id":10,"body_bytes":3}"#;
+    let progress = r#"{"operation_id":"42","progress_sequence":"7","stage_code":8,"percent_x100":9000,"object_id":"10","body_bytes":3}"#;
     let tail = [30_u8, 31, 32];
 
     let encoded =
         encode_runtime_control_metadata_json(MessageType::Progress as u8, progress, &tail)
             .expect("wasm binding should encode progress metadata");
+    let decoded = decode_runtime_control_metadata_json(MessageType::Progress as u8, &encoded)
+        .expect("wasm binding should decode progress metadata");
+    let decoded: Value = serde_json::from_str(&decoded).expect("decoded metadata should be JSON");
 
     assert_eq!(&encoded[encoded.len() - tail.len()..], tail);
+    assert_eq!(decoded["metadata"]["operation_id"], "42");
+    assert_eq!(decoded["metadata"]["progress_sequence"], "7");
 }

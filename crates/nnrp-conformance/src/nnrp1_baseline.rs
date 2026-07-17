@@ -156,7 +156,7 @@ fn l0_result_push_metadata() -> Result<(), String> {
 fn l0_body_region_prelude() -> Result<(), String> {
     round_trip_metadata(
         32,
-        &hex_to_bytes("1800000010000000100000000e00000010000000050000000000000000000000"),
+        &hex_to_bytes("1800000018000000100000000e00000010000000050000000000000000000000"),
         BodyRegionPrelude::parse,
         |metadata, destination| metadata.write(destination),
     )
@@ -165,7 +165,7 @@ fn l0_body_region_prelude() -> Result<(), String> {
 fn l0_object_reference_block() -> Result<(), String> {
     round_trip_metadata(
         OBJECT_REFERENCE_BLOCK_LEN,
-        &hex_to_bytes("02000000070000004433221188776655"),
+        &hex_to_bytes("020000000700000044332211000000008877665500000000"),
         ObjectReferenceBlock::parse,
         |metadata, destination| metadata.write(destination),
     )
@@ -249,19 +249,23 @@ fn l1_result_hint_validation() -> Result<(), String> {
 fn l1_cache_lifecycle_roundtrip() -> Result<(), String> {
     round_trip_metadata(
         CACHE_PUT_METADATA_LEN,
-        &hex_to_bytes("01000000040302010807060501000000983a0000000800000300000003000000"),
+        &hex_to_bytes(
+            "010000000100000004030201000000000807060500000000983a0000000800000300000003000000",
+        ),
         CachePutMetadata::parse,
         |metadata, destination| metadata.write(destination),
     )?;
     round_trip_metadata(
         CACHE_ACK_METADATA_LEN,
-        &hex_to_bytes("01000000040302010807060500000000983a00000020000000000000"),
+        &hex_to_bytes(
+            "010000000000000004030201000000000807060500000000983a0000002000000000000000000000",
+        ),
         CacheAckMetadata::parse,
         |metadata, destination| metadata.write(destination),
     )?;
     round_trip_metadata(
         CACHE_INVALIDATE_METADATA_LEN,
-        &hex_to_bytes("0000000001000000040302010807060502000000"),
+        &hex_to_bytes("0300000001000000040302010000000008070605000000000200000000000000"),
         CacheInvalidateMetadata::parse,
         |metadata, destination| metadata.write(destination),
     )

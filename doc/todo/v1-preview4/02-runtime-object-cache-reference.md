@@ -32,7 +32,8 @@
   - [x] `CACHE_MISS`.
   - [x] `CACHE_INVALIDATE` is inherited from the existing NNRP/1 message type, not re-assigned in preview4.
 - [x] Add cache identity fields.
-  - [x] Cache key.
+  - [x] Canonical `(cache_namespace:u32, cache_key_hi:u64, cache_key_lo:u64)` identity across cache and object-reference frames.
+  - [x] Preserve both 64-bit cache key words without truncation in core codecs, FFI descriptors, and WASM codecs.
   - [x] Schema/profile anchor.
   - [x] Optional lease ID.
   - [x] Optional producer trace ID.
@@ -65,5 +66,6 @@
 - [x] Define C ABI structs for object descriptors.
 - [x] Define C ABI structs for object delta descriptors.
 - [x] Define C ABI structs for cache reference descriptors.
+  - [x] Keep the canonical cache identity contiguous and padding-stable in the breaking ABI revision.
 - [x] Define release functions for native-owned object metadata buffers.
 - [x] Keep FFI calls coarse for declare/request/progress/result/release loops.
