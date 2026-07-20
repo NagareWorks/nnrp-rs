@@ -245,12 +245,26 @@ fn websocket_bind_address(endpoint: &WebSocketEndpoint) -> Result<String, Runtim
     let port = uri
         .port_u16()
         .unwrap_or(if endpoint.is_secure() { 443 } else { 80 });
-    Ok(format!("{host}:{port}"))
+    let unbracketed_host = host
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(host);
+    if matches!(unbracketed_host.parse::<IpAddr>(), Ok(IpAddr::V6(_))) {
+        Ok(format!("[{unbracketed_host}]:{port}"))
+    } else {
+        Ok(format!("{host}:{port}"))
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ReferenceTransport, WireEndpointSecurity, WireReferenceEndpoint};
+    use std::str::FromStr;
+
+    use nnrp_transport_websocket::WebSocketEndpoint;
+
+    use super::{
+        websocket_bind_address, ReferenceTransport, WireEndpointSecurity, WireReferenceEndpoint,
+    };
 
     fn security() -> WireEndpointSecurity {
         WireEndpointSecurity {
@@ -295,5 +309,16 @@ mod tests {
         )
         .validate()
         .is_err());
+    }
+
+    #[test]
+    fn websocket_bind_address_preserves_ipv6_literal_brackets() {
+        let endpoint = WebSocketEndpoint::from_str("ws://[::1]:19093/nnrp")
+            .expect("IPv6 WebSocket endpoint should parse");
+
+        assert_eq!(
+            websocket_bind_address(&endpoint).expect("IPv6 bind address should resolve"),
+            "[::1]:19093"
+        );
     }
 }
