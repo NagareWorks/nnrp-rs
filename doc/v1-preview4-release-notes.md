@@ -2,6 +2,13 @@
 
 Preview4 moves the Rust workspace beyond token-stream transport substitution and into runtime orchestration features that help SDKs model cancellation, priority, progress, partial results, cache references, route hints, trace context, result drop reasons, IPC, and WebSocket endpoints directly.
 
+## 1.0.0-preview.4.7
+
+TCP and QUIC now retain partially received packet bytes when a bounded role-event poll times out. Repeated short polls
+therefore resume the same frame instead of restarting at the next byte and corrupting stream alignment. The public FFI
+also projects `PARTIAL_RESULT` through the session-scoped runtime-frame event surface in both directions, matching the
+frozen Preview4 SDK contract.
+
 ## 1.0.0-preview.4.6
 
 The `nnrp-conformance` crate now drives declared external wire targets through real TCP, IPC, QUIC, WebSocket, and
