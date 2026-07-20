@@ -14,6 +14,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+http.workspace = true
 nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.4.5" }
 nnrp-ffi = { path = "../nnrp-ffi", version = "1.0.0-preview.4.5" }
 nnrp-runtime = { path = "../nnrp-runtime", version = "1.0.0-preview.4.5" }
