@@ -2,6 +2,12 @@
 
 Preview4 moves the Rust workspace beyond token-stream transport substitution and into runtime orchestration features that help SDKs model cancellation, priority, progress, partial results, cache references, route hints, trace context, result drop reasons, IPC, and WebSocket endpoints directly.
 
+## 1.0.0-preview.4.8
+
+Closing a native client or server session now releases every operation and cache lease owned by that session before the
+session handle is removed. Applications can therefore reopen the same protocol session identity and reuse operation
+identifiers without colliding with stale FFI resources left by an earlier session lifetime.
+
 ## 1.0.0-preview.4.7
 
 TCP and QUIC now retain partially received packet bytes when a bounded role-event poll times out. Repeated short polls

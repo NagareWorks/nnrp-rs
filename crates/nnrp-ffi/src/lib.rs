@@ -718,6 +718,54 @@ impl NnrpFfiHandleStore {
         Ok(())
     }
 
+    fn close_session(&mut self, session: NnrpHandle) -> Result<(), NnrpFfiStatus> {
+        self.get(session, NnrpHandleKind::Session)?;
+
+        let operations: Vec<NnrpHandle> = self
+            .entries
+            .iter()
+            .filter_map(|((kind, id), entry)| match &entry.resource {
+                NnrpFfiResource::Operation { session: owner, .. } if *owner == session => {
+                    Some(NnrpHandle {
+                        kind: *kind,
+                        id: *id,
+                        generation: entry.generation,
+                        flags: 0,
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+
+        for operation in &operations {
+            self.entries.remove(&(operation.kind, operation.id));
+        }
+        self.entries.retain(|_, entry| match &entry.resource {
+            NnrpFfiResource::CacheLease { owner, .. } => {
+                *owner != session && !operations.iter().any(|operation| operation == owner)
+            }
+            _ => true,
+        });
+        self.entries.remove(&(session.kind, session.id));
+        #[cfg(any(test, feature = "benchmark-ffi"))]
+        {
+            let payload_owners: Vec<NnrpHandle> = self
+                .events
+                .iter()
+                .filter_map(|event| {
+                    (event.session == session
+                        && event.payload_owner.kind == NnrpHandleKind::Buffer as u32)
+                        .then_some(event.payload_owner)
+                })
+                .collect();
+            self.events.retain(|event| event.session != session);
+            for owner in payload_owners {
+                self.entries.remove(&(owner.kind, owner.id));
+            }
+        }
+        Ok(())
+    }
+
     #[cfg(any(test, feature = "benchmark-ffi"))]
     fn push_event(&mut self, event: NnrpQueuedEvent) {
         self.events.push_back(event);
@@ -2701,7 +2749,7 @@ pub unsafe extern "C" fn nnrp_client_close(session: NnrpHandle) -> NnrpFfiStatus
             return status;
         }
         return handle_store()
-            .remove(session, NnrpHandleKind::Session)
+            .close_session(session)
             .map(|_| NnrpFfiStatus::ok())
             .unwrap_or_else(|status| status);
     }
@@ -2715,7 +2763,7 @@ pub unsafe extern "C" fn nnrp_client_close(session: NnrpHandle) -> NnrpFfiStatus
             Err(status) => return status,
         };
         store
-            .remove(session, NnrpHandleKind::Session)
+            .close_session(session)
             .map(|_| {
                 store.push_event(NnrpQueuedEvent::plain(
                     NnrpEventKind::SessionClosed,
@@ -6474,7 +6522,7 @@ pub unsafe extern "C" fn nnrp_server_close(session: NnrpHandle) -> NnrpFfiStatus
             return status;
         }
         return handle_store()
-            .remove(session, NnrpHandleKind::Session)
+            .close_session(session)
             .map(|_| NnrpFfiStatus::ok())
             .unwrap_or_else(|status| status);
     }
@@ -6489,7 +6537,7 @@ pub unsafe extern "C" fn nnrp_server_close(session: NnrpHandle) -> NnrpFfiStatus
             Err(status) => return status,
         };
         store
-            .remove(session, NnrpHandleKind::Session)
+            .close_session(session)
             .map(|_| {
                 store.push_event(NnrpQueuedEvent::plain(
                     NnrpEventKind::SessionClosed,
@@ -7975,6 +8023,50 @@ mod tests {
                 NnrpFfiStatusCode::WouldBlock as u32
             );
             assert_eq!(result.has_event, 0);
+
+            let mut reopened_session = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_open_session(
+                    NnrpSessionOpenRequest {
+                        connection,
+                        requested_session_id: 91_002,
+                        generation: 1,
+                        profile_id: 2,
+                        schema_id: 0x1001,
+                        schema_version: 3,
+                    },
+                    &mut reopened_session
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(reopened_session, session);
+            assert_eq!(
+                nnrp_client_await_event(connection, &mut result),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(result.event.kind, NnrpEventKind::SessionOpened as u32);
+
+            let mut reopened_operation = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_submit(
+                    NnrpSubmitRequest {
+                        session: reopened_session,
+                        operation_id: 91_003,
+                        frame_id: 45,
+                        payload: NnrpBufferView {
+                            ptr: payload.as_ptr(),
+                            len: payload.len(),
+                        },
+                    },
+                    &mut reopened_operation
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_ne!(reopened_operation, operation);
+            assert_eq!(
+                nnrp_client_close_connection(connection),
+                NnrpFfiStatus::ok()
+            );
         }
     }
 
@@ -10969,17 +11061,23 @@ mod tests {
                 nnrp_cache_release(NnrpHandle::invalid(), &mut result),
                 NnrpFfiStatus::invalid_handle(NnrpHandleKind::CacheLease as u32)
             );
+            assert_eq!(nnrp_client_close(session), NnrpFfiStatus::ok());
+            let store = handle_store();
+            assert!(!store.entries.values().any(|entry| matches!(
+                &entry.resource,
+                NnrpFfiResource::Operation { session: owner, .. } if *owner == session
+            )));
+            assert!(!store.entries.values().any(|entry| matches!(
+                &entry.resource,
+                NnrpFfiResource::CacheLease { owner, .. }
+                    if *owner == session || *owner == operation
+            )));
+            drop(store);
+            assert_eq!(operation_lease.kind, NnrpHandleKind::CacheLease as u32);
             assert_eq!(
                 nnrp_client_close_connection(connection),
                 NnrpFfiStatus::ok()
             );
-            let store = handle_store();
-            assert!(!store.entries.values().any(|entry| matches!(
-                &entry.resource,
-                NnrpFfiResource::CacheLease { owner, .. } if *owner == operation
-            )));
-            drop(store);
-            assert_eq!(operation_lease.kind, NnrpHandleKind::CacheLease as u32);
         }
     }
 
