@@ -9,32 +9,32 @@
 - [x] Preserve selected scenario IDs exactly in result reports.
 - [x] Write evidence paths for frame logs and timing traces.
 
-## Direct Endpoint Driver
+## External Target Endpoint Driver
 
-- [x] Implement suite-as-client mode.
+- [x] Implement suite-as-client mode against an externally declared target endpoint.
   - [x] TCP endpoint.
   - [x] QUIC endpoint.
   - [x] IPC endpoint.
   - [x] WebSocket endpoint.
-- [x] Implement suite-as-server mode.
+- [x] Implement suite-as-server mode by binding the endpoint declared for an external target client.
   - [x] TCP listener.
   - [x] QUIC listener.
   - [x] IPC listener.
   - [x] WebSocket listener.
-- [x] Implement suite-as-proxy mode.
-  - [x] Bidirectional frame forwarding.
-  - [x] Frame injection.
-  - [x] Timeout injection.
-  - [x] Close injection.
-  - [x] Backpressure injection.
-  - [x] Frame-order perturbation.
+- [x] Implement suite-as-proxy mode with an external target server as the upstream endpoint.
+  - [x] Bind an ephemeral suite-owned QUIC front endpoint.
+  - [x] Terminate and forward typed NNRP operations in both directions.
+  - [x] Inject `PRIORITY_UPDATE` and an already-expired non-zero `EXPIRE_AT` timestamp.
+  - [x] Preserve the target's typed `RESULT_DROP_REASON` for the suite-owned probe client.
+- [x] Load owned TLS material for QUIC and secure WebSocket endpoint roles.
+- [x] Reject TLS material on TCP, IPC, and plain WebSocket endpoints.
 
 ## Scenario Execution
 
-- [x] Execute cancel/abort scenarios.
-- [x] Execute priority/deadline scenarios.
-- [x] Execute progress/backpressure scenarios.
-- [x] Execute capability/route/cache scenarios.
+- [x] Execute cancel/abort scenarios with suite-to-target control direction.
+- [x] Execute priority/deadline scenarios through the typed QUIC proxy path.
+- [x] Execute progress/backpressure scenarios with target-client-to-suite-server direction.
+- [x] Execute capability/route/cache scenarios with suite-to-target hints and target-to-suite cache miss.
 - [x] Execute IPC-specific cancel scenarios.
 - [x] Execute WebSocket-specific progress/backpressure scenarios.
 
@@ -50,6 +50,6 @@
 ## CI Integration
 
 - [x] Keep dry-run plan generation in conformance CI.
-- [x] Add local reference endpoint tests for each concrete transport crate.
+- [x] Add external target role tests for each concrete transport crate.
 - [x] Add negative target tests for unsupported modes and transports.
-- [x] Add matrix coverage for TCP, QUIC, IPC, and WebSocket reference endpoints.
+- [x] Add matrix coverage for TCP, QUIC, IPC, plain WebSocket, and secure WebSocket endpoints.

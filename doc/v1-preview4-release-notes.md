@@ -2,6 +2,12 @@
 
 Preview4 moves the Rust workspace beyond token-stream transport substitution and into runtime orchestration features that help SDKs model cancellation, priority, progress, partial results, cache references, route hints, trace context, result drop reasons, IPC, and WebSocket endpoints directly.
 
+## 1.0.0-preview.4.6
+
+The `nnrp-conformance` crate now drives declared external wire targets through real TCP, IPC, QUIC, WebSocket, and
+secure WebSocket endpoints. Its typed client, server, and proxy roles exercise the frozen Preview4 runtime-control
+flows without fabricating observed frames inside the suite process.
+
 ## 1.0.0-preview.4.5
 
 The native FFI ABI is `3.0.0`. Cache identities now use the frozen `(cache_namespace: u32, cache_key_hi: u64,

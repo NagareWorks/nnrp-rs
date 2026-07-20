@@ -3,6 +3,8 @@ mod nnrp1_baseline;
 pub mod preview3_vectors;
 pub mod preview4_vectors;
 pub mod wire_conformance;
+pub mod wire_endpoint;
+pub mod wire_external;
 pub mod wire_reference;
 
 use nnrp_core::ProtocolVersion;

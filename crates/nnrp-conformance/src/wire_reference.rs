@@ -19,16 +19,10 @@ use nnrp_transport_websocket::{WebSocketEndpoint, WebSocketProvider};
 use serde_json::{json, Map, Value};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+pub use crate::wire_endpoint::{ReferenceTransport, WireEndpointSecurity, WireReferenceEndpoint};
+
 const REQUEST_BODY: &[u8] = b"wire-reference-request";
 const RESPONSE_BODY: &[u8] = b"wire-reference-result";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReferenceTransport {
-    Tcp,
-    Ipc,
-    Quic,
-    WebSocket,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WireReferenceScenario {
@@ -80,17 +74,6 @@ impl<'a> WireReportExpectation<'a> {
     pub fn with_trace_context(mut self, trace_context: WireTraceExpectation) -> Self {
         self.trace_context = Some(trace_context);
         self
-    }
-}
-
-impl ReferenceTransport {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Tcp => "tcp",
-            Self::Ipc => "ipc",
-            Self::Quic => "quic",
-            Self::WebSocket => "websocket",
-        }
     }
 }
 
