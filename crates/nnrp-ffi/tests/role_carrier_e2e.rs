@@ -22,10 +22,10 @@ use nnrp_ffi::{
     nnrp_connection_close, nnrp_runtime_frame_send, nnrp_server_accept, nnrp_server_await_events,
     nnrp_server_bind, nnrp_server_close, nnrp_server_send_partial_result, nnrp_server_send_result,
     NnrpBufferView, NnrpClientCancelRequest, NnrpClientConnectRequest, NnrpEvent, NnrpEventKind,
-    NnrpFfiStatus, NnrpHandle, NnrpHandleKind, NnrpPollResult, NnrpRoleEventPollRequest,
-    NnrpRuntimeFrameSendRequest, NnrpServerAcceptRequest, NnrpServerBindRequest,
-    NnrpServerSendPartialResultRequest, NnrpServerSendResultRequest, NnrpSessionOpenRequest,
-    NnrpSubmitRequest, NnrpTransportFrameBatch, NnrpTransportOpenRequest,
+    NnrpFfiStatus, NnrpFfiStatusCode, NnrpHandle, NnrpHandleKind, NnrpPollResult,
+    NnrpRoleEventPollRequest, NnrpRuntimeFrameSendRequest, NnrpServerAcceptRequest,
+    NnrpServerBindRequest, NnrpServerSendPartialResultRequest, NnrpServerSendResultRequest,
+    NnrpSessionOpenRequest, NnrpSubmitRequest, NnrpTransportFrameBatch, NnrpTransportOpenRequest,
     NnrpTransportReadBatchRequest,
 };
 
@@ -177,9 +177,7 @@ unsafe fn assert_runtime_event(
     assert_eq!(event.message_type, message_type as u32);
     assert_eq!(
         event.kind,
-        if message_type == MessageType::PartialResult {
-            NnrpEventKind::PartialResult as u32
-        } else if message_type == MessageType::ResultDropReason {
+        if message_type == MessageType::ResultDropReason {
             NnrpEventKind::ResultDropped as u32
         } else if message_type == MessageType::FlowUpdate {
             NnrpEventKind::FlowUpdated as u32
@@ -1074,6 +1072,49 @@ unsafe fn assert_role_handshake(transport_id: TransportId, listen_endpoint: &str
         NnrpFfiStatus::ok()
     );
 
+    let delayed_progress = progress_payload(submit_request.operation_id);
+    let delayed_progress_sender = delayed_progress.clone();
+    let delayed_server_operation = server_event.operation;
+    let delayed_send = thread::spawn(move || {
+        thread::sleep(std::time::Duration::from_millis(75));
+        unsafe {
+            send_runtime_frame(
+                delayed_server_operation,
+                MessageType::Progress,
+                submit_request.frame_id,
+                &delayed_progress_sender,
+            );
+        }
+    });
+    for _ in 0..3 {
+        let mut event = NnrpEvent::none();
+        let mut count = 0usize;
+        let status = nnrp_client_await_events(
+            NnrpRoleEventPollRequest {
+                timeout_ms: 5,
+                ..poll_request(client_session)
+            },
+            &mut event,
+            1,
+            &mut count,
+        );
+        assert_eq!(
+            status.status_code,
+            NnrpFfiStatusCode::WouldBlock as u32,
+            "short event poll must time out without corrupting the carrier"
+        );
+        assert_eq!(count, 0);
+    }
+    delayed_send
+        .join()
+        .expect("delayed runtime frame sender joins");
+    assert_runtime_event(
+        poll_client_event(client_session),
+        MessageType::Progress,
+        Some(client_operation),
+        &delayed_progress,
+    );
+
     for case in bidirectional_runtime_frames(
         submit_request.operation_id,
         submit_request.frame_id,
@@ -1206,7 +1247,7 @@ unsafe fn assert_role_handshake(transport_id: TransportId, listen_endpoint: &str
         NnrpFfiStatus::ok()
     );
     assert_eq!(partial_event_count, 1);
-    assert_eq!(partial_event.kind, NnrpEventKind::PartialResult as u32);
+    assert_eq!(partial_event.kind, NnrpEventKind::RuntimeFrame as u32);
     assert_eq!(partial_event.operation, client_operation);
     assert_eq!(partial_event.frame_id, submit_request.frame_id);
     assert_eq!(
@@ -1259,7 +1300,7 @@ unsafe fn assert_role_handshake(transport_id: TransportId, listen_endpoint: &str
     assert_eq!(direct_partial_event_count, 1);
     assert_eq!(
         direct_partial_event.kind,
-        NnrpEventKind::PartialResult as u32
+        NnrpEventKind::RuntimeFrame as u32
     );
     assert_eq!(direct_partial_event.operation, client_operation);
     assert_eq!(

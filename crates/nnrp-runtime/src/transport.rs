@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use nnrp_core::{CommonHeader, COMMON_HEADER_LEN};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream, ToSocketAddrs},
 };
 
@@ -34,6 +34,92 @@ impl RuntimeFrameLimits {
 impl Default for RuntimeFrameLimits {
     fn default() -> Self {
         Self::new(Self::DEFAULT_MAX_PACKET_BYTES)
+    }
+}
+
+const STREAM_READ_CHUNK_BYTES: usize = 64 * 1024;
+
+#[derive(Debug)]
+pub struct StreamPacketReader {
+    buffered: Vec<u8>,
+    consumed: usize,
+    packet_len: Option<usize>,
+    scratch: Vec<u8>,
+}
+
+impl Default for StreamPacketReader {
+    fn default() -> Self {
+        Self {
+            buffered: Vec::new(),
+            consumed: 0,
+            packet_len: None,
+            scratch: vec![0; STREAM_READ_CHUNK_BYTES],
+        }
+    }
+}
+
+impl StreamPacketReader {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub async fn read_packet<R>(
+        &mut self,
+        reader: &mut R,
+        limits: RuntimeFrameLimits,
+    ) -> Result<RuntimePacket, RuntimeError>
+    where
+        R: AsyncRead + Unpin,
+    {
+        loop {
+            if self.packet_len.is_none() && self.available() >= COMMON_HEADER_LEN {
+                let header = CommonHeader::parse(
+                    &self.buffered[self.consumed..self.consumed + COMMON_HEADER_LEN],
+                )?;
+                let packet_len = header.packet_len()?;
+                limits.validate_packet_len(packet_len)?;
+                self.packet_len = Some(packet_len);
+            }
+
+            if let Some(packet_len) = self.packet_len {
+                if self.available() >= packet_len {
+                    return self.take_packet(packet_len);
+                }
+            }
+
+            let read = reader.read(&mut self.scratch).await?;
+            if read == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "stream closed before a complete NNRP packet",
+                )
+                .into());
+            }
+            self.buffered.extend_from_slice(&self.scratch[..read]);
+        }
+    }
+
+    fn available(&self) -> usize {
+        self.buffered.len() - self.consumed
+    }
+
+    fn take_packet(&mut self, packet_len: usize) -> Result<RuntimePacket, RuntimeError> {
+        let packet_start = self.consumed;
+        let packet_end = packet_start + packet_len;
+        let packet = &self.buffered[packet_start..packet_end];
+        let (header, metadata, body) = CommonHeader::parse_packet(packet)?;
+        let packet = RuntimePacket::from_parts(header, metadata.to_vec(), body.to_vec())?;
+
+        self.consumed = packet_end;
+        self.packet_len = None;
+        if self.consumed == self.buffered.len() {
+            self.buffered.clear();
+            self.consumed = 0;
+        } else if self.consumed >= STREAM_READ_CHUNK_BYTES {
+            self.buffered.drain(..self.consumed);
+            self.consumed = 0;
+        }
+        Ok(packet)
     }
 }
 
@@ -78,6 +164,7 @@ pub trait FramedListener: Send + Sync {
 pub struct TcpTransport {
     stream: TcpStream,
     limits: RuntimeFrameLimits,
+    reader: StreamPacketReader,
 }
 
 impl TcpTransport {
@@ -86,7 +173,11 @@ impl TcpTransport {
     }
 
     pub fn new_with_limits(stream: TcpStream, limits: RuntimeFrameLimits) -> Self {
-        Self { stream, limits }
+        Self {
+            stream,
+            limits,
+            reader: StreamPacketReader::new(),
+        }
     }
 
     pub async fn connect(addr: impl ToSocketAddrs) -> Result<Self, RuntimeError> {
@@ -100,6 +191,7 @@ impl TcpTransport {
         Ok(Self {
             stream: TcpStream::connect(addr).await?,
             limits,
+            reader: StreamPacketReader::new(),
         })
     }
 }
@@ -111,22 +203,7 @@ impl FramedTransport for TcpTransport {
     }
 
     async fn read_packet(&mut self) -> Result<RuntimePacket, RuntimeError> {
-        let mut header_bytes = [0u8; COMMON_HEADER_LEN];
-        self.stream.read_exact(&mut header_bytes).await?;
-        let header = CommonHeader::parse(&header_bytes)?;
-        self.limits.validate_packet_len(header.packet_len()?)?;
-
-        let mut metadata = vec![0u8; header.meta_len as usize];
-        if !metadata.is_empty() {
-            self.stream.read_exact(&mut metadata).await?;
-        }
-
-        let mut body = vec![0u8; header.body_len as usize];
-        if !body.is_empty() {
-            self.stream.read_exact(&mut body).await?;
-        }
-
-        Ok(RuntimePacket::from_parts(header, metadata, body)?)
+        self.reader.read_packet(&mut self.stream, self.limits).await
     }
 
     async fn write_packet(&mut self, packet: &RuntimePacket) -> Result<(), RuntimeError> {
@@ -202,6 +279,20 @@ mod tests {
         assert_eq!(
             RuntimeTransportKind::WebSocket.transport_id(),
             TransportId::WebSocket
+        );
+    }
+
+    #[test]
+    fn stream_packet_reader_keeps_read_scratch_out_of_the_async_future() {
+        let mut packet_reader = StreamPacketReader::new();
+        assert_eq!(packet_reader.scratch.len(), STREAM_READ_CHUNK_BYTES);
+
+        let mut input = tokio::io::empty();
+        let future = packet_reader.read_packet(&mut input, RuntimeFrameLimits::default());
+
+        assert!(
+            std::mem::size_of_val(&future) < 1024,
+            "read_packet future unexpectedly stores a large inline buffer"
         );
     }
 }
