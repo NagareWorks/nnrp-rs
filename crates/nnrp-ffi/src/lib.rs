@@ -3799,7 +3799,7 @@ fn client_role_event(
         NnrpClientEvent::PartialResult { metadata, body } => {
             let operation_id = metadata.operation_id;
             (
-                NnrpEventKind::PartialResult,
+                NnrpEventKind::RuntimeFrame,
                 0,
                 Some(operation_id),
                 MessageType::PartialResult,
@@ -4311,7 +4311,7 @@ fn server_role_event(
             false,
         ),
         NnrpServerEvent::PartialResult { metadata, body } => (
-            NnrpEventKind::PartialResult,
+            NnrpEventKind::RuntimeFrame,
             MessageType::PartialResult,
             Some(metadata.operation_id),
             0,

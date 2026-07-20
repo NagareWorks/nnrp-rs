@@ -25,8 +25,52 @@ use nnrp_runtime::{
 };
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
+
+#[tokio::test]
+async fn tcp_packet_read_preserves_partial_bytes_across_timeouts() -> Result<(), RuntimeError> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let (prefix_sent, prefix_received) = tokio::sync::oneshot::channel();
+    let expected = RuntimePacket::new(
+        CommonHeader::new(MessageType::Ping, 3, 5),
+        b"met".to_vec(),
+        b"body!".to_vec(),
+    )?;
+    let encoded = expected.to_bytes()?;
+
+    let server_task = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await?;
+        stream.write_all(&encoded[..13]).await?;
+        let _ = prefix_sent.send(());
+        tokio::time::sleep(Duration::from_millis(75)).await;
+        stream.write_all(&encoded[13..]).await?;
+        stream.flush().await?;
+        Ok::<_, RuntimeError>(())
+    });
+
+    let mut transport = TcpTransport::connect(addr).await?;
+    prefix_received
+        .await
+        .expect("server should announce the partial packet");
+    for _ in 0..3 {
+        assert!(
+            tokio::time::timeout(Duration::from_millis(5), transport.read_packet())
+                .await
+                .is_err(),
+            "short poll should time out while the packet remains partial"
+        );
+    }
+
+    let actual = tokio::time::timeout(Duration::from_secs(1), transport.read_packet())
+        .await
+        .expect("complete packet should arrive")?;
+    assert_eq!(actual, expected);
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
 
 #[tokio::test]
 async fn tcp_loopback_opens_matching_client_and_server_sessions() -> Result<(), RuntimeError> {

@@ -16,5 +16,5 @@ pub use server::{
 };
 pub use transport::{
     BoxedFramedListener, BoxedFramedTransport, FramedListener, FramedTransport, RuntimeFrameLimits,
-    RuntimeTransportKind, TcpFramedListener, TcpTransport,
+    RuntimeTransportKind, StreamPacketReader, TcpFramedListener, TcpTransport,
 };

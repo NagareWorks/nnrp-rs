@@ -5,11 +5,11 @@ use std::{
 };
 
 use async_trait::async_trait;
-use nnrp_core::{CommonHeader, TransportId, COMMON_HEADER_LEN};
+use nnrp_core::TransportId;
 use nnrp_runtime::{
     BoxedFramedListener, BoxedFramedTransport, FramedListener, FramedTransport, NnrpClient,
     NnrpClientConfig, NnrpServer, NnrpServerConfig, RuntimeError, RuntimeFrameLimits,
-    RuntimePacket, RuntimeTransportKind,
+    RuntimePacket, RuntimeTransportKind, StreamPacketReader,
 };
 use nnrp_transport_provider::{
     TransportProviderDescriptor, TransportProviderKind, TransportProviderRegistry,
@@ -142,6 +142,7 @@ pub struct QuicTransport {
     recv: Option<RecvStream>,
     initiator: bool,
     limits: RuntimeFrameLimits,
+    reader: StreamPacketReader,
 }
 
 impl QuicTransport {
@@ -171,6 +172,7 @@ impl QuicTransport {
             recv: None,
             initiator: true,
             limits,
+            reader: StreamPacketReader::new(),
         })
     }
 
@@ -182,6 +184,7 @@ impl QuicTransport {
             recv: None,
             initiator: false,
             limits,
+            reader: StreamPacketReader::new(),
         }
     }
 
@@ -212,24 +215,7 @@ impl FramedTransport for QuicTransport {
             .recv
             .as_mut()
             .expect("QUIC receive stream is initialized");
-        let mut header_bytes = [0u8; COMMON_HEADER_LEN];
-        recv.read_exact(&mut header_bytes)
-            .await
-            .map_err(runtime_io)?;
-        let header = CommonHeader::parse(&header_bytes)?;
-        self.limits.validate_packet_len(header.packet_len()?)?;
-
-        let mut metadata = vec![0u8; header.meta_len as usize];
-        if !metadata.is_empty() {
-            recv.read_exact(&mut metadata).await.map_err(runtime_io)?;
-        }
-
-        let mut body = vec![0u8; header.body_len as usize];
-        if !body.is_empty() {
-            recv.read_exact(&mut body).await.map_err(runtime_io)?;
-        }
-
-        Ok(RuntimePacket::from_parts(header, metadata, body)?)
+        self.reader.read_packet(recv, self.limits).await
     }
 
     async fn write_packet(&mut self, packet: &RuntimePacket) -> Result<(), RuntimeError> {
