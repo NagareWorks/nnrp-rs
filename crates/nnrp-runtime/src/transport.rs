@@ -39,11 +39,23 @@ impl Default for RuntimeFrameLimits {
 
 const STREAM_READ_CHUNK_BYTES: usize = 64 * 1024;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct StreamPacketReader {
     buffered: Vec<u8>,
     consumed: usize,
     packet_len: Option<usize>,
+    scratch: Vec<u8>,
+}
+
+impl Default for StreamPacketReader {
+    fn default() -> Self {
+        Self {
+            buffered: Vec::new(),
+            consumed: 0,
+            packet_len: None,
+            scratch: vec![0; STREAM_READ_CHUNK_BYTES],
+        }
+    }
 }
 
 impl StreamPacketReader {
@@ -75,8 +87,7 @@ impl StreamPacketReader {
                 }
             }
 
-            let mut chunk = [0u8; STREAM_READ_CHUNK_BYTES];
-            let read = reader.read(&mut chunk).await?;
+            let read = reader.read(&mut self.scratch).await?;
             if read == 0 {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
@@ -84,7 +95,7 @@ impl StreamPacketReader {
                 )
                 .into());
             }
-            self.buffered.extend_from_slice(&chunk[..read]);
+            self.buffered.extend_from_slice(&self.scratch[..read]);
         }
     }
 
@@ -268,6 +279,20 @@ mod tests {
         assert_eq!(
             RuntimeTransportKind::WebSocket.transport_id(),
             TransportId::WebSocket
+        );
+    }
+
+    #[test]
+    fn stream_packet_reader_keeps_read_scratch_out_of_the_async_future() {
+        let mut packet_reader = StreamPacketReader::new();
+        assert_eq!(packet_reader.scratch.len(), STREAM_READ_CHUNK_BYTES);
+
+        let mut input = tokio::io::empty();
+        let future = packet_reader.read_packet(&mut input, RuntimeFrameLimits::default());
+
+        assert!(
+            std::mem::size_of_val(&future) < 1024,
+            "read_packet future unexpectedly stores a large inline buffer"
         );
     }
 }
