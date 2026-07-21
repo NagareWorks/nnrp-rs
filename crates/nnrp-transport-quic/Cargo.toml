@@ -19,9 +19,9 @@ native-loader = ["nnrp-transport-provider/native-loader"]
 wasm = ["nnrp-transport-provider/wasm"]
 
 [dependencies]
-nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.4.8" }
-nnrp-runtime = { path = "../nnrp-runtime", version = "1.0.0-preview.4.8" }
-nnrp-transport-provider = { path = "../nnrp-transport-provider", version = "1.0.0-preview.4.8", default-features = false, features = ["quic"] }
+nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.4.9" }
+nnrp-runtime = { path = "../nnrp-runtime", version = "1.0.0-preview.4.9" }
+nnrp-transport-provider = { path = "../nnrp-transport-provider", version = "1.0.0-preview.4.9", default-features = false, features = ["quic"] }
 async-trait.workspace = true
 quinn = "0.11.9"
 rcgen = "=0.14.7"

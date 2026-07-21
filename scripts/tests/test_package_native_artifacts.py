@@ -18,6 +18,12 @@ def load_package_script():
 
 
 class NativeExportVerificationTests(unittest.TestCase):
+    def test_role_connection_lifecycle_exports_are_required(self):
+        package = load_package_script()
+
+        self.assertIn("nnrp_connection_close", package.EXPECTED_EXPORTS)
+        self.assertIn("nnrp_client_close_connection", package.EXPECTED_EXPORTS)
+
     def test_every_retired_abi_export_is_rejected(self):
         package = load_package_script()
         library = Path("nnrp_ffi.test")

@@ -31,6 +31,8 @@ EXPECTED_EXPORTS = [
     "nnrp_client_submit",
     "nnrp_session_close",
     "nnrp_client_close",
+    "nnrp_connection_close",
+    "nnrp_client_close_connection",
     "nnrp_client_cancel",
     "nnrp_client_await_event",
     "nnrp_client_await_events",
