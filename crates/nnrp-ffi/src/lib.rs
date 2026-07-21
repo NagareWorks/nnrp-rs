@@ -42,7 +42,12 @@ use tokio::sync::Mutex as AsyncMutex;
 
 mod transport;
 mod transport_exports;
+mod sdk_version {
+    include!(concat!(env!("OUT_DIR"), "/sdk_version.rs"));
+}
 pub use transport::*;
+
+use sdk_version::{SDK_MAJOR, SDK_MINOR, SDK_PATCH, SDK_PREVIEW, SDK_REVISION};
 
 pub const NNRP_FFI_ABI_MAJOR: u16 = 3;
 pub const NNRP_FFI_ABI_MINOR: u16 = 0;
@@ -153,11 +158,11 @@ pub fn runtime_capabilities() -> NnrpRuntimeCapabilities {
         abi_patch: NNRP_FFI_ABI_PATCH,
         reserved0: 0,
         protocol_version: current_protocol_version(),
-        sdk_major: 1,
-        sdk_minor: 0,
-        sdk_patch: 0,
-        sdk_preview: 4,
-        sdk_revision: 4,
+        sdk_major: SDK_MAJOR,
+        sdk_minor: SDK_MINOR,
+        sdk_patch: SDK_PATCH,
+        sdk_preview: SDK_PREVIEW,
+        sdk_revision: SDK_REVISION,
         reserved1: 0,
         transport_slots: enabled_transport_slots(),
         feature_flags: NNRP_RUNTIME_FEATURE_PROTOCOL_CORE
@@ -7279,11 +7284,27 @@ mod tests {
         assert_eq!(capabilities.abi_patch, NNRP_FFI_ABI_PATCH);
         assert_eq!(capabilities.reserved0, 0);
         assert_eq!(capabilities.protocol_version, current_protocol_version());
-        assert_eq!(capabilities.sdk_major, 1);
-        assert_eq!(capabilities.sdk_minor, 0);
-        assert_eq!(capabilities.sdk_patch, 0);
-        assert_eq!(capabilities.sdk_preview, 4);
-        assert_eq!(capabilities.sdk_revision, 4);
+        assert_eq!(capabilities.sdk_major, SDK_MAJOR);
+        assert_eq!(capabilities.sdk_minor, SDK_MINOR);
+        assert_eq!(capabilities.sdk_patch, SDK_PATCH);
+        assert_eq!(capabilities.sdk_preview, SDK_PREVIEW);
+        assert_eq!(capabilities.sdk_revision, SDK_REVISION);
+        let reported_version = if capabilities.sdk_preview == 0 && capabilities.sdk_revision == 0 {
+            format!(
+                "{}.{}.{}",
+                capabilities.sdk_major, capabilities.sdk_minor, capabilities.sdk_patch
+            )
+        } else {
+            format!(
+                "{}.{}.{}-preview.{}.{}",
+                capabilities.sdk_major,
+                capabilities.sdk_minor,
+                capabilities.sdk_patch,
+                capabilities.sdk_preview,
+                capabilities.sdk_revision
+            )
+        };
+        assert_eq!(reported_version, env!("CARGO_PKG_VERSION"));
         assert_eq!(capabilities.reserved1, 0);
         assert_eq!(capabilities.transport_slots, enabled_transport_slots());
         assert_eq!(transport_slot_bit(TransportId::Unspecified), 0);

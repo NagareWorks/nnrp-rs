@@ -2,6 +2,15 @@
 
 Preview4 moves the Rust workspace beyond token-stream transport substitution and into runtime orchestration features that help SDKs model cancellation, priority, progress, partial results, cache references, route hints, trace context, result drop reasons, IPC, and WebSocket endpoints directly.
 
+## 1.0.0-preview.4.9
+
+Transport-scoped native artifact manifests now declare both role connection-close entry points exported by the ABI 3
+library. Downstream SDKs can validate and bind complete client and server connection lifecycles without rejecting the
+official TCP, QUIC, IPC, or WebSocket artifact as incomplete.
+
+Native runtime capability records now derive their SDK components from the Cargo package version at compile time, so
+artifact probes, public headers, and crate metadata report the same Preview4 revision.
+
 ## 1.0.0-preview.4.8
 
 Closing a native client or server session now releases every operation and cache lease owned by that session before the

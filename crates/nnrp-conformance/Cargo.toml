@@ -15,13 +15,13 @@ categories.workspace = true
 
 [dependencies]
 http.workspace = true
-nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.4.8" }
-nnrp-ffi = { path = "../nnrp-ffi", version = "1.0.0-preview.4.8" }
-nnrp-runtime = { path = "../nnrp-runtime", version = "1.0.0-preview.4.8" }
-nnrp-transport-ipc = { path = "../nnrp-transport-ipc", version = "1.0.0-preview.4.8" }
-nnrp-transport-provider = { path = "../nnrp-transport-provider", version = "1.0.0-preview.4.8" }
-nnrp-transport-quic = { path = "../nnrp-transport-quic", version = "1.0.0-preview.4.8" }
-nnrp-transport-tcp = { path = "../nnrp-transport-tcp", version = "1.0.0-preview.4.8" }
-nnrp-transport-websocket = { path = "../nnrp-transport-websocket", version = "1.0.0-preview.4.8" }
+nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.4.9" }
+nnrp-ffi = { path = "../nnrp-ffi", version = "1.0.0-preview.4.9" }
+nnrp-runtime = { path = "../nnrp-runtime", version = "1.0.0-preview.4.9" }
+nnrp-transport-ipc = { path = "../nnrp-transport-ipc", version = "1.0.0-preview.4.9" }
+nnrp-transport-provider = { path = "../nnrp-transport-provider", version = "1.0.0-preview.4.9" }
+nnrp-transport-quic = { path = "../nnrp-transport-quic", version = "1.0.0-preview.4.9" }
+nnrp-transport-tcp = { path = "../nnrp-transport-tcp", version = "1.0.0-preview.4.9" }
+nnrp-transport-websocket = { path = "../nnrp-transport-websocket", version = "1.0.0-preview.4.9" }
 serde_json.workspace = true
 tokio.workspace = true
