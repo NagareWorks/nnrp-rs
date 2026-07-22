@@ -2,6 +2,13 @@
 
 Preview4 moves the Rust workspace beyond token-stream transport substitution and into runtime orchestration features that help SDKs model cancellation, priority, progress, partial results, cache references, route hints, trace context, result drop reasons, IPC, and WebSocket endpoints directly.
 
+## 1.0.0-preview.4.12
+
+Closing a browser client role now cancels an outstanding event receive before taking the shared carrier read gate. The
+role can therefore send the normal `SESSION_CLOSE` exchange while an SDK event pump is waiting for a peer frame,
+instead of deadlocking or requiring the JavaScript carrier to be disconnected first. The cancelled event wait reports
+the same closed-role error used by other post-close operations.
+
 ## 1.0.0-preview.4.11
 
 The browser client role now exposes coarse `SESSION_PATCH` request/acknowledgement handling backed by the Rust runtime.
