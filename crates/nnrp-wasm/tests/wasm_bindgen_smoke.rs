@@ -2,12 +2,12 @@
 
 use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
-use js_sys::{Function, Promise, Uint8Array};
+use js_sys::{Array, Function, Promise, Uint8Array};
 use nnrp_core::{
     BudgetMetadata, CommonHeader, FrameSubmitMetadata, InputProfile, MessageType,
-    PayloadKindBitmap, ResultClass, ResultPushMetadata, SessionCloseAckMetadata,
+    PayloadKindBitmap, ProgressMetadata, ResultClass, ResultPushMetadata, SessionCloseAckMetadata,
     SessionCloseMetadata, SessionCloseStatus, SessionOpenAckMetadata, SessionOpenMetadata,
-    SessionStatus, SubmitMode, TileIndexMode, RESULT_PUSH_METADATA_LEN,
+    SessionStatus, SubmitMode, TileIndexMode, PROGRESS_METADATA_LEN, RESULT_PUSH_METADATA_LEN,
     SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE, SESSION_OPEN_ACK_METADATA_LEN,
     STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
 };
@@ -105,7 +105,7 @@ async fn wasm_bindgen_browser_role_runs_real_session_submit_and_close() {
     let responses = Rc::new(RefCell::new(VecDeque::<Vec<u8>>::new()));
     let send_responses = Rc::clone(&responses);
     let send = Closure::wrap(Box::new(move |packet: Uint8Array| -> Promise {
-        if let Some(response) = browser_role_response(&packet.to_vec()) {
+        for response in browser_role_responses(&packet.to_vec()) {
             send_responses.borrow_mut().push_back(response);
         }
         Promise::resolve(&JsValue::UNDEFINED)
@@ -113,13 +113,16 @@ async fn wasm_bindgen_browser_role_runs_real_session_submit_and_close() {
 
     let receive_responses = Rc::clone(&responses);
     let receive = Closure::wrap(Box::new(move || -> Promise {
-        match receive_responses.borrow_mut().pop_front() {
-            Some(packet) => {
-                let packet: JsValue = Uint8Array::from(packet.as_slice()).into();
-                Promise::resolve(&packet)
-            }
-            None => Promise::reject(&JsValue::from_str("no scripted browser response")),
+        let mut responses = receive_responses.borrow_mut();
+        if responses.is_empty() {
+            return Promise::reject(&JsValue::from_str("no scripted browser response"));
         }
+        let packets = Array::new();
+        while let Some(packet) = responses.pop_front() {
+            packets.push(&Uint8Array::from(packet.as_slice()));
+        }
+        let packets: JsValue = packets.into();
+        Promise::resolve(&packets)
     }) as Box<dyn FnMut() -> Promise>);
 
     let close_count = Rc::new(RefCell::new(0_u32));
@@ -175,15 +178,32 @@ async fn wasm_bindgen_browser_role_runs_real_session_submit_and_close() {
     .await
     .expect("browser role should route runtime controls through the Rust session");
 
-    let event = role
-        .await_event()
+    let event_batch = role
+        .await_event_batch(2)
         .await
-        .expect("browser role should validate and return the result event");
-    assert_eq!(event.message_type(), MessageType::ResultPush as u8);
-    assert_eq!(event.session_id(), 7);
-    assert_eq!(event.frame_id(), 9);
-    assert_eq!(event.metadata().length(), RESULT_PUSH_METADATA_LEN as u32);
-    assert_eq!(event.body().to_vec(), b"answer");
+        .expect("browser role should validate and return a coarse event batch");
+    assert_eq!(event_batch.count(), 2);
+    let packet_bytes = event_batch.packet_bytes().to_vec();
+    let packet_offsets = event_batch.packet_offsets().to_vec();
+    assert_eq!(packet_offsets.len(), 3);
+    let event_packets = packet_offsets
+        .windows(2)
+        .map(|range| {
+            let start = range[0] as usize;
+            let end = range[1] as usize;
+            CommonHeader::parse_packet(&packet_bytes[start..end])
+                .expect("batched browser event packet should parse")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(event_packets[0].0.message_type, MessageType::Progress);
+    assert_eq!(event_packets[0].0.session_id, 7);
+    assert_eq!(event_packets[0].0.frame_id, 9);
+    assert_eq!(event_packets[0].1.len(), PROGRESS_METADATA_LEN);
+    assert_eq!(event_packets[1].0.message_type, MessageType::ResultPush);
+    assert_eq!(event_packets[1].0.session_id, 7);
+    assert_eq!(event_packets[1].0.frame_id, 9);
+    assert_eq!(event_packets[1].1.len(), RESULT_PUSH_METADATA_LEN);
+    assert_eq!(event_packets[1].2, b"answer");
 
     role.close()
         .await
@@ -194,7 +214,7 @@ async fn wasm_bindgen_browser_role_runs_real_session_submit_and_close() {
     assert_eq!(*close_count.borrow(), 1);
 }
 
-fn browser_role_response(packet: &[u8]) -> Option<Vec<u8>> {
+fn browser_role_responses(packet: &[u8]) -> Vec<Vec<u8>> {
     let (header, metadata, _) =
         CommonHeader::parse_packet(packet).expect("browser carrier should receive a valid packet");
     match header.message_type {
@@ -218,17 +238,25 @@ fn browser_role_response(packet: &[u8]) -> Option<Vec<u8>> {
                 session_error_code: SESSION_ERROR_NONE,
                 session_flags_ack: 0,
             };
-            Some(response_packet(
+            vec![response_packet(
                 MessageType::SessionOpenAck,
                 ack.session_id,
                 0,
                 ack.to_bytes().expect("session ack should encode").to_vec(),
                 Vec::new(),
                 SESSION_OPEN_ACK_METADATA_LEN,
-            ))
+            )]
         }
         MessageType::FrameSubmit => {
             FrameSubmitMetadata::parse(metadata).expect("frame submit should parse");
+            let progress = ProgressMetadata {
+                operation_id: 42,
+                progress_sequence: 1,
+                stage_code: 7,
+                percent_x100: 5_000,
+                object_id: 0,
+                body_bytes: 0,
+            };
             let result = ResultPushMetadata {
                 status_code: 200,
                 result_flags: 0,
@@ -248,21 +276,34 @@ fn browser_role_response(packet: &[u8]) -> Option<Vec<u8>> {
                 payload_kind_bitmap: PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),
                 payload_frame_count: 1,
             };
-            Some(response_packet(
-                MessageType::ResultPush,
-                header.session_id,
-                header.frame_id,
-                result.to_bytes().expect("result should encode").to_vec(),
-                b"answer".to_vec(),
-                RESULT_PUSH_METADATA_LEN,
-            ))
+            vec![
+                response_packet(
+                    MessageType::Progress,
+                    header.session_id,
+                    header.frame_id,
+                    progress
+                        .to_bytes()
+                        .expect("progress should encode")
+                        .to_vec(),
+                    Vec::new(),
+                    PROGRESS_METADATA_LEN,
+                ),
+                response_packet(
+                    MessageType::ResultPush,
+                    header.session_id,
+                    header.frame_id,
+                    result.to_bytes().expect("result should encode").to_vec(),
+                    b"answer".to_vec(),
+                    RESULT_PUSH_METADATA_LEN,
+                ),
+            ]
         }
         MessageType::BudgetUpdate => {
             assert_eq!(header.session_id, 7);
             assert_eq!(header.frame_id, 9);
             let budget = BudgetMetadata::parse(metadata).expect("budget update should parse");
             assert_eq!(budget.operation_id, 42);
-            None
+            Vec::new()
         }
         MessageType::SessionClose => {
             let close = SessionCloseMetadata::parse(metadata).expect("session close should parse");
@@ -271,14 +312,14 @@ fn browser_role_response(packet: &[u8]) -> Option<Vec<u8>> {
                 last_operation_id: close.last_operation_id,
                 session_error_code: SESSION_ERROR_NONE,
             };
-            Some(response_packet(
+            vec![response_packet(
                 MessageType::SessionCloseAck,
                 header.session_id,
                 0,
                 ack.to_bytes().expect("close ack should encode").to_vec(),
                 Vec::new(),
                 SESSION_CLOSE_ACK_METADATA_LEN,
-            ))
+            )]
         }
         message_type => panic!("unexpected browser role packet: {message_type:?}"),
     }

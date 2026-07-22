@@ -1,5 +1,7 @@
+use std::collections::VecDeque;
+
 use async_trait::async_trait;
-use js_sys::{Function, Promise, Uint8Array};
+use js_sys::{Array, Function, Promise, Uint32Array, Uint8Array};
 use nnrp_core::{
     CommonHeader, FrameSubmitMetadata, MessageType, SessionPriorityClass, FRAME_SUBMIT_METADATA_LEN,
 };
@@ -8,7 +10,7 @@ use nnrp_runtime::{
     RuntimeFrameLimits, RuntimePacket, RuntimeTransportKind,
 };
 use serde::Deserialize;
-use wasm_bindgen::prelude::*;
+use wasm_bindgen::{prelude::*, JsCast};
 use wasm_bindgen_futures::JsFuture;
 
 #[derive(Debug, Deserialize)]
@@ -57,6 +59,7 @@ struct HostWebSocketTransport {
     receive: Function,
     close: Function,
     limits: RuntimeFrameLimits,
+    pending_packets: VecDeque<Vec<u8>>,
     closed: bool,
 }
 
@@ -67,6 +70,7 @@ impl HostWebSocketTransport {
             receive,
             close,
             limits,
+            pending_packets: VecDeque::new(),
             closed: false,
         }
     }
@@ -81,6 +85,30 @@ impl HostWebSocketTransport {
             Ok(())
         }
     }
+
+    fn enqueue_receive_value(&mut self, value: JsValue) -> Result<(), RuntimeError> {
+        if Array::is_array(&value) {
+            let packets = Array::from(&value);
+            if packets.length() == 0 {
+                return Err(RuntimeError::UnexpectedMessage(
+                    "browser WebSocket receive callback returned an empty packet batch",
+                ));
+            }
+            for packet in packets.iter() {
+                self.pending_packets
+                    .push_back(receive_packet_bytes(packet)?);
+            }
+        } else {
+            self.pending_packets.push_back(receive_packet_bytes(value)?);
+        }
+        Ok(())
+    }
+
+    fn decode_packet(&self, bytes: Vec<u8>) -> Result<RuntimePacket, RuntimeError> {
+        self.limits.validate_packet_len(bytes.len())?;
+        let (header, metadata, body) = CommonHeader::parse_packet(&bytes)?;
+        RuntimePacket::from_parts(header, metadata.to_vec(), body.to_vec()).map_err(Into::into)
+    }
 }
 
 #[async_trait(?Send)]
@@ -89,13 +117,23 @@ impl FramedTransport for HostWebSocketTransport {
         RuntimeTransportKind::WebSocket
     }
 
+    fn try_read_packet(&mut self) -> Result<Option<RuntimePacket>, RuntimeError> {
+        self.pending_packets
+            .pop_front()
+            .map(|bytes| self.decode_packet(bytes))
+            .transpose()
+    }
+
     async fn read_packet(&mut self) -> Result<RuntimePacket, RuntimeError> {
         self.ensure_open()?;
+        if let Some(packet) = self.try_read_packet()? {
+            return Ok(packet);
+        }
         let value = await_callback(self.receive.call0(&JsValue::NULL)).await?;
-        let bytes = Uint8Array::new(&value).to_vec();
-        self.limits.validate_packet_len(bytes.len())?;
-        let (header, metadata, body) = CommonHeader::parse_packet(&bytes)?;
-        RuntimePacket::from_parts(header, metadata.to_vec(), body.to_vec()).map_err(Into::into)
+        self.enqueue_receive_value(value)?;
+        self.try_read_packet()?.ok_or(RuntimeError::Internal(
+            "browser WebSocket receive queue was empty after a successful callback",
+        ))
     }
 
     async fn write_packet(&mut self, packet: &RuntimePacket) -> Result<(), RuntimeError> {
@@ -135,6 +173,51 @@ impl From<RuntimePacket> for BrowserClientEventPacket {
             metadata: packet.metadata,
             body: packet.body,
         }
+    }
+}
+
+#[wasm_bindgen(js_name = BrowserClientEventBatch)]
+pub struct BrowserClientEventBatch {
+    packet_bytes: Vec<u8>,
+    packet_offsets: Vec<u32>,
+}
+
+impl BrowserClientEventBatch {
+    fn from_events(
+        events: Vec<(nnrp_runtime::NnrpClientEvent, RuntimePacket)>,
+    ) -> Result<Self, RuntimeError> {
+        let mut packet_bytes = Vec::new();
+        let mut packet_offsets = Vec::with_capacity(events.len() + 1);
+        packet_offsets.push(0);
+        for (_, packet) in events {
+            packet_bytes.extend_from_slice(&packet.to_bytes()?);
+            packet_offsets.push(
+                u32::try_from(packet_bytes.len())
+                    .map_err(|_| RuntimeError::Internal("browser event batch exceeds u32"))?,
+            );
+        }
+        Ok(Self {
+            packet_bytes,
+            packet_offsets,
+        })
+    }
+}
+
+#[wasm_bindgen(js_class = BrowserClientEventBatch)]
+impl BrowserClientEventBatch {
+    #[wasm_bindgen(getter)]
+    pub fn count(&self) -> u32 {
+        self.packet_offsets.len().saturating_sub(1) as u32
+    }
+
+    #[wasm_bindgen(getter, js_name = packetBytes)]
+    pub fn packet_bytes(&self) -> Uint8Array {
+        Uint8Array::from(self.packet_bytes.as_slice())
+    }
+
+    #[wasm_bindgen(getter, js_name = packetOffsets)]
+    pub fn packet_offsets(&self) -> Uint32Array {
+        Uint32Array::from(self.packet_offsets.as_slice())
     }
 }
 
@@ -222,6 +305,21 @@ impl BrowserClientRole {
         Ok(packet.into())
     }
 
+    #[wasm_bindgen(js_name = awaitEventBatch)]
+    pub async fn await_event_batch(
+        &mut self,
+        max_events: u32,
+    ) -> Result<BrowserClientEventBatch, JsValue> {
+        let max_events = usize::try_from(max_events)
+            .map_err(|_| js_error("maxEvents is not representable on this host"))?;
+        let events = self
+            .session_mut()?
+            .await_event_packet_batch(max_events)
+            .await
+            .map_err(js_runtime_error)?;
+        BrowserClientEventBatch::from_events(events).map_err(js_runtime_error)
+    }
+
     pub async fn close(&mut self) -> Result<(), JsValue> {
         if let Some(mut session) = self.session.take() {
             session.close_in_place().await.map_err(js_runtime_error)?;
@@ -259,6 +357,17 @@ async fn await_callback(result: Result<JsValue, JsValue>) -> Result<JsValue, Run
     JsFuture::from(Promise::resolve(&value))
         .await
         .map_err(js_transport_error)
+}
+
+fn receive_packet_bytes(value: JsValue) -> Result<Vec<u8>, RuntimeError> {
+    value
+        .dyn_into::<Uint8Array>()
+        .map(|packet| packet.to_vec())
+        .map_err(|_| {
+            RuntimeError::UnexpectedMessage(
+                "browser WebSocket receive callback must return Uint8Array packets",
+            )
+        })
 }
 
 fn js_transport_error(value: JsValue) -> RuntimeError {

@@ -20,7 +20,9 @@ use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
 mod browser_role;
 #[cfg(target_arch = "wasm32")]
-pub use browser_role::{open_browser_client_role, BrowserClientEventPacket, BrowserClientRole};
+pub use browser_role::{
+    open_browser_client_role, BrowserClientEventBatch, BrowserClientEventPacket, BrowserClientRole,
+};
 
 #[cfg(not(any(
     feature = "transport-tcp",

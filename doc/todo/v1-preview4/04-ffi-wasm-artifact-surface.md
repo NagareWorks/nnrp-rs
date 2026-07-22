@@ -74,7 +74,7 @@
 - [x] Add TypeScript-visible runtime control structures.
 - [x] Add TypeScript-visible runtime object structures.
 - [x] Encode every runtime control/object `u64` as a canonical decimal JSON string and reject lossy JSON numbers.
-- [ ] Add browser-role WASM event polling batch calls backed by `nnrp-runtime` state.
+- [x] Add browser-role WASM event polling batch calls backed by `nnrp-runtime` state.
 - [x] Add WASM helpers for browser WebSocket binary frame mapping.
 - [ ] Keep browser APIs aligned with native role package semantics.
   - [x] Open a real client session over the host WebSocket carrier.

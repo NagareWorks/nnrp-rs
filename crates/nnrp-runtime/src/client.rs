@@ -556,6 +556,34 @@ impl NnrpClientSession {
         &mut self,
     ) -> Result<(NnrpClientEvent, RuntimePacket), RuntimeError> {
         let packet = self.transport.read_packet().await?;
+        self.decode_event_packet(packet)
+    }
+
+    pub async fn await_event_packet_batch(
+        &mut self,
+        max_events: usize,
+    ) -> Result<Vec<(NnrpClientEvent, RuntimePacket)>, RuntimeError> {
+        if max_events == 0 {
+            return Err(RuntimeError::UnexpectedMessage(
+                "client event batch limit must be greater than zero",
+            ));
+        }
+
+        let mut events = Vec::with_capacity(max_events);
+        events.push(self.await_event_packet().await?);
+        while events.len() < max_events {
+            let Some(packet) = self.transport.try_read_packet()? else {
+                break;
+            };
+            events.push(self.decode_event_packet(packet)?);
+        }
+        Ok(events)
+    }
+
+    fn decode_event_packet(
+        &mut self,
+        packet: RuntimePacket,
+    ) -> Result<(NnrpClientEvent, RuntimePacket), RuntimeError> {
         let wire_packet = packet.clone();
         let event = match packet.header.message_type {
             MessageType::ResultPush => {

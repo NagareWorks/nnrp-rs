@@ -156,6 +156,9 @@ pub type BoxedFramedListener = Box<dyn FramedListener>;
 #[cfg(target_arch = "wasm32")]
 pub trait FramedTransport {
     fn transport_kind(&self) -> RuntimeTransportKind;
+    fn try_read_packet(&mut self) -> Result<Option<RuntimePacket>, RuntimeError> {
+        Ok(None)
+    }
     async fn read_packet(&mut self) -> Result<RuntimePacket, RuntimeError>;
     async fn write_packet(&mut self, packet: &RuntimePacket) -> Result<(), RuntimeError>;
     async fn close(&mut self) -> Result<(), RuntimeError>;
@@ -165,6 +168,9 @@ pub trait FramedTransport {
 #[cfg(not(target_arch = "wasm32"))]
 pub trait FramedTransport: Send {
     fn transport_kind(&self) -> RuntimeTransportKind;
+    fn try_read_packet(&mut self) -> Result<Option<RuntimePacket>, RuntimeError> {
+        Ok(None)
+    }
     async fn read_packet(&mut self) -> Result<RuntimePacket, RuntimeError>;
     async fn write_packet(&mut self, packet: &RuntimePacket) -> Result<(), RuntimeError>;
     async fn close(&mut self) -> Result<(), RuntimeError>;

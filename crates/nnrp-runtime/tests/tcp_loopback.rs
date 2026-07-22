@@ -52,6 +52,7 @@ async fn tcp_packet_read_preserves_partial_bytes_across_timeouts() -> Result<(),
     });
 
     let mut transport = TcpTransport::connect(addr).await?;
+    assert!(transport.try_read_packet()?.is_none());
     prefix_received
         .await
         .expect("server should announce the partial packet");
@@ -2540,6 +2541,71 @@ async fn transport_slot_rejects_config_mismatches() {
     ));
 }
 
+#[tokio::test]
+async fn client_event_packet_batch_drains_only_buffered_validated_events(
+) -> Result<(), RuntimeError> {
+    let open = session_open();
+    let ack = open_ack(&open);
+    let mut ack_header = CommonHeader::new(
+        MessageType::SessionOpenAck,
+        SESSION_OPEN_ACK_METADATA_LEN as u32,
+        0,
+    );
+    ack_header.session_id = ack.session_id;
+
+    let progress = ProgressMetadata {
+        operation_id: 1,
+        progress_sequence: 1,
+        stage_code: 7,
+        percent_x100: 5_000,
+        object_id: 0,
+        body_bytes: 0,
+    };
+    let mut progress_header = CommonHeader::new(
+        MessageType::Progress,
+        nnrp_core::PROGRESS_METADATA_LEN as u32,
+        0,
+    );
+    progress_header.session_id = ack.session_id;
+    progress_header.frame_id = 1;
+
+    let result = token_result();
+    let mut result_header =
+        CommonHeader::new(MessageType::ResultPush, RESULT_PUSH_METADATA_LEN as u32, 6);
+    result_header.session_id = ack.session_id;
+    result_header.frame_id = 1;
+
+    let writes = Arc::new(Mutex::new(Vec::new()));
+    let transport = ScriptedTransport::new(
+        RuntimeTransportKind::Tcp,
+        vec![
+            RuntimePacket::new(ack_header, ack.to_bytes()?.to_vec(), Vec::new())?,
+            RuntimePacket::new(progress_header, progress.to_bytes()?.to_vec(), Vec::new())?,
+            RuntimePacket::new(
+                result_header,
+                result.to_bytes()?.to_vec(),
+                b"answer".to_vec(),
+            )?,
+        ],
+        writes,
+    );
+    let client = NnrpClient::from_transport(transport, NnrpClientConfig::default())?;
+    let mut session = client.open_session().await?;
+    session.submit(token_submit(1), b"prompt".to_vec()).await?;
+
+    assert!(matches!(
+        session.await_event_packet_batch(0).await,
+        Err(RuntimeError::UnexpectedMessage(_))
+    ));
+    let events = session.await_event_packet_batch(3).await?;
+    assert_eq!(events.len(), 2);
+    assert!(matches!(events[0].0, NnrpClientEvent::Progress { .. }));
+    assert_eq!(events[0].1.header.message_type, MessageType::Progress);
+    assert!(matches!(events[1].0, NnrpClientEvent::Result(_)));
+    assert_eq!(events[1].1.header.message_type, MessageType::ResultPush);
+    session.close_transport().await
+}
+
 fn token_submit(operation_id: u64) -> FrameSubmitMetadata {
     FrameSubmitMetadata {
         src_width: 0,
@@ -2594,9 +2660,12 @@ impl FramedTransport for ScriptedTransport {
         self.kind
     }
 
+    fn try_read_packet(&mut self) -> Result<Option<RuntimePacket>, RuntimeError> {
+        Ok(self.reads.pop_front())
+    }
+
     async fn read_packet(&mut self) -> Result<RuntimePacket, RuntimeError> {
-        self.reads
-            .pop_front()
+        self.try_read_packet()?
             .ok_or(RuntimeError::UnexpectedMessage(
                 "scripted transport is empty",
             ))

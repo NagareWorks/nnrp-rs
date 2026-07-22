@@ -81,11 +81,21 @@ export class BrowserClientEventPacket {
   readonly sessionId: number;
 }
 
+export class BrowserClientEventBatch {
+  private constructor();
+  free(): void;
+  [Symbol.dispose](): void;
+  readonly count: number;
+  readonly packetBytes: Uint8Array;
+  readonly packetOffsets: Uint32Array;
+}
+
 export class BrowserClientRole {
   private constructor();
   free(): void;
   [Symbol.dispose](): void;
   awaitEvent(): Promise<BrowserClientEventPacket>;
+  awaitEventBatch(maxEvents: number): Promise<BrowserClientEventBatch>;
   close(): Promise<void>;
   sendRuntimeFrame(messageType: number, frameId: number, payload: Uint8Array): Promise<void>;
   submitNoWait(frameId: number, payload: Uint8Array): Promise<number>;
@@ -94,7 +104,7 @@ export class BrowserClientRole {
 
 export function openBrowserClientRole(
   send: (packet: Uint8Array) => void | Promise<void>,
-  receive: () => Uint8Array | Promise<Uint8Array>,
+  receive: () => Uint8Array | readonly Uint8Array[] | Promise<Uint8Array | readonly Uint8Array[]>,
   close: () => void | Promise<void>,
   configJson: string,
 ): Promise<BrowserClientRole>;
