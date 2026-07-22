@@ -8,7 +8,8 @@ use async_trait::async_trait;
 use futures_util::lock::Mutex;
 use js_sys::{Array, Function, Promise, Uint32Array, Uint8Array};
 use nnrp_core::{
-    CommonHeader, FrameSubmitMetadata, MessageType, SessionPriorityClass, FRAME_SUBMIT_METADATA_LEN,
+    CommonHeader, FrameSubmitMetadata, MessageType, SessionPatchMetadata, SessionPriorityClass,
+    FRAME_SUBMIT_METADATA_LEN, SESSION_PATCH_METADATA_LEN,
 };
 use nnrp_runtime::{
     FramedTransport, NnrpClient, NnrpClientConfig, NnrpClientSession, RuntimeError,
@@ -65,6 +66,7 @@ struct HostWebSocketCarrier {
     close: Function,
     limits: RuntimeFrameLimits,
     pending_packets: RefCell<VecDeque<Vec<u8>>>,
+    receive_gate: Mutex<()>,
     closed: Cell<bool>,
 }
 
@@ -76,6 +78,7 @@ impl HostWebSocketCarrier {
             close,
             limits,
             pending_packets: RefCell::new(VecDeque::new()),
+            receive_gate: Mutex::new(()),
             closed: Cell::new(false),
         }
     }
@@ -124,7 +127,11 @@ impl HostWebSocketCarrier {
     }
 
     async fn receive_packets(&self) -> Result<(), RuntimeError> {
+        let _receive_guard = self.receive_gate.lock().await;
         self.ensure_open()?;
+        if !self.pending_packets.borrow().is_empty() {
+            return Ok(());
+        }
         let value = await_callback(self.receive.call0(&JsValue::NULL)).await?;
         self.ensure_open()?;
         self.enqueue_receive_value(value)
@@ -338,6 +345,32 @@ impl BrowserClientRole {
             .map_err(js_runtime_error)
     }
 
+    #[wasm_bindgen(js_name = patchSession)]
+    pub async fn patch_session(&self, metadata: &[u8]) -> Result<Uint8Array, JsValue> {
+        if metadata.len() != SESSION_PATCH_METADATA_LEN {
+            return Err(js_error(&format!(
+                "SESSION_PATCH metadata must be exactly {SESSION_PATCH_METADATA_LEN} bytes"
+            )));
+        }
+        let patch = SessionPatchMetadata::parse(metadata).map_err(js_nnrp_error)?;
+        if patch.profile_patch_bytes != 0 {
+            return Err(js_error(
+                "browser session patch does not accept a profile-specific body",
+            ));
+        }
+        let ack = self
+            .session
+            .lock()
+            .await
+            .as_mut()
+            .ok_or_else(closed_role_error)?
+            .patch_session(patch)
+            .await
+            .map_err(js_runtime_error)?;
+        let bytes = ack.to_bytes().map_err(js_nnrp_error)?;
+        Ok(Uint8Array::from(bytes.as_slice()))
+    }
+
     #[wasm_bindgen(js_name = awaitEvent)]
     pub async fn await_event(&self) -> Result<BrowserClientEventPacket, JsValue> {
         let mut events = self.receive_event_packets(1).await?;
@@ -376,29 +409,21 @@ impl BrowserClientRole {
             .map_err(|_| js_error("maxEvents is not representable on this host"))?;
         let _receive_guard = self.receive_gate.lock().await;
 
-        let mut session_slot = self.session.lock().await;
-        let session = session_slot.as_mut().ok_or_else(closed_role_error)?;
-        let buffered = session
-            .poll_event_packet_batch(max_events)
-            .map_err(js_runtime_error)?;
-        drop(session_slot);
-        if !buffered.is_empty() {
-            return Ok(buffered);
-        }
+        loop {
+            let mut session_slot = self.session.lock().await;
+            let session = session_slot.as_mut().ok_or_else(closed_role_error)?;
+            let buffered = session
+                .poll_event_packet_batch(max_events)
+                .map_err(js_runtime_error)?;
+            drop(session_slot);
+            if !buffered.is_empty() {
+                return Ok(buffered);
+            }
 
-        self.carrier
-            .receive_packets()
-            .await
-            .map_err(js_runtime_error)?;
-        let mut session_slot = self.session.lock().await;
-        let session = session_slot.as_mut().ok_or_else(closed_role_error)?;
-        let events = session
-            .poll_event_packet_batch(max_events)
-            .map_err(js_runtime_error)?;
-        if events.is_empty() {
-            Err(js_error("browser event receive produced no packet"))
-        } else {
-            Ok(events)
+            self.carrier
+                .receive_packets()
+                .await
+                .map_err(js_runtime_error)?;
         }
     }
 }

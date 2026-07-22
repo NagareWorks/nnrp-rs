@@ -80,6 +80,7 @@
   - [x] Open a real client session over the host WebSocket carrier.
   - [x] Route outbound control, object, and cache traffic plus inbound partial and terminal traffic through the Rust role runtime without blocking control writes behind a pending event receive.
   - [x] Poll normalized events without caller-injected runtime primitives.
+  - [x] Route `SESSION_PATCH` through the Rust session and preserve interleaved runtime events until JavaScript consumes them.
   - [x] Close the session and carrier exactly once.
 - [x] Keep TCP, QUIC, and IPC transport implementations out of browser WASM packages.
 - [x] Keep browser WASM output focused on Rust-owned framing, control, runtime-object, and WebSocket substrate helpers.

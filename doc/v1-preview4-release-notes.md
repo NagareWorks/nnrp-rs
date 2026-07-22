@@ -2,6 +2,14 @@
 
 Preview4 moves the Rust workspace beyond token-stream transport substitution and into runtime orchestration features that help SDKs model cancellation, priority, progress, partial results, cache references, route hints, trace context, result drop reasons, IPC, and WebSocket endpoints directly.
 
+## 1.0.0-preview.4.11
+
+The browser client role now exposes coarse `SESSION_PATCH` request/acknowledgement handling backed by the Rust runtime.
+Runtime events that arrive before the acknowledgement are retained in wire order for later event polling, and concurrent
+browser receive calls share one carrier read gate so a pending event wait cannot steal a patch acknowledgement. The runtime
+rejects profile-body lengths that its metadata-only patch API cannot send and bounds events deferred while waiting for an
+acknowledgement.
+
 ## 1.0.0-preview.4.10
 
 The browser WASM artifact now exposes a session-owning client role. JavaScript supplies a binary WebSocket carrier,

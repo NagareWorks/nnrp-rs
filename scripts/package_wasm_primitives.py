@@ -109,6 +109,10 @@ def package_wasm(out_dir: Path, transport_scope: str) -> Path:
             raise SystemExit(
                 f"wasm-bindgen output is missing callable export {export_name}"
             )
+    if "patchSession(metadata: Uint8Array): Promise<Uint8Array>" not in generated_declarations:
+        raise SystemExit("wasm-bindgen output is missing BrowserClientRole.patchSession")
+    if "patchSession(metadata: Uint8Array): Promise<Uint8Array>" not in source_dts.read_text():
+        raise SystemExit("packaged declarations are missing BrowserClientRole.patchSession")
 
     scope = TRANSPORT_SCOPES[transport_scope]
     package_dir = out_dir / scope["directory"]
