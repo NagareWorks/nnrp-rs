@@ -336,6 +336,11 @@ jobs:
           path: artifacts/native
           merge-multiple: true
 
+      - name: Install wasm-bindgen CLI
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.122
+
       - name: Package WASM primitives
         run: |
           rustup target add wasm32-unknown-unknown

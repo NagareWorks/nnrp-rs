@@ -2,6 +2,16 @@
 
 Preview4 moves the Rust workspace beyond token-stream transport substitution and into runtime orchestration features that help SDKs model cancellation, priority, progress, partial results, cache references, route hints, trace context, result drop reasons, IPC, and WebSocket endpoints directly.
 
+## 1.0.0-preview.4.10
+
+The browser WASM artifact now exposes a session-owning client role. JavaScript supplies a binary WebSocket carrier,
+while Rust performs session open and close, runtime-frame dispatch, packet validation, and event projection. Browser
+SDKs therefore consume the same runtime semantics as native SDKs without moving protocol state or hot-path payloads
+through JSON.
+
+The shared runtime session dispatch now serves both native FFI and WASM roles, preventing the two bindings from
+maintaining separate control, object, and cache-reference implementations.
+
 ## 1.0.0-preview.4.9
 
 Transport-scoped native artifact manifests now declare both role connection-close entry points exported by the ABI 3

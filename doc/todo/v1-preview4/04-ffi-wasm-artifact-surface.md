@@ -53,30 +53,34 @@
   - [x] Perform the client `SESSION_OPEN` / `SESSION_OPEN_ACK` exchange in `nnrp_client_open_session`.
   - [x] Accept a carrier connection and perform the server handshake in `nnrp_server_accept`.
   - [x] Remove caller-injected server session/profile/schema state.
-- [ ] Route every role operation over the adopted carrier.
+- [x] Route every role operation over the adopted carrier.
   - [x] Validate, split, and send `FRAME_SUBMIT` metadata/body with independent wire operation and frame identities in one coarse call.
   - [x] Decode inbound submit packets and bind both wire identities to opaque server operation handles.
   - [x] Validate, split, and send partial/terminal/drop/trace result packets.
   - [x] Validate, split, and send control/object/cache packets.
   - [x] Read and decode bounded client and server event batches.
-  - [ ] Preserve operation ordering, pressure state, object/cache state, and owned payload release.
-- [ ] Remove production use of local completion and event-injection helpers.
+  - [x] Preserve operation ordering, pressure state, object/cache state, and owned payload release.
+- [x] Remove production use of local completion and event-injection helpers.
   - [x] Keep any synthetic loop helper explicitly benchmark-only.
-  - [ ] Reject SDK or conformance paths that never read or write the selected carrier.
-- [ ] Add same-library role/carrier E2E coverage.
-  - [ ] Cover TCP, QUIC, IPC, WebSocket, and secure variants supported by each platform.
+  - [x] Reject SDK or conformance paths that never read or write the selected carrier.
+- [x] Add same-library role/carrier E2E coverage.
+  - [x] Cover TCP, QUIC, IPC, WebSocket, and secure variants supported by each platform.
   - [x] Cover handshake, submit, partial result, terminal result, control, object/cache, and close.
   - [x] Assert successful adoption invalidates the packet-level transport handle.
-  - [ ] Run the E2E through every packaged host dynamic library before release.
+  - [x] Run the E2E through every packaged host dynamic library before release.
 
 ## WASM Surface
 
 - [x] Add TypeScript-visible runtime control structures.
 - [x] Add TypeScript-visible runtime object structures.
 - [x] Encode every runtime control/object `u64` as a canonical decimal JSON string and reject lossy JSON numbers.
-- [x] Add WASM event polling batch calls.
+- [x] Add browser-role WASM event polling batch calls backed by `nnrp-runtime` state.
 - [x] Add WASM helpers for browser WebSocket binary frame mapping.
 - [x] Keep browser APIs aligned with native role package semantics.
+  - [x] Open a real client session over the host WebSocket carrier.
+  - [x] Route outbound control, object, and cache traffic plus inbound partial and terminal traffic through the Rust role runtime without blocking control writes behind a pending event receive.
+  - [x] Poll normalized events without caller-injected runtime primitives.
+  - [x] Close the session and carrier exactly once.
 - [x] Keep TCP, QUIC, and IPC transport implementations out of browser WASM packages.
 - [x] Keep browser WASM output focused on Rust-owned framing, control, runtime-object, and WebSocket substrate helpers.
 - [x] Add wasm-bindgen tests for encode/decode and event batching.
@@ -92,6 +96,7 @@
   - [x] Runtime control frame codecs.
   - [x] Runtime object reference codecs.
   - [x] Browser WebSocket substrate helpers.
+  - [x] Browser-loadable `wasm-bindgen` ESM glue and processed WASM binary.
 - [x] Write manifest fields for transport name, protocol version, ABI version, and enabled features.
 - [x] Write provider metadata required for deterministic downstream selection.
   - [x] Native TCP, QUIC, IPC, and WebSocket provider identities and platform limitations.
@@ -100,3 +105,4 @@
 - [x] Export structured WASM probe metrics and candidate diagnostics without weighted scores.
 - [x] Reject release artifacts that collapse all transport behavior into one hidden package.
 - [x] Reject transport artifacts whose exported ABI cannot establish and use their declared transport.
+- [x] Reject browser artifacts whose ESM glue or declarations omit a manifest-declared export.

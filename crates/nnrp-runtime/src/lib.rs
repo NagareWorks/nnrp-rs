@@ -16,5 +16,7 @@ pub use server::{
 };
 pub use transport::{
     BoxedFramedListener, BoxedFramedTransport, FramedListener, FramedTransport, RuntimeFrameLimits,
-    RuntimeTransportKind, StreamPacketReader, TcpFramedListener, TcpTransport,
+    RuntimeTransportKind,
 };
+#[cfg(all(feature = "native-tcp", not(target_arch = "wasm32")))]
+pub use transport::{StreamPacketReader, TcpFramedListener, TcpTransport};
