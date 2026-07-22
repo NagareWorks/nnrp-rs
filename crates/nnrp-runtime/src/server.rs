@@ -33,11 +33,14 @@ use nnrp_core::{
     SESSION_MIGRATE_METADATA_LEN, SESSION_OPEN_ACK_METADATA_LEN, SESSION_PATCH_ACK_METADATA_LEN,
     SESSION_PATCH_METADATA_LEN, SUPERSEDE_METADATA_LEN, TRACE_CONTEXT_METADATA_LEN,
 };
+#[cfg(all(feature = "native-tcp", not(target_arch = "wasm32")))]
 use tokio::net::TcpListener;
 
+#[cfg(all(feature = "native-tcp", not(target_arch = "wasm32")))]
+use crate::TcpFramedListener;
 use crate::{
     BoxedFramedListener, BoxedFramedTransport, FramedListener, RuntimeError, RuntimePacket,
-    RuntimePressureState, RuntimeTransportKind, TcpFramedListener,
+    RuntimePressureState, RuntimeTransportKind,
 };
 
 #[derive(Clone)]
@@ -325,6 +328,7 @@ pub enum NnrpServerEvent {
 }
 
 impl NnrpServer {
+    #[cfg(all(feature = "native-tcp", not(target_arch = "wasm32")))]
     pub async fn bind_tcp(
         addr: impl tokio::net::ToSocketAddrs,
         config: NnrpServerConfig,

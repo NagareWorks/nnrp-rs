@@ -77,10 +77,10 @@
 - [ ] Add browser-role WASM event polling batch calls backed by `nnrp-runtime` state.
 - [x] Add WASM helpers for browser WebSocket binary frame mapping.
 - [ ] Keep browser APIs aligned with native role package semantics.
-  - [ ] Open a real client session over the host WebSocket carrier.
-  - [ ] Submit control, object, cache, partial, and terminal traffic through the Rust role runtime.
+  - [x] Open a real client session over the host WebSocket carrier.
+  - [x] Route outbound control, object, and cache traffic plus inbound partial and terminal traffic through the Rust role runtime.
   - [ ] Poll normalized events without caller-injected runtime primitives.
-  - [ ] Close the session and carrier exactly once.
+  - [x] Close the session and carrier exactly once.
 - [x] Keep TCP, QUIC, and IPC transport implementations out of browser WASM packages.
 - [x] Keep browser WASM output focused on Rust-owned framing, control, runtime-object, and WebSocket substrate helpers.
 - [x] Add wasm-bindgen tests for encode/decode and event batching.

@@ -53,6 +53,7 @@ BROWSER_WASM_SCOPE = {
         "decodeRuntimeControlMetadataJson",
         "encodeRuntimeObjectMetadataJson",
         "decodeRuntimeObjectMetadataJson",
+        "openBrowserClientRole",
     ],
     "provider": {
         "id": "nnrp.transport.websocket.browser-wasm",

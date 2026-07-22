@@ -1,5 +1,7 @@
 use async_trait::async_trait;
+#[cfg(all(feature = "native-tcp", not(target_arch = "wasm32")))]
 use nnrp_core::{CommonHeader, COMMON_HEADER_LEN};
+#[cfg(all(feature = "native-tcp", not(target_arch = "wasm32")))]
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream, ToSocketAddrs},
@@ -37,8 +39,10 @@ impl Default for RuntimeFrameLimits {
     }
 }
 
+#[cfg(all(feature = "native-tcp", not(target_arch = "wasm32")))]
 const STREAM_READ_CHUNK_BYTES: usize = 64 * 1024;
 
+#[cfg(all(feature = "native-tcp", not(target_arch = "wasm32")))]
 #[derive(Debug)]
 pub struct StreamPacketReader {
     buffered: Vec<u8>,
@@ -47,6 +51,7 @@ pub struct StreamPacketReader {
     scratch: Vec<u8>,
 }
 
+#[cfg(all(feature = "native-tcp", not(target_arch = "wasm32")))]
 impl Default for StreamPacketReader {
     fn default() -> Self {
         Self {
@@ -58,6 +63,7 @@ impl Default for StreamPacketReader {
     }
 }
 
+#[cfg(all(feature = "native-tcp", not(target_arch = "wasm32")))]
 impl StreamPacketReader {
     pub fn new() -> Self {
         Self::default()
@@ -145,8 +151,10 @@ impl RuntimeTransportKind {
 pub type BoxedFramedTransport = Box<dyn FramedTransport>;
 pub type BoxedFramedListener = Box<dyn FramedListener>;
 
-#[async_trait]
-pub trait FramedTransport: Send {
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg(target_arch = "wasm32")]
+pub trait FramedTransport {
     fn transport_kind(&self) -> RuntimeTransportKind;
     async fn read_packet(&mut self) -> Result<RuntimePacket, RuntimeError>;
     async fn write_packet(&mut self, packet: &RuntimePacket) -> Result<(), RuntimeError>;
@@ -154,12 +162,32 @@ pub trait FramedTransport: Send {
 }
 
 #[async_trait]
+#[cfg(not(target_arch = "wasm32"))]
+pub trait FramedTransport: Send {
+    fn transport_kind(&self) -> RuntimeTransportKind;
+    async fn read_packet(&mut self) -> Result<RuntimePacket, RuntimeError>;
+    async fn write_packet(&mut self, packet: &RuntimePacket) -> Result<(), RuntimeError>;
+    async fn close(&mut self) -> Result<(), RuntimeError>;
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg(target_arch = "wasm32")]
+pub trait FramedListener {
+    fn transport_kind(&self) -> RuntimeTransportKind;
+    fn local_addr(&self) -> Result<std::net::SocketAddr, RuntimeError>;
+    async fn accept(&self) -> Result<BoxedFramedTransport, RuntimeError>;
+}
+
+#[async_trait]
+#[cfg(not(target_arch = "wasm32"))]
 pub trait FramedListener: Send + Sync {
     fn transport_kind(&self) -> RuntimeTransportKind;
     fn local_addr(&self) -> Result<std::net::SocketAddr, RuntimeError>;
     async fn accept(&self) -> Result<BoxedFramedTransport, RuntimeError>;
 }
 
+#[cfg(all(feature = "native-tcp", not(target_arch = "wasm32")))]
 #[derive(Debug)]
 pub struct TcpTransport {
     stream: TcpStream,
@@ -167,6 +195,7 @@ pub struct TcpTransport {
     reader: StreamPacketReader,
 }
 
+#[cfg(all(feature = "native-tcp", not(target_arch = "wasm32")))]
 impl TcpTransport {
     pub fn new(stream: TcpStream) -> Self {
         Self::new_with_limits(stream, RuntimeFrameLimits::default())
@@ -197,6 +226,7 @@ impl TcpTransport {
 }
 
 #[async_trait]
+#[cfg(all(feature = "native-tcp", not(target_arch = "wasm32")))]
 impl FramedTransport for TcpTransport {
     fn transport_kind(&self) -> RuntimeTransportKind {
         RuntimeTransportKind::Tcp
@@ -220,12 +250,14 @@ impl FramedTransport for TcpTransport {
     }
 }
 
+#[cfg(all(feature = "native-tcp", not(target_arch = "wasm32")))]
 #[derive(Debug)]
 pub struct TcpFramedListener {
     listener: TcpListener,
     limits: RuntimeFrameLimits,
 }
 
+#[cfg(all(feature = "native-tcp", not(target_arch = "wasm32")))]
 impl TcpFramedListener {
     pub fn new(listener: TcpListener) -> Self {
         Self::new_with_limits(listener, RuntimeFrameLimits::default())
@@ -251,6 +283,7 @@ impl TcpFramedListener {
 }
 
 #[async_trait]
+#[cfg(all(feature = "native-tcp", not(target_arch = "wasm32")))]
 impl FramedListener for TcpFramedListener {
     fn transport_kind(&self) -> RuntimeTransportKind {
         RuntimeTransportKind::Tcp
@@ -282,6 +315,7 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "native-tcp", not(target_arch = "wasm32")))]
     #[test]
     fn stream_packet_reader_keeps_read_scratch_out_of_the_async_future() {
         let mut packet_reader = StreamPacketReader::new();

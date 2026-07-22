@@ -30,9 +30,11 @@ use nnrp_core::{
     TOKEN_DELTA_SCHEMA_VERSION, TRACE_CONTEXT_METADATA_LEN,
 };
 
+#[cfg(all(feature = "native-tcp", not(target_arch = "wasm32")))]
+use crate::TcpTransport;
 use crate::{
     BoxedFramedTransport, FramedTransport, RuntimeError, RuntimePacket, RuntimePressureState,
-    RuntimeTransportKind, TcpTransport,
+    RuntimeTransportKind,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,6 +203,7 @@ pub enum NnrpClientEvent {
 }
 
 impl NnrpClient {
+    #[cfg(all(feature = "native-tcp", not(target_arch = "wasm32")))]
     pub async fn connect_tcp(
         addr: impl tokio::net::ToSocketAddrs,
         config: NnrpClientConfig,
@@ -394,6 +397,113 @@ impl NnrpClientSession {
         Ok(frame_id)
     }
 
+    pub async fn send_runtime_frame(
+        &mut self,
+        message_type: MessageType,
+        frame_id: u32,
+        payload: &[u8],
+    ) -> Result<(), RuntimeError> {
+        match message_type {
+            MessageType::FlowUpdate => {
+                self.send_flow_update(FlowUpdateMetadata::parse(payload)?)
+                    .await
+            }
+            MessageType::Progress => {
+                let (metadata, body) = ProgressMetadata::parse_with_body(payload)?;
+                self.send_progress(metadata, body.to_vec()).await
+            }
+            MessageType::PartialResult => {
+                let (metadata, body) = PartialResultMetadata::parse_with_body(payload)?;
+                self.send_partial_result(metadata, body.to_vec()).await
+            }
+            MessageType::Backpressure => {
+                self.send_backpressure(PressureMetadata::parse(payload)?)
+                    .await
+            }
+            MessageType::ResultDropReason => {
+                let (metadata, body) = ResultDropReasonMetadata::parse_with_diagnostics(payload)?;
+                self.send_result_drop_reason(metadata, body.to_vec()).await
+            }
+            MessageType::Cancel | MessageType::Abort => {
+                let (metadata, body) = ControlRequestMetadata::parse_with_diagnostics(payload)?;
+                self.send_control_request_with_diagnostics(message_type, metadata, body.to_vec())
+                    .await
+            }
+            MessageType::PriorityUpdate | MessageType::Deadline | MessageType::ExpireAt => {
+                self.send_scheduling_update(message_type, SchedulingMetadata::parse(payload)?)
+                    .await
+            }
+            MessageType::Supersede => {
+                let (metadata, body) = SupersedeMetadata::parse_with_diagnostics(payload)?;
+                self.supersede_operation(metadata, body.to_vec()).await
+            }
+            MessageType::BudgetUpdate => self.update_budget(BudgetMetadata::parse(payload)?).await,
+            MessageType::CreditUpdate => {
+                self.send_credit_update(PressureMetadata::parse(payload)?)
+                    .await
+            }
+            MessageType::CapabilityNegotiation | MessageType::DegradeProfile => {
+                let (metadata, body) = CapabilityMetadata::parse_with_body(payload)?;
+                self.send_capability(message_type, metadata, body.to_vec())
+                    .await
+            }
+            MessageType::RouteHint | MessageType::ExecutionHint => {
+                let (metadata, body) = RouteHintMetadata::parse_with_body(payload)?;
+                self.send_route_hint(message_type, metadata, body.to_vec())
+                    .await
+            }
+            MessageType::TraceContext => {
+                let (metadata, body) = TraceContextMetadata::parse_with_body(payload)?;
+                self.send_trace_context(frame_id, metadata, body.to_vec())
+                    .await
+            }
+            MessageType::ErrorRecoverable => {
+                let (metadata, body) = RecoverableErrorMetadata::parse_with_diagnostics(payload)?;
+                self.send_recoverable_error(metadata, body.to_vec()).await
+            }
+            MessageType::RetryAfter => {
+                let (metadata, body) = RetryAfterMetadata::parse_with_diagnostics(payload)?;
+                self.send_retry_after(metadata, body.to_vec()).await
+            }
+            MessageType::ObjectDeclare => {
+                let (metadata, body) = ObjectDescriptorMetadata::parse_with_extension(payload)?;
+                self.send_object_declare(metadata, body.to_vec()).await
+            }
+            MessageType::ObjectRef => {
+                let (metadata, body) = ObjectReferenceMetadata::parse_with_extension(payload)?;
+                self.send_object_ref(metadata, body.to_vec()).await
+            }
+            MessageType::ObjectRelease => {
+                let (metadata, body) = ObjectReleaseMetadata::parse_with_diagnostics(payload)?;
+                self.send_object_release(metadata, body.to_vec()).await
+            }
+            MessageType::ObjectPatch | MessageType::ObjectDelta => {
+                let metadata = ObjectDeltaMetadata::parse(payload)?;
+                self.send_object_delta(
+                    message_type,
+                    metadata,
+                    payload[OBJECT_DELTA_METADATA_LEN..].to_vec(),
+                )
+                .await
+            }
+            MessageType::CacheReference => {
+                let (metadata, body) = CacheReferenceMetadata::parse_with_extension(payload)?;
+                self.send_cache_reference(metadata, body.to_vec()).await
+            }
+            MessageType::CacheMiss => {
+                let (metadata, body) = CacheMissMetadata::parse_with_diagnostics(payload)?;
+                self.send_cache_miss(metadata, body.to_vec()).await
+            }
+            MessageType::CacheInvalidate => {
+                self.send_cache_invalidate(CacheInvalidateMetadata::parse(payload)?)
+                    .await
+            }
+            _ => Err(RuntimeError::UnexpectedMessage(
+                "client runtime frame direction is unsupported",
+            )),
+        }
+    }
+
     pub async fn await_result(&mut self) -> Result<NnrpResult, RuntimeError> {
         match self.await_event().await? {
             NnrpClientEvent::Result(result) => Ok(result),
@@ -439,8 +549,15 @@ impl NnrpClientSession {
     }
 
     pub async fn await_event(&mut self) -> Result<NnrpClientEvent, RuntimeError> {
+        Ok(self.await_event_packet().await?.0)
+    }
+
+    pub async fn await_event_packet(
+        &mut self,
+    ) -> Result<(NnrpClientEvent, RuntimePacket), RuntimeError> {
         let packet = self.transport.read_packet().await?;
-        match packet.header.message_type {
+        let wire_packet = packet.clone();
+        let event = match packet.header.message_type {
             MessageType::ResultPush => {
                 self.require_session_packet(&packet, "client received result for another session")?;
                 if packet.metadata.len() != RESULT_PUSH_METADATA_LEN {
@@ -919,7 +1036,8 @@ impl NnrpClientSession {
             _ => Err(RuntimeError::UnexpectedMessage(
                 "client expected a runtime result or control event",
             )),
-        }
+        }?;
+        Ok((event, wire_packet))
     }
 
     pub async fn cancel_operation(

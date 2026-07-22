@@ -58,6 +58,47 @@ export interface ProbeMetrics {
   median_rtt_us: string;
 }
 
+export interface BrowserClientRoleConfig {
+  requestedSessionId: number;
+  profileId: number;
+  schemaId: number;
+  schemaVersion: number;
+  priorityClass: 0 | 1 | 2;
+  defaultDeadlineMs: number;
+  maxInFlightOperations: number;
+  leaseTtlHintMs: number;
+  maxPacketBytes: number;
+}
+
+export class BrowserClientEventPacket {
+  private constructor();
+  free(): void;
+  [Symbol.dispose](): void;
+  readonly body: Uint8Array;
+  readonly frameId: number;
+  readonly messageType: number;
+  readonly metadata: Uint8Array;
+  readonly sessionId: number;
+}
+
+export class BrowserClientRole {
+  private constructor();
+  free(): void;
+  [Symbol.dispose](): void;
+  awaitEvent(): Promise<BrowserClientEventPacket>;
+  close(): Promise<void>;
+  sendRuntimeFrame(messageType: number, frameId: number, payload: Uint8Array): Promise<void>;
+  submitNoWait(frameId: number, payload: Uint8Array): Promise<number>;
+  readonly sessionId: number;
+}
+
+export function openBrowserClientRole(
+  send: (packet: Uint8Array) => void | Promise<void>,
+  receive: () => Uint8Array | Promise<Uint8Array>,
+  close: () => void | Promise<void>,
+  configJson: string,
+): Promise<BrowserClientRole>;
+
 export type ProbeState = "not-run" | "succeeded" | "failed" | "missing";
 export type TransportRejectionReason =
   | "policy-disallowed"

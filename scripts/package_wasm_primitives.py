@@ -22,6 +22,7 @@ WASM_EXPORTS = [
     "decodeRuntimeControlMetadataJson",
     "encodeRuntimeObjectMetadataJson",
     "decodeRuntimeObjectMetadataJson",
+    "openBrowserClientRole",
 ]
 
 TRANSPORT_SCOPES = {
