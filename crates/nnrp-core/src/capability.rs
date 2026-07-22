@@ -11,7 +11,6 @@ pub const CONTROL_RESULT_DROP_REASON: &str = "control.result_drop_reason";
 pub const CONTROL_DEGRADE_PROFILE: &str = "control.degrade_profile";
 pub const CONTROL_BUDGET_UPDATE: &str = "control.budget_update";
 pub const CONTROL_RECOVERABLE_ERROR: &str = "control.recoverable_error";
-pub const CONTROL_RETRY_AFTER: &str = "control.retry_after";
 
 pub const OBJECT_LIFECYCLE: &str = "object.lifecycle";
 pub const OBJECT_DELTA: &str = "object.delta";
@@ -39,7 +38,6 @@ pub const PREVIEW4_CONTROL_CAPABILITY_TOKENS: &[&str] = &[
     CONTROL_DEGRADE_PROFILE,
     CONTROL_BUDGET_UPDATE,
     CONTROL_RECOVERABLE_ERROR,
-    CONTROL_RETRY_AFTER,
 ];
 
 pub const PREVIEW4_OBJECT_CAPABILITY_TOKENS: &[&str] = &[
@@ -65,6 +63,8 @@ mod tests {
     fn preview4_capability_tokens_match_public_catalog_names() {
         assert!(PREVIEW4_CONTROL_CAPABILITY_TOKENS.contains(&CONTROL_CANCEL_ABORT));
         assert!(PREVIEW4_CONTROL_CAPABILITY_TOKENS.contains(&CONTROL_RESULT_DROP_REASON));
+        assert!(PREVIEW4_CONTROL_CAPABILITY_TOKENS.contains(&CONTROL_RECOVERABLE_ERROR));
+        assert!(!PREVIEW4_CONTROL_CAPABILITY_TOKENS.contains(&"control.retry_after"));
         assert!(PREVIEW4_OBJECT_CAPABILITY_TOKENS.contains(&OBJECT_LIFECYCLE));
         assert!(PREVIEW4_OBJECT_CAPABILITY_TOKENS.contains(&CACHE_REFERENCE));
         assert!(!PREVIEW4_OBJECT_CAPABILITY_TOKENS.contains(&"control.cache_reference"));
