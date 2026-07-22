@@ -63,11 +63,11 @@
 - [ ] Remove production use of local completion and event-injection helpers.
   - [x] Keep any synthetic loop helper explicitly benchmark-only.
   - [ ] Reject SDK or conformance paths that never read or write the selected carrier.
-- [ ] Add same-library role/carrier E2E coverage.
-  - [ ] Cover TCP, QUIC, IPC, WebSocket, and secure variants supported by each platform.
+- [x] Add same-library role/carrier E2E coverage.
+  - [x] Cover TCP, QUIC, IPC, WebSocket, and secure variants supported by each platform.
   - [x] Cover handshake, submit, partial result, terminal result, control, object/cache, and close.
   - [x] Assert successful adoption invalidates the packet-level transport handle.
-  - [ ] Run the E2E through every packaged host dynamic library before release.
+  - [x] Run the E2E through every packaged host dynamic library before release.
 
 ## WASM Surface
 
@@ -76,10 +76,10 @@
 - [x] Encode every runtime control/object `u64` as a canonical decimal JSON string and reject lossy JSON numbers.
 - [x] Add browser-role WASM event polling batch calls backed by `nnrp-runtime` state.
 - [x] Add WASM helpers for browser WebSocket binary frame mapping.
-- [ ] Keep browser APIs aligned with native role package semantics.
+- [x] Keep browser APIs aligned with native role package semantics.
   - [x] Open a real client session over the host WebSocket carrier.
   - [x] Route outbound control, object, and cache traffic plus inbound partial and terminal traffic through the Rust role runtime without blocking control writes behind a pending event receive.
-  - [ ] Poll normalized events without caller-injected runtime primitives.
+  - [x] Poll normalized events without caller-injected runtime primitives.
   - [x] Close the session and carrier exactly once.
 - [x] Keep TCP, QUIC, and IPC transport implementations out of browser WASM packages.
 - [x] Keep browser WASM output focused on Rust-owned framing, control, runtime-object, and WebSocket substrate helpers.
