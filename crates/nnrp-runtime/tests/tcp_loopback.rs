@@ -7,16 +7,17 @@ use nnrp_core::{
     MemoryLocationHint, MessageType, ObjectDeltaMetadata, ObjectDescriptorMetadata,
     ObjectReferenceMetadata, ObjectReleaseMetadata, ObjectReleaseReason, OperationState,
     OwnershipHint, PartialResultMetadata, PayloadKindBitmap, PressureMetadata, ProgressMetadata,
-    ResultClass, ResultDropReasonMetadata, ResultPushMetadata, RouteHintMetadata,
-    RuntimeObjectKind, RuntimeRole, SchedulingMetadata, SchemaRegistry, SessionCloseMetadata,
-    SessionCloseReason, SessionMigrateAckMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
-    SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata, SessionPatchRejectReason,
-    SessionPriorityClass, SessionStatus, SubmitMode, SupersedeMetadata, TileIndexMode,
-    TraceContextMetadata, TransportId, TransportProbeAckMetadata, TransportProbeMetadata,
-    FLOW_UPDATE_FLAG_CREDIT_VALID, FRAME_SUBMIT_METADATA_LEN, RESULT_DROP_REASON_DEADLINE_EXPIRED,
-    RESULT_PUSH_METADATA_LEN, SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE,
-    SESSION_OPEN_ACK_METADATA_LEN, SESSION_OPEN_METADATA_LEN, STANDARD_PROFILE_TOKEN,
-    TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
+    ResultClass, ResultDropReasonMetadata, ResultPushMetadata, RetryAfterMetadata,
+    RouteHintMetadata, RuntimeObjectKind, RuntimeRole, SchedulingMetadata, SchemaRegistry,
+    SessionCloseMetadata, SessionCloseReason, SessionMigrateAckMetadata, SessionOpenAckMetadata,
+    SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata,
+    SessionPatchRejectReason, SessionPriorityClass, SessionStatus, SubmitMode, SupersedeMetadata,
+    TileIndexMode, TraceContextMetadata, TransportId, TransportProbeAckMetadata,
+    TransportProbeMetadata, FLOW_UPDATE_FLAG_CREDIT_VALID, FRAME_SUBMIT_METADATA_LEN,
+    RESULT_DROP_REASON_DEADLINE_EXPIRED, RESULT_PUSH_METADATA_LEN, RETRY_AFTER_METADATA_LEN,
+    SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE, SESSION_OPEN_ACK_METADATA_LEN,
+    SESSION_OPEN_METADATA_LEN, STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID,
+    TOKEN_DELTA_SCHEMA_VERSION,
 };
 use nnrp_runtime::{
     BoxedFramedTransport, FramedListener, FramedTransport, NnrpClient, NnrpClientConfig,
@@ -323,9 +324,8 @@ async fn tcp_loopback_handles_cancel_drop_flow_and_patch() -> Result<(), Runtime
 
         let patch = session.receive_patch().await?;
         assert_eq!(patch.patch_mask, 1);
-        session.send_patch_ack(patch_ack()).await?;
-
         session.send_flow_update(session_flow_update()).await?;
+        session.send_patch_ack(patch_ack()).await?;
         session.send_result_drop(submit.frame_id).await?;
 
         let close = session.receive_close().await?;
@@ -339,6 +339,13 @@ async fn tcp_loopback_handles_cancel_drop_flow_and_patch() -> Result<(), Runtime
         .submit_nowait(token_submit(201), b"prompt".to_vec())
         .await?;
     session.cancel_frame(frame_id).await?;
+
+    let mut patch_with_body = session_patch();
+    patch_with_body.profile_patch_bytes = 1;
+    assert!(matches!(
+        session.patch_session(patch_with_body).await,
+        Err(RuntimeError::UnexpectedMessage(_))
+    ));
 
     let patch_ack = session.patch_session(session_patch()).await?;
     assert_eq!(patch_ack.ack_status, SessionPatchAckStatus::Accepted);
@@ -2603,6 +2610,67 @@ async fn client_event_packet_batch_drains_only_buffered_validated_events(
     assert_eq!(events[0].1.header.message_type, MessageType::Progress);
     assert!(matches!(events[1].0, NnrpClientEvent::Result(_)));
     assert_eq!(events[1].1.header.message_type, MessageType::ResultPush);
+    session.close_transport().await
+}
+
+#[tokio::test]
+async fn client_patch_bounds_interleaved_event_buffer() -> Result<(), RuntimeError> {
+    let open = session_open();
+    let ack = open_ack(&open);
+    let mut ack_header = CommonHeader::new(
+        MessageType::SessionOpenAck,
+        SESSION_OPEN_ACK_METADATA_LEN as u32,
+        0,
+    );
+    ack_header.session_id = ack.session_id;
+
+    let retry = RetryAfterMetadata {
+        scope_id: ack.session_id as u64,
+        control_sequence: 1,
+        retry_after_ms: 1,
+        jitter_ms: 0,
+        reason_code: 1,
+        source_role: RuntimeRole::Server as u8,
+        flags: 0,
+        diagnostic_bytes: 0,
+    };
+    let mut packets = Vec::with_capacity(1_027);
+    packets.push(RuntimePacket::new(
+        ack_header,
+        ack.to_bytes()?.to_vec(),
+        Vec::new(),
+    )?);
+    for _ in 0..1_025 {
+        let mut retry_header =
+            CommonHeader::new(MessageType::RetryAfter, RETRY_AFTER_METADATA_LEN as u32, 0);
+        retry_header.session_id = ack.session_id;
+        packets.push(RuntimePacket::new(
+            retry_header,
+            retry.to_bytes()?.to_vec(),
+            Vec::new(),
+        )?);
+    }
+    let patch_ack = patch_ack();
+    let mut patch_ack_header = CommonHeader::new(
+        MessageType::SessionPatchAck,
+        nnrp_core::SESSION_PATCH_ACK_METADATA_LEN as u32,
+        0,
+    );
+    patch_ack_header.session_id = ack.session_id;
+    packets.push(RuntimePacket::new(
+        patch_ack_header,
+        patch_ack.to_bytes()?.to_vec(),
+        Vec::new(),
+    )?);
+
+    let writes = Arc::new(Mutex::new(Vec::new()));
+    let transport = ScriptedTransport::new(RuntimeTransportKind::Tcp, packets, writes);
+    let client = NnrpClient::from_transport(transport, NnrpClientConfig::default())?;
+    let mut session = client.open_session().await?;
+    assert!(matches!(
+        session.patch_session(session_patch()).await,
+        Err(RuntimeError::UnexpectedMessage(_))
+    ));
     session.close_transport().await
 }
 

@@ -37,36 +37,36 @@ This repository is intended to be the implementation source for Rust users and f
 For a Rust client/server application using the runtime plus TCP transport:
 
 ```powershell
-cargo add nnrp-core@1.0.0-preview.4.10 nnrp-runtime@1.0.0-preview.4.10 nnrp-transport-tcp@1.0.0-preview.4.10
+cargo add nnrp-core@1.0.0-preview.4.11 nnrp-runtime@1.0.0-preview.4.11 nnrp-transport-tcp@1.0.0-preview.4.11
 cargo add tokio --features macros,rt-multi-thread,net,io-util,time
 ```
 
 Add optional packages only when your application needs them:
 
 ```powershell
-cargo add nnrp-transport-quic@1.0.0-preview.4.10
-cargo add nnrp-transport-ipc@1.0.0-preview.4.10
-cargo add nnrp-transport-websocket@1.0.0-preview.4.10
-cargo add nnrp-transport-provider@1.0.0-preview.4.10
-cargo add nnrp-ffi@1.0.0-preview.4.10
-cargo add nnrp-wasm@1.0.0-preview.4.10
+cargo add nnrp-transport-quic@1.0.0-preview.4.11
+cargo add nnrp-transport-ipc@1.0.0-preview.4.11
+cargo add nnrp-transport-websocket@1.0.0-preview.4.11
+cargo add nnrp-transport-provider@1.0.0-preview.4.11
+cargo add nnrp-ffi@1.0.0-preview.4.11
+cargo add nnrp-wasm@1.0.0-preview.4.11
 ```
 
 Equivalent `Cargo.toml` form:
 
 ```toml
 [dependencies]
-nnrp-core = "1.0.0-preview.4.10"
-nnrp-runtime = "1.0.0-preview.4.10"
-nnrp-transport-tcp = "1.0.0-preview.4.10"
+nnrp-core = "1.0.0-preview.4.11"
+nnrp-runtime = "1.0.0-preview.4.11"
+nnrp-transport-tcp = "1.0.0-preview.4.11"
 
 # Optional packages
-nnrp-transport-provider = "1.0.0-preview.4.10"
-nnrp-transport-quic = "1.0.0-preview.4.10"
-nnrp-transport-ipc = "1.0.0-preview.4.10"
-nnrp-transport-websocket = "1.0.0-preview.4.10"
-nnrp-ffi = "1.0.0-preview.4.10"
-nnrp-wasm = "1.0.0-preview.4.10"
+nnrp-transport-provider = "1.0.0-preview.4.11"
+nnrp-transport-quic = "1.0.0-preview.4.11"
+nnrp-transport-ipc = "1.0.0-preview.4.11"
+nnrp-transport-websocket = "1.0.0-preview.4.11"
+nnrp-ffi = "1.0.0-preview.4.11"
+nnrp-wasm = "1.0.0-preview.4.11"
 ```
 
 For repository builds before publishing:

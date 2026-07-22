@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
 use nnrp_core::{
@@ -36,6 +36,8 @@ use crate::{
     BoxedFramedTransport, FramedTransport, RuntimeError, RuntimePacket, RuntimePressureState,
     RuntimeTransportKind,
 };
+
+const MAX_PENDING_EVENTS_DURING_SESSION_PATCH: usize = 1_024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NnrpClientConfig {
@@ -106,6 +108,7 @@ pub struct NnrpClientSession {
     transport: BoxedFramedTransport,
     lifecycle: ConnectionLifecycle,
     pressure: RuntimePressureState,
+    pending_events: VecDeque<(NnrpClientEvent, RuntimePacket)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -296,6 +299,7 @@ impl NnrpClient {
             transport: self.transport,
             lifecycle: self.lifecycle,
             pressure: RuntimePressureState::default(),
+            pending_events: VecDeque::new(),
         })
     }
 
@@ -555,6 +559,9 @@ impl NnrpClientSession {
     pub async fn await_event_packet(
         &mut self,
     ) -> Result<(NnrpClientEvent, RuntimePacket), RuntimeError> {
+        if let Some(event) = self.pending_events.pop_front() {
+            return Ok(event);
+        }
         let packet = self.transport.read_packet().await?;
         self.decode_event_packet(packet)
     }
@@ -575,6 +582,12 @@ impl NnrpClientSession {
         max_events: usize,
     ) -> Result<Vec<(NnrpClientEvent, RuntimePacket)>, RuntimeError> {
         let mut events = Vec::with_capacity(max_events);
+        while events.len() < max_events {
+            let Some(event) = self.pending_events.pop_front() else {
+                break;
+            };
+            events.push(event);
+        }
         while events.len() < max_events {
             let Some(packet) = self.transport.try_read_packet()? else {
                 break;
@@ -1683,10 +1696,15 @@ impl NnrpClientSession {
         &mut self,
         patch: SessionPatchMetadata,
     ) -> Result<SessionPatchAckMetadata, RuntimeError> {
+        if patch.profile_patch_bytes != 0 {
+            return Err(RuntimeError::UnexpectedMessage(
+                "client session patch metadata declares an unsupported profile-specific body",
+            ));
+        }
         let mut header = CommonHeader::new(
             MessageType::SessionPatch,
             SESSION_PATCH_METADATA_LEN as u32,
-            patch.profile_patch_bytes,
+            0,
         );
         header.session_id = self.session_id;
         self.transport
@@ -1697,19 +1715,29 @@ impl NnrpClientSession {
             )?)
             .await?;
 
-        let ack_packet = self.transport.read_packet().await?;
-        if ack_packet.header.message_type != MessageType::SessionPatchAck {
-            return Err(RuntimeError::UnexpectedMessage(
-                "client expected SESSION_PATCH_ACK",
-            ));
+        loop {
+            let ack_packet = self.transport.read_packet().await?;
+            if ack_packet.header.message_type != MessageType::SessionPatchAck {
+                let event = self.decode_event_packet(ack_packet)?;
+                if self.pending_events.len() >= MAX_PENDING_EVENTS_DURING_SESSION_PATCH {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "client session patch exceeded the pending event limit before acknowledgement",
+                    ));
+                }
+                self.pending_events.push_back(event);
+                continue;
+            }
+            self.require_session_packet(
+                &ack_packet,
+                "client received patch ack for another session",
+            )?;
+            if ack_packet.metadata.len() != SESSION_PATCH_ACK_METADATA_LEN {
+                return Err(RuntimeError::UnexpectedMessage(
+                    "client received malformed SESSION_PATCH_ACK metadata length",
+                ));
+            }
+            return Ok(SessionPatchAckMetadata::parse(&ack_packet.metadata)?);
         }
-        self.require_session_packet(&ack_packet, "client received patch ack for another session")?;
-        if ack_packet.metadata.len() != SESSION_PATCH_ACK_METADATA_LEN {
-            return Err(RuntimeError::UnexpectedMessage(
-                "client received malformed SESSION_PATCH_ACK metadata length",
-            ));
-        }
-        Ok(SessionPatchAckMetadata::parse(&ack_packet.metadata)?)
     }
 
     pub async fn migrate_transport(

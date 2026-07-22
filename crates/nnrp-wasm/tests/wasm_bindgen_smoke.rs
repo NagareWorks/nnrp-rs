@@ -7,10 +7,12 @@ use nnrp_core::{
     BudgetMetadata, CommonHeader, ControlRequestMetadata, FrameSubmitMetadata, InputProfile,
     MessageType, PayloadKindBitmap, ProgressMetadata, ResultClass, ResultPushMetadata, RuntimeRole,
     SessionCloseAckMetadata, SessionCloseMetadata, SessionCloseStatus, SessionOpenAckMetadata,
-    SessionOpenMetadata, SessionStatus, SubmitMode, TileIndexMode,
+    SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata,
+    SessionPatchRejectReason, SessionStatus, SubmitMode, TileIndexMode,
     CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED, PROGRESS_METADATA_LEN, RESULT_PUSH_METADATA_LEN,
     SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE, SESSION_OPEN_ACK_METADATA_LEN,
-    STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
+    SESSION_PATCH_ACK_METADATA_LEN, STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID,
+    TOKEN_DELTA_SCHEMA_VERSION,
 };
 use nnrp_runtime::RuntimePacket;
 use nnrp_wasm::{
@@ -179,6 +181,27 @@ async fn wasm_bindgen_browser_role_runs_real_session_submit_and_close() {
     .await
     .expect("browser role should route runtime controls through the Rust session");
 
+    let patch = SessionPatchMetadata {
+        profile_id: STANDARD_PROFILE_TOKEN,
+        patch_mask: 0x03,
+        target_cadence_x100: 6_000,
+        quality_tier: 2,
+        degrade_policy: 0,
+        active_lane_mask: 0,
+        preferred_codec_bitmap: 0,
+        preferred_compression_bitmap: 0,
+        profile_patch_bytes: 0,
+    };
+    let patch_ack = role
+        .patch_session(&patch.to_bytes().expect("patch metadata should encode"))
+        .await
+        .expect("browser role should patch through the Rust runtime")
+        .to_vec();
+    let patch_ack = SessionPatchAckMetadata::parse(&patch_ack)
+        .expect("browser role should return canonical patch ack metadata");
+    assert_eq!(patch_ack.ack_status, SessionPatchAckStatus::Accepted);
+    assert_eq!(patch_ack.applied_patch_mask, 0x03);
+
     let event_batch = role
         .await_event_batch(2)
         .await
@@ -216,7 +239,7 @@ async fn wasm_bindgen_browser_role_runs_real_session_submit_and_close() {
 }
 
 #[wasm_bindgen_test(async)]
-async fn browser_role_sends_cancel_while_event_receive_is_pending() {
+async fn browser_role_routes_control_and_patch_while_event_receive_is_pending() {
     let responses = Rc::new(RefCell::new(VecDeque::<Vec<u8>>::new()));
     let pending_receive = Rc::new(RefCell::new(None::<Function>));
     let cancel_observed = Rc::new(RefCell::new(false));
@@ -269,6 +292,49 @@ async fn browser_role_sends_cancel_while_event_receive_is_pending() {
                     .expect("event receive should already be pending")
                     .call1(&JsValue::NULL, Uint8Array::from(event.as_slice()).as_ref())
                     .expect("pending event receive should resolve");
+            }
+            MessageType::SessionPatch => {
+                let patch = SessionPatchMetadata::parse(metadata)
+                    .expect("concurrent session patch should parse");
+                let ack = session_patch_ack(&patch);
+                let progress = ProgressMetadata {
+                    operation_id: 42,
+                    progress_sequence: 2,
+                    stage_code: 8,
+                    percent_x100: 7_500,
+                    object_id: 0,
+                    body_bytes: 0,
+                };
+                send_responses.borrow_mut().push_back(response_packet(
+                    MessageType::Progress,
+                    header.session_id,
+                    9,
+                    progress
+                        .to_bytes()
+                        .expect("post-patch progress should encode")
+                        .to_vec(),
+                    Vec::new(),
+                    PROGRESS_METADATA_LEN,
+                ));
+                let ack_packet = response_packet(
+                    MessageType::SessionPatchAck,
+                    header.session_id,
+                    0,
+                    ack.to_bytes()
+                        .expect("concurrent session patch ack should encode")
+                        .to_vec(),
+                    Vec::new(),
+                    SESSION_PATCH_ACK_METADATA_LEN,
+                );
+                send_pending_receive
+                    .borrow_mut()
+                    .take()
+                    .expect("event receive should already be pending for patch ack")
+                    .call1(
+                        &JsValue::NULL,
+                        Uint8Array::from(ack_packet.as_slice()).as_ref(),
+                    )
+                    .expect("pending event receive should accept the patch ack");
             }
             message_type => panic!("unexpected concurrent browser role packet: {message_type:?}"),
         }
@@ -334,6 +400,31 @@ async fn browser_role_sends_cancel_while_event_receive_is_pending() {
     cancel_result.expect("cancel should write while receive remains pending");
     assert!(*cancel_observed.borrow());
     let event = event.expect("pending receive should finish after cancel is written");
+    assert_eq!(event.message_type(), MessageType::Progress as u8);
+    assert_eq!(event.frame_id(), 9);
+
+    let patch = SessionPatchMetadata {
+        profile_id: STANDARD_PROFILE_TOKEN,
+        patch_mask: 0x01,
+        target_cadence_x100: 6_000,
+        quality_tier: 0,
+        degrade_policy: 0,
+        active_lane_mask: 0,
+        preferred_codec_bitmap: 0,
+        preferred_compression_bitmap: 0,
+        profile_patch_bytes: 0,
+    };
+    let patch_bytes = patch.to_bytes().expect("concurrent patch should encode");
+    let event_future = role.await_event();
+    let patch_future = role.patch_session(&patch_bytes);
+    let (event, patch_ack) = futures_util::future::join(event_future, patch_future).await;
+    let patch_ack = patch_ack
+        .expect("patch should complete while event receive is pending")
+        .to_vec();
+    let patch_ack = SessionPatchAckMetadata::parse(&patch_ack)
+        .expect("concurrent patch ack should remain canonical");
+    assert_eq!(patch_ack.applied_patch_mask, 0x01);
+    let event = event.expect("event receive should continue after routing the patch ack");
     assert_eq!(event.message_type(), MessageType::Progress as u8);
     assert_eq!(event.frame_id(), 9);
 
@@ -433,6 +524,21 @@ fn browser_role_responses(packet: &[u8]) -> Vec<Vec<u8>> {
             assert_eq!(budget.operation_id, 42);
             Vec::new()
         }
+        MessageType::SessionPatch => {
+            let patch = SessionPatchMetadata::parse(metadata).expect("session patch should parse");
+            assert_eq!(patch.patch_mask, 0x03);
+            let ack = session_patch_ack(&patch);
+            vec![response_packet(
+                MessageType::SessionPatchAck,
+                header.session_id,
+                0,
+                ack.to_bytes()
+                    .expect("session patch ack should encode")
+                    .to_vec(),
+                Vec::new(),
+                SESSION_PATCH_ACK_METADATA_LEN,
+            )]
+        }
         MessageType::SessionClose => {
             let close = SessionCloseMetadata::parse(metadata).expect("session close should parse");
             let ack = SessionCloseAckMetadata {
@@ -450,6 +556,24 @@ fn browser_role_responses(packet: &[u8]) -> Vec<Vec<u8>> {
             )]
         }
         message_type => panic!("unexpected browser role packet: {message_type:?}"),
+    }
+}
+
+fn session_patch_ack(patch: &SessionPatchMetadata) -> SessionPatchAckMetadata {
+    SessionPatchAckMetadata {
+        ack_status: SessionPatchAckStatus::Accepted,
+        reject_reason: SessionPatchRejectReason::None,
+        applied_patch_mask: patch.patch_mask,
+        rejected_patch_mask: 0,
+        retry_after_ms: 0,
+        effective_profile_id: patch.profile_id,
+        effective_target_cadence_x100: patch.target_cadence_x100,
+        effective_quality_tier: patch.quality_tier,
+        effective_degrade_policy: patch.degrade_policy,
+        effective_lane_mask: patch.active_lane_mask,
+        effective_codec_bitmap: patch.preferred_codec_bitmap,
+        effective_compression_bitmap: patch.preferred_compression_bitmap,
+        profile_patch_ack_bytes: 0,
     }
 }
 

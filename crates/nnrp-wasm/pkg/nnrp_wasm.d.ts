@@ -97,6 +97,7 @@ export class BrowserClientRole {
   awaitEvent(): Promise<BrowserClientEventPacket>;
   awaitEventBatch(maxEvents: number): Promise<BrowserClientEventBatch>;
   close(): Promise<void>;
+  patchSession(metadata: Uint8Array): Promise<Uint8Array>;
   sendRuntimeFrame(messageType: number, frameId: number, payload: Uint8Array): Promise<void>;
   submitNoWait(frameId: number, payload: Uint8Array): Promise<number>;
   readonly sessionId: number;
