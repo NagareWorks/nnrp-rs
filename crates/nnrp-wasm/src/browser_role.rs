@@ -5,7 +5,10 @@ use std::{
 };
 
 use async_trait::async_trait;
-use futures_util::lock::Mutex;
+use futures_util::{
+    future::{AbortHandle, Abortable},
+    lock::Mutex,
+};
 use js_sys::{Array, Function, Promise, Uint32Array, Uint8Array};
 use nnrp_core::{
     CommonHeader, FrameSubmitMetadata, MessageType, SessionPatchMetadata, SessionPriorityClass,
@@ -294,6 +297,7 @@ pub struct BrowserClientRole {
     session: Mutex<Option<NnrpClientSession>>,
     carrier: Rc<HostWebSocketCarrier>,
     receive_gate: Mutex<()>,
+    receive_abort: RefCell<Option<AbortHandle>>,
 }
 
 #[wasm_bindgen(js_class = BrowserClientRole)]
@@ -393,6 +397,9 @@ impl BrowserClientRole {
     }
 
     pub async fn close(&self) -> Result<(), JsValue> {
+        if let Some(abort) = self.receive_abort.borrow_mut().take() {
+            abort.abort();
+        }
         let _receive_guard = self.receive_gate.lock().await;
         let mut session_slot = self.session.lock().await;
         if let Some(mut session) = session_slot.take() {
@@ -408,7 +415,18 @@ impl BrowserClientRole {
         let max_events = usize::try_from(max_events)
             .map_err(|_| js_error("maxEvents is not representable on this host"))?;
         let _receive_guard = self.receive_gate.lock().await;
+        let (abort, registration) = AbortHandle::new_pair();
+        self.receive_abort.borrow_mut().replace(abort);
+        let result =
+            Abortable::new(self.receive_event_packets_locked(max_events), registration).await;
+        self.receive_abort.borrow_mut().take();
+        result.map_err(|_| closed_role_error())?
+    }
 
+    async fn receive_event_packets_locked(
+        &self,
+        max_events: usize,
+    ) -> Result<Vec<(nnrp_runtime::NnrpClientEvent, RuntimePacket)>, JsValue> {
         loop {
             let mut session_slot = self.session.lock().await;
             let session = session_slot.as_mut().ok_or_else(closed_role_error)?;
@@ -448,6 +466,7 @@ pub async fn open_browser_client_role(
         session: Mutex::new(Some(session)),
         carrier,
         receive_gate: Mutex::new(()),
+        receive_abort: RefCell::new(None),
     })
 }
 

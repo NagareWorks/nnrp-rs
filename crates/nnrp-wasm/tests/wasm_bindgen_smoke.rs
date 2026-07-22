@@ -428,9 +428,14 @@ async fn browser_role_routes_control_and_patch_while_event_receive_is_pending() 
     assert_eq!(event.message_type(), MessageType::Progress as u8);
     assert_eq!(event.frame_id(), 9);
 
-    role.close()
-        .await
-        .expect("concurrent browser role should close cleanly");
+    let pending_event = role.await_event();
+    let close = role.close();
+    let (event_result, close_result) = futures_util::future::join(pending_event, close).await;
+    assert!(
+        event_result.is_err(),
+        "closing the role should cancel a pending event receive"
+    );
+    close_result.expect("concurrent browser role should close cleanly");
 }
 
 fn browser_role_responses(packet: &[u8]) -> Vec<Vec<u8>> {
