@@ -96,6 +96,8 @@ export class BrowserClientRole {
   [Symbol.dispose](): void;
   awaitEvent(): Promise<BrowserClientEventPacket>;
   awaitEventBatch(maxEvents: number): Promise<BrowserClientEventBatch>;
+  ingestPackets(packets: Uint8Array | readonly Uint8Array[]): void;
+  failReceive(detail: string): void;
   close(): Promise<void>;
   patchSession(metadata: Uint8Array): Promise<Uint8Array>;
   sendRuntimeFrame(messageType: number, frameId: number, payload: Uint8Array): Promise<void>;

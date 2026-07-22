@@ -1,7 +1,10 @@
 use std::{
     cell::{Cell, RefCell},
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
+    future::Future,
+    pin::Pin,
     rc::Rc,
+    task::{Context, Poll, Waker},
 };
 
 use async_trait::async_trait;
@@ -20,7 +23,7 @@ use nnrp_runtime::{
 };
 use serde::Deserialize;
 use wasm_bindgen::{prelude::*, JsCast};
-use wasm_bindgen_futures::JsFuture;
+use wasm_bindgen_futures::{future_to_promise, JsFuture};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -69,7 +72,11 @@ struct HostWebSocketCarrier {
     close: Function,
     limits: RuntimeFrameLimits,
     pending_packets: RefCell<VecDeque<Vec<u8>>>,
-    receive_gate: Mutex<()>,
+    receive_error: RefCell<Option<String>>,
+    packet_waiters: WaiterRegistry,
+    event_waiters: WaiterRegistry,
+    event_generation: Cell<u64>,
+    external_ingress: Cell<bool>,
     closed: Cell<bool>,
 }
 
@@ -81,20 +88,47 @@ impl HostWebSocketCarrier {
             close,
             limits,
             pending_packets: RefCell::new(VecDeque::new()),
-            receive_gate: Mutex::new(()),
+            receive_error: RefCell::new(None),
+            packet_waiters: WaiterRegistry::new(),
+            event_waiters: WaiterRegistry::new(),
+            event_generation: Cell::new(0),
+            external_ingress: Cell::new(false),
             closed: Cell::new(false),
         }
     }
 
+    fn enable_external_ingress(&self) {
+        self.external_ingress.set(true);
+    }
+
+    fn ingest_receive_value(&self, value: JsValue) -> Result<(), RuntimeError> {
+        self.ensure_open()?;
+        self.enqueue_receive_value(value)?;
+        self.packet_waiters.wake_all();
+        self.notify_event_waiters();
+        Ok(())
+    }
+
+    fn fail_receive(&self, detail: String) {
+        self.receive_error.borrow_mut().replace(detail);
+        self.packet_waiters.wake_all();
+        self.notify_event_waiters();
+    }
+
     fn ensure_open(&self) -> Result<(), RuntimeError> {
+        if let Some(detail) = self.receive_error.borrow().as_ref() {
+            return Err(RuntimeError::TransportClosed {
+                transport: RuntimeTransportKind::WebSocket,
+                detail: detail.clone(),
+            });
+        }
         if self.closed.get() {
-            Err(RuntimeError::TransportClosed {
+            return Err(RuntimeError::TransportClosed {
                 transport: RuntimeTransportKind::WebSocket,
                 detail: "browser WebSocket carrier is already closed".to_owned(),
-            })
-        } else {
-            Ok(())
+            });
         }
+        Ok(())
     }
 
     fn enqueue_receive_value(&self, value: JsValue) -> Result<(), RuntimeError> {
@@ -129,15 +163,50 @@ impl HostWebSocketCarrier {
             .transpose()
     }
 
-    async fn receive_packets(&self) -> Result<(), RuntimeError> {
-        let _receive_guard = self.receive_gate.lock().await;
-        self.ensure_open()?;
+    fn poll_ingress(&self) -> Option<Result<(), RuntimeError>> {
         if !self.pending_packets.borrow().is_empty() {
-            return Ok(());
+            return Some(Ok(()));
         }
+        if let Some(detail) = self.receive_error.borrow().as_ref() {
+            return Some(Err(RuntimeError::TransportClosed {
+                transport: RuntimeTransportKind::WebSocket,
+                detail: detail.clone(),
+            }));
+        }
+        self.closed.get().then(|| self.ensure_open())
+    }
+
+    fn event_generation(&self) -> u64 {
+        self.event_generation.get()
+    }
+
+    fn poll_event_notification(
+        &self,
+        observed_generation: u64,
+    ) -> Option<Result<(), RuntimeError>> {
+        if let Some(result) = self.poll_ingress() {
+            return Some(result);
+        }
+        (self.event_generation.get() != observed_generation).then_some(Ok(()))
+    }
+
+    fn notify_event_waiters(&self) {
+        self.event_generation
+            .set(self.event_generation.get().wrapping_add(1));
+        self.event_waiters.wake_all();
+    }
+
+    async fn wait_for_packet(&self) -> Result<(), RuntimeError> {
+        PacketWaiter::new(self).await
+    }
+
+    async fn wait_for_event(&self, observed_generation: u64) -> Result<(), RuntimeError> {
+        EventWaiter::new(self, observed_generation).await
+    }
+
+    async fn receive_for_handshake(&self) -> Result<(), RuntimeError> {
         let value = await_callback(self.receive.call0(&JsValue::NULL)).await?;
-        self.ensure_open()?;
-        self.enqueue_receive_value(value)
+        self.ingest_receive_value(value)
     }
 
     async fn write_packet(&self, packet: &RuntimePacket) -> Result<(), RuntimeError> {
@@ -153,8 +222,142 @@ impl HostWebSocketCarrier {
         if self.closed.replace(true) {
             return Ok(());
         }
+        self.packet_waiters.wake_all();
+        self.notify_event_waiters();
         await_callback(self.close.call0(&JsValue::NULL)).await?;
         Ok(())
+    }
+}
+
+struct WaiterRegistry {
+    waiters: RefCell<BTreeMap<u64, Waker>>,
+    next_waiter_id: Cell<u64>,
+}
+
+impl WaiterRegistry {
+    fn new() -> Self {
+        Self {
+            waiters: RefCell::new(BTreeMap::new()),
+            next_waiter_id: Cell::new(0),
+        }
+    }
+
+    fn register(&self, waiter_id: &mut Option<u64>, waker: &Waker) {
+        let mut waiters = self.waiters.borrow_mut();
+        if let Some(waiter_id) = waiter_id {
+            waiters.insert(*waiter_id, waker.clone());
+            return;
+        }
+        let mut candidate = self.next_waiter_id.get();
+        while waiters.contains_key(&candidate) {
+            candidate = candidate.wrapping_add(1);
+        }
+        self.next_waiter_id.set(candidate.wrapping_add(1));
+        waiters.insert(candidate, waker.clone());
+        waiter_id.replace(candidate);
+    }
+
+    fn remove(&self, waiter_id: Option<u64>) {
+        if let Some(waiter_id) = waiter_id {
+            self.waiters.borrow_mut().remove(&waiter_id);
+        }
+    }
+
+    fn wake_all(&self) {
+        let waiters = std::mem::take(&mut *self.waiters.borrow_mut());
+        for (_, waker) in waiters {
+            waker.wake();
+        }
+    }
+}
+
+struct PacketWaiter<'a> {
+    carrier: &'a HostWebSocketCarrier,
+    waiter_id: Option<u64>,
+}
+
+impl<'a> PacketWaiter<'a> {
+    fn new(carrier: &'a HostWebSocketCarrier) -> Self {
+        Self {
+            carrier,
+            waiter_id: None,
+        }
+    }
+}
+
+impl Future for PacketWaiter<'_> {
+    type Output = Result<(), RuntimeError>;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        if let Some(result) = self.carrier.poll_ingress() {
+            self.carrier.packet_waiters.remove(self.waiter_id.take());
+            return Poll::Ready(result);
+        }
+        let this = self.as_mut().get_mut();
+        this.carrier
+            .packet_waiters
+            .register(&mut this.waiter_id, context.waker());
+        if let Some(result) = this.carrier.poll_ingress() {
+            this.carrier.packet_waiters.remove(this.waiter_id.take());
+            Poll::Ready(result)
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+impl Drop for PacketWaiter<'_> {
+    fn drop(&mut self) {
+        self.carrier.packet_waiters.remove(self.waiter_id.take());
+    }
+}
+
+struct EventWaiter<'a> {
+    carrier: &'a HostWebSocketCarrier,
+    observed_generation: u64,
+    waiter_id: Option<u64>,
+}
+
+impl<'a> EventWaiter<'a> {
+    fn new(carrier: &'a HostWebSocketCarrier, observed_generation: u64) -> Self {
+        Self {
+            carrier,
+            observed_generation,
+            waiter_id: None,
+        }
+    }
+}
+
+impl Future for EventWaiter<'_> {
+    type Output = Result<(), RuntimeError>;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        if let Some(result) = self
+            .carrier
+            .poll_event_notification(self.observed_generation)
+        {
+            self.carrier.event_waiters.remove(self.waiter_id.take());
+            return Poll::Ready(result);
+        }
+        let this = self.as_mut().get_mut();
+        this.carrier
+            .event_waiters
+            .register(&mut this.waiter_id, context.waker());
+        if let Some(result) = this
+            .carrier
+            .poll_event_notification(this.observed_generation)
+        {
+            this.carrier.event_waiters.remove(this.waiter_id.take());
+            Poll::Ready(result)
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+impl Drop for EventWaiter<'_> {
+    fn drop(&mut self) {
+        self.carrier.event_waiters.remove(self.waiter_id.take());
     }
 }
 
@@ -182,7 +385,11 @@ impl FramedTransport for HostWebSocketTransport {
         if let Some(packet) = self.try_read_packet()? {
             return Ok(packet);
         }
-        self.carrier.receive_packets().await?;
+        if self.carrier.external_ingress.get() {
+            self.carrier.wait_for_packet().await?;
+        } else {
+            self.carrier.receive_for_handshake().await?;
+        }
         self.try_read_packet()?.ok_or(RuntimeError::Internal(
             "browser WebSocket receive queue was empty after a successful callback",
         ))
@@ -293,6 +500,10 @@ impl BrowserClientEventPacket {
 
 #[wasm_bindgen(js_name = BrowserClientRole)]
 pub struct BrowserClientRole {
+    state: Rc<BrowserClientRoleState>,
+}
+
+struct BrowserClientRoleState {
     session_id: u32,
     session: Mutex<Option<NnrpClientSession>>,
     carrier: Rc<HostWebSocketCarrier>,
@@ -304,14 +515,129 @@ pub struct BrowserClientRole {
 impl BrowserClientRole {
     #[wasm_bindgen(getter, js_name = sessionId)]
     pub fn session_id(&self) -> Result<u32, JsValue> {
-        self.carrier
+        self.state
+            .carrier
             .ensure_open()
             .map_err(js_runtime_error)
-            .map(|()| self.session_id)
+            .map(|()| self.state.session_id)
     }
 
     #[wasm_bindgen(js_name = submitNoWait)]
+    pub fn submit_no_wait_promise(&self, frame_id: u32, payload: &[u8]) -> Promise {
+        let state = Rc::clone(&self.state);
+        let payload = payload.to_vec();
+        future_to_promise(async move {
+            state
+                .submit_no_wait(frame_id, &payload)
+                .await
+                .map(|frame_id| JsValue::from_f64(frame_id.into()))
+        })
+    }
+
+    #[wasm_bindgen(js_name = sendRuntimeFrame)]
+    pub fn send_runtime_frame_promise(
+        &self,
+        message_type: u8,
+        frame_id: u32,
+        payload: &[u8],
+    ) -> Promise {
+        let state = Rc::clone(&self.state);
+        let payload = payload.to_vec();
+        future_to_promise(async move {
+            state
+                .send_runtime_frame(message_type, frame_id, &payload)
+                .await
+                .map(|()| JsValue::UNDEFINED)
+        })
+    }
+
+    #[wasm_bindgen(js_name = patchSession)]
+    pub fn patch_session_promise(&self, metadata: &[u8]) -> Promise {
+        let state = Rc::clone(&self.state);
+        let metadata = metadata.to_vec();
+        future_to_promise(async move {
+            state
+                .patch_session(&metadata)
+                .await
+                .map(|bytes| JsValue::from(bytes))
+        })
+    }
+
+    #[wasm_bindgen(js_name = awaitEvent)]
+    pub fn await_event_promise(&self) -> Promise {
+        let state = Rc::clone(&self.state);
+        future_to_promise(async move { state.await_event().await.map(JsValue::from) })
+    }
+
+    #[wasm_bindgen(js_name = awaitEventBatch)]
+    pub fn await_event_batch_promise(&self, max_events: u32) -> Promise {
+        if max_events == 0 {
+            return Promise::reject(&js_error("maxEvents must be greater than zero"));
+        }
+        let state = Rc::clone(&self.state);
+        future_to_promise(
+            async move { state.await_event_batch(max_events).await.map(JsValue::from) },
+        )
+    }
+
+    #[wasm_bindgen(js_name = ingestPackets)]
+    pub fn ingest_packets(&self, packets: JsValue) -> Result<(), JsValue> {
+        self.state
+            .carrier
+            .ingest_receive_value(packets)
+            .map_err(js_runtime_error)
+    }
+
+    #[wasm_bindgen(js_name = failReceive)]
+    pub fn fail_receive(&self, detail: String) {
+        self.state.carrier.fail_receive(detail);
+    }
+
+    #[wasm_bindgen(js_name = close)]
+    pub fn close_promise(&self) -> Promise {
+        let state = Rc::clone(&self.state);
+        future_to_promise(async move { state.close().await.map(|()| JsValue::UNDEFINED) })
+    }
+}
+
+impl BrowserClientRole {
     pub async fn submit_no_wait(&self, frame_id: u32, payload: &[u8]) -> Result<u32, JsValue> {
+        self.state.submit_no_wait(frame_id, payload).await
+    }
+
+    pub async fn send_runtime_frame(
+        &self,
+        message_type: u8,
+        frame_id: u32,
+        payload: &[u8],
+    ) -> Result<(), JsValue> {
+        self.state
+            .send_runtime_frame(message_type, frame_id, payload)
+            .await
+    }
+
+    pub async fn patch_session(&self, metadata: &[u8]) -> Result<Uint8Array, JsValue> {
+        self.state.patch_session(metadata).await
+    }
+
+    pub async fn await_event(&self) -> Result<BrowserClientEventPacket, JsValue> {
+        self.state.await_event().await
+    }
+
+    pub async fn await_event_batch(
+        &self,
+        max_events: u32,
+    ) -> Result<BrowserClientEventBatch, JsValue> {
+        self.state.await_event_batch(max_events).await
+    }
+
+    pub async fn close(&self) -> Result<(), JsValue> {
+        self.state.close().await
+    }
+}
+
+impl BrowserClientRoleState {
+    async fn submit_no_wait(&self, frame_id: u32, payload: &[u8]) -> Result<u32, JsValue> {
         if payload.len() < FRAME_SUBMIT_METADATA_LEN {
             return Err(js_error("FRAME_SUBMIT payload is truncated"));
         }
@@ -331,8 +657,7 @@ impl BrowserClientRole {
             .map_err(js_runtime_error)
     }
 
-    #[wasm_bindgen(js_name = sendRuntimeFrame)]
-    pub async fn send_runtime_frame(
+    async fn send_runtime_frame(
         &self,
         message_type: u8,
         frame_id: u32,
@@ -349,8 +674,7 @@ impl BrowserClientRole {
             .map_err(js_runtime_error)
     }
 
-    #[wasm_bindgen(js_name = patchSession)]
-    pub async fn patch_session(&self, metadata: &[u8]) -> Result<Uint8Array, JsValue> {
+    async fn patch_session(&self, metadata: &[u8]) -> Result<Uint8Array, JsValue> {
         if metadata.len() != SESSION_PATCH_METADATA_LEN {
             return Err(js_error(&format!(
                 "SESSION_PATCH metadata must be exactly {SESSION_PATCH_METADATA_LEN} bytes"
@@ -371,12 +695,12 @@ impl BrowserClientRole {
             .patch_session(patch)
             .await
             .map_err(js_runtime_error)?;
+        self.carrier.notify_event_waiters();
         let bytes = ack.to_bytes().map_err(js_nnrp_error)?;
         Ok(Uint8Array::from(bytes.as_slice()))
     }
 
-    #[wasm_bindgen(js_name = awaitEvent)]
-    pub async fn await_event(&self) -> Result<BrowserClientEventPacket, JsValue> {
+    async fn await_event(&self) -> Result<BrowserClientEventPacket, JsValue> {
         let mut events = self.receive_event_packets(1).await?;
         let (_, packet) = events
             .pop()
@@ -384,28 +708,12 @@ impl BrowserClientRole {
         Ok(packet.into())
     }
 
-    #[wasm_bindgen(js_name = awaitEventBatch)]
-    pub async fn await_event_batch(
-        &self,
-        max_events: u32,
-    ) -> Result<BrowserClientEventBatch, JsValue> {
+    async fn await_event_batch(&self, max_events: u32) -> Result<BrowserClientEventBatch, JsValue> {
         if max_events == 0 {
             return Err(js_error("maxEvents must be greater than zero"));
         }
         let events = self.receive_event_packets(max_events).await?;
         BrowserClientEventBatch::from_events(events).map_err(js_runtime_error)
-    }
-
-    pub async fn close(&self) -> Result<(), JsValue> {
-        if let Some(abort) = self.receive_abort.borrow_mut().take() {
-            abort.abort();
-        }
-        let _receive_guard = self.receive_gate.lock().await;
-        let mut session_slot = self.session.lock().await;
-        if let Some(mut session) = session_slot.take() {
-            session.close_in_place().await.map_err(js_runtime_error)?;
-        }
-        Ok(())
     }
 
     async fn receive_event_packets(
@@ -428,21 +736,40 @@ impl BrowserClientRole {
         max_events: usize,
     ) -> Result<Vec<(nnrp_runtime::NnrpClientEvent, RuntimePacket)>, JsValue> {
         loop {
-            let mut session_slot = self.session.lock().await;
-            let session = session_slot.as_mut().ok_or_else(closed_role_error)?;
-            let buffered = session
-                .poll_event_packet_batch(max_events)
-                .map_err(js_runtime_error)?;
-            drop(session_slot);
+            let observed_generation = self.carrier.event_generation();
+            let buffered = self.poll_session_event_packets(max_events).await?;
             if !buffered.is_empty() {
                 return Ok(buffered);
             }
-
             self.carrier
-                .receive_packets()
+                .wait_for_event(observed_generation)
                 .await
                 .map_err(js_runtime_error)?;
         }
+    }
+
+    async fn poll_session_event_packets(
+        &self,
+        max_events: usize,
+    ) -> Result<Vec<(nnrp_runtime::NnrpClientEvent, RuntimePacket)>, JsValue> {
+        let mut session_slot = self.session.lock().await;
+        session_slot
+            .as_mut()
+            .ok_or_else(closed_role_error)?
+            .poll_event_packet_batch(max_events)
+            .map_err(js_runtime_error)
+    }
+
+    async fn close(&self) -> Result<(), JsValue> {
+        if let Some(abort) = self.receive_abort.borrow_mut().take() {
+            abort.abort();
+        }
+        let _receive_guard = self.receive_gate.lock().await;
+        let mut session_slot = self.session.lock().await;
+        if let Some(mut session) = session_slot.take() {
+            session.close_in_place().await.map_err(js_runtime_error)?;
+        }
+        Ok(())
     }
 }
 
@@ -460,13 +787,16 @@ pub async fn open_browser_client_role(
     let transport = HostWebSocketTransport::new(Rc::clone(&carrier));
     let client = NnrpClient::from_transport(transport, config).map_err(js_runtime_error)?;
     let session = client.open_session().await.map_err(js_runtime_error)?;
+    carrier.enable_external_ingress();
     let session_id = session.session_id();
     Ok(BrowserClientRole {
-        session_id,
-        session: Mutex::new(Some(session)),
-        carrier,
-        receive_gate: Mutex::new(()),
-        receive_abort: RefCell::new(None),
+        state: Rc::new(BrowserClientRoleState {
+            session_id,
+            session: Mutex::new(Some(session)),
+            carrier,
+            receive_gate: Mutex::new(()),
+            receive_abort: RefCell::new(None),
+        }),
     })
 }
 

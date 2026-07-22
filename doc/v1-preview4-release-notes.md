@@ -2,6 +2,19 @@
 
 Preview4 moves the Rust workspace beyond token-stream transport substitution and into runtime orchestration features that help SDKs model cancellation, priority, progress, partial results, cache references, route hints, trace context, result drop reasons, IPC, and WebSocket endpoints directly.
 
+## 1.0.0-preview.4.14
+
+The browser client role now keeps post-handshake carrier ingress outside exported Rust futures. The
+JavaScript host owns one continuous binary WebSocket receive pump and feeds complete packet batches
+through `ingestPackets`, while Rust retains packet validation, session state, control dispatch, and
+event projection. A pending `awaitEvent` call therefore no longer prevents a concurrent submit,
+control frame, session patch, or close from entering the same generated WASM instance.
+
+Carrier receive failures enter Rust through `failReceive` and wake pending event polls with the
+original transport failure. Packet, failure, and close checks are repeated after waker registration
+so ingress cannot be lost in the registration race. The published browser declaration and packaging
+validation now require both external-ingress methods.
+
 ## 1.0.0-preview.4.13
 
 The public capability catalog now follows the frozen runtime-control profile exactly: the single
