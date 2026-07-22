@@ -381,3 +381,16 @@ export function decodeRuntimeObjectMetadataJson(
   messageType: number,
   metadata: Uint8Array,
 ): string;
+
+export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
+export type SyncInitInput = BufferSource | WebAssembly.Module;
+
+export interface InitOutput {
+  readonly memory: WebAssembly.Memory;
+}
+
+export function initSync(module: { module: SyncInitInput } | SyncInitInput): InitOutput;
+
+export default function init(
+  moduleOrPath?: { module_or_path: InitInput | Promise<InitInput> } | InitInput | Promise<InitInput>,
+): Promise<InitOutput>;

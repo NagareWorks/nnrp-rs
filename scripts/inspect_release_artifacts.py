@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import re
 from pathlib import Path
 
 NATIVE_TRANSPORTS = {
@@ -200,6 +201,30 @@ def inspect_wasm(wasm_dir: Path) -> None:
             "provider",
             manifest_path,
         )
+        wasm_path = manifest_path.parent / manifest.get("wasm", "")
+        glue_path = manifest_path.parent / manifest.get("glue", "")
+        types_path = manifest_path.parent / manifest.get("types", "")
+        for artifact_path, label in (
+            (wasm_path, "wasm"),
+            (glue_path, "glue"),
+            (types_path, "types"),
+        ):
+            if not artifact_path.is_file():
+                raise SystemExit(f"{manifest_path}: missing {label} artifact {artifact_path.name!r}")
+
+        wasm = wasm_path.read_bytes()
+        if not wasm.startswith(b"\0asm\x01\0\0\0"):
+            raise SystemExit(f"{wasm_path}: not a WebAssembly 1 binary")
+        glue = glue_path.read_text()
+        declarations = types_path.read_text()
+        if wasm_path.name not in glue:
+            raise SystemExit(f"{glue_path}: does not load {wasm_path.name}")
+        for export_name in BROWSER_WASM_SCOPE["exports"]:
+            pattern = rf"export\s+function\s+{re.escape(export_name)}\s*\("
+            if re.search(pattern, glue) is None:
+                raise SystemExit(f"{glue_path}: missing callable export {export_name}")
+            if re.search(pattern, declarations) is None:
+                raise SystemExit(f"{types_path}: missing declaration for {export_name}")
 
 
 def main() -> None:

@@ -74,9 +74,13 @@
 - [x] Add TypeScript-visible runtime control structures.
 - [x] Add TypeScript-visible runtime object structures.
 - [x] Encode every runtime control/object `u64` as a canonical decimal JSON string and reject lossy JSON numbers.
-- [x] Add WASM event polling batch calls.
+- [ ] Add browser-role WASM event polling batch calls backed by `nnrp-runtime` state.
 - [x] Add WASM helpers for browser WebSocket binary frame mapping.
-- [x] Keep browser APIs aligned with native role package semantics.
+- [ ] Keep browser APIs aligned with native role package semantics.
+  - [ ] Open a real client session over the host WebSocket carrier.
+  - [ ] Submit control, object, cache, partial, and terminal traffic through the Rust role runtime.
+  - [ ] Poll normalized events without caller-injected runtime primitives.
+  - [ ] Close the session and carrier exactly once.
 - [x] Keep TCP, QUIC, and IPC transport implementations out of browser WASM packages.
 - [x] Keep browser WASM output focused on Rust-owned framing, control, runtime-object, and WebSocket substrate helpers.
 - [x] Add wasm-bindgen tests for encode/decode and event batching.
@@ -92,6 +96,7 @@
   - [x] Runtime control frame codecs.
   - [x] Runtime object reference codecs.
   - [x] Browser WebSocket substrate helpers.
+  - [x] Browser-loadable `wasm-bindgen` ESM glue and processed WASM binary.
 - [x] Write manifest fields for transport name, protocol version, ABI version, and enabled features.
 - [x] Write provider metadata required for deterministic downstream selection.
   - [x] Native TCP, QUIC, IPC, and WebSocket provider identities and platform limitations.
@@ -100,3 +105,4 @@
 - [x] Export structured WASM probe metrics and candidate diagnostics without weighted scores.
 - [x] Reject release artifacts that collapse all transport behavior into one hidden package.
 - [x] Reject transport artifacts whose exported ABI cannot establish and use their declared transport.
+- [x] Reject browser artifacts whose ESM glue or declarations omit a manifest-declared export.
