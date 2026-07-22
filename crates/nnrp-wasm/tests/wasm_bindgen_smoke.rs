@@ -4,10 +4,11 @@ use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
 use js_sys::{Array, Function, Promise, Uint8Array};
 use nnrp_core::{
-    BudgetMetadata, CommonHeader, FrameSubmitMetadata, InputProfile, MessageType,
-    PayloadKindBitmap, ProgressMetadata, ResultClass, ResultPushMetadata, SessionCloseAckMetadata,
-    SessionCloseMetadata, SessionCloseStatus, SessionOpenAckMetadata, SessionOpenMetadata,
-    SessionStatus, SubmitMode, TileIndexMode, PROGRESS_METADATA_LEN, RESULT_PUSH_METADATA_LEN,
+    BudgetMetadata, CommonHeader, ControlRequestMetadata, FrameSubmitMetadata, InputProfile,
+    MessageType, PayloadKindBitmap, ProgressMetadata, ResultClass, ResultPushMetadata, RuntimeRole,
+    SessionCloseAckMetadata, SessionCloseMetadata, SessionCloseStatus, SessionOpenAckMetadata,
+    SessionOpenMetadata, SessionStatus, SubmitMode, TileIndexMode,
+    CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED, PROGRESS_METADATA_LEN, RESULT_PUSH_METADATA_LEN,
     SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE, SESSION_OPEN_ACK_METADATA_LEN,
     STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
 };
@@ -143,7 +144,7 @@ async fn wasm_bindgen_browser_role_runs_real_session_submit_and_close() {
         "leaseTtlHintMs": 30_000,
         "maxPacketBytes": 64 * 1024 * 1024,
     });
-    let mut role = open_browser_client_role(
+    let role = open_browser_client_role(
         send.as_ref().unchecked_ref::<Function>().clone(),
         receive.as_ref().unchecked_ref::<Function>().clone(),
         close.as_ref().unchecked_ref::<Function>().clone(),
@@ -212,6 +213,133 @@ async fn wasm_bindgen_browser_role_runs_real_session_submit_and_close() {
         .await
         .expect("browser role close should be idempotent");
     assert_eq!(*close_count.borrow(), 1);
+}
+
+#[wasm_bindgen_test(async)]
+async fn browser_role_sends_cancel_while_event_receive_is_pending() {
+    let responses = Rc::new(RefCell::new(VecDeque::<Vec<u8>>::new()));
+    let pending_receive = Rc::new(RefCell::new(None::<Function>));
+    let cancel_observed = Rc::new(RefCell::new(false));
+
+    let send_responses = Rc::clone(&responses);
+    let send_pending_receive = Rc::clone(&pending_receive);
+    let send_cancel_observed = Rc::clone(&cancel_observed);
+    let send = Closure::wrap(Box::new(move |packet: Uint8Array| -> Promise {
+        let packet = packet.to_vec();
+        let (header, metadata, _) = CommonHeader::parse_packet(&packet)
+            .expect("concurrent browser carrier should receive a valid packet");
+        match header.message_type {
+            MessageType::SessionOpen | MessageType::SessionClose => {
+                for response in browser_role_responses(&packet) {
+                    send_responses.borrow_mut().push_back(response);
+                }
+            }
+            MessageType::FrameSubmit => {
+                FrameSubmitMetadata::parse(metadata).expect("frame submit should parse");
+            }
+            MessageType::Cancel => {
+                let cancel = ControlRequestMetadata::parse(metadata)
+                    .expect("concurrent cancel should preserve frozen metadata");
+                assert_eq!(cancel.operation_id, 42);
+                assert_eq!(header.frame_id, 9);
+                *send_cancel_observed.borrow_mut() = true;
+
+                let progress = ProgressMetadata {
+                    operation_id: 42,
+                    progress_sequence: 1,
+                    stage_code: 7,
+                    percent_x100: 5_000,
+                    object_id: 0,
+                    body_bytes: 0,
+                };
+                let event = response_packet(
+                    MessageType::Progress,
+                    header.session_id,
+                    header.frame_id,
+                    progress
+                        .to_bytes()
+                        .expect("progress should encode")
+                        .to_vec(),
+                    Vec::new(),
+                    PROGRESS_METADATA_LEN,
+                );
+                send_pending_receive
+                    .borrow_mut()
+                    .take()
+                    .expect("event receive should already be pending")
+                    .call1(&JsValue::NULL, Uint8Array::from(event.as_slice()).as_ref())
+                    .expect("pending event receive should resolve");
+            }
+            message_type => panic!("unexpected concurrent browser role packet: {message_type:?}"),
+        }
+        Promise::resolve(&JsValue::UNDEFINED)
+    }) as Box<dyn FnMut(Uint8Array) -> Promise>);
+
+    let receive_responses = Rc::clone(&responses);
+    let receive_pending = Rc::clone(&pending_receive);
+    let receive = Closure::wrap(Box::new(move || -> Promise {
+        if let Some(packet) = receive_responses.borrow_mut().pop_front() {
+            let packet: JsValue = Uint8Array::from(packet.as_slice()).into();
+            return Promise::resolve(&packet);
+        }
+        Promise::new(&mut |resolve, _reject| {
+            *receive_pending.borrow_mut() = Some(resolve);
+        })
+    }) as Box<dyn FnMut() -> Promise>);
+
+    let close = Closure::wrap(
+        Box::new(move || -> Promise { Promise::resolve(&JsValue::UNDEFINED) })
+            as Box<dyn FnMut() -> Promise>,
+    );
+    let config = serde_json::json!({
+        "requestedSessionId": 7,
+        "profileId": STANDARD_PROFILE_TOKEN,
+        "schemaId": TOKEN_DELTA_SCHEMA_ID,
+        "schemaVersion": TOKEN_DELTA_SCHEMA_VERSION,
+        "priorityClass": 1,
+        "defaultDeadlineMs": 500,
+        "maxInFlightOperations": 4,
+        "leaseTtlHintMs": 30_000,
+        "maxPacketBytes": 64 * 1024 * 1024,
+    });
+    let role = open_browser_client_role(
+        send.as_ref().unchecked_ref::<Function>().clone(),
+        receive.as_ref().unchecked_ref::<Function>().clone(),
+        close.as_ref().unchecked_ref::<Function>().clone(),
+        &config.to_string(),
+    )
+    .await
+    .expect("concurrent browser role should open a real NNRP session");
+
+    let submit = token_submit(42);
+    let mut submit_payload = Vec::from(submit.to_bytes().expect("submit metadata should encode"));
+    submit_payload.extend_from_slice(b"prompt");
+    role.submit_no_wait(9, &submit_payload)
+        .await
+        .expect("concurrent browser role should submit");
+
+    let cancel = ControlRequestMetadata {
+        operation_id: 42,
+        control_sequence: 1,
+        reason_code: 7,
+        source_role: RuntimeRole::Client as u8,
+        flags: CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED,
+        diagnostic_bytes: 0,
+    };
+    let event_future = role.await_event();
+    let cancel_bytes = cancel.to_bytes().expect("cancel metadata should encode");
+    let cancel_future = role.send_runtime_frame(MessageType::Cancel as u8, 9, &cancel_bytes);
+    let (event, cancel_result) = futures_util::future::join(event_future, cancel_future).await;
+
+    cancel_result.expect("cancel should write while receive remains pending");
+    assert!(*cancel_observed.borrow());
+    let event = event.expect("pending receive should finish after cancel is written");
+    assert_eq!(event.message_type(), MessageType::Progress as u8);
+    assert_eq!(event.frame_id(), 9);
+
+    role.close()
+        .await
+        .expect("concurrent browser role should close cleanly");
 }
 
 fn browser_role_responses(packet: &[u8]) -> Vec<Vec<u8>> {

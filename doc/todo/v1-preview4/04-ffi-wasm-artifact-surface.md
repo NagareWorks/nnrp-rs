@@ -78,7 +78,7 @@
 - [x] Add WASM helpers for browser WebSocket binary frame mapping.
 - [ ] Keep browser APIs aligned with native role package semantics.
   - [x] Open a real client session over the host WebSocket carrier.
-  - [x] Route outbound control, object, and cache traffic plus inbound partial and terminal traffic through the Rust role runtime.
+  - [x] Route outbound control, object, and cache traffic plus inbound partial and terminal traffic through the Rust role runtime without blocking control writes behind a pending event receive.
   - [ ] Poll normalized events without caller-injected runtime primitives.
   - [x] Close the session and carrier exactly once.
 - [x] Keep TCP, QUIC, and IPC transport implementations out of browser WASM packages.

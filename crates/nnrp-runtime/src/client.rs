@@ -563,14 +563,18 @@ impl NnrpClientSession {
         &mut self,
         max_events: usize,
     ) -> Result<Vec<(NnrpClientEvent, RuntimePacket)>, RuntimeError> {
-        if max_events == 0 {
-            return Err(RuntimeError::UnexpectedMessage(
-                "client event batch limit must be greater than zero",
-            ));
-        }
-
+        validate_event_batch_limit(max_events)?;
         let mut events = Vec::with_capacity(max_events);
         events.push(self.await_event_packet().await?);
+        events.extend(self.poll_event_packet_batch(max_events - 1)?);
+        Ok(events)
+    }
+
+    pub fn poll_event_packet_batch(
+        &mut self,
+        max_events: usize,
+    ) -> Result<Vec<(NnrpClientEvent, RuntimePacket)>, RuntimeError> {
+        let mut events = Vec::with_capacity(max_events);
         while events.len() < max_events {
             let Some(packet) = self.transport.try_read_packet()? else {
                 break;
@@ -1842,6 +1846,16 @@ impl NnrpClientSession {
         if packet.header.session_id != 0 && packet.header.session_id != self.session_id {
             return Err(RuntimeError::UnexpectedMessage(message));
         }
+        Ok(())
+    }
+}
+
+fn validate_event_batch_limit(max_events: usize) -> Result<(), RuntimeError> {
+    if max_events == 0 {
+        Err(RuntimeError::UnexpectedMessage(
+            "client event batch limit must be greater than zero",
+        ))
+    } else {
         Ok(())
     }
 }

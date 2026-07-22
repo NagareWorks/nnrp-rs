@@ -1,6 +1,11 @@
-use std::collections::VecDeque;
+use std::{
+    cell::{Cell, RefCell},
+    collections::VecDeque,
+    rc::Rc,
+};
 
 use async_trait::async_trait;
+use futures_util::lock::Mutex;
 use js_sys::{Array, Function, Promise, Uint32Array, Uint8Array};
 use nnrp_core::{
     CommonHeader, FrameSubmitMetadata, MessageType, SessionPriorityClass, FRAME_SUBMIT_METADATA_LEN,
@@ -54,29 +59,29 @@ impl BrowserClientRoleConfig {
     }
 }
 
-struct HostWebSocketTransport {
+struct HostWebSocketCarrier {
     send: Function,
     receive: Function,
     close: Function,
     limits: RuntimeFrameLimits,
-    pending_packets: VecDeque<Vec<u8>>,
-    closed: bool,
+    pending_packets: RefCell<VecDeque<Vec<u8>>>,
+    closed: Cell<bool>,
 }
 
-impl HostWebSocketTransport {
+impl HostWebSocketCarrier {
     fn new(send: Function, receive: Function, close: Function, limits: RuntimeFrameLimits) -> Self {
         Self {
             send,
             receive,
             close,
             limits,
-            pending_packets: VecDeque::new(),
-            closed: false,
+            pending_packets: RefCell::new(VecDeque::new()),
+            closed: Cell::new(false),
         }
     }
 
     fn ensure_open(&self) -> Result<(), RuntimeError> {
-        if self.closed {
+        if self.closed.get() {
             Err(RuntimeError::TransportClosed {
                 transport: RuntimeTransportKind::WebSocket,
                 detail: "browser WebSocket carrier is already closed".to_owned(),
@@ -86,7 +91,8 @@ impl HostWebSocketTransport {
         }
     }
 
-    fn enqueue_receive_value(&mut self, value: JsValue) -> Result<(), RuntimeError> {
+    fn enqueue_receive_value(&self, value: JsValue) -> Result<(), RuntimeError> {
+        let mut pending_packets = self.pending_packets.borrow_mut();
         if Array::is_array(&value) {
             let packets = Array::from(&value);
             if packets.length() == 0 {
@@ -95,11 +101,10 @@ impl HostWebSocketTransport {
                 ));
             }
             for packet in packets.iter() {
-                self.pending_packets
-                    .push_back(receive_packet_bytes(packet)?);
+                pending_packets.push_back(receive_packet_bytes(packet)?);
             }
         } else {
-            self.pending_packets.push_back(receive_packet_bytes(value)?);
+            pending_packets.push_back(receive_packet_bytes(value)?);
         }
         Ok(())
     }
@@ -108,6 +113,48 @@ impl HostWebSocketTransport {
         self.limits.validate_packet_len(bytes.len())?;
         let (header, metadata, body) = CommonHeader::parse_packet(&bytes)?;
         RuntimePacket::from_parts(header, metadata.to_vec(), body.to_vec()).map_err(Into::into)
+    }
+
+    fn try_read_packet(&self) -> Result<Option<RuntimePacket>, RuntimeError> {
+        self.pending_packets
+            .borrow_mut()
+            .pop_front()
+            .map(|bytes| self.decode_packet(bytes))
+            .transpose()
+    }
+
+    async fn receive_packets(&self) -> Result<(), RuntimeError> {
+        self.ensure_open()?;
+        let value = await_callback(self.receive.call0(&JsValue::NULL)).await?;
+        self.ensure_open()?;
+        self.enqueue_receive_value(value)
+    }
+
+    async fn write_packet(&self, packet: &RuntimePacket) -> Result<(), RuntimeError> {
+        self.ensure_open()?;
+        let bytes = packet.to_bytes()?;
+        self.limits.validate_packet_len(bytes.len())?;
+        let bytes = Uint8Array::from(bytes.as_slice());
+        await_callback(self.send.call1(&JsValue::NULL, bytes.as_ref())).await?;
+        Ok(())
+    }
+
+    async fn close(&self) -> Result<(), RuntimeError> {
+        if self.closed.replace(true) {
+            return Ok(());
+        }
+        await_callback(self.close.call0(&JsValue::NULL)).await?;
+        Ok(())
+    }
+}
+
+struct HostWebSocketTransport {
+    carrier: Rc<HostWebSocketCarrier>,
+}
+
+impl HostWebSocketTransport {
+    fn new(carrier: Rc<HostWebSocketCarrier>) -> Self {
+        Self { carrier }
     }
 }
 
@@ -118,40 +165,25 @@ impl FramedTransport for HostWebSocketTransport {
     }
 
     fn try_read_packet(&mut self) -> Result<Option<RuntimePacket>, RuntimeError> {
-        self.pending_packets
-            .pop_front()
-            .map(|bytes| self.decode_packet(bytes))
-            .transpose()
+        self.carrier.try_read_packet()
     }
 
     async fn read_packet(&mut self) -> Result<RuntimePacket, RuntimeError> {
-        self.ensure_open()?;
         if let Some(packet) = self.try_read_packet()? {
             return Ok(packet);
         }
-        let value = await_callback(self.receive.call0(&JsValue::NULL)).await?;
-        self.enqueue_receive_value(value)?;
+        self.carrier.receive_packets().await?;
         self.try_read_packet()?.ok_or(RuntimeError::Internal(
             "browser WebSocket receive queue was empty after a successful callback",
         ))
     }
 
     async fn write_packet(&mut self, packet: &RuntimePacket) -> Result<(), RuntimeError> {
-        self.ensure_open()?;
-        let bytes = packet.to_bytes()?;
-        self.limits.validate_packet_len(bytes.len())?;
-        let bytes = Uint8Array::from(bytes.as_slice());
-        await_callback(self.send.call1(&JsValue::NULL, bytes.as_ref())).await?;
-        Ok(())
+        self.carrier.write_packet(packet).await
     }
 
     async fn close(&mut self) -> Result<(), RuntimeError> {
-        if self.closed {
-            return Ok(());
-        }
-        self.closed = true;
-        await_callback(self.close.call0(&JsValue::NULL)).await?;
-        Ok(())
+        self.carrier.close().await
     }
 }
 
@@ -251,27 +283,34 @@ impl BrowserClientEventPacket {
 
 #[wasm_bindgen(js_name = BrowserClientRole)]
 pub struct BrowserClientRole {
-    session: Option<NnrpClientSession>,
+    session_id: u32,
+    session: Mutex<Option<NnrpClientSession>>,
+    carrier: Rc<HostWebSocketCarrier>,
+    receive_gate: Mutex<()>,
 }
 
 #[wasm_bindgen(js_class = BrowserClientRole)]
 impl BrowserClientRole {
     #[wasm_bindgen(getter, js_name = sessionId)]
     pub fn session_id(&self) -> Result<u32, JsValue> {
-        self.session
-            .as_ref()
-            .map(NnrpClientSession::session_id)
-            .ok_or_else(|| js_error("browser client role is closed"))
+        self.carrier
+            .ensure_open()
+            .map_err(js_runtime_error)
+            .map(|()| self.session_id)
     }
 
     #[wasm_bindgen(js_name = submitNoWait)]
-    pub async fn submit_no_wait(&mut self, frame_id: u32, payload: &[u8]) -> Result<u32, JsValue> {
+    pub async fn submit_no_wait(&self, frame_id: u32, payload: &[u8]) -> Result<u32, JsValue> {
         if payload.len() < FRAME_SUBMIT_METADATA_LEN {
             return Err(js_error("FRAME_SUBMIT payload is truncated"));
         }
         let metadata = FrameSubmitMetadata::parse(&payload[..FRAME_SUBMIT_METADATA_LEN])
             .map_err(js_nnrp_error)?;
-        self.session_mut()?
+        self.session
+            .lock()
+            .await
+            .as_mut()
+            .ok_or_else(closed_role_error)?
             .submit_with_frame_id(
                 frame_id,
                 metadata,
@@ -283,54 +322,84 @@ impl BrowserClientRole {
 
     #[wasm_bindgen(js_name = sendRuntimeFrame)]
     pub async fn send_runtime_frame(
-        &mut self,
+        &self,
         message_type: u8,
         frame_id: u32,
         payload: &[u8],
     ) -> Result<(), JsValue> {
         let message_type = MessageType::try_from_u8(message_type).map_err(js_nnrp_error)?;
-        self.session_mut()?
+        self.session
+            .lock()
+            .await
+            .as_mut()
+            .ok_or_else(closed_role_error)?
             .send_runtime_frame(message_type, frame_id, payload)
             .await
             .map_err(js_runtime_error)
     }
 
     #[wasm_bindgen(js_name = awaitEvent)]
-    pub async fn await_event(&mut self) -> Result<BrowserClientEventPacket, JsValue> {
-        let (_, packet) = self
-            .session_mut()?
-            .await_event_packet()
-            .await
-            .map_err(js_runtime_error)?;
+    pub async fn await_event(&self) -> Result<BrowserClientEventPacket, JsValue> {
+        let mut events = self.receive_event_packets(1).await?;
+        let (_, packet) = events
+            .pop()
+            .ok_or_else(|| js_error("browser event receive produced no packet"))?;
         Ok(packet.into())
     }
 
     #[wasm_bindgen(js_name = awaitEventBatch)]
     pub async fn await_event_batch(
-        &mut self,
+        &self,
         max_events: u32,
     ) -> Result<BrowserClientEventBatch, JsValue> {
-        let max_events = usize::try_from(max_events)
-            .map_err(|_| js_error("maxEvents is not representable on this host"))?;
-        let events = self
-            .session_mut()?
-            .await_event_packet_batch(max_events)
-            .await
-            .map_err(js_runtime_error)?;
+        if max_events == 0 {
+            return Err(js_error("maxEvents must be greater than zero"));
+        }
+        let events = self.receive_event_packets(max_events).await?;
         BrowserClientEventBatch::from_events(events).map_err(js_runtime_error)
     }
 
-    pub async fn close(&mut self) -> Result<(), JsValue> {
-        if let Some(mut session) = self.session.take() {
+    pub async fn close(&self) -> Result<(), JsValue> {
+        let _receive_guard = self.receive_gate.lock().await;
+        let mut session_slot = self.session.lock().await;
+        if let Some(mut session) = session_slot.take() {
             session.close_in_place().await.map_err(js_runtime_error)?;
         }
         Ok(())
     }
 
-    fn session_mut(&mut self) -> Result<&mut NnrpClientSession, JsValue> {
-        self.session
-            .as_mut()
-            .ok_or_else(|| js_error("browser client role is closed"))
+    async fn receive_event_packets(
+        &self,
+        max_events: u32,
+    ) -> Result<Vec<(nnrp_runtime::NnrpClientEvent, RuntimePacket)>, JsValue> {
+        let max_events = usize::try_from(max_events)
+            .map_err(|_| js_error("maxEvents is not representable on this host"))?;
+        let _receive_guard = self.receive_gate.lock().await;
+
+        let mut session_slot = self.session.lock().await;
+        let session = session_slot.as_mut().ok_or_else(closed_role_error)?;
+        let buffered = session
+            .poll_event_packet_batch(max_events)
+            .map_err(js_runtime_error)?;
+        drop(session_slot);
+        if !buffered.is_empty() {
+            return Ok(buffered);
+        }
+
+        self.carrier
+            .receive_packets()
+            .await
+            .map_err(js_runtime_error)?;
+        let mut session_slot = self.session.lock().await;
+        let session = session_slot.as_mut().ok_or_else(closed_role_error)?;
+        let events = session
+            .poll_event_packet_batch(max_events)
+            .map_err(js_runtime_error)?;
+        if events.is_empty() {
+            Err(js_error("browser event receive produced no packet"))
+        } else {
+            Ok(events)
+        }
     }
 }
 
@@ -344,12 +413,21 @@ pub async fn open_browser_client_role(
     let config: BrowserClientRoleConfig =
         serde_json::from_str(config_json).map_err(js_serde_error)?;
     let (config, limits) = config.into_runtime()?;
-    let transport = HostWebSocketTransport::new(send, receive, close, limits);
+    let carrier = Rc::new(HostWebSocketCarrier::new(send, receive, close, limits));
+    let transport = HostWebSocketTransport::new(Rc::clone(&carrier));
     let client = NnrpClient::from_transport(transport, config).map_err(js_runtime_error)?;
     let session = client.open_session().await.map_err(js_runtime_error)?;
+    let session_id = session.session_id();
     Ok(BrowserClientRole {
-        session: Some(session),
+        session_id,
+        session: Mutex::new(Some(session)),
+        carrier,
+        receive_gate: Mutex::new(()),
     })
+}
+
+fn closed_role_error() -> JsValue {
+    js_error("browser client role is closed")
 }
 
 async fn await_callback(result: Result<JsValue, JsValue>) -> Result<JsValue, RuntimeError> {
