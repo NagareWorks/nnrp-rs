@@ -28,9 +28,9 @@ wasm-provider = ["nnrp-transport-provider/wasm"]
 async-trait.workspace = true
 futures-util.workspace = true
 js-sys.workspace = true
-nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.4.13" }
-nnrp-runtime = { path = "../nnrp-runtime", version = "1.0.0-preview.4.13", default-features = false }
-nnrp-transport-provider = { path = "../nnrp-transport-provider", version = "1.0.0-preview.4.13", default-features = false }
+nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.4.14" }
+nnrp-runtime = { path = "../nnrp-runtime", version = "1.0.0-preview.4.14", default-features = false }
+nnrp-transport-provider = { path = "../nnrp-transport-provider", version = "1.0.0-preview.4.14", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 wasm-bindgen.workspace = true

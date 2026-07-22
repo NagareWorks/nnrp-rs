@@ -2,7 +2,7 @@
 
 use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
-use js_sys::{Array, Function, Promise, Uint8Array};
+use js_sys::{Array, Function, Promise, Reflect, Uint8Array};
 use nnrp_core::{
     BudgetMetadata, CommonHeader, ControlRequestMetadata, FrameSubmitMetadata, InputProfile,
     MessageType, PayloadKindBitmap, ProgressMetadata, ResultClass, ResultPushMetadata, RuntimeRole,
@@ -18,10 +18,11 @@ use nnrp_runtime::RuntimePacket;
 use nnrp_wasm::{
     decode_runtime_control_metadata_json, decode_websocket_binary_frame_batch_json,
     decode_websocket_binary_frame_json, encode_runtime_control_metadata_json,
-    encode_websocket_binary_frame_json, open_browser_client_role,
+    encode_websocket_binary_frame_json, open_browser_client_role, BrowserClientRole,
 };
 use serde_json::Value;
 use wasm_bindgen::{closure::Closure, JsCast, JsValue};
+use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::wasm_bindgen_test;
 
 #[wasm_bindgen_test]
@@ -192,9 +193,13 @@ async fn wasm_bindgen_browser_role_runs_real_session_submit_and_close() {
         preferred_compression_bitmap: 0,
         profile_patch_bytes: 0,
     };
-    let patch_ack = role
-        .patch_session(&patch.to_bytes().expect("patch metadata should encode"))
-        .await
+    let patch_bytes = patch.to_bytes().expect("patch metadata should encode");
+    let (patch_ack, ()) = futures_util::future::join(
+        role.patch_session(&patch_bytes),
+        ingest_scripted_responses(&role, &responses),
+    )
+    .await;
+    let patch_ack = patch_ack
         .expect("browser role should patch through the Rust runtime")
         .to_vec();
     let patch_ack = SessionPatchAckMetadata::parse(&patch_ack)
@@ -229,9 +234,10 @@ async fn wasm_bindgen_browser_role_runs_real_session_submit_and_close() {
     assert_eq!(event_packets[1].1.len(), RESULT_PUSH_METADATA_LEN);
     assert_eq!(event_packets[1].2, b"answer");
 
-    role.close()
-        .await
-        .expect("browser role should close the session and carrier");
+    let (close_result, ()) =
+        futures_util::future::join(role.close(), ingest_scripted_responses(&role, &responses))
+            .await;
+    close_result.expect("browser role should close the session and carrier");
     role.close()
         .await
         .expect("browser role close should be idempotent");
@@ -241,11 +247,9 @@ async fn wasm_bindgen_browser_role_runs_real_session_submit_and_close() {
 #[wasm_bindgen_test(async)]
 async fn browser_role_routes_control_and_patch_while_event_receive_is_pending() {
     let responses = Rc::new(RefCell::new(VecDeque::<Vec<u8>>::new()));
-    let pending_receive = Rc::new(RefCell::new(None::<Function>));
     let cancel_observed = Rc::new(RefCell::new(false));
 
     let send_responses = Rc::clone(&responses);
-    let send_pending_receive = Rc::clone(&pending_receive);
     let send_cancel_observed = Rc::clone(&cancel_observed);
     let send = Closure::wrap(Box::new(move |packet: Uint8Array| -> Promise {
         let packet = packet.to_vec();
@@ -286,12 +290,7 @@ async fn browser_role_routes_control_and_patch_while_event_receive_is_pending() 
                     Vec::new(),
                     PROGRESS_METADATA_LEN,
                 );
-                send_pending_receive
-                    .borrow_mut()
-                    .take()
-                    .expect("event receive should already be pending")
-                    .call1(&JsValue::NULL, Uint8Array::from(event.as_slice()).as_ref())
-                    .expect("pending event receive should resolve");
+                send_responses.borrow_mut().push_back(event);
             }
             MessageType::SessionPatch => {
                 let patch = SessionPatchMetadata::parse(metadata)
@@ -326,15 +325,7 @@ async fn browser_role_routes_control_and_patch_while_event_receive_is_pending() 
                     Vec::new(),
                     SESSION_PATCH_ACK_METADATA_LEN,
                 );
-                send_pending_receive
-                    .borrow_mut()
-                    .take()
-                    .expect("event receive should already be pending for patch ack")
-                    .call1(
-                        &JsValue::NULL,
-                        Uint8Array::from(ack_packet.as_slice()).as_ref(),
-                    )
-                    .expect("pending event receive should accept the patch ack");
+                send_responses.borrow_mut().push_back(ack_packet);
             }
             message_type => panic!("unexpected concurrent browser role packet: {message_type:?}"),
         }
@@ -342,15 +333,14 @@ async fn browser_role_routes_control_and_patch_while_event_receive_is_pending() 
     }) as Box<dyn FnMut(Uint8Array) -> Promise>);
 
     let receive_responses = Rc::clone(&responses);
-    let receive_pending = Rc::clone(&pending_receive);
     let receive = Closure::wrap(Box::new(move || -> Promise {
         if let Some(packet) = receive_responses.borrow_mut().pop_front() {
             let packet: JsValue = Uint8Array::from(packet.as_slice()).into();
             return Promise::resolve(&packet);
         }
-        Promise::new(&mut |resolve, _reject| {
-            *receive_pending.borrow_mut() = Some(resolve);
-        })
+        Promise::reject(&JsValue::from_str(
+            "post-handshake packets must use external ingress",
+        ))
     }) as Box<dyn FnMut() -> Promise>);
 
     let close = Closure::wrap(
@@ -395,7 +385,11 @@ async fn browser_role_routes_control_and_patch_while_event_receive_is_pending() 
     let event_future = role.await_event();
     let cancel_bytes = cancel.to_bytes().expect("cancel metadata should encode");
     let cancel_future = role.send_runtime_frame(MessageType::Cancel as u8, 9, &cancel_bytes);
-    let (event, cancel_result) = futures_util::future::join(event_future, cancel_future).await;
+    let ((event, cancel_result), ()) = futures_util::future::join(
+        futures_util::future::join(event_future, cancel_future),
+        ingest_scripted_responses(&role, &responses),
+    )
+    .await;
 
     cancel_result.expect("cancel should write while receive remains pending");
     assert!(*cancel_observed.borrow());
@@ -415,27 +409,101 @@ async fn browser_role_routes_control_and_patch_while_event_receive_is_pending() 
         profile_patch_bytes: 0,
     };
     let patch_bytes = patch.to_bytes().expect("concurrent patch should encode");
-    let event_future = role.await_event();
-    let patch_future = role.patch_session(&patch_bytes);
-    let (event, patch_ack) = futures_util::future::join(event_future, patch_future).await;
-    let patch_ack = patch_ack
-        .expect("patch should complete while event receive is pending")
+    let event_result = Rc::new(RefCell::new(None));
+    let event_result_callback = Rc::clone(&event_result);
+    let event_callback = Closure::wrap(Box::new(move |event: JsValue| {
+        event_result_callback.borrow_mut().replace(Ok(event));
+    }) as Box<dyn FnMut(JsValue)>);
+    let event_error_callback = Rc::clone(&event_result);
+    let event_error = Closure::wrap(Box::new(move |error: JsValue| {
+        event_error_callback.borrow_mut().replace(Err(error));
+    }) as Box<dyn FnMut(JsValue)>);
+    let _event_completion = role
+        .await_event_promise()
+        .then2(&event_callback, &event_error);
+
+    let patch_result = Rc::new(RefCell::new(None));
+    let patch_result_callback = Rc::clone(&patch_result);
+    let patch_callback = Closure::wrap(Box::new(move |ack: JsValue| {
+        patch_result_callback.borrow_mut().replace(Ok(ack));
+    }) as Box<dyn FnMut(JsValue)>);
+    let patch_error_callback = Rc::clone(&patch_result);
+    let patch_error = Closure::wrap(Box::new(move |error: JsValue| {
+        patch_error_callback.borrow_mut().replace(Err(error));
+    }) as Box<dyn FnMut(JsValue)>);
+    let _patch_completion = role
+        .patch_session_promise(&patch_bytes)
+        .then2(&patch_callback, &patch_error);
+
+    ingest_scripted_responses(&role, &responses).await;
+    for _ in 0..64 {
+        if event_result.borrow().is_some() && patch_result.borrow().is_some() {
+            break;
+        }
+        JsFuture::from(Promise::resolve(&JsValue::UNDEFINED))
+            .await
+            .expect("concurrent exported promises should advance a microtask turn");
+    }
+    let patch_ack = patch_result
+        .borrow_mut()
+        .take()
+        .expect("exported patch promise should complete while event receive is pending")
+        .expect("exported patch promise should resolve")
+        .dyn_into::<Uint8Array>()
+        .expect("exported patch promise should resolve to Uint8Array")
         .to_vec();
     let patch_ack = SessionPatchAckMetadata::parse(&patch_ack)
         .expect("concurrent patch ack should remain canonical");
     assert_eq!(patch_ack.applied_patch_mask, 0x01);
-    let event = event.expect("event receive should continue after routing the patch ack");
-    assert_eq!(event.message_type(), MessageType::Progress as u8);
-    assert_eq!(event.frame_id(), 9);
+    let event = event_result
+        .borrow_mut()
+        .take()
+        .expect("exported event promise should complete after routing the patch ack")
+        .expect("exported event promise should resolve");
+    assert_eq!(
+        Reflect::get(&event, &JsValue::from_str("messageType"))
+            .expect("exported event should expose messageType")
+            .as_f64(),
+        Some(MessageType::Progress as u8 as f64)
+    );
+    assert_eq!(
+        Reflect::get(&event, &JsValue::from_str("frameId"))
+            .expect("exported event should expose frameId")
+            .as_f64(),
+        Some(9.0)
+    );
 
     let pending_event = role.await_event();
     let close = role.close();
-    let (event_result, close_result) = futures_util::future::join(pending_event, close).await;
+    let ((event_result, close_result), ()) = futures_util::future::join(
+        futures_util::future::join(pending_event, close),
+        ingest_scripted_responses(&role, &responses),
+    )
+    .await;
     assert!(
         event_result.is_err(),
         "closing the role should cancel a pending event receive"
     );
     close_result.expect("concurrent browser role should close cleanly");
+}
+
+async fn ingest_scripted_responses(
+    role: &BrowserClientRole,
+    responses: &Rc<RefCell<VecDeque<Vec<u8>>>>,
+) {
+    JsFuture::from(Promise::resolve(&JsValue::UNDEFINED))
+        .await
+        .expect("scripted carrier turn should complete");
+    let packets = Array::new();
+    while let Some(packet) = responses.borrow_mut().pop_front() {
+        packets.push(&Uint8Array::from(packet.as_slice()));
+    }
+    assert!(
+        packets.length() > 0,
+        "exported role call should produce an external-ingress response"
+    );
+    role.ingest_packets(packets.into())
+        .expect("external ingress should accept complete NNRP packets");
 }
 
 fn browser_role_responses(packet: &[u8]) -> Vec<Vec<u8>> {
