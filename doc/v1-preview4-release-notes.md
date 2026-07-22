@@ -2,6 +2,13 @@
 
 Preview4 moves the Rust workspace beyond token-stream transport substitution and into runtime orchestration features that help SDKs model cancellation, priority, progress, partial results, cache references, route hints, trace context, result drop reasons, IPC, and WebSocket endpoints directly.
 
+## 1.0.0-preview.4.13
+
+The public capability catalog now follows the frozen runtime-control profile exactly: the single
+`control.recoverable_error` capability covers both `ERROR_RECOVERABLE` and `RETRY_AFTER`. The
+previous standalone `control.retry_after` capability token was never part of the frozen profile and
+has been removed. Frame metadata and the `send_retry_after` runtime APIs are unchanged.
+
 ## 1.0.0-preview.4.12
 
 Closing a browser client role now cancels an outstanding event receive before taking the shared carrier read gate. The

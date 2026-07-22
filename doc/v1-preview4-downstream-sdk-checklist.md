@@ -15,7 +15,7 @@ Downstream SDKs should consume Preview4 as a protocol and artifact boundary upda
 - Validate `manifest.json` before loading a native library.
 - Reject artifacts whose `transport_scope` does not match the SDK package.
 - Reject artifacts whose `transport_slots` contains transports outside the package boundary.
-- Require FFI ABI `3.0.0` and Rust artifact revision `1.0.0-preview.4.12` for cascading session-owned handle cleanup, cancellation-safe bounded event polling, canonical cache identity, reachable transport handles, packet batches, and the browser client role runtime including session patch acknowledgements and cancellation-safe close.
+- Require FFI ABI `3.0.0` and Rust artifact revision `1.0.0-preview.4.13` for the frozen capability catalog, cascading session-owned handle cleanup, cancellation-safe bounded event polling, canonical cache identity, reachable transport handles, packet batches, and the browser client role runtime including session patch acknowledgements and cancellation-safe close.
 - Bind transport connect, listen, accept, endpoint, probe, batch read/write, security-config, and close exports directly.
 - Keep native calls coarse around session, control, object, progress, result, and release hot paths.
 - Keep complete NNRP packets as the transport FFI unit; do not introduce per-socket-chunk cross-language calls.
