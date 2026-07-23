@@ -2970,6 +2970,32 @@ pub unsafe extern "C" fn nnrp_benchmark_open_session(
 
 #[cfg(any(test, feature = "benchmark-ffi"))]
 #[cfg_attr(feature = "benchmark-ffi", no_mangle)]
+/// Closes an isolated logical session opened by `nnrp_benchmark_open_session`.
+///
+/// The close cascades through benchmark operations and queued events before
+/// releasing the owning logical connection.
+pub extern "C" fn nnrp_benchmark_close_session(session: NnrpHandle) -> NnrpFfiStatus {
+    let mut store = handle_store();
+    let connection = match store.get(session, NnrpHandleKind::Session) {
+        Ok(NnrpFfiResource::Session {
+            connection,
+            #[cfg(not(test))]
+                runtime: NnrpFfiSessionRuntime::Benchmark,
+            ..
+        }) => *connection,
+        Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32),
+        Err(status) => return status,
+    };
+    let close_result = store.close_session(session);
+    debug_assert!(close_result.is_ok());
+    match store.close_connection(connection) {
+        Ok(()) => NnrpFfiStatus::ok(),
+        Err(status) => status,
+    }
+}
+
+#[cfg(any(test, feature = "benchmark-ffi"))]
+#[cfg_attr(feature = "benchmark-ffi", no_mangle)]
 /// # Safety
 ///
 /// `request.submit_payload` and `request.result_payload` must remain readable
@@ -8647,6 +8673,7 @@ mod tests {
                 ),
                 NnrpFfiStatus::invalid_argument(126)
             );
+            assert_eq!(nnrp_benchmark_close_session(session), NnrpFfiStatus::ok());
         }
     }
 
@@ -8790,7 +8817,49 @@ mod tests {
                 ),
                 NnrpFfiStatus::invalid_argument(145)
             );
+            assert_eq!(nnrp_benchmark_close_session(session), NnrpFfiStatus::ok());
         }
+    }
+
+    #[test]
+    fn benchmark_ffi_close_rejects_non_session_and_missing_connection_resources() {
+        let wrong_resource = NnrpHandle::new(NnrpHandleKind::Session, 93_300, 1);
+        {
+            let mut store = handle_store();
+            store.entries.insert(
+                (wrong_resource.kind, wrong_resource.id),
+                NnrpFfiResourceEntry {
+                    generation: wrong_resource.generation,
+                    resource: NnrpFfiResource::Buffer { bytes: Vec::new() },
+                },
+            );
+        }
+        assert_eq!(
+            nnrp_benchmark_close_session(wrong_resource),
+            NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32)
+        );
+
+        let missing_connection = NnrpHandle::new(NnrpHandleKind::Connection, 93_301, 1);
+        let orphan_session = NnrpHandle::new(NnrpHandleKind::Session, 93_302, 1);
+        {
+            let mut store = handle_store();
+            store.entries.insert(
+                (orphan_session.kind, orphan_session.id),
+                NnrpFfiResourceEntry {
+                    generation: orphan_session.generation,
+                    resource: NnrpFfiResource::Session {
+                        connection: missing_connection,
+                        profile_id: 0,
+                        schema_id: 0,
+                        schema_version: 0,
+                    },
+                },
+            );
+        }
+        assert_eq!(
+            nnrp_benchmark_close_session(orphan_session),
+            NnrpFfiStatus::invalid_handle(NnrpHandleKind::Connection as u32)
+        );
     }
 
     #[test]

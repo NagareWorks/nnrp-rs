@@ -4,9 +4,10 @@ Preview4 moves the Rust workspace beyond token-stream transport substitution and
 
 ## 1.0.0-preview.4.16
 
-The explicit `benchmark-ffi` build now opens an isolated logical benchmark session instead of routing synthetic
-coarse-boundary measurements through a production carrier. Batched submit/result measurements retain operation
-creation, terminal result projection, and operation release while amortizing the handle-store boundary once per batch.
+The explicit `benchmark-ffi` build now opens and closes an isolated logical benchmark session instead of routing
+synthetic coarse-boundary measurements through a production carrier. Close cascades through queued events, operations,
+the session, and its logical connection. Batched submit/result measurements retain operation creation, terminal result
+projection, and operation release while amortizing the handle-store boundary once per batch.
 
 CI compiles the non-test `benchmark-ffi` feature surface and executes its session and batch lifecycle directly. This
 closes the gap where unit tests could pass under `cfg(test)` even though the release cdylib could not run the documented

@@ -67,6 +67,7 @@ typedef struct NnrpBenchmarkClientRuntimeObjectLoopRequest {
 NnrpFfiStatus nnrp_benchmark_open_session(
     NnrpBenchmarkSessionOpenRequest request,
     NnrpHandle *out_session);
+NnrpFfiStatus nnrp_benchmark_close_session(NnrpHandle session);
 NnrpFfiStatus nnrp_benchmark_client_submit_result_compact(
     NnrpBenchmarkClientSubmitResultRequest request,
     NnrpBenchmarkCompactResult *out_result);

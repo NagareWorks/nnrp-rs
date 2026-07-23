@@ -63,6 +63,7 @@ RETIRED_ABI_EXPORTS = [
 ]
 
 BENCHMARK_ONLY_EXPORTS = [
+    "nnrp_benchmark_close_session",
     "nnrp_benchmark_open_session",
     "nnrp_benchmark_client_submit_result_compact",
     "nnrp_benchmark_client_submit_result_compact_batch",

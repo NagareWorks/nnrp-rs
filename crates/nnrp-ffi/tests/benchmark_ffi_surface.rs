@@ -1,9 +1,10 @@
 #![cfg(feature = "benchmark-ffi")]
 
 use nnrp_ffi::{
-    nnrp_benchmark_client_submit_result_compact_batch, nnrp_benchmark_open_session,
-    NnrpBenchmarkSessionOpenRequest, NnrpBufferView, NnrpClientSubmitResultBatchRequest,
-    NnrpCompactResult, NnrpFfiStatus, NnrpFfiStatusCode, NnrpHandle, NnrpHandleKind,
+    nnrp_benchmark_client_submit_result_compact_batch, nnrp_benchmark_close_session,
+    nnrp_benchmark_open_session, NnrpBenchmarkSessionOpenRequest, NnrpBufferView,
+    NnrpClientSubmitResultBatchRequest, NnrpCompactResult, NnrpFfiStatus, NnrpFfiStatusCode,
+    NnrpHandle, NnrpHandleKind,
 };
 
 #[test]
@@ -57,5 +58,10 @@ fn explicit_benchmark_feature_opens_session_and_runs_coarse_batch() {
         assert_eq!(result.operation_id, 14_095);
         assert_eq!(result.frame_id, 24_095);
         assert_eq!(result.payload.len, result_payload.len());
+        assert_eq!(nnrp_benchmark_close_session(session), NnrpFfiStatus::ok());
+        assert_eq!(
+            nnrp_benchmark_close_session(session),
+            NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32)
+        );
     }
 }
