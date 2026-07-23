@@ -503,6 +503,8 @@ enum NnrpFfiConnectionRuntime {
         carrier: Option<BoxedFramedTransport>,
     },
     Server(Arc<NnrpServer>),
+    #[cfg(feature = "benchmark-ffi")]
+    Benchmark,
 }
 
 #[cfg(not(test))]
@@ -510,6 +512,8 @@ enum NnrpFfiConnectionRuntime {
 enum NnrpFfiSessionRuntime {
     Client(Arc<AsyncMutex<NnrpClientSession>>),
     Server(Arc<AsyncMutex<NnrpServerSession>>),
+    #[cfg(feature = "benchmark-ffi")]
+    Benchmark,
 }
 
 #[cfg(not(test))]
@@ -2215,6 +2219,15 @@ pub struct NnrpClientSubmitResultBatchRequest {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(test, feature = "benchmark-ffi"))]
+pub struct NnrpBenchmarkSessionOpenRequest {
+    pub connection_id: u64,
+    pub requested_session_id: u32,
+    pub generation: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NnrpClientRuntimeObjectLoopRequest {
     pub session: NnrpHandle,
     pub operation_id: u64,
@@ -2890,6 +2903,99 @@ unsafe fn benchmark_client_submit_result(
 
 #[cfg(any(test, feature = "benchmark-ffi"))]
 #[cfg_attr(feature = "benchmark-ffi", no_mangle)]
+/// Opens an isolated logical session owned by the explicit benchmark ABI.
+///
+/// # Safety
+///
+/// `out_session` must point to one caller-owned writable `NnrpHandle`.
+pub unsafe extern "C" fn nnrp_benchmark_open_session(
+    request: NnrpBenchmarkSessionOpenRequest,
+    out_session: *mut NnrpHandle,
+) -> NnrpFfiStatus {
+    if out_session.is_null()
+        || request.connection_id == 0
+        || request.requested_session_id == 0
+        || request.generation == 0
+    {
+        return NnrpFfiStatus::invalid_argument(151);
+    }
+
+    let connection = NnrpHandle::new(
+        NnrpHandleKind::Connection,
+        request.connection_id,
+        request.generation,
+    );
+    let session = NnrpHandle::new(
+        NnrpHandleKind::Session,
+        request.requested_session_id as u64,
+        request.generation,
+    );
+    let mut store = handle_store();
+    if store
+        .entries
+        .contains_key(&(connection.kind, connection.id))
+        || store.entries.contains_key(&(session.kind, session.id))
+    {
+        return NnrpFfiStatus::invalid_argument(145);
+    }
+    store.entries.insert(
+        (connection.kind, connection.id),
+        NnrpFfiResourceEntry {
+            generation: connection.generation,
+            resource: NnrpFfiResource::Connection {
+                transport_id: 0,
+                role: NnrpFfiConnectionRole::Client,
+                #[cfg(not(test))]
+                runtime: NnrpFfiConnectionRuntime::Benchmark,
+            },
+        },
+    );
+    store.entries.insert(
+        (session.kind, session.id),
+        NnrpFfiResourceEntry {
+            generation: session.generation,
+            resource: NnrpFfiResource::Session {
+                connection,
+                profile_id: 0,
+                schema_id: 0,
+                schema_version: 0,
+                #[cfg(not(test))]
+                runtime: NnrpFfiSessionRuntime::Benchmark,
+            },
+        },
+    );
+    *out_session = session;
+    NnrpFfiStatus::ok()
+}
+
+#[cfg(any(test, feature = "benchmark-ffi"))]
+#[cfg_attr(feature = "benchmark-ffi", no_mangle)]
+/// Closes an isolated logical session opened by `nnrp_benchmark_open_session`.
+///
+/// The close cascades through benchmark operations and queued events before
+/// releasing the owning logical connection.
+pub extern "C" fn nnrp_benchmark_close_session(session: NnrpHandle) -> NnrpFfiStatus {
+    let mut store = handle_store();
+    let connection = match store.get(session, NnrpHandleKind::Session) {
+        Ok(NnrpFfiResource::Session {
+            connection,
+            #[cfg(not(test))]
+                runtime: NnrpFfiSessionRuntime::Benchmark,
+            ..
+        }) => *connection,
+        Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32),
+        Err(status) => return status,
+    };
+    let close_result = store.close_session(session);
+    debug_assert!(close_result.is_ok());
+    match store.close_connection(connection) {
+        Ok(()) => NnrpFfiStatus::ok(),
+        Err(status) => status,
+    }
+}
+
+#[cfg(any(test, feature = "benchmark-ffi"))]
+#[cfg_attr(feature = "benchmark-ffi", no_mangle)]
 /// # Safety
 ///
 /// `request.submit_payload` and `request.result_payload` must remain readable
@@ -2997,7 +3103,7 @@ unsafe fn benchmark_client_submit_result_compact_impl(
         payload: request.submit_payload,
     };
     let mut operation = NnrpHandle::invalid();
-    let submit_status = nnrp_client_submit(submit_request, &mut operation);
+    let submit_status = benchmark_client_submit(submit_request, &mut operation);
     if submit_status.status_code != NnrpFfiStatusCode::Ok as u32 {
         *out_result = NnrpCompactResult::none(submit_status);
         return submit_status;
@@ -3023,6 +3129,63 @@ unsafe fn benchmark_client_submit_result_compact_impl(
 }
 
 #[cfg(any(test, feature = "benchmark-ffi"))]
+unsafe fn benchmark_client_submit(
+    request: NnrpSubmitRequest,
+    out_operation: *mut NnrpHandle,
+) -> NnrpFfiStatus {
+    if out_operation.is_null() || request.operation_id == 0 || request.frame_id == 0 {
+        return NnrpFfiStatus::invalid_argument(12);
+    }
+    if let Err(status) = request.payload.validate() {
+        return status;
+    }
+    let mut store = handle_store();
+    let connection = match store.get(request.session, NnrpHandleKind::Session) {
+        Ok(NnrpFfiResource::Session { connection, .. }) => *connection,
+        Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32),
+        Err(status) => return status,
+    };
+    if store.entries.values().any(|entry| {
+        matches!(
+            entry.resource,
+            NnrpFfiResource::Operation {
+                session,
+                operation_id,
+                ..
+            } if session == request.session && operation_id == request.operation_id
+        )
+    }) {
+        return NnrpFfiStatus::invalid_argument(145);
+    }
+    let operation = NnrpHandle::new(
+        NnrpHandleKind::Operation,
+        next_handle_id(&mut store, NnrpHandleKind::Operation),
+        request.session.generation,
+    );
+    store.entries.insert(
+        (operation.kind, operation.id),
+        NnrpFfiResourceEntry {
+            generation: operation.generation,
+            resource: NnrpFfiResource::Operation {
+                session: request.session,
+                operation_id: request.operation_id,
+                frame_id: request.frame_id,
+                payload_len: request.payload.len,
+            },
+        },
+    );
+    store.push_event(NnrpQueuedEvent::plain(
+        NnrpEventKind::SubmitAccepted,
+        connection,
+        request.session,
+        operation,
+        request.frame_id,
+    ));
+    *out_operation = operation;
+    NnrpFfiStatus::ok()
+}
+
+#[cfg(any(test, feature = "benchmark-ffi"))]
 unsafe fn benchmark_client_submit_result_compact_batch_impl(
     request: NnrpClientSubmitResultBatchRequest,
     out_last_result: *mut NnrpCompactResult,
@@ -3036,34 +3199,75 @@ unsafe fn benchmark_client_submit_result_compact_batch_impl(
         *out_last_result = NnrpCompactResult::none(NnrpFfiStatus::ok());
         return NnrpFfiStatus::ok();
     }
+    if let Err(status) = request.submit_payload.validate() {
+        return status;
+    }
+    if let Err(status) = request.result_payload.validate() {
+        return status;
+    }
 
     let stride = if request.frame_id_stride == 0 {
         1
     } else {
         request.frame_id_stride
     };
+    let mut store = handle_store();
+    let connection = match store.get(request.session, NnrpHandleKind::Session) {
+        Ok(NnrpFfiResource::Session { connection, .. }) => *connection,
+        Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32),
+        Err(status) => return status,
+    };
+    if store.entries.values().any(|entry| {
+        matches!(
+            entry.resource,
+            NnrpFfiResource::Operation { session, .. } if session == request.session
+        )
+    }) {
+        return NnrpFfiStatus::invalid_argument(145);
+    }
+
     let mut completed = 0usize;
     let mut last = NnrpCompactResult::none(NnrpFfiStatus::ok());
     for index in 0..request.iterations {
+        let operation_id = request.operation_id_start.wrapping_add(index as u64);
         let frame_id = request
             .frame_id_start
             .wrapping_add((index as u32).wrapping_mul(stride));
-        let status = benchmark_client_submit_result_compact_impl(
-            NnrpClientSubmitResultRequest {
-                session: request.session,
-                operation_id: request.operation_id_start.wrapping_add(index as u64),
-                frame_id,
-                submit_payload: request.submit_payload,
-                result_payload: request.result_payload,
-                max_events: request.max_events,
-            },
-            &mut last,
-        );
-        if status.status_code != NnrpFfiStatusCode::Ok as u32 {
+        if operation_id == 0 || frame_id == 0 {
+            let status = NnrpFfiStatus::invalid_argument(12);
             *out_completed = completed;
-            *out_last_result = last;
+            *out_last_result = NnrpCompactResult::none(status);
             return status;
         }
+
+        let operation = NnrpHandle::new(
+            NnrpHandleKind::Operation,
+            next_handle_id(&mut store, NnrpHandleKind::Operation),
+            request.session.generation,
+        );
+        store.entries.insert(
+            (operation.kind, operation.id),
+            NnrpFfiResourceEntry {
+                generation: operation.generation,
+                resource: NnrpFfiResource::Operation {
+                    session: request.session,
+                    operation_id,
+                    frame_id,
+                    payload_len: request.submit_payload.len,
+                },
+            },
+        );
+        store.entries.remove(&(operation.kind, operation.id));
+
+        let event = NnrpQueuedEvent::plain(
+            NnrpEventKind::ResultPushed,
+            connection,
+            request.session,
+            operation,
+            frame_id,
+        )
+        .into_event(request.result_payload);
+        last = NnrpCompactResult::from_event(NnrpFfiStatus::ok(), event, operation_id);
         completed += 1;
     }
 
@@ -8341,34 +8545,18 @@ mod tests {
     #[test]
     fn benchmark_ffi_client_submit_result_compact_batch_amortizes_hot_path() {
         unsafe {
-            let mut connection = NnrpHandle::invalid();
-            assert_eq!(
-                nnrp_client_connect(
-                    NnrpClientConnectRequest {
-                        connection_id: 91_429,
-                        generation: 1,
-                        transport_id: test_transport_id(),
-                    },
-                    &mut connection
-                ),
-                NnrpFfiStatus::ok()
-            );
             let mut session = NnrpHandle::invalid();
             assert_eq!(
-                nnrp_client_open_session(
-                    NnrpSessionOpenRequest {
-                        connection,
+                nnrp_benchmark_open_session(
+                    NnrpBenchmarkSessionOpenRequest {
+                        connection_id: 91_429,
                         requested_session_id: 91_430,
                         generation: 1,
-                        profile_id: 2,
-                        schema_id: 0x1001,
-                        schema_version: 3,
                     },
                     &mut session
                 ),
                 NnrpFfiStatus::ok()
             );
-            drain_events(connection);
 
             let submit_payload = [1u8, 2, 3];
             let result_payload = [4u8, 5, 6];
@@ -8485,7 +8673,193 @@ mod tests {
                 ),
                 NnrpFfiStatus::invalid_argument(126)
             );
+            assert_eq!(nnrp_benchmark_close_session(session), NnrpFfiStatus::ok());
         }
+    }
+
+    #[test]
+    fn benchmark_ffi_session_and_batch_reject_invalid_boundaries() {
+        unsafe {
+            let open_request = NnrpBenchmarkSessionOpenRequest {
+                connection_id: 93_001,
+                requested_session_id: 93_002,
+                generation: 1,
+            };
+            assert_eq!(
+                nnrp_benchmark_open_session(open_request, core::ptr::null_mut()),
+                NnrpFfiStatus::invalid_argument(151)
+            );
+
+            let mut session = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_benchmark_open_session(open_request, &mut session),
+                NnrpFfiStatus::ok()
+            );
+            let mut duplicate = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_benchmark_open_session(open_request, &mut duplicate),
+                NnrpFfiStatus::invalid_argument(145)
+            );
+            assert_eq!(
+                nnrp_benchmark_open_session(
+                    NnrpBenchmarkSessionOpenRequest {
+                        connection_id: 93_003,
+                        ..open_request
+                    },
+                    &mut duplicate
+                ),
+                NnrpFfiStatus::invalid_argument(145)
+            );
+
+            let payload = [1_u8, 2, 3];
+            let request = NnrpClientSubmitResultBatchRequest {
+                session,
+                operation_id_start: 93_100,
+                frame_id_start: 100,
+                frame_id_stride: 1,
+                submit_payload: NnrpBufferView {
+                    ptr: payload.as_ptr(),
+                    len: payload.len(),
+                },
+                result_payload: NnrpBufferView {
+                    ptr: payload.as_ptr(),
+                    len: payload.len(),
+                },
+                max_events: 2,
+                iterations: 2,
+            };
+            let invalid_buffer = NnrpBufferView {
+                ptr: core::ptr::null(),
+                len: 1,
+            };
+            let mut result = NnrpCompactResult::none(NnrpFfiStatus::ok());
+            let mut completed = 0_usize;
+            assert_eq!(
+                nnrp_benchmark_client_submit_result_compact_batch(
+                    NnrpClientSubmitResultBatchRequest {
+                        submit_payload: invalid_buffer,
+                        ..request
+                    },
+                    &mut result,
+                    &mut completed
+                ),
+                NnrpFfiStatus::invalid_argument(1)
+            );
+            assert_eq!(
+                nnrp_benchmark_client_submit_result_compact_batch(
+                    NnrpClientSubmitResultBatchRequest {
+                        result_payload: invalid_buffer,
+                        ..request
+                    },
+                    &mut result,
+                    &mut completed
+                ),
+                NnrpFfiStatus::invalid_argument(1)
+            );
+            assert_eq!(
+                nnrp_benchmark_client_submit_result_compact_batch(
+                    NnrpClientSubmitResultBatchRequest {
+                        session: NnrpHandle::new(NnrpHandleKind::Operation, 93_004, 1),
+                        ..request
+                    },
+                    &mut result,
+                    &mut completed
+                ),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32)
+            );
+
+            assert_eq!(
+                nnrp_benchmark_client_submit_result_compact_batch(
+                    NnrpClientSubmitResultBatchRequest {
+                        operation_id_start: u64::MAX,
+                        ..request
+                    },
+                    &mut result,
+                    &mut completed
+                ),
+                NnrpFfiStatus::invalid_argument(12)
+            );
+            assert_eq!(completed, 1);
+
+            let mut operation = NnrpHandle::invalid();
+            assert_eq!(
+                benchmark_client_submit(
+                    NnrpSubmitRequest {
+                        session,
+                        operation_id: 93_200,
+                        frame_id: 200,
+                        payload: NnrpBufferView {
+                            ptr: payload.as_ptr(),
+                            len: payload.len(),
+                        },
+                    },
+                    &mut operation
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(
+                benchmark_client_submit(
+                    NnrpSubmitRequest {
+                        session,
+                        operation_id: 93_200,
+                        frame_id: 201,
+                        payload: NnrpBufferView::empty(),
+                    },
+                    &mut duplicate
+                ),
+                NnrpFfiStatus::invalid_argument(145)
+            );
+            assert_eq!(
+                nnrp_benchmark_client_submit_result_compact_batch(
+                    request,
+                    &mut result,
+                    &mut completed
+                ),
+                NnrpFfiStatus::invalid_argument(145)
+            );
+            assert_eq!(nnrp_benchmark_close_session(session), NnrpFfiStatus::ok());
+        }
+    }
+
+    #[test]
+    fn benchmark_ffi_close_rejects_non_session_and_missing_connection_resources() {
+        let wrong_resource = NnrpHandle::new(NnrpHandleKind::Session, 93_300, 1);
+        {
+            let mut store = handle_store();
+            store.entries.insert(
+                (wrong_resource.kind, wrong_resource.id),
+                NnrpFfiResourceEntry {
+                    generation: wrong_resource.generation,
+                    resource: NnrpFfiResource::Buffer { bytes: Vec::new() },
+                },
+            );
+        }
+        assert_eq!(
+            nnrp_benchmark_close_session(wrong_resource),
+            NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32)
+        );
+
+        let missing_connection = NnrpHandle::new(NnrpHandleKind::Connection, 93_301, 1);
+        let orphan_session = NnrpHandle::new(NnrpHandleKind::Session, 93_302, 1);
+        {
+            let mut store = handle_store();
+            store.entries.insert(
+                (orphan_session.kind, orphan_session.id),
+                NnrpFfiResourceEntry {
+                    generation: orphan_session.generation,
+                    resource: NnrpFfiResource::Session {
+                        connection: missing_connection,
+                        profile_id: 0,
+                        schema_id: 0,
+                        schema_version: 0,
+                    },
+                },
+            );
+        }
+        assert_eq!(
+            nnrp_benchmark_close_session(orphan_session),
+            NnrpFfiStatus::invalid_handle(NnrpHandleKind::Connection as u32)
+        );
     }
 
     #[test]

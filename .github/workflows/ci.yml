@@ -157,6 +157,14 @@ jobs:
           NNRP_CONFORMANCE_SUITE_REPO: ${{ github.workspace }}/nnrp-conformance-action
         run: cargo test --workspace
 
+      - name: Test explicit benchmark FFI surface
+        run: |
+          cargo test -p nnrp-ffi --no-default-features \
+            --features benchmark-ffi,transport-tcp \
+            --test benchmark_ffi_surface
+          cargo build --release -p nnrp-ffi --no-default-features \
+            --features benchmark-ffi,transport-tcp
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
