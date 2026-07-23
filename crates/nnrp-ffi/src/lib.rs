@@ -49,7 +49,7 @@ pub use transport::*;
 
 use sdk_version::{SDK_MAJOR, SDK_MINOR, SDK_PATCH, SDK_PREVIEW, SDK_REVISION};
 
-pub const NNRP_FFI_ABI_MAJOR: u16 = 3;
+pub const NNRP_FFI_ABI_MAJOR: u16 = 4;
 pub const NNRP_FFI_ABI_MINOR: u16 = 0;
 pub const NNRP_FFI_ABI_PATCH: u16 = 0;
 
@@ -994,7 +994,10 @@ pub struct NnrpCacheLeaseResult {
     pub object_id: NnrpCacheObjectId,
     pub object_version: u64,
     pub lease_id: u64,
-    pub expires_at_ms: u64,
+    pub owner_scope: u32,
+    pub ttl_ms: u32,
+    pub owner_id: u64,
+    pub granted_at_ms: u64,
 }
 
 impl NnrpCacheLeaseResult {
@@ -1005,7 +1008,10 @@ impl NnrpCacheLeaseResult {
             object_id: object_id.into(),
             object_version: 0,
             lease_id: 0,
-            expires_at_ms: 0,
+            owner_scope: 0,
+            ttl_ms: 0,
+            owner_id: 0,
+            granted_at_ms: 0,
         }
     }
 
@@ -1016,7 +1022,10 @@ impl NnrpCacheLeaseResult {
             object_id: lease.object_id.into(),
             object_version: lease.object_version,
             lease_id: lease.lease_id,
-            expires_at_ms: lease.expires_at_ms(),
+            owner_scope: lease.owner_scope as u32,
+            ttl_ms: lease.ttl_ms,
+            owner_id: lease.owner_id,
+            granted_at_ms: lease.granted_at_ms,
         }
     }
 }
@@ -5791,6 +5800,7 @@ unsafe fn cache_query_impl(
             return cache_validation_failure_status(CacheValidationFailure::VersionMismatch);
         }
         if request.ttl_ms != 0 {
+            lease.granted_at_ms = request.now_ms;
             lease.ttl_ms = request.ttl_ms;
             if let Ok(NnrpFfiResource::CacheLease {
                 lease: stored_lease,
@@ -7086,12 +7096,29 @@ mod tests {
     }
 
     #[test]
-    fn ffi_cache_identity_layout_is_frozen_for_abi_v3() {
+    fn ffi_cache_layouts_are_frozen_for_abi_v4() {
         assert_eq!(core::mem::size_of::<NnrpCacheObjectId>(), 24);
         assert_eq!(core::mem::offset_of!(NnrpCacheObjectId, cache_namespace), 0);
         assert_eq!(core::mem::offset_of!(NnrpCacheObjectId, object_kind), 4);
         assert_eq!(core::mem::offset_of!(NnrpCacheObjectId, cache_key_hi), 8);
         assert_eq!(core::mem::offset_of!(NnrpCacheObjectId, cache_key_lo), 16);
+
+        assert_eq!(core::mem::size_of::<NnrpCacheLeaseResult>(), 96);
+        assert_eq!(core::mem::offset_of!(NnrpCacheLeaseResult, outcome_code), 0);
+        assert_eq!(core::mem::offset_of!(NnrpCacheLeaseResult, lease_handle), 8);
+        assert_eq!(core::mem::offset_of!(NnrpCacheLeaseResult, object_id), 32);
+        assert_eq!(
+            core::mem::offset_of!(NnrpCacheLeaseResult, object_version),
+            56
+        );
+        assert_eq!(core::mem::offset_of!(NnrpCacheLeaseResult, lease_id), 64);
+        assert_eq!(core::mem::offset_of!(NnrpCacheLeaseResult, owner_scope), 72);
+        assert_eq!(core::mem::offset_of!(NnrpCacheLeaseResult, ttl_ms), 76);
+        assert_eq!(core::mem::offset_of!(NnrpCacheLeaseResult, owner_id), 80);
+        assert_eq!(
+            core::mem::offset_of!(NnrpCacheLeaseResult, granted_at_ms),
+            88
+        );
 
         assert_eq!(core::mem::size_of::<NnrpCacheReferenceDescriptor>(), 56);
         assert_eq!(
@@ -10725,13 +10752,20 @@ mod tests {
                 object_id,
                 object_version: 0,
                 lease_id: 0,
-                expires_at_ms: 0,
+                owner_scope: 0,
+                ttl_ms: 0,
+                owner_id: 0,
+                granted_at_ms: 0,
             };
             assert_eq!(nnrp_cache_query(request, &mut result), NnrpFfiStatus::ok());
             assert_eq!(result.outcome_code, NNRP_CACHE_LEASE_OUTCOME_VALID);
             assert_eq!(result.lease_handle.kind, NnrpHandleKind::CacheLease as u32);
             assert_eq!(result.object_version, 9);
-            assert_eq!(result.expires_at_ms, 31_000);
+            assert_eq!(result.owner_scope, CacheLeaseOwnerScope::Connection as u32);
+            assert_eq!(result.owner_id, connection.id);
+            assert_eq!(result.granted_at_ms, 1_000);
+            assert_eq!(result.ttl_ms, 30_000);
+            assert_eq!(result.granted_at_ms + u64::from(result.ttl_ms), 31_000);
 
             let mut touched = result;
             assert_eq!(
@@ -10746,7 +10780,11 @@ mod tests {
                 NnrpFfiStatus::ok()
             );
             assert_eq!(touched.lease_handle, result.lease_handle);
-            assert_eq!(touched.expires_at_ms, 1_900);
+            assert_eq!(touched.owner_scope, CacheLeaseOwnerScope::Connection as u32);
+            assert_eq!(touched.owner_id, connection.id);
+            assert_eq!(touched.granted_at_ms, 1_100);
+            assert_eq!(touched.ttl_ms, 900);
+            assert_eq!(touched.granted_at_ms + u64::from(touched.ttl_ms), 2_000);
 
             let mut mismatch = result;
             assert_eq!(
@@ -10878,7 +10916,10 @@ mod tests {
                 object_id,
                 object_version: 0,
                 lease_id: 0,
-                expires_at_ms: 0,
+                owner_scope: 0,
+                ttl_ms: 0,
+                owner_id: 0,
+                granted_at_ms: 0,
             };
             assert_eq!(
                 nnrp_cache_query(request, core::ptr::null_mut()),
@@ -10932,7 +10973,10 @@ mod tests {
             assert_eq!(
                 nnrp_cache_query(
                     NnrpCacheLeaseRequest {
-                        now_ms: result.expires_at_ms.saturating_add(1),
+                        now_ms: result
+                            .granted_at_ms
+                            .saturating_add(u64::from(result.ttl_ms))
+                            .saturating_add(1),
                         ttl_ms: 0,
                         ..request
                     },
@@ -11329,7 +11373,10 @@ mod tests {
                 object_id,
                 object_version: 0,
                 lease_id: 0,
-                expires_at_ms: 0,
+                owner_scope: 0,
+                ttl_ms: 0,
+                owner_id: 0,
+                granted_at_ms: 0,
             };
             assert_eq!(
                 nnrp_cache_release(lease_handle, &mut lease_result),

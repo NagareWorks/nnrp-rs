@@ -2,6 +2,18 @@
 
 Preview4 moves the Rust workspace beyond token-stream transport substitution and into runtime orchestration features that help SDKs model cancellation, priority, progress, partial results, cache references, route hints, trace context, result drop reasons, IPC, and WebSocket endpoints directly.
 
+## 1.0.0-preview.4.15
+
+The native FFI cache-lease result now carries the complete local lease value: owner scope, owner id,
+grant timestamp, and TTL in addition to object identity, version, and lease id. Downstream SDKs no
+longer need to infer lease state from a derived expiration timestamp. Touching a lease starts the
+renewed TTL at the touch timestamp, so the returned grant time and expiration arithmetic stay
+consistent.
+
+Because the result structure changed, the native FFI ABI is now `4.0.0`. SDK bindings must validate
+ABI 4 and use the new 96-byte `NnrpCacheLeaseResult` layout before loading Preview4 revision 15
+artifacts.
+
 ## 1.0.0-preview.4.14
 
 The browser client role now keeps post-handshake carrier ingress outside exported Rust futures. The

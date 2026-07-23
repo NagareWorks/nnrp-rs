@@ -19,7 +19,7 @@ native-tcp = ["dep:tokio"]
 
 [dependencies]
 async-trait.workspace = true
-nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.4.14" }
+nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.4.15" }
 thiserror.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

@@ -13,7 +13,7 @@ typedef struct NnrpProtocolVersion {
   uint8_t wire_format;
 } NnrpProtocolVersion;
 
-#define NNRP_FFI_ABI_MAJOR 3
+#define NNRP_FFI_ABI_MAJOR 4
 #define NNRP_FFI_ABI_MINOR 0
 #define NNRP_FFI_ABI_PATCH 0
 
@@ -284,7 +284,10 @@ typedef struct NnrpCacheLeaseResult {
   NnrpCacheObjectId object_id;
   uint64_t object_version;
   uint64_t lease_id;
-  uint64_t expires_at_ms;
+  uint32_t owner_scope;
+  uint32_t ttl_ms;
+  uint64_t owner_id;
+  uint64_t granted_at_ms;
 } NnrpCacheLeaseResult;
 
 typedef struct NnrpSessionResumeRequest {

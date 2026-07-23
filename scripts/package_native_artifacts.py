@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PROTOCOL_VERSION = "NNRP/1"
-FFI_ABI_VERSION = "3.0.0"
+FFI_ABI_VERSION = "4.0.0"
 EXPECTED_EXPORTS = [
     "nnrp_current_protocol_version",
     "nnrp_runtime_capabilities",
