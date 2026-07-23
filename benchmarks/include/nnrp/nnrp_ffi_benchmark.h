@@ -28,6 +28,12 @@ typedef struct NnrpBenchmarkClientSubmitResultRequest {
   uintptr_t max_events;
 } NnrpBenchmarkClientSubmitResultRequest;
 
+typedef struct NnrpBenchmarkSessionOpenRequest {
+  uint64_t connection_id;
+  uint32_t requested_session_id;
+  uint32_t generation;
+} NnrpBenchmarkSessionOpenRequest;
+
 typedef struct NnrpBenchmarkClientSubmitResultBatchRequest {
   NnrpHandle session;
   uint64_t operation_id_start;
@@ -58,6 +64,9 @@ typedef struct NnrpBenchmarkClientRuntimeObjectLoopRequest {
   uintptr_t max_events;
 } NnrpBenchmarkClientRuntimeObjectLoopRequest;
 
+NnrpFfiStatus nnrp_benchmark_open_session(
+    NnrpBenchmarkSessionOpenRequest request,
+    NnrpHandle *out_session);
 NnrpFfiStatus nnrp_benchmark_client_submit_result_compact(
     NnrpBenchmarkClientSubmitResultRequest request,
     NnrpBenchmarkCompactResult *out_result);
