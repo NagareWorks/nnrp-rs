@@ -48,7 +48,6 @@ impl BrowserClientRoleConfig {
             SessionPriorityClass::try_from_u8(self.priority_class).map_err(js_nnrp_error)?;
         Ok((
             NnrpClientConfig {
-                transport: RuntimeTransportKind::WebSocket,
                 requested_session_id: self.requested_session_id,
                 profile_id: self.profile_id,
                 schema_id: self.schema_id,

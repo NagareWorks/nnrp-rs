@@ -6,13 +6,9 @@ use std::{
 use http::Uri;
 use nnrp_runtime::{
     NnrpClient, NnrpClientConfig, NnrpServer, NnrpServerConfig, RuntimeError, RuntimeFrameLimits,
-    RuntimeTransportKind,
 };
 use nnrp_transport_ipc::{IpcEndpoint, IpcProvider};
-use nnrp_transport_quic::{
-    quic_client_config, quic_server_config, QuicClientEndpointConfig, QuicProvider,
-    QuicServerEndpointConfig,
-};
+use nnrp_transport_quic::{QuicClientEndpointConfig, QuicProvider, QuicServerEndpointConfig};
 use nnrp_transport_websocket::{
     WebSocketEndpoint, WebSocketFramedListener, WebSocketProvider, WebSocketTransport,
 };
@@ -121,12 +117,8 @@ impl WireReferenceEndpoint {
                     security.server_name.clone(),
                     security.trusted_certificate_der.clone(),
                 );
-                QuicProvider::connect(
-                    &self.endpoint,
-                    endpoint_config,
-                    quic_client_config(NnrpClientConfig::default()),
-                )
-                .await
+                QuicProvider::connect(&self.endpoint, endpoint_config, NnrpClientConfig::default())
+                    .await
             }
             ReferenceTransport::WebSocket => {
                 let endpoint = WebSocketEndpoint::from_str(&self.endpoint)?;
@@ -139,10 +131,7 @@ impl WireReferenceEndpoint {
                         RuntimeFrameLimits::default(),
                     )
                     .await?;
-                    NnrpClient::from_transport(
-                        transport,
-                        NnrpClientConfig::default().with_transport(RuntimeTransportKind::WebSocket),
-                    )
+                    NnrpClient::from_transport(transport, NnrpClientConfig::default())
                 } else {
                     WebSocketProvider::connect(&endpoint, NnrpClientConfig::default()).await
                 }
@@ -167,11 +156,7 @@ impl WireReferenceEndpoint {
                     security.certificate_der.clone(),
                     security.private_key_pkcs8_der.clone(),
                 );
-                QuicProvider::bind(
-                    endpoint_config,
-                    quic_server_config(NnrpServerConfig::default()),
-                )
-                .await
+                QuicProvider::bind(endpoint_config, NnrpServerConfig::default()).await
             }
             ReferenceTransport::WebSocket => {
                 let endpoint = WebSocketEndpoint::from_str(&self.endpoint)?;
@@ -185,10 +170,7 @@ impl WireReferenceEndpoint {
                         RuntimeFrameLimits::default(),
                     )
                     .await?;
-                    NnrpServer::from_listener(
-                        listener,
-                        NnrpServerConfig::default().with_transport(RuntimeTransportKind::WebSocket),
-                    )
+                    NnrpServer::from_listener(listener, NnrpServerConfig::default())
                 } else {
                     WebSocketProvider::bind(bind_address, NnrpServerConfig::default()).await
                 }

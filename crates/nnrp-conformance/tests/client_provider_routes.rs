@@ -7,8 +7,8 @@ use nnrp_core::{TransportId, TransportPolicy};
 use nnrp_runtime::{
     ClientProviderRoute, ClientProviderRoutes, ClientTransportSecurity, NnrpClient,
     NnrpClientConfig, NnrpClientOptions, NnrpClientProvider, NnrpServer, NnrpServerConfig,
-    NnrpServerOptions, NnrpServerProvider, NnrpServerSession, RuntimeError, RuntimeTransportKind,
-    ServerProviderRoute, ServerProviderRoutes, ServerTransportSecurity,
+    NnrpServerOptions, NnrpServerProvider, NnrpServerSession, RuntimeError, ServerProviderRoute,
+    ServerProviderRoutes, ServerTransportSecurity,
 };
 use nnrp_transport_ipc::{IpcEndpoint, IpcFramedListener, IpcProvider};
 use nnrp_transport_quic::{QuicProvider, QuicServerEndpointConfig};
@@ -32,11 +32,7 @@ async fn official_client_providers_probe_and_adopt_one_real_carrier() {
     let tcp_addr = tcp_server.local_addr().unwrap();
     let ipc_endpoint = unique_ipc_endpoint();
     let ipc_listener = IpcFramedListener::bind(&ipc_endpoint).await.unwrap();
-    let ipc_server = NnrpServer::from_listener(
-        ipc_listener,
-        NnrpServerConfig::default().with_transport(RuntimeTransportKind::Ipc),
-    )
-    .unwrap();
+    let ipc_server = NnrpServer::from_listener(ipc_listener, NnrpServerConfig::default()).unwrap();
     let tcp_task = spawn_accept_after_probe(tcp_server);
     let ipc_task = spawn_accept_after_probe(ipc_server);
 

@@ -313,20 +313,14 @@ impl IpcProvider {
         endpoint: &IpcEndpoint,
         config: NnrpClientConfig,
     ) -> Result<NnrpClient, RuntimeError> {
-        NnrpClient::from_transport(
-            Self::connect_transport(endpoint).await?,
-            config.with_transport(RuntimeTransportKind::Ipc),
-        )
+        NnrpClient::from_transport(Self::connect_transport(endpoint).await?, config)
     }
 
     pub async fn bind(
         endpoint: &IpcEndpoint,
         config: NnrpServerConfig,
     ) -> Result<NnrpServer, RuntimeError> {
-        NnrpServer::from_listener(
-            Self::bind_listener(endpoint).await?,
-            config.with_transport(RuntimeTransportKind::Ipc),
-        )
+        NnrpServer::from_listener(Self::bind_listener(endpoint).await?, config)
     }
 }
 

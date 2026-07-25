@@ -2474,11 +2474,13 @@ pub unsafe extern "C" fn nnrp_client_open_session(
         if runtime_transport_id(transport_kind) != transport_id {
             return NnrpFfiStatus::invalid_state(12);
         }
-        let mut config = NnrpClientConfig::default().with_transport(transport_kind);
-        config.requested_session_id = request.requested_session_id;
-        config.profile_id = request.profile_id;
-        config.schema_id = request.schema_id;
-        config.schema_version = request.schema_version;
+        let config = NnrpClientConfig {
+            requested_session_id: request.requested_session_id,
+            profile_id: request.profile_id,
+            schema_id: request.schema_id,
+            schema_version: request.schema_version,
+            ..NnrpClientConfig::default()
+        };
         let client = match NnrpClient::from_boxed_transport(carrier, config) {
             Ok(client) => client,
             Err(error) => return transport::role_status_from_runtime_error(error),
@@ -6104,10 +6106,7 @@ pub unsafe extern "C" fn nnrp_server_bind(
         };
         let transport_kind = listener.transport_kind();
         let transport_id = runtime_transport_id(transport_kind);
-        let server = match NnrpServer::from_boxed_listener(
-            listener,
-            NnrpServerConfig::default().with_transport(transport_kind),
-        ) {
+        let server = match NnrpServer::from_boxed_listener(listener, NnrpServerConfig::default()) {
             Ok(server) => Arc::new(server),
             Err(error) => return transport::role_status_from_runtime_error(error),
         };

@@ -11,10 +11,7 @@ use nnrp_runtime::{
     RuntimeError, RuntimePacket, TcpTransport,
 };
 use nnrp_transport_ipc::{IpcEndpoint, IpcProvider};
-use nnrp_transport_quic::{
-    quic_client_config, quic_server_config, QuicClientEndpointConfig, QuicProvider,
-    QuicServerEndpointConfig,
-};
+use nnrp_transport_quic::{QuicClientEndpointConfig, QuicProvider, QuicServerEndpointConfig};
 use nnrp_transport_websocket::{WebSocketEndpoint, WebSocketProvider};
 use serde_json::{json, Map, Value};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -328,22 +325,14 @@ async fn run_quic_suite_as_client_reference() -> Result<Value, RuntimeError> {
             .parse()
             .expect("loopback QUIC bind address should be a valid socket address"),
     )?;
-    let server = QuicProvider::bind(
-        server_endpoint,
-        quic_server_config(NnrpServerConfig::default()),
-    )
-    .await?;
+    let server = QuicProvider::bind(server_endpoint, NnrpServerConfig::default()).await?;
     let addr = server.local_addr()?;
     let server_task = tokio::spawn(reference_server_task(server));
 
     let client_endpoint =
         QuicClientEndpointConfig::localhost_with_root_certificate(certificate.certificate_der);
-    let client = QuicProvider::connect_addr(
-        addr,
-        client_endpoint,
-        quic_client_config(NnrpClientConfig::default()),
-    )
-    .await?;
+    let client =
+        QuicProvider::connect_addr(addr, client_endpoint, NnrpClientConfig::default()).await?;
     let report = run_reference_client(ReferenceTransport::Quic, started, client).await?;
     server_task
         .await
@@ -360,22 +349,14 @@ async fn run_quic_suite_as_client_scenario_reference(
             .parse()
             .expect("loopback QUIC bind address should be a valid socket address"),
     )?;
-    let server = QuicProvider::bind(
-        server_endpoint,
-        quic_server_config(NnrpServerConfig::default()),
-    )
-    .await?;
+    let server = QuicProvider::bind(server_endpoint, NnrpServerConfig::default()).await?;
     let addr = server.local_addr()?;
     let server_task = tokio::spawn(reference_scenario_server_task(server, scenario));
 
     let client_endpoint =
         QuicClientEndpointConfig::localhost_with_root_certificate(certificate.certificate_der);
-    let client = QuicProvider::connect_addr(
-        addr,
-        client_endpoint,
-        quic_client_config(NnrpClientConfig::default()),
-    )
-    .await?;
+    let client =
+        QuicProvider::connect_addr(addr, client_endpoint, NnrpClientConfig::default()).await?;
     let report =
         run_reference_scenario_client(ReferenceTransport::Quic, scenario, started, client).await?;
     server_task.await.map_err(|_| {
@@ -391,21 +372,13 @@ async fn run_quic_suite_as_server_reference() -> Result<Value, RuntimeError> {
             .parse()
             .expect("loopback QUIC bind address should be a valid socket address"),
     )?;
-    let server = QuicProvider::bind(
-        server_endpoint,
-        quic_server_config(NnrpServerConfig::default()),
-    )
-    .await?;
+    let server = QuicProvider::bind(server_endpoint, NnrpServerConfig::default()).await?;
     let addr = server.local_addr()?;
     let target_task = tokio::spawn(async move {
         let client_endpoint =
             QuicClientEndpointConfig::localhost_with_root_certificate(certificate.certificate_der);
-        let client = QuicProvider::connect_addr(
-            addr,
-            client_endpoint,
-            quic_client_config(NnrpClientConfig::default()),
-        )
-        .await?;
+        let client =
+            QuicProvider::connect_addr(addr, client_endpoint, NnrpClientConfig::default()).await?;
         target_client_task(client).await
     });
 

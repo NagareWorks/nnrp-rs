@@ -307,20 +307,14 @@ impl WebSocketProvider {
         endpoint: &WebSocketEndpoint,
         config: NnrpClientConfig,
     ) -> Result<NnrpClient, RuntimeError> {
-        NnrpClient::from_transport(
-            Self::connect_transport(endpoint).await?,
-            config.with_transport(RuntimeTransportKind::WebSocket),
-        )
+        NnrpClient::from_transport(Self::connect_transport(endpoint).await?, config)
     }
 
     pub async fn bind(
         addr: impl ToSocketAddrs,
         config: NnrpServerConfig,
     ) -> Result<NnrpServer, RuntimeError> {
-        NnrpServer::from_listener(
-            Self::bind_listener(addr).await?,
-            config.with_transport(RuntimeTransportKind::WebSocket),
-        )
+        NnrpServer::from_listener(Self::bind_listener(addr).await?, config)
     }
 }
 

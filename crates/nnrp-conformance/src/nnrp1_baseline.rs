@@ -16,10 +16,7 @@ use nnrp_transport_provider::{
     select_transport_with_probe, ProbeSample, RemoteTransportSupport, TransportProviderDescriptor,
     TransportProviderKind,
 };
-use nnrp_transport_quic::{
-    quic_client_config, quic_server_config, QuicClientEndpointConfig, QuicProvider,
-    QuicServerEndpointConfig,
-};
+use nnrp_transport_quic::{QuicClientEndpointConfig, QuicProvider, QuicServerEndpointConfig};
 use nnrp_transport_tcp::TcpProvider;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -494,11 +491,7 @@ async fn tcp_session_smoke() -> Result<(), RuntimeError> {
 async fn quic_session_smoke() -> Result<(), RuntimeError> {
     let (endpoint_config, certificate) =
         QuicServerEndpointConfig::self_signed_localhost("127.0.0.1:0".parse().unwrap())?;
-    let server = QuicProvider::bind(
-        endpoint_config,
-        quic_server_config(NnrpServerConfig::default()),
-    )
-    .await?;
+    let server = QuicProvider::bind(endpoint_config, NnrpServerConfig::default()).await?;
     let addr = server.local_addr()?;
     let server_task = tokio::spawn(async move {
         let mut session = server.accept().await?;
@@ -513,12 +506,8 @@ async fn quic_session_smoke() -> Result<(), RuntimeError> {
 
     let endpoint_config =
         QuicClientEndpointConfig::localhost_with_root_certificate(certificate.certificate_der);
-    let client = QuicProvider::connect_addr(
-        addr,
-        endpoint_config,
-        quic_client_config(NnrpClientConfig::default()),
-    )
-    .await?;
+    let client =
+        QuicProvider::connect_addr(addr, endpoint_config, NnrpClientConfig::default()).await?;
     let mut session = client.open_session().await?;
     let frame_id = session.submit(token_submit(1), b"prompt".to_vec()).await?;
     let result = session.await_result().await?;

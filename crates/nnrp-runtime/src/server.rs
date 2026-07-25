@@ -46,12 +46,10 @@ use crate::{
     server_provider::{bind_server, BoundServerProvider},
     BoxedFramedListener, BoxedFramedTransport, FramedListener, NnrpServerOptions,
     NnrpServerProvider, ProviderEndpoint, RuntimeError, RuntimePacket, RuntimePressureState,
-    RuntimeTransportKind,
 };
 
 #[derive(Clone)]
 pub struct NnrpServerConfig {
-    pub transport: RuntimeTransportKind,
     pub supported_profiles: Vec<u16>,
     pub supported_cache_objects: Vec<CacheObjectKind>,
     pub max_cache_objects: usize,
@@ -69,7 +67,6 @@ impl fmt::Debug for NnrpServerConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("NnrpServerConfig")
-            .field("transport", &self.transport)
             .field("supported_profiles", &self.supported_profiles)
             .field("supported_cache_objects", &self.supported_cache_objects)
             .field("max_cache_objects", &self.max_cache_objects)
@@ -101,7 +98,6 @@ impl NnrpServerPolicy for AllowAllServerPolicy {
 impl Default for NnrpServerConfig {
     fn default() -> Self {
         Self {
-            transport: RuntimeTransportKind::Tcp,
             supported_profiles: vec![nnrp_core::PROFILE_TOKEN],
             supported_cache_objects: Vec::new(),
             max_cache_objects: 0,
@@ -118,11 +114,6 @@ impl Default for NnrpServerConfig {
 }
 
 impl NnrpServerConfig {
-    pub fn with_transport(mut self, transport: RuntimeTransportKind) -> Self {
-        self.transport = transport;
-        self
-    }
-
     pub fn with_supported_profiles(mut self, profiles: impl Into<Vec<u16>>) -> Self {
         self.supported_profiles = profiles.into();
         self
@@ -350,11 +341,6 @@ impl NnrpServer {
         addr: impl tokio::net::ToSocketAddrs,
         config: NnrpServerConfig,
     ) -> Result<Self, RuntimeError> {
-        if config.transport != RuntimeTransportKind::Tcp {
-            return Err(RuntimeError::UnsupportedTransport(
-                "server config selected a non-TCP transport for bind_tcp",
-            ));
-        }
         Self::from_listener(
             TcpFramedListener::new(TcpListener::bind(addr).await?),
             config,
@@ -363,13 +349,8 @@ impl NnrpServer {
 
     pub async fn bind_quic(
         _endpoint: &str,
-        config: NnrpServerConfig,
+        _config: NnrpServerConfig,
     ) -> Result<Self, RuntimeError> {
-        if config.transport != RuntimeTransportKind::Quic {
-            return Err(RuntimeError::UnsupportedTransport(
-                "server config selected a non-QUIC transport for bind_quic",
-            ));
-        }
         Err(RuntimeError::UnsupportedTransport(
             "QUIC provider is not installed; use from_listener with a QUIC FramedListener",
         ))
@@ -386,11 +367,6 @@ impl NnrpServer {
         listener: BoxedFramedListener,
         config: NnrpServerConfig,
     ) -> Result<Self, RuntimeError> {
-        if listener.transport_kind() != config.transport {
-            return Err(RuntimeError::UnsupportedTransport(
-                "server config transport does not match the provided listener slot",
-            ));
-        }
         Ok(Self::from_bound_listeners(
             vec![BoundServerProvider::from_listener(listener)],
             config,
@@ -405,12 +381,6 @@ impl NnrpServer {
     where
         L: FramedListener + 'static,
     {
-        let transport = listener.transport_kind();
-        if transport != config.transport {
-            return Err(RuntimeError::UnsupportedTransport(
-                "server config transport does not match the provided listener slot",
-            ));
-        }
         Ok(Self::from_bound_listeners(
             vec![BoundServerProvider::new(endpoint, Box::new(listener))?],
             config,
