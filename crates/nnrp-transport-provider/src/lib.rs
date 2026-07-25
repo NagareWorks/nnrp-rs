@@ -1,49 +1,10 @@
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
-use nnrp_core::TransportId;
+use nnrp_core::{TransportId, TransportPolicy};
 use thiserror::Error;
 
 pub const DEFAULT_PROVIDER_MAX_FRAME_BYTES: u64 = 64 * 1024 * 1024;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransportPolicy {
-    Auto,
-    PreferQuic,
-    PreferTcp,
-    PreferIpc,
-    PreferWebSocket,
-    ForceQuic,
-    ForceTcp,
-    ForceIpc,
-    ForceWebSocket,
-}
-
-impl TransportPolicy {
-    pub fn allows(self, transport_id: TransportId) -> bool {
-        match self {
-            Self::Auto
-            | Self::PreferQuic
-            | Self::PreferTcp
-            | Self::PreferIpc
-            | Self::PreferWebSocket => is_selectable_transport(transport_id),
-            Self::ForceQuic => transport_id == TransportId::Quic,
-            Self::ForceTcp => transport_id == TransportId::Tcp,
-            Self::ForceIpc => transport_id == TransportId::Ipc,
-            Self::ForceWebSocket => transport_id == TransportId::WebSocket,
-        }
-    }
-
-    fn preferred_transport(self) -> Option<TransportId> {
-        match self {
-            Self::PreferQuic | Self::ForceQuic => Some(TransportId::Quic),
-            Self::PreferTcp | Self::ForceTcp => Some(TransportId::Tcp),
-            Self::PreferIpc | Self::ForceIpc => Some(TransportId::Ipc),
-            Self::PreferWebSocket | Self::ForceWebSocket => Some(TransportId::WebSocket),
-            Self::Auto => None,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransportProviderKind {
@@ -813,13 +774,7 @@ fn selection_error<T>(
 }
 
 fn forced_transport(policy: TransportPolicy) -> Option<TransportId> {
-    match policy {
-        TransportPolicy::ForceQuic => Some(TransportId::Quic),
-        TransportPolicy::ForceTcp => Some(TransportId::Tcp),
-        TransportPolicy::ForceIpc => Some(TransportId::Ipc),
-        TransportPolicy::ForceWebSocket => Some(TransportId::WebSocket),
-        _ => None,
-    }
+    policy.forced_transport()
 }
 
 fn is_selectable_transport(transport_id: TransportId) -> bool {

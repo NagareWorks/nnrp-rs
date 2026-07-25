@@ -10,11 +10,11 @@ use nnrp_core::{
     OBJECT_REFERENCE_BLOCK_LEN, PAYLOAD_KIND_KNOWN_MASK, RESULT_PUSH_METADATA_LEN,
     SESSION_PATCH_ACK_METADATA_LEN, STANDARD_PROFILE_TOKEN,
 };
-use nnrp_core::{ClientHelloMetadata, ResultHintReason};
+use nnrp_core::{ClientHelloMetadata, ResultHintReason, TransportPolicy};
 use nnrp_runtime::{NnrpClient, NnrpClientConfig, NnrpServerConfig, RuntimeError};
 use nnrp_transport_provider::{
-    select_transport_with_probe, ProbeSample, RemoteTransportSupport, TransportPolicy,
-    TransportProviderDescriptor, TransportProviderKind,
+    select_transport_with_probe, ProbeSample, RemoteTransportSupport, TransportProviderDescriptor,
+    TransportProviderKind,
 };
 use nnrp_transport_quic::{
     quic_client_config, quic_server_config, QuicClientEndpointConfig, QuicProvider,

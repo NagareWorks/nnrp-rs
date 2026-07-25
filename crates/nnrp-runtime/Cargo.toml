@@ -19,6 +19,7 @@ native-tcp = ["dep:tokio"]
 
 [dependencies]
 async-trait.workspace = true
+http.workspace = true
 nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.4.16" }
 thiserror.workspace = true
 

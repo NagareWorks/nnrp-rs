@@ -19,16 +19,16 @@
 
 ## Host Route Model
 
-- [ ] Add the frozen application and provider endpoint values.
-  - [ ] Add `NnrpEndpoint` for `nnrp://` and `nnrps://` only.
-  - [ ] Add `ProviderEndpoint` for carrier-local locator overrides.
-  - [ ] Preserve application authority, path, query, and security intent.
-  - [ ] Reject provider-local schemes in `NnrpEndpoint`.
+- [x] Add the frozen application and provider endpoint values.
+  - [x] Add `NnrpEndpoint` for `nnrp://` and `nnrps://` only.
+  - [x] Add `ProviderEndpoint` for carrier-local locator overrides.
+  - [x] Preserve application authority, path, query, and security intent.
+  - [x] Reject provider-local schemes in `NnrpEndpoint`.
 - [ ] Add role-specific route values.
-  - [ ] Add `ClientProviderRoute` and `ClientProviderRoutes`.
-  - [ ] Add `ServerProviderRoute` and `ServerProviderRoutes`.
-  - [ ] Add the exact owned fields for `ClientTransportSecurity` and `ServerTransportSecurity`.
-  - [ ] Keep locator and security values isolated per transport ID.
+  - [x] Add `ClientProviderRoute` and `ClientProviderRoutes`.
+  - [x] Add `ServerProviderRoute` and `ServerProviderRoutes`.
+  - [x] Add the exact owned fields for `ClientTransportSecurity` and `ServerTransportSecurity`.
+  - [x] Keep locator and security values isolated per transport ID.
   - [ ] Reject duplicate keys, provider-kind mismatches, and role-mismatched security.
   - [ ] Report a configured known-but-uninstalled route as `local-unavailable`.
   - [ ] Apply the exact rejection precedence when multiple checks fail.

@@ -43,7 +43,8 @@ pub fn register_tcp_provider(registry: &mut TransportProviderRegistry) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nnrp_transport_provider::{RemoteTransportSupport, TransportPolicy};
+    use nnrp_core::TransportPolicy;
+    use nnrp_transport_provider::RemoteTransportSupport;
 
     #[test]
     fn tcp_provider_registers_available_descriptor() {

@@ -626,6 +626,7 @@ async fn bind_named_pipe(_path: &str) -> Result<IpcListener, RuntimeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nnrp_core::TransportPolicy;
     #[cfg(unix)]
     use nnrp_core::{
         BackpressureLevel, CommonHeader, FrameSubmitMetadata, InputProfile, MessageType,
@@ -634,7 +635,7 @@ mod tests {
     };
     #[cfg(unix)]
     use nnrp_runtime::{NnrpClientEvent, NnrpResult};
-    use nnrp_transport_provider::{RemoteTransportSupport, TransportPolicy};
+    use nnrp_transport_provider::RemoteTransportSupport;
     #[cfg(unix)]
     use tokio::time::{timeout, Duration};
 

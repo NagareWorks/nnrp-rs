@@ -406,12 +406,13 @@ mod tests {
     use async_trait::async_trait;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
+    use nnrp_core::TransportPolicy;
     use nnrp_core::{
         CommonHeader, FrameSubmitMetadata, InputProfile, MessageType, PayloadKindBitmap,
         ResultClass, ResultPushMetadata, SessionCloseReason, SubmitMode, TileIndexMode,
     };
     use nnrp_runtime::{RuntimePacket, RuntimeTransportKind};
-    use nnrp_transport_provider::{RemoteTransportSupport, TransportPolicy};
+    use nnrp_transport_provider::RemoteTransportSupport;
 
     #[test]
     fn quic_provider_registers_available_backend_descriptor() {

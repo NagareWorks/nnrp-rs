@@ -435,13 +435,14 @@ fn websocket_close_error(close: Option<CloseFrame>) -> RuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nnrp_core::TransportPolicy;
     use nnrp_core::{
         BackpressureLevel, FrameSubmitMetadata, InputProfile, PartialResultMetadata,
         PayloadKindBitmap, PressureMetadata, ProgressMetadata, ResultClass, ResultPushMetadata,
         SubmitMode, TileIndexMode, STANDARD_PROFILE_TOKEN,
     };
     use nnrp_runtime::{NnrpClientEvent, NnrpResult};
-    use nnrp_transport_provider::{RemoteTransportSupport, TransportPolicy};
+    use nnrp_transport_provider::RemoteTransportSupport;
     use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
     #[test]

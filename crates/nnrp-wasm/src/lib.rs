@@ -6,13 +6,13 @@ use nnrp_core::{
     PressureMetadata, ProgressMetadata, ProtocolVersion, RecoverableErrorMetadata,
     ResultDropReasonMetadata, RetryAfterMetadata, RouteHintMetadata, RuntimeObjectKind,
     RuntimeRole, SchedulingMetadata, SupersedeMetadata, TraceContextMetadata, TransportId,
-    COMMON_HEADER_LEN,
+    TransportPolicy, COMMON_HEADER_LEN,
 };
 use nnrp_transport_provider::{
     select_transport_with_probe, summarize_provider_probe, ProbeMetrics, ProbeSample, ProbeState,
     ProviderCost, ProviderLimitation, ProviderLimits, RemoteTransportSupport,
-    TransportCandidateDiagnostic, TransportPolicy, TransportProviderDescriptor,
-    TransportProviderKind, TransportProviderMetadata, TransportRejectionReason,
+    TransportCandidateDiagnostic, TransportProviderDescriptor, TransportProviderKind,
+    TransportProviderMetadata, TransportRejectionReason,
 };
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
