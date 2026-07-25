@@ -58,7 +58,7 @@
   - [ ] Reject IPC for `nnrps://` in Preview4.
   - [ ] Require WSS and route-local credentials for native WebSocket.
   - [ ] Preserve browser-owned TLS verification for browser WSS.
-- [ ] Add `route-unresolved` and `security-unsatisfied` to the exact rejection registry.
+- [x] Add `route-unresolved` and `security-unsatisfied` to the exact rejection registry.
 - [ ] Keep `nnrp://` compatible with both plain and secure eligible routes.
 
 ## IPC Transport

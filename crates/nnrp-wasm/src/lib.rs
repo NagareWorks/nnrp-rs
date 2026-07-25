@@ -1676,6 +1676,8 @@ fn transport_rejection_reason_name(value: TransportRejectionReason) -> &'static 
         TransportRejectionReason::LocalUnavailable => "local-unavailable",
         TransportRejectionReason::PeerUnsupported => "peer-unsupported",
         TransportRejectionReason::LimitExceeded => "limit-exceeded",
+        TransportRejectionReason::RouteUnresolved => "route-unresolved",
+        TransportRejectionReason::SecurityUnsatisfied => "security-unsatisfied",
         TransportRejectionReason::ProbeMissing => "probe-missing",
         TransportRejectionReason::ProbeFailed => "probe-failed",
     }

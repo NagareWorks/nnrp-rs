@@ -350,12 +350,54 @@ impl ProbeSample {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransportCandidateReadiness {
+    pub provider_id: String,
+    pub route_resolved: bool,
+    pub security_satisfied: bool,
+    pub diagnostic: Option<String>,
+}
+
+impl TransportCandidateReadiness {
+    pub fn ready(provider_id: impl Into<String>) -> Self {
+        Self {
+            provider_id: provider_id.into(),
+            route_resolved: true,
+            security_satisfied: true,
+            diagnostic: None,
+        }
+    }
+
+    pub fn route_unresolved(provider_id: impl Into<String>, diagnostic: impl Into<String>) -> Self {
+        Self {
+            provider_id: provider_id.into(),
+            route_resolved: false,
+            security_satisfied: true,
+            diagnostic: Some(diagnostic.into()),
+        }
+    }
+
+    pub fn security_unsatisfied(
+        provider_id: impl Into<String>,
+        diagnostic: impl Into<String>,
+    ) -> Self {
+        Self {
+            provider_id: provider_id.into(),
+            route_resolved: true,
+            security_satisfied: false,
+            diagnostic: Some(diagnostic.into()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransportRejectionReason {
     PolicyDisallowed,
     LocalUnavailable,
     PeerUnsupported,
     LimitExceeded,
+    RouteUnresolved,
+    SecurityUnsatisfied,
     ProbeMissing,
     ProbeFailed,
 }
@@ -399,7 +441,23 @@ pub fn select_transport(
     policy: TransportPolicy,
     requested_max_frame_bytes: Option<u64>,
 ) -> Result<TransportSelection, TransportSelectionError> {
-    let mut candidates = evaluate_candidates(providers, remote, policy, requested_max_frame_bytes);
+    select_transport_with_readiness(providers, remote, policy, requested_max_frame_bytes, &[])
+}
+
+pub fn select_transport_with_readiness(
+    providers: &[TransportProviderDescriptor],
+    remote: &RemoteTransportSupport,
+    policy: TransportPolicy,
+    requested_max_frame_bytes: Option<u64>,
+    readiness: &[TransportCandidateReadiness],
+) -> Result<TransportSelection, TransportSelectionError> {
+    let mut candidates = evaluate_candidates(
+        providers,
+        remote,
+        policy,
+        requested_max_frame_bytes,
+        readiness,
+    );
     let eligible = eligible_indices(&candidates);
 
     if eligible.len() == 1 {
@@ -424,7 +482,31 @@ pub fn select_transport_with_probe(
     requested_max_frame_bytes: Option<u64>,
     samples: &[ProbeSample],
 ) -> Result<TransportSelection, TransportSelectionError> {
-    let mut candidates = evaluate_candidates(providers, remote, policy, requested_max_frame_bytes);
+    select_transport_with_readiness_and_probe(
+        providers,
+        remote,
+        policy,
+        requested_max_frame_bytes,
+        &[],
+        samples,
+    )
+}
+
+pub fn select_transport_with_readiness_and_probe(
+    providers: &[TransportProviderDescriptor],
+    remote: &RemoteTransportSupport,
+    policy: TransportPolicy,
+    requested_max_frame_bytes: Option<u64>,
+    readiness: &[TransportCandidateReadiness],
+    samples: &[ProbeSample],
+) -> Result<TransportSelection, TransportSelectionError> {
+    let mut candidates = evaluate_candidates(
+        providers,
+        remote,
+        policy,
+        requested_max_frame_bytes,
+        readiness,
+    );
     let eligible = eligible_indices(&candidates);
 
     if eligible.len() == 1 {
@@ -581,11 +663,15 @@ fn evaluate_candidates(
     remote: &RemoteTransportSupport,
     policy: TransportPolicy,
     requested_max_frame_bytes: Option<u64>,
+    readiness: &[TransportCandidateReadiness],
 ) -> Vec<EvaluatedCandidate> {
     providers
         .iter()
         .filter(|provider| is_selectable_transport(provider.transport_id))
         .map(|provider| {
+            let readiness = readiness
+                .iter()
+                .find(|readiness| readiness.provider_id == provider.metadata.id);
             let peer_supported = remote.supports(provider.transport_id);
             let within_limits = requested_max_frame_bytes
                 .map(|requested| requested <= provider.metadata.limits.max_frame_bytes)
@@ -598,6 +684,10 @@ fn evaluate_candidates(
                 Some(TransportRejectionReason::PeerUnsupported)
             } else if !within_limits {
                 Some(TransportRejectionReason::LimitExceeded)
+            } else if readiness.is_some_and(|readiness| !readiness.route_resolved) {
+                Some(TransportRejectionReason::RouteUnresolved)
+            } else if readiness.is_some_and(|readiness| !readiness.security_satisfied) {
+                Some(TransportRejectionReason::SecurityUnsatisfied)
             } else {
                 None
             };
@@ -614,7 +704,9 @@ fn evaluate_candidates(
                     probe: None,
                     selection_rank: None,
                     rejection_reason,
-                    diagnostic: provider.diagnostic.clone(),
+                    diagnostic: readiness
+                        .and_then(|readiness| readiness.diagnostic.clone())
+                        .or_else(|| provider.diagnostic.clone()),
                 },
             }
         })
@@ -915,6 +1007,107 @@ mod tests {
             candidate.probe_state == ProbeState::Missing
                 && candidate.rejection_reason == Some(TransportRejectionReason::ProbeMissing)
         }));
+    }
+
+    #[test]
+    fn readiness_rejections_preserve_frozen_precedence() {
+        let mut provider = available(TransportId::Tcp);
+        let provider_id = provider.metadata.id.clone();
+        let remote = RemoteTransportSupport::new([TransportId::Tcp]);
+        let unresolved = TransportCandidateReadiness {
+            provider_id: provider_id.clone(),
+            route_resolved: false,
+            security_satisfied: false,
+            diagnostic: Some("route could not be derived".to_owned()),
+        };
+
+        let error = select_transport_with_readiness(
+            &[provider.clone()],
+            &remote,
+            TransportPolicy::Auto,
+            None,
+            std::slice::from_ref(&unresolved),
+        )
+        .expect_err("an unresolved route is ineligible");
+        let TransportSelectionError::NoViableTransport { candidates } = error else {
+            panic!("unexpected forced error")
+        };
+        assert_eq!(
+            candidates[0].rejection_reason,
+            Some(TransportRejectionReason::RouteUnresolved)
+        );
+        assert_eq!(
+            candidates[0].diagnostic.as_deref(),
+            Some("route could not be derived")
+        );
+
+        let security = TransportCandidateReadiness::security_unsatisfied(
+            &provider_id,
+            "route does not satisfy nnrps",
+        );
+        let error = select_transport_with_readiness(
+            &[provider.clone()],
+            &remote,
+            TransportPolicy::Auto,
+            None,
+            &[security],
+        )
+        .expect_err("an insecure route is ineligible");
+        let TransportSelectionError::NoViableTransport { candidates } = error else {
+            panic!("unexpected forced error")
+        };
+        assert_eq!(
+            candidates[0].rejection_reason,
+            Some(TransportRejectionReason::SecurityUnsatisfied)
+        );
+
+        provider.metadata.limits.max_frame_bytes = 1;
+        let error = select_transport_with_readiness(
+            &[provider.clone()],
+            &remote,
+            TransportPolicy::Auto,
+            Some(2),
+            std::slice::from_ref(&unresolved),
+        )
+        .expect_err("frame limits take precedence over route readiness");
+        let TransportSelectionError::NoViableTransport { candidates } = error else {
+            panic!("unexpected forced error")
+        };
+        assert_eq!(
+            candidates[0].rejection_reason,
+            Some(TransportRejectionReason::LimitExceeded)
+        );
+
+        provider.available = false;
+        let error = select_transport_with_readiness(
+            &[provider],
+            &RemoteTransportSupport::new([]),
+            TransportPolicy::ForceQuic,
+            Some(2),
+            &[unresolved],
+        )
+        .expect_err("policy takes precedence over every candidate failure");
+        let TransportSelectionError::ForcedTransportUnavailable { candidates, .. } = error else {
+            panic!("unexpected non-forced error")
+        };
+        assert_eq!(
+            candidates[0].rejection_reason,
+            Some(TransportRejectionReason::PolicyDisallowed)
+        );
+    }
+
+    #[test]
+    fn readiness_helpers_keep_provider_identity_and_diagnostic() {
+        let ready = TransportCandidateReadiness::ready("provider.ready");
+        assert!(ready.route_resolved);
+        assert!(ready.security_satisfied);
+        assert_eq!(ready.diagnostic, None);
+
+        let unresolved =
+            TransportCandidateReadiness::route_unresolved("provider.route", "missing locator");
+        assert!(!unresolved.route_resolved);
+        assert!(unresolved.security_satisfied);
+        assert_eq!(unresolved.diagnostic.as_deref(), Some("missing locator"));
     }
 
     #[test]
