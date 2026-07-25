@@ -1,5 +1,18 @@
 # 06 - Release Validation And Docs
 
+## Cross-SDK Route Closure
+
+- [ ] Reserve `1.0.0-preview.4.17` as the single coordinated Rust correction release; do not publish it until the host-route contract is complete.
+  - [ ] Rust client/server host APIs match the frozen route-set cardinality.
+  - [ ] TCP TLS and route-local security pass native tests.
+  - [ ] Host-level multi-route and multi-listener conformance passes.
+  - [ ] Python, JavaScript, and C# can consume the same route/security ABI without language-specific exceptions.
+- [ ] Run one coordinated design-to-code audit before publishing `1.0.0-preview.4.17`.
+  - [ ] Compare every frozen route field and rejection reason with Rust public APIs.
+  - [ ] Compare every checked Preview4 TODO item with executable evidence.
+  - [ ] Confirm no production role exposes a singular route override.
+  - [ ] Confirm the release notes describe one complete correction rather than piecemeal patches.
+
 ## Version And Release Flow
 
 - [x] Move Rust workspace version to the preview4 release line in the release-preparation commit.

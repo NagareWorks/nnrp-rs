@@ -41,6 +41,18 @@
 - [x] Add deterministic idempotent transport resource close behavior.
 - [x] Run real Rust FFI loopbacks for TCP, QUIC, IPC, WS, and WSS.
 - [x] Load each packaged host dynamic library and run a real packet-batch loopback through exported symbols.
+- [ ] Complete the route-security ABI required by host SDKs.
+  - [ ] Allow TCP transport security handles to configure TLS connect and listen paths.
+  - [ ] Preserve distinct client and server security handle kinds per route.
+  - [ ] Return `route-unresolved` and `security-unsatisfied` through typed selection diagnostics.
+  - [ ] Reject security handles from another transport artifact or role.
+  - [ ] Add native TCP TLS, QUIC TLS, WS, and WSS loopbacks through exported symbols.
+- [ ] Preserve the singular coarse-FFI ownership boundary.
+  - [ ] Keep one carrier connection per client runtime handle.
+  - [ ] Keep one provider listener per low-level listener handle.
+  - [ ] Keep one carrier connection per accepted server session handle.
+  - [ ] Keep multi-route selection and multi-listener ownership in the host SDK layer.
+  - [ ] Add architecture tests that reject per-frame calls across multiple transport libraries.
 
 ## FFI Role Runtime Carrier Ownership
 

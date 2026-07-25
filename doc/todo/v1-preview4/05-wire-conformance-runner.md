@@ -37,6 +37,17 @@
 - [x] Execute capability/route/cache scenarios with suite-to-target hints and target-to-suite cache miss.
 - [x] Execute IPC-specific cancel scenarios.
 - [x] Execute WebSocket-specific progress/backpressure scenarios.
+- [ ] Execute host-route cardinality scenarios.
+  - [ ] Drive one target client against at least two suite-owned provider endpoints.
+  - [ ] Verify deterministic selection and single-carrier runtime adoption.
+  - [ ] Verify forced-route failure without fallback.
+  - [ ] Drive one target server through at least two simultaneously bound listeners.
+  - [ ] Verify every actual bound provider endpoint.
+  - [ ] Verify active transport identity for sessions accepted on each listener.
+  - [ ] Inject one bind failure and verify atomic listener rollback.
+  - [ ] Inject one terminal listener failure and verify the logical set closes instead of shrinking.
+  - [ ] Verify route-local security isolation and `nnrps://` filtering.
+  - [ ] Verify known-but-uninstalled routes and combined failures use exact rejection precedence.
 
 ## Result Validation
 

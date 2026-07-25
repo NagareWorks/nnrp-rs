@@ -17,6 +17,50 @@
 - [x] Ensure every provider owns real connect/listen/send/receive behavior.
 - [x] Keep provider packages from becoming configuration-only switches.
 
+## Host Route Model
+
+- [ ] Add the frozen application and provider endpoint values.
+  - [ ] Add `NnrpEndpoint` for `nnrp://` and `nnrps://` only.
+  - [ ] Add `ProviderEndpoint` for carrier-local locator overrides.
+  - [ ] Preserve application authority, path, query, and security intent.
+  - [ ] Reject provider-local schemes in `NnrpEndpoint`.
+- [ ] Add role-specific route values.
+  - [ ] Add `ClientProviderRoute` and `ClientProviderRoutes`.
+  - [ ] Add `ServerProviderRoute` and `ServerProviderRoutes`.
+  - [ ] Add the exact owned fields for `ClientTransportSecurity` and `ServerTransportSecurity`.
+  - [ ] Keep locator and security values isolated per transport ID.
+  - [ ] Reject duplicate keys, provider-kind mismatches, and role-mismatched security.
+  - [ ] Report a configured known-but-uninstalled route as `local-unavailable`.
+  - [ ] Apply the exact rejection precedence when multiple checks fail.
+- [ ] Add host-level client orchestration.
+  - [ ] Resolve every installed provider route before selection.
+  - [ ] Keep unresolved and security-incompatible candidates in diagnostics.
+  - [ ] Probe all eligible Auto/Prefer candidates.
+  - [ ] Adopt only the selected carrier into `NnrpClient`.
+  - [ ] Make Force fail without fallback.
+- [ ] Add host-level server orchestration.
+  - [ ] Resolve every policy-allowed installed provider route.
+  - [ ] Bind every eligible Auto/Prefer listener into one logical `NnrpServer`.
+  - [ ] Restrict Force to the named listener.
+  - [ ] Roll back every listener opened by a failed logical listen operation.
+  - [ ] Accept across the listener set while each session adopts one carrier.
+  - [ ] Expose the actual `active_transport_id` on every accepted session.
+  - [ ] Expose actual bound provider endpoints, including assigned ports.
+  - [ ] Break simultaneous accept readiness with stable provider order.
+  - [ ] Fail and close the complete logical set after a terminal provider-listener failure.
+
+## Application Security Intent
+
+- [ ] Enforce `nnrps://` before probing or binding.
+  - [ ] Add TCP TLS client and server paths with route-local credentials.
+  - [ ] Keep plain TCP visible as `security-unsatisfied` for `nnrps://`.
+  - [ ] Keep QUIC TLS credentials route-local.
+  - [ ] Reject IPC for `nnrps://` in Preview4.
+  - [ ] Require WSS and route-local credentials for native WebSocket.
+  - [ ] Preserve browser-owned TLS verification for browser WSS.
+- [ ] Add `route-unresolved` and `security-unsatisfied` to the exact rejection registry.
+- [ ] Keep `nnrp://` compatible with both plain and secure eligible routes.
+
 ## IPC Transport
 
 - [x] Add `nnrp-transport-ipc` crate.
