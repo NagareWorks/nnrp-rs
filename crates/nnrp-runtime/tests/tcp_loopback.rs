@@ -35,6 +35,7 @@ async fn tcp_packet_read_preserves_partial_bytes_across_timeouts() -> Result<(),
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
     let (prefix_sent, prefix_received) = tokio::sync::oneshot::channel();
+    let (release_suffix, suffix_released) = tokio::sync::oneshot::channel();
     let expected = RuntimePacket::new(
         CommonHeader::new(MessageType::Ping, 3, 5),
         b"met".to_vec(),
@@ -46,7 +47,9 @@ async fn tcp_packet_read_preserves_partial_bytes_across_timeouts() -> Result<(),
         let (mut stream, _) = listener.accept().await?;
         stream.write_all(&encoded[..13]).await?;
         let _ = prefix_sent.send(());
-        tokio::time::sleep(Duration::from_millis(75)).await;
+        suffix_released
+            .await
+            .expect("client should release the packet suffix");
         stream.write_all(&encoded[13..]).await?;
         stream.flush().await?;
         Ok::<_, RuntimeError>(())
@@ -65,6 +68,9 @@ async fn tcp_packet_read_preserves_partial_bytes_across_timeouts() -> Result<(),
             "short poll should time out while the packet remains partial"
         );
     }
+    release_suffix
+        .send(())
+        .expect("server should still be waiting for the suffix release");
 
     let actual = tokio::time::timeout(Duration::from_secs(1), transport.read_packet())
         .await
