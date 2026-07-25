@@ -359,13 +359,17 @@ fn status_from_runtime_error(error: RuntimeError) -> NnrpFfiStatus {
         | RuntimeError::FrameTooLarge { .. }
         | RuntimeError::RouteConfiguration(_)
         | RuntimeError::DuplicateTransportProvider(_)
-        | RuntimeError::DuplicateClientProviderId(_) => {
+        | RuntimeError::DuplicateServerTransportProvider(_)
+        | RuntimeError::DuplicateClientProviderId(_)
+        | RuntimeError::DuplicateServerProviderId(_)
+        | RuntimeError::ServerRouteRejected { .. } => {
             transport_status(NnrpFfiStatusCode::InvalidArgument, 104)
         }
         RuntimeError::TransportClosed { .. }
         | RuntimeError::UnexpectedMessage(_)
         | RuntimeError::TransportSelection(_)
-        | RuntimeError::SelectedProviderUnavailable(_) => {
+        | RuntimeError::SelectedProviderUnavailable(_)
+        | RuntimeError::ServerListenerSetClosed => {
             transport_status(NnrpFfiStatusCode::InvalidState, 105)
         }
         RuntimeError::Io(_) | RuntimeError::FrameIdOverflow | RuntimeError::Internal(_) => {

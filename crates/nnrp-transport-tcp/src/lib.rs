@@ -3,9 +3,10 @@ use std::{io, net::SocketAddr, sync::Arc};
 use async_trait::async_trait;
 use nnrp_core::TransportId;
 use nnrp_runtime::{
-    BoxedFramedTransport, ClientTransportSecurity, FramedListener, FramedTransport,
-    NnrpClientProvider, ProviderEndpoint, RuntimeError, RuntimeFrameLimits, RuntimePacket,
-    RuntimeTransportKind, StreamPacketReader, TcpFramedListener, TcpTransport,
+    BoundServerProvider, BoxedFramedTransport, ClientTransportSecurity, FramedListener,
+    FramedTransport, NnrpClientProvider, NnrpServerProvider, ProviderEndpoint, RuntimeError,
+    RuntimeFrameLimits, RuntimePacket, RuntimeTransportKind, ServerTransportSecurity,
+    StreamPacketReader, TcpFramedListener, TcpTransport,
 };
 use nnrp_transport_provider::{
     TransportProviderDescriptor, TransportProviderKind, TransportProviderRegistry,
@@ -202,6 +203,42 @@ impl NnrpClientProvider for TcpProvider {
                 TcpTransport::connect_with_limits(addr, limits).await?,
             )),
         }
+    }
+}
+
+#[async_trait]
+impl NnrpServerProvider for TcpProvider {
+    fn descriptor(&self) -> TransportProviderDescriptor {
+        TcpProvider::descriptor()
+    }
+
+    async fn bind(
+        &self,
+        endpoint: &ProviderEndpoint,
+        security: Option<&ServerTransportSecurity>,
+        limits: RuntimeFrameLimits,
+    ) -> Result<BoundServerProvider, RuntimeError> {
+        let addr =
+            endpoint
+                .as_str()
+                .strip_prefix("tcp://")
+                .ok_or(RuntimeError::UnsupportedTransport(
+                    "TCP provider endpoint must use tcp://",
+                ))?;
+        let listener: Box<dyn FramedListener> = match security {
+            Some(security) => Box::new(
+                TcpTlsFramedListener::bind(
+                    addr,
+                    security.certificate_der.clone(),
+                    security.private_key_pkcs8_der.clone(),
+                    limits,
+                )
+                .await?,
+            ),
+            None => Box::new(TcpFramedListener::bind_with_limits(addr, limits).await?),
+        };
+        let endpoint = format!("tcp://{}", listener.local_addr()?).parse()?;
+        BoundServerProvider::new(endpoint, listener)
     }
 }
 

@@ -2,6 +2,7 @@ use thiserror::Error;
 
 use crate::transport::RuntimeTransportKind;
 use nnrp_core::TransportId;
+use nnrp_transport_provider::TransportRejectionReason;
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
@@ -20,8 +21,24 @@ pub enum RuntimeError {
     #[error("more than one client provider uses transport {0:?}")]
     DuplicateTransportProvider(TransportId),
 
+    #[error("more than one server provider uses transport {0:?}")]
+    DuplicateServerTransportProvider(TransportId),
+
     #[error("more than one client provider uses id {0}")]
     DuplicateClientProviderId(String),
+
+    #[error("more than one server provider uses id {0}")]
+    DuplicateServerProviderId(String),
+
+    #[error("server route {transport_id:?} was rejected as {reason:?}: {diagnostic}")]
+    ServerRouteRejected {
+        transport_id: TransportId,
+        reason: TransportRejectionReason,
+        diagnostic: String,
+    },
+
+    #[error("no server provider listener remains available")]
+    ServerListenerSetClosed,
 
     #[error("selected client provider is unavailable: {0}")]
     SelectedProviderUnavailable(String),

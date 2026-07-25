@@ -1,8 +1,12 @@
 use std::collections::BTreeMap;
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::task::Poll;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use futures_util::{future::poll_fn, lock::Mutex as AsyncMutex};
 use nnrp_core::{
     validate_control_request_semantics, validate_partial_result_semantics,
     validate_pressure_semantics, validate_profile_assignment, validate_progress_semantics,
@@ -39,8 +43,10 @@ use tokio::net::TcpListener;
 #[cfg(all(feature = "native-tcp", not(target_arch = "wasm32")))]
 use crate::TcpFramedListener;
 use crate::{
-    BoxedFramedListener, BoxedFramedTransport, FramedListener, RuntimeError, RuntimePacket,
-    RuntimePressureState, RuntimeTransportKind,
+    server_provider::{bind_server, BoundServerProvider},
+    BoxedFramedListener, BoxedFramedTransport, FramedListener, NnrpServerOptions,
+    NnrpServerProvider, ProviderEndpoint, RuntimeError, RuntimePacket, RuntimePressureState,
+    RuntimeTransportKind,
 };
 
 #[derive(Clone)]
@@ -180,13 +186,16 @@ impl NnrpServerConfig {
 }
 
 pub struct NnrpServer {
-    listener: BoxedFramedListener,
+    listeners: AsyncMutex<Option<Vec<BoundServerProvider>>>,
+    bound_provider_endpoints: BTreeMap<nnrp_core::TransportId, ProviderEndpoint>,
+    primary_local_addr: Option<std::net::SocketAddr>,
     config: NnrpServerConfig,
     sessions: SharedSessionRegistry,
 }
 
 pub struct NnrpServerSession {
     session_id: u32,
+    active_transport_id: nnrp_core::TransportId,
     client_open: SessionOpenMetadata,
     transport: BoxedFramedTransport,
     lifecycle: ConnectionLifecycle,
@@ -328,6 +337,14 @@ pub enum NnrpServerEvent {
 }
 
 impl NnrpServer {
+    pub async fn listen<I>(options: NnrpServerOptions, providers: I) -> Result<Self, RuntimeError>
+    where
+        I: IntoIterator<Item = Arc<dyn NnrpServerProvider>>,
+    {
+        let listeners = bind_server(&options, providers).await?;
+        Ok(Self::from_bound_listeners(listeners, options.session))
+    }
+
     #[cfg(all(feature = "native-tcp", not(target_arch = "wasm32")))]
     pub async fn bind_tcp(
         addr: impl tokio::net::ToSocketAddrs,
@@ -374,15 +391,61 @@ impl NnrpServer {
                 "server config transport does not match the provided listener slot",
             ));
         }
-        Ok(Self {
-            listener,
+        Ok(Self::from_bound_listeners(
+            vec![BoundServerProvider::from_listener(listener)],
+            config,
+        ))
+    }
+
+    pub fn from_bound_listener<L>(
+        endpoint: ProviderEndpoint,
+        listener: L,
+        config: NnrpServerConfig,
+    ) -> Result<Self, RuntimeError>
+    where
+        L: FramedListener + 'static,
+    {
+        let transport = listener.transport_kind();
+        if transport != config.transport {
+            return Err(RuntimeError::UnsupportedTransport(
+                "server config transport does not match the provided listener slot",
+            ));
+        }
+        Ok(Self::from_bound_listeners(
+            vec![BoundServerProvider::new(endpoint, Box::new(listener))?],
+            config,
+        ))
+    }
+
+    fn from_bound_listeners(listeners: Vec<BoundServerProvider>, config: NnrpServerConfig) -> Self {
+        let bound_provider_endpoints = listeners
+            .iter()
+            .filter_map(|listener| {
+                listener
+                    .provider_endpoint()
+                    .cloned()
+                    .map(|endpoint| (listener.transport_id(), endpoint))
+            })
+            .collect();
+        let primary_local_addr = listeners.iter().find_map(BoundServerProvider::local_addr);
+        Self {
+            listeners: AsyncMutex::new(Some(listeners)),
+            bound_provider_endpoints,
+            primary_local_addr,
             config,
             sessions: Arc::new(Mutex::new(BTreeMap::new())),
-        })
+        }
     }
 
     pub fn local_addr(&self) -> Result<std::net::SocketAddr, RuntimeError> {
-        self.listener.local_addr()
+        self.primary_local_addr
+            .ok_or(RuntimeError::UnsupportedTransport(
+                "server listener set does not expose an IP socket address",
+            ))
+    }
+
+    pub fn bound_provider_endpoints(&self) -> &BTreeMap<nnrp_core::TransportId, ProviderEndpoint> {
+        &self.bound_provider_endpoints
     }
 
     pub fn session_count(&self) -> Result<usize, RuntimeError> {
@@ -390,7 +453,19 @@ impl NnrpServer {
     }
 
     pub async fn accept(&self) -> Result<NnrpServerSession, RuntimeError> {
-        let mut transport = self.listener.accept().await?;
+        let (active_transport_id, mut transport) = {
+            let mut listeners = self.listeners.lock().await;
+            let Some(active) = listeners.as_ref() else {
+                return Err(RuntimeError::ServerListenerSetClosed);
+            };
+            match accept_stable(active).await {
+                Ok(accepted) => accepted,
+                Err(error) => {
+                    listeners.take();
+                    return Err(error);
+                }
+            }
+        };
         let packet = loop {
             let packet = transport.read_packet().await?;
             if packet.header.message_type == MessageType::TransportProbe {
@@ -447,6 +522,7 @@ impl NnrpServer {
 
         Ok(NnrpServerSession {
             session_id: ack.session_id,
+            active_transport_id,
             client_open: open,
             transport,
             lifecycle,
@@ -533,6 +609,33 @@ impl NnrpServer {
     }
 }
 
+async fn accept_stable(
+    listeners: &[BoundServerProvider],
+) -> Result<(nnrp_core::TransportId, BoxedFramedTransport), RuntimeError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    type AcceptFuture<'a> =
+        Pin<Box<dyn Future<Output = Result<BoxedFramedTransport, RuntimeError>> + Send + 'a>>;
+    #[cfg(target_arch = "wasm32")]
+    type AcceptFuture<'a> =
+        Pin<Box<dyn Future<Output = Result<BoxedFramedTransport, RuntimeError>> + 'a>>;
+
+    let mut accepts = listeners
+        .iter()
+        .map(|listener| listener.listener().accept())
+        .collect::<Vec<AcceptFuture<'_>>>();
+    poll_fn(|context| {
+        for (index, accept) in accepts.iter_mut().enumerate() {
+            if let Poll::Ready(result) = accept.as_mut().poll(context) {
+                return Poll::Ready(
+                    result.map(|transport| (listeners[index].transport_id(), transport)),
+                );
+            }
+        }
+        Poll::Pending
+    })
+    .await
+}
+
 async fn respond_to_transport_probe(
     transport: &mut BoxedFramedTransport,
     packet: RuntimePacket,
@@ -572,7 +675,7 @@ impl fmt::Debug for NnrpServer {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("NnrpServer")
-            .field("transport", &self.listener.transport_kind())
+            .field("bound_provider_endpoints", &self.bound_provider_endpoints)
             .field("config", &self.config)
             .finish_non_exhaustive()
     }
@@ -583,6 +686,7 @@ impl fmt::Debug for NnrpServerSession {
         formatter
             .debug_struct("NnrpServerSession")
             .field("session_id", &self.session_id)
+            .field("active_transport_id", &self.active_transport_id)
             .field("client_open", &self.client_open)
             .field("transport", &self.transport.transport_kind())
             .field("lifecycle", &self.lifecycle)
@@ -597,6 +701,10 @@ impl fmt::Debug for NnrpServerSession {
 impl NnrpServerSession {
     pub fn session_id(&self) -> u32 {
         self.session_id
+    }
+
+    pub fn active_transport_id(&self) -> nnrp_core::TransportId {
+        self.active_transport_id
     }
 
     pub fn client_open(&self) -> &SessionOpenMetadata {

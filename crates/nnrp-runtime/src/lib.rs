@@ -5,6 +5,7 @@ pub mod packet;
 pub mod pressure;
 pub mod route;
 pub mod server;
+pub mod server_provider;
 pub mod transport;
 
 pub use client::{NnrpClient, NnrpClientConfig, NnrpClientEvent, NnrpClientSession, NnrpResult};
@@ -22,6 +23,7 @@ pub use server::{
     NnrpSchedulingUpdate, NnrpServer, NnrpServerConfig, NnrpServerEvent, NnrpServerPolicy,
     NnrpServerSession, NnrpSubmit,
 };
+pub use server_provider::{BoundServerProvider, NnrpServerOptions, NnrpServerProvider};
 pub use transport::{
     BoxedFramedListener, BoxedFramedTransport, FramedListener, FramedTransport, RuntimeFrameLimits,
     RuntimeTransportKind,

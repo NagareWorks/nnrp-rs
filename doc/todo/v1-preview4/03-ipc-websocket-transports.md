@@ -38,28 +38,28 @@
   - [x] Probe all eligible Auto/Prefer candidates.
   - [x] Adopt only the selected carrier into `NnrpClient`.
   - [x] Make Force fail without fallback.
-- [ ] Add host-level server orchestration.
-  - [ ] Resolve every policy-allowed installed provider route.
-  - [ ] Bind every eligible Auto/Prefer listener into one logical `NnrpServer`.
-  - [ ] Restrict Force to the named listener.
-  - [ ] Roll back every listener opened by a failed logical listen operation.
-  - [ ] Accept across the listener set while each session adopts one carrier.
-  - [ ] Expose the actual `active_transport_id` on every accepted session.
-  - [ ] Expose actual bound provider endpoints, including assigned ports.
-  - [ ] Break simultaneous accept readiness with stable provider order.
-  - [ ] Fail and close the complete logical set after a terminal provider-listener failure.
+- [x] Add host-level server orchestration.
+  - [x] Resolve every policy-allowed installed provider route.
+  - [x] Bind every eligible Auto/Prefer listener into one logical `NnrpServer`.
+  - [x] Restrict Force to the named listener.
+  - [x] Roll back every listener opened by a failed logical listen operation.
+  - [x] Accept across the listener set while each session adopts one carrier.
+  - [x] Expose the actual `active_transport_id` on every accepted session.
+  - [x] Expose actual bound provider endpoints, including assigned ports.
+  - [x] Break simultaneous accept readiness with stable provider order.
+  - [x] Fail and close the complete logical set after a terminal provider-listener failure.
 
 ## Application Security Intent
 
-- [ ] Enforce `nnrps://` before probing or binding.
-  - [ ] Add TCP TLS client and server paths with route-local credentials.
-  - [ ] Keep plain TCP visible as `security-unsatisfied` for `nnrps://`.
-  - [ ] Keep QUIC TLS credentials route-local.
-  - [ ] Reject IPC for `nnrps://` in Preview4.
-  - [ ] Require WSS and route-local credentials for native WebSocket.
-  - [ ] Preserve browser-owned TLS verification for browser WSS.
+- [x] Enforce `nnrps://` before probing or binding.
+  - [x] Add TCP TLS client and server paths with route-local credentials.
+  - [x] Keep plain TCP visible as `security-unsatisfied` for `nnrps://`.
+  - [x] Keep QUIC TLS credentials route-local.
+  - [x] Reject IPC for `nnrps://` in Preview4.
+  - [x] Require WSS and route-local credentials for native WebSocket.
+  - [x] Preserve browser-owned TLS verification for browser WSS.
 - [x] Add `route-unresolved` and `security-unsatisfied` to the exact rejection registry.
-- [ ] Keep `nnrp://` compatible with both plain and secure eligible routes.
+- [x] Keep `nnrp://` compatible with both plain and secure eligible routes.
 
 ## IPC Transport
 

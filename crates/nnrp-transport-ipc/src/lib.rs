@@ -7,9 +7,10 @@ use std::{
 use async_trait::async_trait;
 use nnrp_core::{CommonHeader, TransportId, COMMON_HEADER_LEN};
 use nnrp_runtime::{
-    BoxedFramedTransport, ClientTransportSecurity, FramedListener, FramedTransport, NnrpClient,
-    NnrpClientConfig, NnrpClientProvider, NnrpServer, NnrpServerConfig, ProviderEndpoint,
-    RuntimeError, RuntimeFrameLimits, RuntimePacket, RuntimeTransportKind,
+    BoundServerProvider, BoxedFramedTransport, ClientTransportSecurity, FramedListener,
+    FramedTransport, NnrpClient, NnrpClientConfig, NnrpClientProvider, NnrpServer,
+    NnrpServerConfig, NnrpServerProvider, ProviderEndpoint, RuntimeError, RuntimeFrameLimits,
+    RuntimePacket, RuntimeTransportKind, ServerTransportSecurity,
 };
 use nnrp_transport_provider::{
     TransportProviderDescriptor, TransportProviderKind, TransportProviderRegistry,
@@ -350,6 +351,29 @@ impl NnrpClientProvider for IpcProvider {
         Ok(Box::new(
             IpcTransport::connect_with_limits(&endpoint, limits).await?,
         ))
+    }
+}
+
+#[async_trait]
+impl NnrpServerProvider for IpcProvider {
+    fn descriptor(&self) -> TransportProviderDescriptor {
+        IpcProvider::descriptor()
+    }
+
+    async fn bind(
+        &self,
+        endpoint: &ProviderEndpoint,
+        security: Option<&ServerTransportSecurity>,
+        limits: RuntimeFrameLimits,
+    ) -> Result<BoundServerProvider, RuntimeError> {
+        if security.is_some() {
+            return Err(RuntimeError::UnsupportedTransport(
+                "IPC does not accept transport security credentials",
+            ));
+        }
+        let ipc_endpoint = endpoint.as_str().parse::<IpcEndpoint>()?;
+        let listener = IpcFramedListener::bind_with_limits(&ipc_endpoint, limits).await?;
+        BoundServerProvider::new(endpoint.clone(), Box::new(listener))
     }
 }
 

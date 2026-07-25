@@ -7,10 +7,10 @@ use std::{
 use async_trait::async_trait;
 use nnrp_core::TransportId;
 use nnrp_runtime::{
-    BoxedFramedListener, BoxedFramedTransport, ClientTransportSecurity, FramedListener,
-    FramedTransport, NnrpClient, NnrpClientConfig, NnrpClientProvider, NnrpServer,
-    NnrpServerConfig, ProviderEndpoint, RuntimeError, RuntimeFrameLimits, RuntimePacket,
-    RuntimeTransportKind, StreamPacketReader,
+    BoundServerProvider, BoxedFramedListener, BoxedFramedTransport, ClientTransportSecurity,
+    FramedListener, FramedTransport, NnrpClient, NnrpClientConfig, NnrpClientProvider, NnrpServer,
+    NnrpServerConfig, NnrpServerProvider, ProviderEndpoint, RuntimeError, RuntimeFrameLimits,
+    RuntimePacket, RuntimeTransportKind, ServerTransportSecurity, StreamPacketReader,
 };
 use nnrp_transport_provider::{
     TransportProviderDescriptor, TransportProviderKind, TransportProviderRegistry,
@@ -408,6 +408,39 @@ impl NnrpClientProvider for QuicProvider {
         Ok(Box::new(
             QuicTransport::connect_with_limits(addr, &config, limits).await?,
         ))
+    }
+}
+
+#[async_trait]
+impl NnrpServerProvider for QuicProvider {
+    fn descriptor(&self) -> TransportProviderDescriptor {
+        QuicProvider::descriptor()
+    }
+
+    async fn bind(
+        &self,
+        endpoint: &ProviderEndpoint,
+        security: Option<&ServerTransportSecurity>,
+        limits: RuntimeFrameLimits,
+    ) -> Result<BoundServerProvider, RuntimeError> {
+        let locator =
+            endpoint
+                .as_str()
+                .strip_prefix("quic://")
+                .ok_or(RuntimeError::UnsupportedTransport(
+                    "QUIC provider endpoint must use quic://",
+                ))?;
+        let security = security.ok_or(RuntimeError::UnsupportedTransport(
+            "QUIC requires route-local server credentials",
+        ))?;
+        let config = QuicServerEndpointConfig::with_single_certificate(
+            resolve_endpoint(locator)?,
+            security.certificate_der.clone(),
+            security.private_key_pkcs8_der.clone(),
+        );
+        let listener = QuicFramedListener::bind_with_limits(&config, limits)?;
+        let endpoint = format!("quic://{}", listener.local_addr()?).parse()?;
+        BoundServerProvider::new(endpoint, Box::new(listener))
     }
 }
 

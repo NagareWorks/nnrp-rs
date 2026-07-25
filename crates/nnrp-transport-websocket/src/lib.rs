@@ -4,9 +4,10 @@ use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use nnrp_core::{CommonHeader, TransportId, COMMON_HEADER_LEN};
 use nnrp_runtime::{
-    BoxedFramedTransport, ClientTransportSecurity, FramedListener, FramedTransport, NnrpClient,
-    NnrpClientConfig, NnrpClientProvider, NnrpServer, NnrpServerConfig, ProviderEndpoint,
-    RuntimeError, RuntimeFrameLimits, RuntimePacket, RuntimeTransportKind,
+    BoundServerProvider, BoxedFramedTransport, ClientTransportSecurity, FramedListener,
+    FramedTransport, NnrpClient, NnrpClientConfig, NnrpClientProvider, NnrpServer,
+    NnrpServerConfig, NnrpServerProvider, ProviderEndpoint, RuntimeError, RuntimeFrameLimits,
+    RuntimePacket, RuntimeTransportKind, ServerTransportSecurity,
 };
 use nnrp_transport_provider::{
     TransportProviderDescriptor, TransportProviderKind, TransportProviderRegistry,
@@ -356,6 +357,71 @@ impl NnrpClientProvider for WebSocketProvider {
                 WebSocketTransport::connect_with_limits(&endpoint, limits).await?,
             )),
         }
+    }
+}
+
+#[async_trait]
+impl NnrpServerProvider for WebSocketProvider {
+    fn descriptor(&self) -> TransportProviderDescriptor {
+        WebSocketProvider::descriptor()
+    }
+
+    async fn bind(
+        &self,
+        endpoint: &ProviderEndpoint,
+        security: Option<&ServerTransportSecurity>,
+        limits: RuntimeFrameLimits,
+    ) -> Result<BoundServerProvider, RuntimeError> {
+        let websocket_endpoint = endpoint.as_str().parse::<WebSocketEndpoint>()?;
+        let uri = endpoint.as_str().parse::<Uri>().map_err(|_| {
+            RuntimeError::UnsupportedTransport("WebSocket bind endpoint is invalid")
+        })?;
+        let authority = uri.authority().ok_or(RuntimeError::UnsupportedTransport(
+            "WebSocket bind endpoint requires an authority",
+        ))?;
+        let listener = match (websocket_endpoint.is_secure(), security) {
+            (true, Some(security)) => {
+                WebSocketFramedListener::bind_secure_with_limits(
+                    authority.as_str(),
+                    security.certificate_der.clone(),
+                    security.private_key_pkcs8_der.clone(),
+                    limits,
+                )
+                .await?
+            }
+            (true, None) => {
+                return Err(RuntimeError::UnsupportedTransport(
+                    "native WSS requires route-local server credentials",
+                ));
+            }
+            (false, Some(_)) => {
+                return Err(RuntimeError::UnsupportedTransport(
+                    "plain WebSocket does not accept transport security credentials",
+                ));
+            }
+            (false, None) => {
+                WebSocketFramedListener::bind_with_limits(authority.as_str(), limits).await?
+            }
+        };
+        let path_and_query = uri
+            .path_and_query()
+            .map(|value| value.as_str())
+            .unwrap_or("/");
+        let host = authority.host();
+        let host = if host.contains(':') {
+            format!("[{host}]")
+        } else {
+            host.to_owned()
+        };
+        let bound_endpoint = format!(
+            "{}://{}:{}{}",
+            endpoint.scheme(),
+            host,
+            listener.local_addr()?.port(),
+            path_and_query
+        )
+        .parse()?;
+        BoundServerProvider::new(bound_endpoint, Box::new(listener))
     }
 }
 
