@@ -48,10 +48,10 @@
   - [ ] Reject security handles from another transport artifact or role.
   - [ ] Add native TCP TLS, QUIC TLS, WS, and WSS loopbacks through exported symbols.
 - [ ] Preserve the singular coarse-FFI ownership boundary.
-  - [ ] Keep one carrier connection per client runtime handle.
-  - [ ] Keep one provider listener per low-level listener handle.
-  - [ ] Keep one carrier connection per accepted server session handle.
-  - [ ] Keep multi-route selection and multi-listener ownership in the host SDK layer.
+  - [x] Keep one carrier connection per client runtime handle.
+  - [x] Keep one provider listener per low-level listener handle.
+  - [x] Keep one carrier connection per accepted server session handle.
+  - [x] Keep multi-route selection and multi-listener ownership in the host SDK layer.
   - [ ] Add architecture tests that reject per-frame calls across multiple transport libraries.
 
 ## FFI Role Runtime Carrier Ownership
@@ -63,7 +63,7 @@
   - [x] Reject handles from another artifact or duplicate library instance.
 - [x] Drive the canonical `nnrp-runtime` state machines from FFI role handles.
   - [x] Perform the client `SESSION_OPEN` / `SESSION_OPEN_ACK` exchange in `nnrp_client_open_session`.
-  - [x] Accept a carrier connection and perform the server handshake in `nnrp_server_accept`.
+  - [x] Keep server accept and handshake alive across bounded host waits through the begin/wait/claim ticket lifecycle.
   - [x] Remove caller-injected server session/profile/schema state.
 - [x] Route every role operation over the adopted carrier.
   - [x] Validate, split, and send `FRAME_SUBMIT` metadata/body with independent wire operation and frame identities in one coarse call.

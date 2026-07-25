@@ -19,13 +19,16 @@ use nnrp_core::{
 use nnrp_ffi::{
     nnrp_buffer_release, nnrp_client_await_event, nnrp_client_await_events, nnrp_client_cancel,
     nnrp_client_close, nnrp_client_connect, nnrp_client_open_session, nnrp_client_submit,
-    nnrp_connection_close, nnrp_runtime_frame_send, nnrp_server_accept, nnrp_server_await_events,
-    nnrp_server_bind, nnrp_server_close, nnrp_server_send_partial_result, nnrp_server_send_result,
-    NnrpBufferView, NnrpClientCancelRequest, NnrpClientConnectRequest, NnrpEvent, NnrpEventKind,
-    NnrpFfiStatus, NnrpFfiStatusCode, NnrpHandle, NnrpHandleKind, NnrpPollResult,
-    NnrpRoleEventPollRequest, NnrpRuntimeFrameSendRequest, NnrpServerAcceptRequest,
-    NnrpServerBindRequest, NnrpServerSendPartialResultRequest, NnrpServerSendResultRequest,
-    NnrpSessionOpenRequest, NnrpSubmitRequest, NnrpTransportFrameBatch, NnrpTransportOpenRequest,
+    nnrp_connection_close, nnrp_runtime_frame_send, nnrp_server_accept, nnrp_server_accept_begin,
+    nnrp_server_accept_claim, nnrp_server_accept_release, nnrp_server_accept_wait,
+    nnrp_server_await_events, nnrp_server_bind, nnrp_server_close, nnrp_server_send_partial_result,
+    nnrp_server_send_result, NnrpBufferView, NnrpClientCancelRequest, NnrpClientConnectRequest,
+    NnrpEvent, NnrpEventKind, NnrpFfiStatus, NnrpFfiStatusCode, NnrpHandle, NnrpHandleKind,
+    NnrpPollResult, NnrpRoleEventPollRequest, NnrpRuntimeFrameSendRequest,
+    NnrpServerAcceptBeginRequest, NnrpServerAcceptClaimRequest, NnrpServerAcceptRequest,
+    NnrpServerAcceptResult, NnrpServerAcceptWaitRequest, NnrpServerBindRequest,
+    NnrpServerSendPartialResultRequest, NnrpServerSendResultRequest, NnrpSessionOpenRequest,
+    NnrpSubmitRequest, NnrpTransportFrameBatch, NnrpTransportOpenRequest,
     NnrpTransportReadBatchRequest,
 };
 
@@ -800,19 +803,43 @@ unsafe fn assert_role_handshake(transport_id: TransportId, listen_endpoint: &str
         NnrpFfiStatus::invalid_handle(NnrpHandleKind::TransportListener as u32)
     );
 
-    let accept = thread::spawn(move || {
-        let mut session = NnrpHandle::invalid();
-        let status = nnrp_server_accept(
-            NnrpServerAcceptRequest {
+    let mut accept = NnrpHandle::invalid();
+    assert_eq!(
+        nnrp_server_accept_begin(
+            NnrpServerAcceptBeginRequest {
                 server,
-                session_handle_id: id_base + 4,
+                accept_handle_id: id_base + 4,
                 generation: 1,
-                timeout_ms: 5_000,
+                reserved0: 0,
             },
-            &mut session,
-        );
-        (status, session, server)
+            &mut accept,
+        ),
+        NnrpFfiStatus::ok()
+    );
+    let would_block = nnrp_server_accept_wait(NnrpServerAcceptWaitRequest {
+        accept,
+        timeout_ms: 1,
+        flags: 0,
     });
+    assert_eq!(
+        would_block.status_code,
+        NnrpFfiStatusCode::WouldBlock as u32
+    );
+    let mut premature_claim = NnrpServerAcceptResult::invalid();
+    let premature_status = nnrp_server_accept_claim(
+        NnrpServerAcceptClaimRequest {
+            accept,
+            session_handle_id: id_base + 4,
+            generation: 1,
+            reserved0: 0,
+        },
+        &mut premature_claim,
+    );
+    assert_eq!(
+        premature_status.status_code,
+        NnrpFfiStatusCode::WouldBlock as u32
+    );
+    assert_eq!(premature_claim, NnrpServerAcceptResult::invalid());
 
     let mut transport_connection = NnrpHandle::invalid();
     assert_eq!(
@@ -880,8 +907,29 @@ unsafe fn assert_role_handshake(transport_id: TransportId, listen_endpoint: &str
         NnrpFfiStatus::ok()
     );
 
-    let (server_status, server_session, server) = accept.join().expect("accept thread joins");
-    assert_eq!(server_status, NnrpFfiStatus::ok());
+    assert_eq!(
+        nnrp_server_accept_wait(NnrpServerAcceptWaitRequest {
+            accept,
+            timeout_ms: 5_000,
+            flags: 0,
+        }),
+        NnrpFfiStatus::ok()
+    );
+    let mut accepted = NnrpServerAcceptResult::invalid();
+    assert_eq!(
+        nnrp_server_accept_claim(
+            NnrpServerAcceptClaimRequest {
+                accept,
+                session_handle_id: id_base + 4,
+                generation: 1,
+                reserved0: 0,
+            },
+            &mut accepted,
+        ),
+        NnrpFfiStatus::ok()
+    );
+    let server_session = accepted.session;
+    assert_eq!(accepted.active_transport_id, transport_id as u32);
     assert_ne!(client_session, NnrpHandle::invalid());
     assert_ne!(server_session, NnrpHandle::invalid());
 
@@ -1457,6 +1505,33 @@ unsafe fn assert_role_handshake(transport_id: TransportId, listen_endpoint: &str
         NnrpFfiStatus::ok()
     );
     assert_eq!(nnrp_connection_close(client), NnrpFfiStatus::ok());
+
+    let mut shutdown_accept = NnrpHandle::invalid();
+    assert_eq!(
+        nnrp_server_accept_begin(
+            NnrpServerAcceptBeginRequest {
+                server,
+                accept_handle_id: id_base + 8,
+                generation: 1,
+                reserved0: 0,
+            },
+            &mut shutdown_accept,
+        ),
+        NnrpFfiStatus::ok()
+    );
+    assert_eq!(
+        nnrp_server_accept_wait(NnrpServerAcceptWaitRequest {
+            accept: shutdown_accept,
+            timeout_ms: 1,
+            flags: 0,
+        })
+        .status_code,
+        NnrpFfiStatusCode::WouldBlock as u32
+    );
+    assert_eq!(
+        nnrp_server_accept_release(shutdown_accept),
+        NnrpFfiStatus::ok()
+    );
     assert_eq!(nnrp_connection_close(server), NnrpFfiStatus::ok());
 }
 
@@ -1520,6 +1595,39 @@ fn role_runtime_rejects_invalid_arguments_and_cross_role_handles() {
                 &mut output,
             ),
             NnrpFfiStatus::invalid_argument(19)
+        );
+        let mut accept = NnrpHandle::invalid();
+        assert_eq!(
+            nnrp_server_accept_begin(
+                NnrpServerAcceptBeginRequest {
+                    server: NnrpHandle::invalid(),
+                    accept_handle_id: 0,
+                    generation: 1,
+                    reserved0: 0,
+                },
+                &mut accept,
+            ),
+            NnrpFfiStatus::invalid_argument(163)
+        );
+        assert_eq!(
+            nnrp_server_accept_wait(NnrpServerAcceptWaitRequest {
+                accept: NnrpHandle::invalid(),
+                timeout_ms: 1,
+                flags: 1,
+            }),
+            NnrpFfiStatus::invalid_argument(164)
+        );
+        assert_eq!(
+            nnrp_server_accept_claim(
+                NnrpServerAcceptClaimRequest {
+                    accept: NnrpHandle::invalid(),
+                    session_handle_id: 0,
+                    generation: 1,
+                    reserved0: 0,
+                },
+                ptr::null_mut(),
+            ),
+            NnrpFfiStatus::invalid_argument(165)
         );
 
         let mut listener = NnrpHandle::invalid();
@@ -1606,6 +1714,63 @@ fn role_runtime_rejects_invalid_arguments_and_cross_role_handles() {
         assert_eq!(
             nnrp_server_accept(accept_request(NnrpHandle::invalid()), &mut output),
             NnrpFfiStatus::invalid_handle(NnrpHandleKind::Connection as u32)
+        );
+        assert_eq!(
+            nnrp_server_accept_begin(
+                NnrpServerAcceptBeginRequest {
+                    server: client,
+                    accept_handle_id: 730_004,
+                    generation: 1,
+                    reserved0: 0,
+                },
+                &mut accept,
+            ),
+            NnrpFfiStatus::invalid_handle(NnrpHandleKind::Connection as u32)
+        );
+        assert_eq!(
+            nnrp_server_accept_begin(
+                NnrpServerAcceptBeginRequest {
+                    server: NnrpHandle::invalid(),
+                    accept_handle_id: 730_004,
+                    generation: 1,
+                    reserved0: 0,
+                },
+                &mut accept,
+            ),
+            NnrpFfiStatus::invalid_handle(NnrpHandleKind::Connection as u32)
+        );
+        assert_eq!(
+            nnrp_server_accept_begin(
+                NnrpServerAcceptBeginRequest {
+                    server,
+                    accept_handle_id: 730_004,
+                    generation: 1,
+                    reserved0: 0,
+                },
+                &mut accept,
+            ),
+            NnrpFfiStatus::ok()
+        );
+        let mut duplicate = NnrpHandle::invalid();
+        assert_eq!(
+            nnrp_server_accept_begin(
+                NnrpServerAcceptBeginRequest {
+                    server,
+                    accept_handle_id: 730_005,
+                    generation: 1,
+                    reserved0: 0,
+                },
+                &mut duplicate,
+            ),
+            NnrpFfiStatus::invalid_state(163)
+        );
+        let stale_accept = NnrpHandle {
+            generation: 2,
+            ..accept
+        };
+        assert_eq!(
+            nnrp_server_accept_release(stale_accept),
+            NnrpFfiStatus::invalid_handle(NnrpHandleKind::ServerAccept as u32)
         );
 
         assert_eq!(nnrp_connection_close(client), NnrpFfiStatus::ok());

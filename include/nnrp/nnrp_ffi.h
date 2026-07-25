@@ -14,7 +14,7 @@ typedef struct NnrpProtocolVersion {
 } NnrpProtocolVersion;
 
 #define NNRP_FFI_ABI_MAJOR 4
-#define NNRP_FFI_ABI_MINOR 0
+#define NNRP_FFI_ABI_MINOR 1
 #define NNRP_FFI_ABI_PATCH 0
 
 #define NNRP_TRANSPORT_SLOT_QUIC 0x00000001u
@@ -117,7 +117,8 @@ typedef enum NnrpHandleKind {
   NNRP_HANDLE_CACHE_REFERENCE_DESCRIPTOR = 9,
   NNRP_HANDLE_TRANSPORT_CONNECTION = 10,
   NNRP_HANDLE_TRANSPORT_LISTENER = 11,
-  NNRP_HANDLE_TRANSPORT_SECURITY_CONFIG = 12
+  NNRP_HANDLE_TRANSPORT_SECURITY_CONFIG = 12,
+  NNRP_HANDLE_SERVER_ACCEPT = 13
 } NnrpHandleKind;
 
 typedef enum NnrpEventKind {
@@ -367,6 +368,32 @@ typedef struct NnrpServerAcceptRequest {
   uint32_t timeout_ms;
 } NnrpServerAcceptRequest;
 
+typedef struct NnrpServerAcceptBeginRequest {
+  NnrpHandle server;
+  uint64_t accept_handle_id;
+  uint32_t generation;
+  uint32_t reserved0;
+} NnrpServerAcceptBeginRequest;
+
+typedef struct NnrpServerAcceptWaitRequest {
+  NnrpHandle accept;
+  uint32_t timeout_ms;
+  uint32_t flags;
+} NnrpServerAcceptWaitRequest;
+
+typedef struct NnrpServerAcceptClaimRequest {
+  NnrpHandle accept;
+  uint64_t session_handle_id;
+  uint32_t generation;
+  uint32_t reserved0;
+} NnrpServerAcceptClaimRequest;
+
+typedef struct NnrpServerAcceptResult {
+  NnrpHandle session;
+  uint32_t active_transport_id;
+  uint32_t reserved0;
+} NnrpServerAcceptResult;
+
 typedef struct NnrpRoleEventPollRequest {
   NnrpHandle scope;
   uint32_t max_events;
@@ -531,6 +558,10 @@ NnrpFfiStatus nnrp_cache_prefetch(NnrpHandle owner, const NnrpCacheObjectId *obj
 NnrpFfiStatus nnrp_cache_release(NnrpHandle lease_handle, NnrpCacheLeaseResult *out_result);
 NnrpFfiStatus nnrp_server_bind(NnrpServerBindRequest request, NnrpHandle *out_server);
 NnrpFfiStatus nnrp_server_accept(NnrpServerAcceptRequest request, NnrpHandle *out_session);
+NnrpFfiStatus nnrp_server_accept_begin(NnrpServerAcceptBeginRequest request, NnrpHandle *out_accept);
+NnrpFfiStatus nnrp_server_accept_wait(NnrpServerAcceptWaitRequest request);
+NnrpFfiStatus nnrp_server_accept_claim(NnrpServerAcceptClaimRequest request, NnrpServerAcceptResult *out_result);
+NnrpFfiStatus nnrp_server_accept_release(NnrpHandle accept);
 NnrpFfiStatus nnrp_server_await_events(NnrpRoleEventPollRequest request, NnrpEvent *out_events, uintptr_t event_capacity, uintptr_t *out_event_count);
 NnrpFfiStatus nnrp_server_send_result(NnrpServerSendResultRequest request);
 NnrpFfiStatus nnrp_server_close(NnrpHandle session);

@@ -117,6 +117,40 @@ class NnrpServerAcceptRequest(ctypes.Structure):
     ]
 
 
+class NnrpServerAcceptBeginRequest(ctypes.Structure):
+    _fields_ = [
+        ("server", NnrpHandle),
+        ("accept_handle_id", ctypes.c_uint64),
+        ("generation", ctypes.c_uint32),
+        ("reserved0", ctypes.c_uint32),
+    ]
+
+
+class NnrpServerAcceptWaitRequest(ctypes.Structure):
+    _fields_ = [
+        ("accept", NnrpHandle),
+        ("timeout_ms", ctypes.c_uint32),
+        ("flags", ctypes.c_uint32),
+    ]
+
+
+class NnrpServerAcceptClaimRequest(ctypes.Structure):
+    _fields_ = [
+        ("accept", NnrpHandle),
+        ("session_handle_id", ctypes.c_uint64),
+        ("generation", ctypes.c_uint32),
+        ("reserved0", ctypes.c_uint32),
+    ]
+
+
+class NnrpServerAcceptResult(ctypes.Structure):
+    _fields_ = [
+        ("session", NnrpHandle),
+        ("active_transport_id", ctypes.c_uint32),
+        ("reserved0", ctypes.c_uint32),
+    ]
+
+
 class NnrpRoleEventPollRequest(ctypes.Structure):
     _fields_ = [
         ("scope", NnrpHandle),
@@ -277,6 +311,16 @@ def configure_library(library: ctypes.CDLL) -> None:
             [NnrpServerAcceptRequest, ctypes.POINTER(NnrpHandle)],
             NnrpFfiStatus,
         ),
+        "nnrp_server_accept_begin": (
+            [NnrpServerAcceptBeginRequest, ctypes.POINTER(NnrpHandle)],
+            NnrpFfiStatus,
+        ),
+        "nnrp_server_accept_wait": ([NnrpServerAcceptWaitRequest], NnrpFfiStatus),
+        "nnrp_server_accept_claim": (
+            [NnrpServerAcceptClaimRequest, ctypes.POINTER(NnrpServerAcceptResult)],
+            NnrpFfiStatus,
+        ),
+        "nnrp_server_accept_release": ([NnrpHandle], NnrpFfiStatus),
         "nnrp_server_await_events": (
             [
                 NnrpRoleEventPollRequest,

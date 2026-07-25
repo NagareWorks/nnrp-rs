@@ -301,6 +301,15 @@ where
     run_async(future, timeout_ms)
 }
 
+#[cfg(not(test))]
+pub(super) fn spawn_role_task<F>(future: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    transport_runtime().spawn(future)
+}
+
 fn run_async_mapped<F, T, E, M>(
     future: F,
     timeout_ms: u32,
@@ -2517,6 +2526,7 @@ mod tests {
         assert_eq!(NnrpHandleKind::TransportConnection as u32, 10);
         assert_eq!(NnrpHandleKind::TransportListener as u32, 11);
         assert_eq!(NnrpHandleKind::TransportSecurityConfig as u32, 12);
+        assert_eq!(NnrpHandleKind::ServerAccept as u32, 13);
         assert_eq!(std::mem::size_of::<NnrpTransportProbeResult>(), 24);
     }
 }

@@ -2,7 +2,10 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex, MutexGuard,
+};
 use std::task::Poll;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -178,6 +181,7 @@ impl NnrpServerConfig {
 
 pub struct NnrpServer {
     listeners: AsyncMutex<Option<Vec<BoundServerProvider>>>,
+    listener_set_closed: AtomicBool,
     bound_provider_endpoints: BTreeMap<nnrp_core::TransportId, ProviderEndpoint>,
     primary_local_addr: Option<std::net::SocketAddr>,
     config: NnrpServerConfig,
@@ -400,6 +404,7 @@ impl NnrpServer {
         let primary_local_addr = listeners.iter().find_map(BoundServerProvider::local_addr);
         Self {
             listeners: AsyncMutex::new(Some(listeners)),
+            listener_set_closed: AtomicBool::new(false),
             bound_provider_endpoints,
             primary_local_addr,
             config,
@@ -422,16 +427,22 @@ impl NnrpServer {
         Ok(self.session_registry()?.len())
     }
 
+    pub fn is_listener_set_closed(&self) -> bool {
+        self.listener_set_closed.load(Ordering::Acquire)
+    }
+
     pub async fn accept(&self) -> Result<NnrpServerSession, RuntimeError> {
         let (active_transport_id, mut transport) = {
             let mut listeners = self.listeners.lock().await;
             let Some(active) = listeners.as_ref() else {
+                self.listener_set_closed.store(true, Ordering::Release);
                 return Err(RuntimeError::ServerListenerSetClosed);
             };
             match accept_stable(active).await {
                 Ok(accepted) => accepted,
                 Err(error) => {
                     listeners.take();
+                    self.listener_set_closed.store(true, Ordering::Release);
                     return Err(error);
                 }
             }
