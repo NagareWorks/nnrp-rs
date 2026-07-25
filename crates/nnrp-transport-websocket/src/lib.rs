@@ -4,9 +4,9 @@ use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use nnrp_core::{CommonHeader, TransportId, COMMON_HEADER_LEN};
 use nnrp_runtime::{
-    BoxedFramedTransport, FramedListener, FramedTransport, NnrpClient, NnrpClientConfig,
-    NnrpServer, NnrpServerConfig, RuntimeError, RuntimeFrameLimits, RuntimePacket,
-    RuntimeTransportKind,
+    BoxedFramedTransport, ClientTransportSecurity, FramedListener, FramedTransport, NnrpClient,
+    NnrpClientConfig, NnrpClientProvider, NnrpServer, NnrpServerConfig, ProviderEndpoint,
+    RuntimeError, RuntimeFrameLimits, RuntimePacket, RuntimeTransportKind,
 };
 use nnrp_transport_provider::{
     TransportProviderDescriptor, TransportProviderKind, TransportProviderRegistry,
@@ -323,6 +323,42 @@ impl WebSocketProvider {
     }
 }
 
+#[async_trait]
+impl NnrpClientProvider for WebSocketProvider {
+    fn descriptor(&self) -> TransportProviderDescriptor {
+        WebSocketProvider::descriptor()
+    }
+
+    async fn connect(
+        &self,
+        endpoint: &ProviderEndpoint,
+        security: Option<&ClientTransportSecurity>,
+        limits: RuntimeFrameLimits,
+    ) -> Result<BoxedFramedTransport, RuntimeError> {
+        let endpoint = endpoint.as_str().parse::<WebSocketEndpoint>()?;
+        match (endpoint.is_secure(), security) {
+            (true, Some(security)) => Ok(Box::new(
+                WebSocketTransport::connect_secure_with_limits(
+                    &endpoint,
+                    &security.server_name,
+                    security.trusted_certificate_der.clone(),
+                    limits,
+                )
+                .await?,
+            )),
+            (true, None) => Err(RuntimeError::UnsupportedTransport(
+                "native WSS requires route-local peer verification credentials",
+            )),
+            (false, Some(_)) => Err(RuntimeError::UnsupportedTransport(
+                "plain WebSocket does not accept transport security credentials",
+            )),
+            (false, None) => Ok(Box::new(
+                WebSocketTransport::connect_with_limits(&endpoint, limits).await?,
+            )),
+        }
+    }
+}
+
 pub fn register_websocket_provider(registry: &mut TransportProviderRegistry) {
     WebSocketProvider::register(registry);
 }
@@ -441,8 +477,12 @@ mod tests {
         PayloadKindBitmap, PressureMetadata, ProgressMetadata, ResultClass, ResultPushMetadata,
         SubmitMode, TileIndexMode, STANDARD_PROFILE_TOKEN,
     };
-    use nnrp_runtime::{NnrpClientEvent, NnrpResult};
+    use nnrp_runtime::{
+        ClientProviderRoute, ClientProviderRoutes, NnrpClientEvent, NnrpClientOptions,
+        NnrpClientProvider, NnrpResult,
+    };
     use nnrp_transport_provider::RemoteTransportSupport;
+    use std::sync::Arc;
     use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
     #[test]
@@ -500,6 +540,36 @@ mod tests {
         server_task
             .await
             .map_err(|_| RuntimeError::Internal("websocket server task panicked"))??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn websocket_provider_opens_high_level_client_session() -> Result<(), RuntimeError> {
+        let server = WebSocketProvider::bind("127.0.0.1:0", NnrpServerConfig::default()).await?;
+        let provider_endpoint = format!("ws://{}/nnrp", server.local_addr()?);
+        let server_task = tokio::spawn(async move { server.accept().await });
+        let client = NnrpClient::connect(
+            NnrpClientOptions {
+                endpoint: "nnrp://runtime.example/session".parse().unwrap(),
+                provider_routes: ClientProviderRoutes::from([(
+                    TransportId::WebSocket,
+                    ClientProviderRoute::at(provider_endpoint.parse().unwrap()),
+                )]),
+                transport_policy: TransportPolicy::Auto,
+                session: NnrpClientConfig::default(),
+            },
+            [Arc::new(WebSocketProvider) as Arc<dyn NnrpClientProvider>],
+        )
+        .await?;
+        assert_eq!(
+            client.transport_selection().unwrap().selected.transport_id,
+            TransportId::WebSocket
+        );
+        let client_session = client.open_session().await?;
+        let server_session = server_task
+            .await
+            .map_err(|_| RuntimeError::Internal("websocket server task panicked"))??;
+        assert_eq!(client_session.session_id(), server_session.session_id());
         Ok(())
     }
 

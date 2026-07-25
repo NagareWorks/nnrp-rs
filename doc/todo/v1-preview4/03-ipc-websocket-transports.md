@@ -32,12 +32,12 @@
   - [ ] Reject duplicate keys, provider-kind mismatches, and role-mismatched security.
   - [ ] Report a configured known-but-uninstalled route as `local-unavailable`.
   - [ ] Apply the exact rejection precedence when multiple checks fail.
-- [ ] Add host-level client orchestration.
-  - [ ] Resolve every installed provider route before selection.
-  - [ ] Keep unresolved and security-incompatible candidates in diagnostics.
-  - [ ] Probe all eligible Auto/Prefer candidates.
-  - [ ] Adopt only the selected carrier into `NnrpClient`.
-  - [ ] Make Force fail without fallback.
+- [x] Add host-level client orchestration.
+  - [x] Resolve every installed provider route before selection.
+  - [x] Keep unresolved and security-incompatible candidates in diagnostics.
+  - [x] Probe all eligible Auto/Prefer candidates.
+  - [x] Adopt only the selected carrier into `NnrpClient`.
+  - [x] Make Force fail without fallback.
 - [ ] Add host-level server orchestration.
   - [ ] Resolve every policy-allowed installed provider route.
   - [ ] Bind every eligible Auto/Prefer listener into one logical `NnrpServer`.

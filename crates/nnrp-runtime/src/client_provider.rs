@@ -268,8 +268,14 @@ fn validate_security(
         TransportId::Tcp if application.is_secure() && security.is_none() => {
             Err("nnrps TCP requires route-local peer verification credentials")
         }
+        TransportId::Ipc if security.is_some() => {
+            Err("IPC does not accept transport security credentials")
+        }
         TransportId::Ipc if application.is_secure() => {
             Err("IPC does not satisfy nnrps in Preview4")
+        }
+        TransportId::WebSocket if !endpoint.is_secure() && security.is_some() => {
+            Err("plain WebSocket does not accept transport security credentials")
         }
         TransportId::WebSocket if application.is_secure() && !endpoint.is_secure() => {
             Err("nnrps WebSocket requires a wss provider endpoint")
@@ -712,7 +718,9 @@ mod tests {
         assert!(validate_security(&plain, &quic_endpoint, None, &quic).is_err());
         assert!(validate_security(&plain, &quic_endpoint, Some(&security), &quic).is_ok());
         assert!(validate_security(&secure, &ipc_endpoint, None, &ipc).is_err());
+        assert!(validate_security(&plain, &ipc_endpoint, Some(&security), &ipc).is_err());
         assert!(validate_security(&secure, &ws_endpoint, None, &native_ws).is_err());
+        assert!(validate_security(&plain, &ws_endpoint, Some(&security), &native_ws).is_err());
         assert!(validate_security(&plain, &wss_endpoint, None, &native_ws).is_err());
         assert!(validate_security(&plain, &wss_endpoint, Some(&security), &native_ws).is_ok());
         assert!(validate_security(&plain, &wss_endpoint, Some(&security), &browser_ws).is_err());
