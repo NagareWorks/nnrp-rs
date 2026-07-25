@@ -355,10 +355,17 @@ fn transport_status(code: NnrpFfiStatusCode, detail_code: u32) -> NnrpFfiStatus 
 fn status_from_runtime_error(error: RuntimeError) -> NnrpFfiStatus {
     match error {
         RuntimeError::Protocol(error) => NnrpFfiStatus::from_core_error(&error),
-        RuntimeError::UnsupportedTransport(_) | RuntimeError::FrameTooLarge { .. } => {
+        RuntimeError::UnsupportedTransport(_)
+        | RuntimeError::FrameTooLarge { .. }
+        | RuntimeError::RouteConfiguration(_)
+        | RuntimeError::DuplicateTransportProvider(_)
+        | RuntimeError::DuplicateClientProviderId(_) => {
             transport_status(NnrpFfiStatusCode::InvalidArgument, 104)
         }
-        RuntimeError::TransportClosed { .. } | RuntimeError::UnexpectedMessage(_) => {
+        RuntimeError::TransportClosed { .. }
+        | RuntimeError::UnexpectedMessage(_)
+        | RuntimeError::TransportSelection(_)
+        | RuntimeError::SelectedProviderUnavailable(_) => {
             transport_status(NnrpFfiStatusCode::InvalidState, 105)
         }
         RuntimeError::Io(_) | RuntimeError::FrameIdOverflow | RuntimeError::Internal(_) => {
@@ -1975,6 +1982,11 @@ mod tests {
                 declared: 2,
                 max: 1,
             },
+            RuntimeError::RouteConfiguration(
+                nnrp_runtime::RouteConfigurationError::InvalidEndpoint,
+            ),
+            RuntimeError::DuplicateTransportProvider(TransportId::Tcp),
+            RuntimeError::DuplicateClientProviderId("duplicate".to_owned()),
         ] {
             assert_code(
                 status_from_runtime_error(error),
@@ -1987,6 +1999,12 @@ mod tests {
                 detail: "closed".to_string(),
             },
             RuntimeError::UnexpectedMessage("test"),
+            RuntimeError::TransportSelection(
+                nnrp_transport_provider::TransportSelectionError::NoViableTransport {
+                    candidates: Vec::new(),
+                },
+            ),
+            RuntimeError::SelectedProviderUnavailable("missing".to_owned()),
         ] {
             assert_code(
                 status_from_runtime_error(error),

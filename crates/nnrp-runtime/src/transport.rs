@@ -146,6 +146,16 @@ impl RuntimeTransportKind {
             Self::WebSocket => nnrp_core::TransportId::WebSocket,
         }
     }
+
+    pub fn from_transport_id(value: nnrp_core::TransportId) -> Option<Self> {
+        match value {
+            nnrp_core::TransportId::Quic => Some(Self::Quic),
+            nnrp_core::TransportId::Tcp => Some(Self::Tcp),
+            nnrp_core::TransportId::Ipc => Some(Self::Ipc),
+            nnrp_core::TransportId::WebSocket => Some(Self::WebSocket),
+            _ => None,
+        }
+    }
 }
 
 pub type BoxedFramedTransport = Box<dyn FramedTransport>;
@@ -318,6 +328,21 @@ mod tests {
         assert_eq!(
             RuntimeTransportKind::WebSocket.transport_id(),
             TransportId::WebSocket
+        );
+        for (transport_id, runtime_kind) in [
+            (TransportId::Tcp, RuntimeTransportKind::Tcp),
+            (TransportId::Quic, RuntimeTransportKind::Quic),
+            (TransportId::Ipc, RuntimeTransportKind::Ipc),
+            (TransportId::WebSocket, RuntimeTransportKind::WebSocket),
+        ] {
+            assert_eq!(
+                RuntimeTransportKind::from_transport_id(transport_id),
+                Some(runtime_kind)
+            );
+        }
+        assert_eq!(
+            RuntimeTransportKind::from_transport_id(TransportId::Unspecified),
+            None
         );
     }
 

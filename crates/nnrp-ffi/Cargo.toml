@@ -34,3 +34,6 @@ nnrp-transport-quic = { path = "../nnrp-transport-quic", version = "1.0.0-previe
 nnrp-transport-tcp = { path = "../nnrp-transport-tcp", version = "1.0.0-preview.4.16", optional = true }
 nnrp-transport-websocket = { path = "../nnrp-transport-websocket", version = "1.0.0-preview.4.16", optional = true }
 tokio.workspace = true
+
+[dev-dependencies]
+nnrp-transport-provider = { path = "../nnrp-transport-provider", version = "1.0.0-preview.4.16" }

@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 use crate::transport::RuntimeTransportKind;
+use nnrp_core::TransportId;
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
@@ -9,6 +10,21 @@ pub enum RuntimeError {
 
     #[error("protocol validation failed: {0}")]
     Protocol(#[from] nnrp_core::NnrpError),
+
+    #[error("route configuration failed: {0}")]
+    RouteConfiguration(#[from] crate::RouteConfigurationError),
+
+    #[error("transport selection failed: {0}")]
+    TransportSelection(#[from] nnrp_transport_provider::TransportSelectionError),
+
+    #[error("more than one client provider uses transport {0:?}")]
+    DuplicateTransportProvider(TransportId),
+
+    #[error("more than one client provider uses id {0}")]
+    DuplicateClientProviderId(String),
+
+    #[error("selected client provider is unavailable: {0}")]
+    SelectedProviderUnavailable(String),
 
     #[error("unsupported transport: {0}")]
     UnsupportedTransport(&'static str),

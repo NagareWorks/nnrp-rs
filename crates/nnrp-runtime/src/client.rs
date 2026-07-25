@@ -33,9 +33,12 @@ use nnrp_core::{
 #[cfg(all(feature = "native-tcp", not(target_arch = "wasm32")))]
 use crate::TcpTransport;
 use crate::{
+    client_provider::{connect_client, NnrpClientOptions, NnrpClientProvider},
     BoxedFramedTransport, FramedTransport, RuntimeError, RuntimePacket, RuntimePressureState,
     RuntimeTransportKind,
 };
+use nnrp_transport_provider::TransportSelection;
+use std::sync::Arc;
 
 const MAX_PENDING_EVENTS_DURING_SESSION_PATCH: usize = 1_024;
 
@@ -96,6 +99,7 @@ pub struct NnrpClient {
     transport: BoxedFramedTransport,
     config: NnrpClientConfig,
     lifecycle: ConnectionLifecycle,
+    transport_selection: Option<TransportSelection>,
 }
 
 pub struct NnrpClientSession {
@@ -206,6 +210,27 @@ pub enum NnrpClientEvent {
 }
 
 impl NnrpClient {
+    pub async fn connect<I>(options: NnrpClientOptions, providers: I) -> Result<Self, RuntimeError>
+    where
+        I: IntoIterator<Item = Arc<dyn NnrpClientProvider>>,
+    {
+        let (transport, mut config, selection) = connect_client(options, providers).await?;
+        config.transport = RuntimeTransportKind::from_transport_id(selection.selected.transport_id)
+            .ok_or(RuntimeError::UnsupportedTransport(
+                "selected provider does not use a registered runtime carrier",
+            ))?;
+        Ok(Self {
+            transport,
+            config,
+            lifecycle: ConnectionLifecycle::new(),
+            transport_selection: Some(selection),
+        })
+    }
+
+    pub fn transport_selection(&self) -> Option<&TransportSelection> {
+        self.transport_selection.as_ref()
+    }
+
     #[cfg(all(feature = "native-tcp", not(target_arch = "wasm32")))]
     pub async fn connect_tcp(
         addr: impl tokio::net::ToSocketAddrs,
@@ -253,6 +278,7 @@ impl NnrpClient {
             transport,
             config,
             lifecycle: ConnectionLifecycle::new(),
+            transport_selection: None,
         })
     }
 
