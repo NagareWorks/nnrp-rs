@@ -42,11 +42,11 @@
 - [x] Run real Rust FFI loopbacks for TCP, QUIC, IPC, WS, and WSS.
 - [x] Load each packaged host dynamic library and run a real packet-batch loopback through exported symbols.
 - [ ] Complete the route-security ABI required by host SDKs.
-  - [ ] Allow TCP transport security handles to configure TLS connect and listen paths.
+  - [x] Allow TCP transport security handles to configure TLS connect and listen paths.
   - [ ] Preserve distinct client and server security handle kinds per route.
   - [ ] Return `route-unresolved` and `security-unsatisfied` through typed selection diagnostics.
-  - [ ] Reject security handles from another transport artifact or role.
-  - [ ] Add native TCP TLS, QUIC TLS, WS, and WSS loopbacks through exported symbols.
+  - [x] Reject security handles from another transport artifact or role.
+  - [x] Add native TCP TLS, QUIC TLS, WS, and WSS loopbacks through exported symbols.
 - [ ] Preserve the singular coarse-FFI ownership boundary.
   - [x] Keep one carrier connection per client runtime handle.
   - [x] Keep one provider listener per low-level listener handle.

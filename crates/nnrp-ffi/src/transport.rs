@@ -489,7 +489,11 @@ fn get_listener_endpoint(handle: NnrpHandle) -> Result<String, NnrpFfiStatus> {
     }
 }
 
-#[cfg(any(feature = "transport-quic", feature = "transport-websocket"))]
+#[cfg(any(
+    feature = "transport-tcp",
+    feature = "transport-quic",
+    feature = "transport-websocket"
+))]
 fn get_security_config(handle: NnrpHandle) -> Result<TransportSecurityConfig, NnrpFfiStatus> {
     handle.validate_kind(NnrpHandleKind::TransportSecurityConfig)?;
     let store = transport_store()
@@ -722,11 +726,7 @@ pub(super) fn consume_role_listener(handle: NnrpHandle) -> Result<(), NnrpFfiSta
     }
 }
 
-#[cfg(any(
-    feature = "transport-tcp",
-    feature = "transport-ipc",
-    feature = "transport-websocket"
-))]
+#[cfg(any(feature = "transport-ipc", feature = "transport-websocket"))]
 fn require_invalid_config(handle: NnrpHandle) -> Result<(), NnrpFfiStatus> {
     if handle == NnrpHandle::invalid() {
         Ok(())
@@ -786,15 +786,7 @@ async fn connect_transport(
 ) -> Result<BoxedFramedTransport, RuntimeError> {
     match transport {
         #[cfg(feature = "transport-tcp")]
-        TransportId::Tcp => {
-            require_invalid_config(config).map_err(|_| {
-                RuntimeError::UnsupportedTransport("TCP does not accept a security config")
-            })?;
-            let addr = socket_endpoint(&endpoint, "tcp://")?;
-            Ok(Box::new(
-                nnrp_runtime::TcpTransport::connect_with_limits(addr, limit).await?,
-            ))
-        }
+        TransportId::Tcp => connect_tcp(endpoint, config, limit).await,
         #[cfg(feature = "transport-ipc")]
         TransportId::Ipc => {
             require_invalid_config(config).map_err(|_| {
@@ -835,15 +827,7 @@ async fn listen_transport(
 ) -> Result<(BoxedFramedListener, String), RuntimeError> {
     match transport {
         #[cfg(feature = "transport-tcp")]
-        TransportId::Tcp => {
-            require_invalid_config(config).map_err(|_| {
-                RuntimeError::UnsupportedTransport("TCP does not accept a security config")
-            })?;
-            let addr = socket_endpoint(&endpoint, "tcp://")?;
-            let listener = nnrp_runtime::TcpFramedListener::bind_with_limits(addr, limit).await?;
-            let endpoint = format!("tcp://{}", listener.local_addr()?);
-            Ok((Box::new(listener), endpoint))
-        }
+        TransportId::Tcp => listen_tcp(endpoint, config, limit).await,
         #[cfg(feature = "transport-ipc")]
         TransportId::Ipc => {
             require_invalid_config(config).map_err(|_| {
@@ -875,6 +859,81 @@ async fn listen_transport(
             "transport implementation is not linked into this artifact",
         )),
     }
+}
+
+#[cfg(feature = "transport-tcp")]
+async fn connect_tcp(
+    endpoint: String,
+    config: NnrpHandle,
+    limit: RuntimeFrameLimits,
+) -> Result<BoxedFramedTransport, RuntimeError> {
+    let addr = socket_endpoint(&endpoint, "tcp://")?;
+    if config == NnrpHandle::invalid() {
+        return Ok(Box::new(
+            nnrp_runtime::TcpTransport::connect_with_limits(addr, limit).await?,
+        ));
+    }
+    let config = get_security_config(config)
+        .map_err(|_| RuntimeError::UnsupportedTransport("TCP TLS client config is invalid"))?;
+    let TransportSecurityConfig::Client {
+        transport_id,
+        server_name,
+        trusted_certificate_der,
+    } = config
+    else {
+        return Err(RuntimeError::UnsupportedTransport(
+            "TCP TLS requires a client security config",
+        ));
+    };
+    if transport_id != TransportId::Tcp {
+        return Err(RuntimeError::UnsupportedTransport(
+            "security config transport does not match TCP",
+        ));
+    }
+    let security = nnrp_runtime::ClientTransportSecurity::new(server_name, trusted_certificate_der);
+    Ok(Box::new(
+        nnrp_transport_tcp::TcpTlsTransport::connect(addr, &security, limit).await?,
+    ))
+}
+
+#[cfg(feature = "transport-tcp")]
+async fn listen_tcp(
+    endpoint: String,
+    config: NnrpHandle,
+    limit: RuntimeFrameLimits,
+) -> Result<(BoxedFramedListener, String), RuntimeError> {
+    let addr = socket_endpoint(&endpoint, "tcp://")?;
+    if config == NnrpHandle::invalid() {
+        let listener = nnrp_runtime::TcpFramedListener::bind_with_limits(addr, limit).await?;
+        let endpoint = format!("tcp://{}", listener.local_addr()?);
+        return Ok((Box::new(listener), endpoint));
+    }
+    let config = get_security_config(config)
+        .map_err(|_| RuntimeError::UnsupportedTransport("TCP TLS server config is invalid"))?;
+    let TransportSecurityConfig::Server {
+        transport_id,
+        certificate_der,
+        private_key_pkcs8_der,
+    } = config
+    else {
+        return Err(RuntimeError::UnsupportedTransport(
+            "TCP TLS requires a server security config",
+        ));
+    };
+    if transport_id != TransportId::Tcp {
+        return Err(RuntimeError::UnsupportedTransport(
+            "security config transport does not match TCP",
+        ));
+    }
+    let listener = nnrp_transport_tcp::TcpTlsFramedListener::bind(
+        addr,
+        certificate_der,
+        private_key_pkcs8_der,
+        limit,
+    )
+    .await?;
+    let endpoint = format!("tcp://{}", listener.local_addr()?);
+    Ok((Box::new(listener), endpoint))
 }
 
 #[cfg(feature = "transport-quic")]
@@ -1083,7 +1142,10 @@ pub(super) unsafe fn transport_client_security_config_create(
     let result = (|| {
         let transport_id = parse_transport_id(request.transport_id)?;
         if !transport_is_linked(transport_id)
-            || !matches!(transport_id, TransportId::Quic | TransportId::WebSocket)
+            || !matches!(
+                transport_id,
+                TransportId::Tcp | TransportId::Quic | TransportId::WebSocket
+            )
         {
             return Err(NnrpFfiStatus::invalid_argument(114));
         }
@@ -1126,7 +1188,10 @@ pub(super) unsafe fn transport_server_security_config_create(
     let result = (|| {
         let transport_id = parse_transport_id(request.transport_id)?;
         if !transport_is_linked(transport_id)
-            || !matches!(transport_id, TransportId::Quic | TransportId::WebSocket)
+            || !matches!(
+                transport_id,
+                TransportId::Tcp | TransportId::Quic | TransportId::WebSocket
+            )
         {
             return Err(NnrpFfiStatus::invalid_argument(119));
         }
@@ -1837,13 +1902,15 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "transport-quic")]
+    #[cfg(any(
+        feature = "transport-tcp",
+        feature = "transport-quic",
+        feature = "transport-websocket"
+    ))]
     unsafe fn security_configs(transport_id: TransportId) -> (NnrpHandle, NnrpHandle) {
-        let (_, certificate) =
-            nnrp_transport_quic::QuicServerEndpointConfig::self_signed_localhost(
-                "127.0.0.1:0".parse().unwrap(),
-            )
-            .unwrap();
+        let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        let certificate_der = certified.cert.der().to_vec();
+        let private_key_pkcs8_der = certified.signing_key.serialize_der();
         let server_name = b"localhost";
         let mut client = NnrpHandle::invalid();
         let mut server = NnrpHandle::invalid();
@@ -1853,7 +1920,7 @@ mod tests {
                     transport_id: transport_id as u32,
                     flags: 0,
                     server_name: view(server_name),
-                    trusted_certificate_der: view(&certificate.certificate_der),
+                    trusted_certificate_der: view(&certificate_der),
                 },
                 &mut client,
             ),
@@ -1864,14 +1931,30 @@ mod tests {
                 NnrpTransportServerSecurityConfigRequest {
                     transport_id: transport_id as u32,
                     flags: 0,
-                    certificate_der: view(&certificate.certificate_der),
-                    private_key_pkcs8_der: view(&certificate.private_key_pkcs8_der),
+                    certificate_der: view(&certificate_der),
+                    private_key_pkcs8_der: view(&private_key_pkcs8_der),
                 },
                 &mut server,
             ),
             NnrpFfiStatus::ok()
         );
         (client, server)
+    }
+
+    #[cfg(feature = "transport-tcp")]
+    #[test]
+    fn tcp_artifact_ffi_runs_real_tls_packet_batch_loopback() {
+        unsafe {
+            let (client_config, server_config) = security_configs(TransportId::Tcp);
+            assert_loopback(
+                TransportId::Tcp,
+                "tcp://127.0.0.1:0",
+                client_config,
+                server_config,
+            );
+            assert_eq!(nnrp_transport_close(client_config), NnrpFfiStatus::ok());
+            assert_eq!(nnrp_transport_close(server_config), NnrpFfiStatus::ok());
+        }
     }
 
     #[cfg(feature = "transport-quic")]
@@ -2117,7 +2200,7 @@ mod tests {
                 NnrpFfiStatusCode::InvalidArgument,
             );
             let mut unsupported = empty_client;
-            unsupported.transport_id = TransportId::Tcp as u32;
+            unsupported.transport_id = TransportId::Ipc as u32;
             assert_code(
                 nnrp_transport_client_security_config_create(unsupported, &mut output),
                 NnrpFfiStatusCode::InvalidArgument,
@@ -2144,6 +2227,7 @@ mod tests {
                 NnrpFfiStatusCode::InvalidArgument,
             );
 
+            let (tcp_client, tcp_server) = security_configs(TransportId::Tcp);
             let (quic_client, quic_server) = security_configs(TransportId::Quic);
             let (ws_client, ws_server) = security_configs(TransportId::WebSocket);
             let mut connection = NnrpHandle::invalid();
@@ -2152,6 +2236,8 @@ mod tests {
             for (transport, endpoint, config) in [
                 (TransportId::Quic, "quic://127.0.0.1:1", quic_server),
                 (TransportId::Quic, "quic://127.0.0.1:1", ws_client),
+                (TransportId::Tcp, "tcp://127.0.0.1:1", tcp_server),
+                (TransportId::Tcp, "tcp://127.0.0.1:1", quic_client),
                 (TransportId::WebSocket, "wss://localhost:1/nnrp", ws_server),
                 (
                     TransportId::WebSocket,
@@ -2170,6 +2256,8 @@ mod tests {
             for (transport, endpoint, config) in [
                 (TransportId::Quic, "quic://127.0.0.1:0", quic_client),
                 (TransportId::Quic, "quic://127.0.0.1:0", ws_server),
+                (TransportId::Tcp, "tcp://127.0.0.1:0", tcp_client),
+                (TransportId::Tcp, "tcp://127.0.0.1:0", quic_server),
                 (TransportId::WebSocket, "wss://localhost:0/nnrp", ws_client),
                 (
                     TransportId::WebSocket,
@@ -2183,7 +2271,14 @@ mod tests {
                 );
             }
 
-            for handle in [quic_client, quic_server, ws_client, ws_server] {
+            for handle in [
+                tcp_client,
+                tcp_server,
+                quic_client,
+                quic_server,
+                ws_client,
+                ws_server,
+            ] {
                 assert_eq!(nnrp_transport_close(handle), NnrpFfiStatus::ok());
             }
         }

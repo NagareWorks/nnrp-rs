@@ -536,13 +536,15 @@ def endpoint_for(scope: str) -> tuple[bytes, Path | None]:
     return f"unix://{path}".encode(), path
 
 
-def run_smoke_test_at_endpoint(library_path: Path, scope: str, endpoint: bytes) -> None:
+def run_smoke_test_at_endpoint(
+    library_path: Path, scope: str, endpoint: bytes, secure: bool = False
+) -> None:
     library = ctypes.CDLL(str(library_path.resolve()))
     configure_library(library)
     transport_id = TRANSPORT_IDS[scope]
     client_config = invalid_handle()
     server_config = invalid_handle()
-    if scope == "quic":
+    if scope == "quic" or secure:
         client_config, server_config = security_configs(library, transport_id)
 
     endpoint_owner, request = open_request(transport_id, endpoint, server_config)
@@ -625,7 +627,7 @@ def run_smoke_test_at_endpoint(library_path: Path, scope: str, endpoint: bytes) 
 
     for handle, name in ((client, "client"), (server, "server"), (listener, "listener")):
         require_ok(library.nnrp_transport_close(handle), f"close {name}")
-    if scope == "quic":
+    if scope == "quic" or secure:
         require_ok(library.nnrp_transport_close(client_config), "close client config")
         require_ok(library.nnrp_transport_close(server_config), "close server config")
     _ = (endpoint_owner, resolved_owner, first_owner, second_owner)
@@ -811,6 +813,15 @@ def run_smoke_test(library_path: Path, scope: str) -> None:
         if scope == "websocket":
             run_role_smoke_test_at_endpoint(
                 library_path, scope, SECURE_WEBSOCKET_ENDPOINT, secure=True
+            )
+        if scope == "tcp":
+            secure_endpoint, _ = endpoint_for(scope)
+            run_smoke_test_at_endpoint(
+                library_path, scope, secure_endpoint, secure=True
+            )
+            secure_role_endpoint, _ = endpoint_for(scope)
+            run_role_smoke_test_at_endpoint(
+                library_path, scope, secure_role_endpoint, secure=True
             )
     finally:
         if ipc_path is not None:

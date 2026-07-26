@@ -27,7 +27,7 @@
   - [x] Inject `PRIORITY_UPDATE` and an already-expired non-zero `EXPIRE_AT` timestamp.
   - [x] Preserve the target's typed `RESULT_DROP_REASON` for the suite-owned probe client.
 - [x] Load owned TLS material for QUIC and secure WebSocket endpoint roles.
-- [x] Reject TLS material on TCP, IPC, and plain WebSocket endpoints.
+- [x] Accept route-local TLS on TCP, require TLS on QUIC and secure WebSocket endpoints, and reject TLS material on IPC and plain WebSocket endpoints.
 
 ## Scenario Execution
 

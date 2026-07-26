@@ -37,3 +37,4 @@ tokio.workspace = true
 
 [dev-dependencies]
 nnrp-transport-provider = { path = "../nnrp-transport-provider", version = "1.0.0-preview.4.16" }
+rcgen = "=0.14.7"
