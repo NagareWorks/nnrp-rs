@@ -2,7 +2,7 @@
 
 ## Transport Provider Contract
 
-- [x] Extend the provider registry to expose four named transport providers.
+- [x] Extend the provider registry to expose four named transport providers and reject duplicate transport or provider identities.
   - [x] TCP provider.
   - [x] QUIC provider.
   - [x] IPC provider.
@@ -10,7 +10,9 @@
 - [x] Keep provider probing behavior stable.
   - [x] If one transport package is present, select that transport directly.
   - [x] If multiple transport packages are present, probe candidates by policy.
-  - [x] Match probe samples by stable provider id instead of package display name.
+  - [x] Require one route/security readiness record for every registered provider before selection.
+  - [x] Aggregate raw probe samples before selection and match readiness/observations by transport and provider identity.
+  - [x] Reject duplicate, unmatched, incomplete, or structurally invalid selection evidence with a typed error.
   - [x] Preserve provider cost, preference, limits, and limitations in candidate diagnostics.
   - [x] Apply the frozen success-count, throughput, RTT, comparable-cost, policy, and identity comparator.
   - [x] Expose ordered candidates and registered rejection reasons without an opaque score.

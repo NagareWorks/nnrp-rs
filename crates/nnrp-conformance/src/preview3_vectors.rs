@@ -16,8 +16,9 @@ use nnrp_core::{
     STREAM_SEMANTICS_TOKEN_DELTA, TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
 };
 use nnrp_transport_provider::{
-    select_transport_with_probe, ProbeSample, RemoteTransportSupport, TransportProviderKind,
-    TransportProviderRegistry,
+    select_transport_with_probe, summarize_provider_probe, ProbeSample, RemoteTransportSupport,
+    TransportCandidateReadiness, TransportProbeObservation, TransportProviderDescriptor,
+    TransportProviderKind, TransportProviderRegistry,
 };
 use nnrp_transport_quic::QuicProvider;
 use nnrp_transport_tcp::TcpProvider;
@@ -801,10 +802,13 @@ fn public_session_resume_contract() -> Result<(), String> {
 }
 
 fn public_tcp_transport_contract() -> Result<(), String> {
-    let registry = TransportProviderRegistry::new().with_provider(TcpProvider::descriptor());
+    let registry = TransportProviderRegistry::new()
+        .with_provider(TcpProvider::descriptor())
+        .map_err(|error| error.to_string())?;
     let remote = RemoteTransportSupport::new([TransportId::Tcp]);
+    let readiness = transport_readiness(registry.providers());
     let selection = registry
-        .select(&remote, TransportPolicy::ForceTcp, None)
+        .select(&remote, TransportPolicy::ForceTcp, None, &readiness)
         .map_err(|error| error.to_string())?;
     if selection.selected.transport_id != TransportId::Tcp {
         return Err("TCP transport provider was not selected".to_string());
@@ -840,9 +844,16 @@ fn public_quic_transport_contract() -> Result<(), String> {
             512,
         ),
     ];
-    let selection =
-        select_transport_with_probe(&providers, &remote, TransportPolicy::Auto, None, &samples)
-            .map_err(|error| error.to_string())?;
+    let readiness = transport_readiness(&providers);
+    let selection = select_transport_with_probe(
+        &providers,
+        &remote,
+        TransportPolicy::Auto,
+        None,
+        &readiness,
+        &transport_observations(&providers, &samples),
+    )
+    .map_err(|error| error.to_string())?;
     if selection.selected.transport_id != TransportId::Quic {
         return Err("QUIC transport provider did not win the scored probe path".to_string());
     }
@@ -868,13 +879,59 @@ fn public_quic_transport_contract() -> Result<(), String> {
         &remote,
         TransportPolicy::PreferQuic,
         None,
-        &fallback_samples,
+        &readiness,
+        &transport_observations(&providers, &fallback_samples),
     )
     .map_err(|error| error.to_string())?;
     if fallback.selected.transport_id != TransportId::Tcp {
         return Err("scored fallback did not choose TCP when QUIC failed".to_string());
     }
     Ok(())
+}
+
+fn transport_readiness(
+    providers: &[TransportProviderDescriptor],
+) -> Vec<TransportCandidateReadiness> {
+    providers
+        .iter()
+        .map(|provider| {
+            TransportCandidateReadiness::ready(provider.transport_id, &provider.metadata.id)
+        })
+        .collect()
+}
+
+fn transport_observations(
+    providers: &[TransportProviderDescriptor],
+    samples: &[ProbeSample],
+) -> Vec<TransportProbeObservation> {
+    providers
+        .iter()
+        .filter_map(|provider| {
+            summarize_provider_probe(provider, samples)
+                .map(|metrics| {
+                    TransportProbeObservation::succeeded(
+                        provider.transport_id,
+                        &provider.metadata.id,
+                        metrics,
+                    )
+                })
+                .or_else(|| {
+                    samples
+                        .iter()
+                        .any(|sample| {
+                            sample.transport_id == provider.transport_id
+                                && sample.provider_id == provider.metadata.id
+                        })
+                        .then(|| {
+                            TransportProbeObservation::failed(
+                                provider.transport_id,
+                                &provider.metadata.id,
+                                "transport probe failed",
+                            )
+                        })
+                })
+        })
+        .collect()
 }
 
 fn opened_ack(session_id: u32) -> SessionOpenAckMetadata {

@@ -19,6 +19,10 @@ Downstream SDKs should consume Preview4 as a protocol and artifact boundary upda
 - Bind transport connect, listen, accept, endpoint, probe, batch read/write, security-config, and close exports directly.
 - Keep native calls coarse around session, control, object, progress, result, and release hot paths.
 - Keep complete NNRP packets as the transport FFI unit; do not introduce per-socket-chunk cross-language calls.
+- Reject duplicate transport IDs and duplicate provider IDs during provider registration.
+- Supply exactly one route/security readiness record for every registered provider before selection.
+- Match readiness and aggregate probe observations by the `(transport_id, provider_id)` identity pair; reject duplicate, unmatched, incomplete, or structurally invalid evidence before producing candidate diagnostics.
+- Keep raw probe samples below the SDK selection boundary and pass only succeeded/failed aggregate observations into deterministic selection.
 
 ## Browser WASM
 

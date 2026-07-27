@@ -297,8 +297,10 @@ impl IpcProvider {
         )
     }
 
-    pub fn register(registry: &mut TransportProviderRegistry) {
-        registry.register(Self::descriptor());
+    pub fn register(
+        registry: &mut TransportProviderRegistry,
+    ) -> Result<(), nnrp_transport_provider::TransportProviderRegistryError> {
+        registry.register(Self::descriptor())
     }
 
     pub async fn connect_transport(endpoint: &IpcEndpoint) -> Result<IpcTransport, RuntimeError> {
@@ -371,8 +373,10 @@ impl NnrpServerProvider for IpcProvider {
     }
 }
 
-pub fn register_ipc_provider(registry: &mut TransportProviderRegistry) {
-    IpcProvider::register(registry);
+pub fn register_ipc_provider(
+    registry: &mut TransportProviderRegistry,
+) -> Result<(), nnrp_transport_provider::TransportProviderRegistryError> {
+    IpcProvider::register(registry)
 }
 
 async fn read_packet<R>(
@@ -706,14 +710,18 @@ mod tests {
     #[test]
     fn ipc_provider_registers_and_selects_ipc() {
         let mut registry = TransportProviderRegistry::new();
-        register_ipc_provider(&mut registry);
+        register_ipc_provider(&mut registry).expect("ipc provider should register");
         assert_eq!(registry.providers().len(), 1);
         assert_eq!(registry.providers()[0].name, IpcProvider::NAME);
         assert_eq!(registry.providers()[0].transport_id, TransportId::Ipc);
 
         let remote = RemoteTransportSupport::new([TransportId::Ipc]);
+        let readiness = [nnrp_transport_provider::TransportCandidateReadiness::ready(
+            TransportId::Ipc,
+            registry.providers()[0].metadata.id.clone(),
+        )];
         let selection = registry
-            .select(&remote, TransportPolicy::ForceIpc, None)
+            .select(&remote, TransportPolicy::ForceIpc, None, &readiness)
             .expect("ipc provider should satisfy force ipc");
         assert_eq!(selection.selected.name, IpcProvider::NAME);
     }

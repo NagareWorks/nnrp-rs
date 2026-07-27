@@ -311,8 +311,10 @@ impl QuicProvider {
         TransportProviderDescriptor::available(name, version, TransportId::Quic, kind)
     }
 
-    pub fn register(registry: &mut TransportProviderRegistry) {
-        registry.register(Self::descriptor());
+    pub fn register(
+        registry: &mut TransportProviderRegistry,
+    ) -> Result<(), nnrp_transport_provider::TransportProviderRegistryError> {
+        registry.register(Self::descriptor())
     }
 
     pub async fn connect(
@@ -444,8 +446,10 @@ impl NnrpServerProvider for QuicProvider {
     }
 }
 
-pub fn register_quic_provider(registry: &mut TransportProviderRegistry) {
-    QuicProvider::register(registry);
+pub fn register_quic_provider(
+    registry: &mut TransportProviderRegistry,
+) -> Result<(), nnrp_transport_provider::TransportProviderRegistryError> {
+    QuicProvider::register(registry)
 }
 
 fn resolve_endpoint(endpoint: &str) -> Result<SocketAddr, RuntimeError> {
@@ -483,7 +487,7 @@ mod tests {
     #[test]
     fn quic_provider_registers_available_backend_descriptor() {
         let mut registry = TransportProviderRegistry::new();
-        register_quic_provider(&mut registry);
+        register_quic_provider(&mut registry).expect("quic provider should register");
 
         assert_eq!(registry.providers().len(), 1);
         assert_eq!(registry.providers()[0].name, QuicProvider::NAME);
@@ -498,15 +502,20 @@ mod tests {
 
     #[test]
     fn quic_backend_descriptor_participates_in_policy_selection() {
-        let registry =
-            TransportProviderRegistry::new().with_provider(QuicProvider::backend_descriptor(
+        let registry = TransportProviderRegistry::new()
+            .with_provider(QuicProvider::backend_descriptor(
                 "quic-custom",
                 "0.0.0",
                 TransportProviderKind::NativeDynamic,
-            ));
+            ))
+            .expect("quic provider should register");
         let remote = RemoteTransportSupport::new([TransportId::Quic]);
+        let readiness = [nnrp_transport_provider::TransportCandidateReadiness::ready(
+            TransportId::Quic,
+            registry.providers()[0].metadata.id.clone(),
+        )];
         let selection = registry
-            .select(&remote, TransportPolicy::ForceQuic, None)
+            .select(&remote, TransportPolicy::ForceQuic, None, &readiness)
             .expect("available quic backend should satisfy force quic");
 
         assert_eq!(selection.selected.transport_id, TransportId::Quic);

@@ -287,8 +287,10 @@ impl WebSocketProvider {
         )
     }
 
-    pub fn register(registry: &mut TransportProviderRegistry) {
-        registry.register(Self::descriptor());
+    pub fn register(
+        registry: &mut TransportProviderRegistry,
+    ) -> Result<(), nnrp_transport_provider::TransportProviderRegistryError> {
+        registry.register(Self::descriptor())
     }
 
     pub async fn connect_transport(
@@ -419,8 +421,10 @@ impl NnrpServerProvider for WebSocketProvider {
     }
 }
 
-pub fn register_websocket_provider(registry: &mut TransportProviderRegistry) {
-    WebSocketProvider::register(registry);
+pub fn register_websocket_provider(
+    registry: &mut TransportProviderRegistry,
+) -> Result<(), nnrp_transport_provider::TransportProviderRegistryError> {
+    WebSocketProvider::register(registry)
 }
 
 #[derive(Debug)]
@@ -566,14 +570,18 @@ mod tests {
     #[test]
     fn websocket_provider_registers_and_selects_websocket() {
         let mut registry = TransportProviderRegistry::new();
-        register_websocket_provider(&mut registry);
+        register_websocket_provider(&mut registry).expect("websocket provider should register");
         assert_eq!(registry.providers().len(), 1);
         assert_eq!(registry.providers()[0].name, WebSocketProvider::NAME);
         assert_eq!(registry.providers()[0].transport_id, TransportId::WebSocket);
 
         let remote = RemoteTransportSupport::new([TransportId::WebSocket]);
+        let readiness = [nnrp_transport_provider::TransportCandidateReadiness::ready(
+            TransportId::WebSocket,
+            registry.providers()[0].metadata.id.clone(),
+        )];
         let selection = registry
-            .select(&remote, TransportPolicy::ForceWebSocket, None)
+            .select(&remote, TransportPolicy::ForceWebSocket, None, &readiness)
             .expect("websocket provider should satisfy force websocket");
         assert_eq!(selection.selected.name, WebSocketProvider::NAME);
     }

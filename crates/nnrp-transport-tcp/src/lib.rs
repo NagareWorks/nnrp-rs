@@ -159,8 +159,10 @@ impl TcpProvider {
         )
     }
 
-    pub fn register(registry: &mut TransportProviderRegistry) {
-        registry.register(Self::descriptor());
+    pub fn register(
+        registry: &mut TransportProviderRegistry,
+    ) -> Result<(), nnrp_transport_provider::TransportProviderRegistryError> {
+        registry.register(Self::descriptor())
     }
 
     pub async fn connect(
@@ -242,8 +244,10 @@ impl NnrpServerProvider for TcpProvider {
     }
 }
 
-pub fn register_tcp_provider(registry: &mut TransportProviderRegistry) {
-    TcpProvider::register(registry);
+pub fn register_tcp_provider(
+    registry: &mut TransportProviderRegistry,
+) -> Result<(), nnrp_transport_provider::TransportProviderRegistryError> {
+    TcpProvider::register(registry)
 }
 
 fn runtime_io(error: impl std::error::Error + Send + Sync + 'static) -> RuntimeError {
@@ -285,7 +289,7 @@ mod tests {
     #[test]
     fn tcp_provider_registers_available_descriptor() {
         let mut registry = TransportProviderRegistry::new();
-        register_tcp_provider(&mut registry);
+        register_tcp_provider(&mut registry).expect("tcp provider should register");
         assert_eq!(registry.providers().len(), 1);
         assert_eq!(registry.providers()[0].name, TcpProvider::NAME);
         assert_eq!(registry.providers()[0].transport_id, TransportId::Tcp);
@@ -294,10 +298,16 @@ mod tests {
 
     #[test]
     fn tcp_provider_participates_in_policy_selection() {
-        let registry = TransportProviderRegistry::new().with_provider(TcpProvider::descriptor());
+        let registry = TransportProviderRegistry::new()
+            .with_provider(TcpProvider::descriptor())
+            .expect("tcp provider should register");
         let remote = RemoteTransportSupport::new([TransportId::Tcp]);
+        let readiness = [nnrp_transport_provider::TransportCandidateReadiness::ready(
+            TransportId::Tcp,
+            TcpProvider::descriptor().metadata.id,
+        )];
         let selection = registry
-            .select(&remote, TransportPolicy::ForceTcp, None)
+            .select(&remote, TransportPolicy::ForceTcp, None, &readiness)
             .expect("tcp provider should satisfy force tcp");
         assert_eq!(selection.selected.name, TcpProvider::NAME);
     }

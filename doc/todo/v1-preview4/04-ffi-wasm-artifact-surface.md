@@ -115,7 +115,7 @@
   - [x] Native TCP, QUIC, IPC, and WebSocket provider identities and platform limitations.
   - [x] Browser WASM WebSocket provider identity and browser limitation.
   - [x] Canonical decimal cost and frame-limit values.
-- [x] Export structured WASM probe metrics and candidate diagnostics without weighted scores.
+- [x] Export structured WASM readiness, probe observations, probe metrics, and candidate diagnostics without weighted scores.
 - [x] Reject release artifacts that collapse all transport behavior into one hidden package.
 - [x] Reject transport artifacts whose exported ABI cannot establish and use their declared transport.
 - [x] Reject browser artifacts whose ESM glue or declarations omit a manifest-declared export.

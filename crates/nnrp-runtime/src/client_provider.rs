@@ -10,9 +10,10 @@ use nnrp_core::{
     TransportProbeMetadata, TRANSPORT_PROBE_ACK_METADATA_LEN,
 };
 use nnrp_transport_provider::{
-    select_transport_with_readiness, select_transport_with_readiness_and_probe, ProbeSample,
-    ProbeState, RemoteTransportSupport, TransportCandidateReadiness, TransportProviderDescriptor,
-    TransportProviderKind, TransportRejectionReason, TransportSelection, TransportSelectionError,
+    select_transport, select_transport_with_probe, summarize_provider_probe, ProbeSample,
+    ProbeState, RemoteTransportSupport, TransportCandidateReadiness, TransportProbeObservation,
+    TransportProviderDescriptor, TransportProviderKind, TransportRejectionReason,
+    TransportSelection, TransportSelectionError,
 };
 
 use crate::{
@@ -92,7 +93,7 @@ where
             )
             .map(|route| {
                 resolved.insert(descriptor.metadata.id.clone(), route);
-                TransportCandidateReadiness::ready(&descriptor.metadata.id)
+                TransportCandidateReadiness::ready(descriptor.transport_id, &descriptor.metadata.id)
             })
             .unwrap_or_else(|failure| failure)
         })
@@ -100,7 +101,7 @@ where
     let remote =
         RemoteTransportSupport::new(descriptors.iter().map(|descriptor| descriptor.transport_id));
 
-    let initial = select_transport_with_readiness(
+    let initial = select_transport(
         &descriptors,
         &remote,
         options.transport_policy,
@@ -110,14 +111,14 @@ where
     let selection = match initial {
         Ok(selection) => selection,
         Err(error) if requires_probe(&error) => {
-            let samples = probe_candidates(&providers, &resolved, &error).await;
-            select_transport_with_readiness_and_probe(
+            let observations = probe_candidates(&providers, &resolved, &error).await;
+            select_transport_with_probe(
                 &descriptors,
                 &remote,
                 options.transport_policy,
                 Some(RuntimeFrameLimits::DEFAULT_MAX_PACKET_BYTES as u64),
                 &readiness,
-                &samples,
+                &observations,
             )?
         }
         Err(error) => return Err(error.into()),
@@ -194,12 +195,16 @@ fn resolve_candidate(
     descriptor: &TransportProviderDescriptor,
 ) -> Result<ResolvedClientRoute, TransportCandidateReadiness> {
     if !descriptor.available {
-        return Err(TransportCandidateReadiness::ready(&descriptor.metadata.id));
+        return Err(TransportCandidateReadiness::ready(
+            descriptor.transport_id,
+            &descriptor.metadata.id,
+        ));
     }
     let route = route.cloned().unwrap_or_default();
     if let Some(endpoint) = &route.provider_endpoint {
         if !endpoint.matches_transport(descriptor.transport_id) {
             return Err(TransportCandidateReadiness::route_unresolved(
+                descriptor.transport_id,
                 &descriptor.metadata.id,
                 "provider endpoint scheme does not match the provider transport",
             ));
@@ -208,6 +213,7 @@ fn resolve_candidate(
     if let Some(security) = &route.security {
         if let Err(error) = security.validate() {
             return Err(TransportCandidateReadiness::security_unsatisfied(
+                descriptor.transport_id,
                 &descriptor.metadata.id,
                 error.to_string(),
             ));
@@ -218,6 +224,7 @@ fn resolve_candidate(
         None => {
             derive_provider_endpoint(application, descriptor.transport_id).map_err(|error| {
                 TransportCandidateReadiness::route_unresolved(
+                    descriptor.transport_id,
                     &descriptor.metadata.id,
                     error.to_string(),
                 )
@@ -228,6 +235,7 @@ fn resolve_candidate(
         validate_security(application, &endpoint, route.security.as_ref(), descriptor)
     {
         return Err(TransportCandidateReadiness::security_unsatisfied(
+            descriptor.transport_id,
             &descriptor.metadata.id,
             diagnostic,
         ));
@@ -300,6 +308,7 @@ fn validate_security(
 
 fn requires_probe(error: &TransportSelectionError) -> bool {
     let candidates = match error {
+        TransportSelectionError::InvalidEvidence { .. } => return false,
         TransportSelectionError::ForcedTransportUnavailable { candidates, .. }
         | TransportSelectionError::NoViableTransport { candidates } => candidates,
     };
@@ -316,12 +325,13 @@ async fn probe_candidates(
     providers: &[Arc<dyn NnrpClientProvider>],
     routes: &BTreeMap<String, ResolvedClientRoute>,
     error: &TransportSelectionError,
-) -> Vec<ProbeSample> {
+) -> Vec<TransportProbeObservation> {
     let candidates = match error {
+        TransportSelectionError::InvalidEvidence { .. } => return Vec::new(),
         TransportSelectionError::ForcedTransportUnavailable { candidates, .. }
         | TransportSelectionError::NoViableTransport { candidates } => candidates,
     };
-    let mut samples = Vec::new();
+    let mut observations = Vec::new();
     for candidate in candidates
         .iter()
         .filter(|candidate| candidate.probe_state == ProbeState::Missing)
@@ -335,9 +345,23 @@ async fn probe_candidates(
         let Some(route) = routes.get(&candidate.provider.id) else {
             continue;
         };
+        let mut samples = Vec::new();
         probe_provider(provider, route, &mut samples).await;
+        let descriptor = provider.descriptor();
+        match summarize_provider_probe(&descriptor, &samples) {
+            Some(metrics) => observations.push(TransportProbeObservation::succeeded(
+                descriptor.transport_id,
+                descriptor.metadata.id,
+                metrics,
+            )),
+            None => observations.push(TransportProbeObservation::failed(
+                descriptor.transport_id,
+                descriptor.metadata.id,
+                "transport probe failed",
+            )),
+        }
     }
-    samples
+    observations
 }
 
 async fn probe_provider(
