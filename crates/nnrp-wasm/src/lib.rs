@@ -6,13 +6,14 @@ use nnrp_core::{
     PressureMetadata, ProgressMetadata, ProtocolVersion, RecoverableErrorMetadata,
     ResultDropReasonMetadata, RetryAfterMetadata, RouteHintMetadata, RuntimeObjectKind,
     RuntimeRole, SchedulingMetadata, SupersedeMetadata, TraceContextMetadata, TransportId,
-    COMMON_HEADER_LEN,
+    TransportPolicy, COMMON_HEADER_LEN,
 };
 use nnrp_transport_provider::{
     select_transport_with_probe, summarize_provider_probe, ProbeMetrics, ProbeSample, ProbeState,
     ProviderCost, ProviderLimitation, ProviderLimits, RemoteTransportSupport,
-    TransportCandidateDiagnostic, TransportPolicy, TransportProviderDescriptor,
-    TransportProviderKind, TransportProviderMetadata, TransportRejectionReason,
+    TransportCandidateDiagnostic, TransportCandidateReadiness, TransportProbeObservation,
+    TransportProviderDescriptor, TransportProviderKind, TransportProviderMetadata,
+    TransportRejectionReason,
 };
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -48,7 +49,8 @@ pub fn select_transport_with_probe_json(
     remote_transports_json: &str,
     policy: &str,
     requested_max_frame_bytes: Option<String>,
-    samples_json: &str,
+    readiness_json: &str,
+    observations_json: &str,
 ) -> Result<String, JsValue> {
     let providers = parse_providers(providers_json)?;
     let remote = RemoteTransportSupport::new(parse_transport_ids(remote_transports_json)?);
@@ -57,13 +59,15 @@ pub fn select_transport_with_probe_json(
         .as_deref()
         .map(parse_canonical_u64)
         .transpose()?;
-    let samples = parse_probe_samples(samples_json)?;
+    let readiness = parse_candidate_readiness(readiness_json)?;
+    let observations = parse_probe_observations(observations_json)?;
     let selection = select_transport_with_probe(
         &providers,
         &remote,
         policy,
         requested_max_frame_bytes,
-        &samples,
+        &readiness,
+        &observations,
     )
     .map_err(|error| js_error(&error.to_string()))?;
 
@@ -439,6 +443,32 @@ struct WasmProbeSampleInput {
     bytes_received: u64,
     timed_out: Option<bool>,
     failed: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WasmCandidateReadinessInput {
+    transport_id: u32,
+    provider_id: String,
+    route_resolved: bool,
+    security_satisfied: bool,
+    diagnostic: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WasmProbeObservationInput {
+    transport_id: u32,
+    provider_id: String,
+    state: String,
+    metrics: Option<WasmProbeMetricsInput>,
+    diagnostic: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WasmProbeMetricsInput {
+    sample_count: u32,
+    success_count: u32,
+    median_throughput_bytes_per_sec: String,
+    median_rtt_us: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1535,6 +1565,62 @@ fn parse_probe_samples(source: &str) -> Result<Vec<ProbeSample>, JsValue> {
         .collect()
 }
 
+fn parse_candidate_readiness(source: &str) -> Result<Vec<TransportCandidateReadiness>, JsValue> {
+    let inputs = serde_json::from_str::<Vec<WasmCandidateReadinessInput>>(source)
+        .map_err(|error| js_error(&error.to_string()))?;
+    inputs
+        .into_iter()
+        .map(|input| {
+            Ok(TransportCandidateReadiness {
+                transport_id: parse_transport_id(input.transport_id)?,
+                provider_id: input.provider_id,
+                route_resolved: input.route_resolved,
+                security_satisfied: input.security_satisfied,
+                diagnostic: input.diagnostic,
+            })
+        })
+        .collect()
+}
+
+fn parse_probe_observations(source: &str) -> Result<Vec<TransportProbeObservation>, JsValue> {
+    let inputs = serde_json::from_str::<Vec<WasmProbeObservationInput>>(source)
+        .map_err(|error| js_error(&error.to_string()))?;
+    inputs
+        .into_iter()
+        .map(|input| {
+            let state = match input.state.as_str() {
+                "succeeded" => ProbeState::Succeeded,
+                "failed" => ProbeState::Failed,
+                _ => {
+                    return Err(js_error(
+                        "probe observation state must be succeeded or failed",
+                    ))
+                }
+            };
+            let metrics = input
+                .metrics
+                .map(|metrics| {
+                    Ok::<ProbeMetrics, JsValue>(ProbeMetrics {
+                        sample_count: metrics.sample_count,
+                        success_count: metrics.success_count,
+                        median_throughput_bytes_per_sec: parse_canonical_u64(
+                            &metrics.median_throughput_bytes_per_sec,
+                        )?,
+                        median_rtt_us: parse_canonical_u64(&metrics.median_rtt_us)?,
+                    })
+                })
+                .transpose()?;
+            Ok(TransportProbeObservation {
+                transport_id: parse_transport_id(input.transport_id)?,
+                provider_id: input.provider_id,
+                state,
+                metrics,
+                diagnostic: input.diagnostic,
+            })
+        })
+        .collect()
+}
+
 fn parse_transport_ids(source: &str) -> Result<Vec<TransportId>, JsValue> {
     let ids =
         serde_json::from_str::<Vec<u32>>(source).map_err(|error| js_error(&error.to_string()))?;
@@ -1676,6 +1762,8 @@ fn transport_rejection_reason_name(value: TransportRejectionReason) -> &'static 
         TransportRejectionReason::LocalUnavailable => "local-unavailable",
         TransportRejectionReason::PeerUnsupported => "peer-unsupported",
         TransportRejectionReason::LimitExceeded => "limit-exceeded",
+        TransportRejectionReason::RouteUnresolved => "route-unresolved",
+        TransportRejectionReason::SecurityUnsatisfied => "security-unsatisfied",
         TransportRejectionReason::ProbeMissing => "probe-missing",
         TransportRejectionReason::ProbeFailed => "probe-failed",
     }
@@ -2164,16 +2252,24 @@ mod tests {
             provider_json("tcp", "nnrp.transport.tcp.native", 2, "pure_rust", true),
             provider_json("quic", "nnrp.transport.quic.native", 1, "pure_rust", true)
         );
-        let samples = r#"[
-            {"transport_id":2,"provider_id":"nnrp.transport.tcp.native","elapsed_us":20000,"rtt_us":5000,"bytes_sent":1024,"bytes_received":1024},
-            {"transport_id":2,"provider_id":"nnrp.transport.tcp.native","elapsed_us":20000,"rtt_us":5100,"bytes_sent":1024,"bytes_received":1024},
-            {"transport_id":1,"provider_id":"nnrp.transport.quic.native","elapsed_us":20000,"rtt_us":800,"bytes_sent":1024,"bytes_received":1024},
-            {"transport_id":1,"provider_id":"nnrp.transport.quic.native","elapsed_us":20000,"rtt_us":null,"bytes_sent":0,"bytes_received":0,"timed_out":true,"failed":true}
+        let readiness = r#"[
+            {"transport_id":2,"provider_id":"nnrp.transport.tcp.native","route_resolved":true,"security_satisfied":true},
+            {"transport_id":1,"provider_id":"nnrp.transport.quic.native","route_resolved":true,"security_satisfied":true}
+        ]"#;
+        let observations = r#"[
+            {"transport_id":2,"provider_id":"nnrp.transport.tcp.native","state":"succeeded","metrics":{"sample_count":2,"success_count":2,"median_throughput_bytes_per_sec":"102400","median_rtt_us":"5050"}},
+            {"transport_id":1,"provider_id":"nnrp.transport.quic.native","state":"succeeded","metrics":{"sample_count":2,"success_count":1,"median_throughput_bytes_per_sec":"102400","median_rtt_us":"800"}}
         ]"#;
 
-        let output =
-            select_transport_with_probe_json(&providers, "[1,2]", "prefer_quic", None, samples)
-                .unwrap();
+        let output = select_transport_with_probe_json(
+            &providers,
+            "[1,2]",
+            "prefer_quic",
+            None,
+            readiness,
+            observations,
+        )
+        .unwrap();
         let output = serde_json::from_str::<serde_json::Value>(&output).unwrap();
         assert_eq!(output["selected"]["transport_id"], 2);
         assert_eq!(output["candidates"].as_array().unwrap().len(), 2);
@@ -2199,13 +2295,20 @@ mod tests {
                 false
             )
         );
-        let samples = r#"[
-            {"transport_id":2,"provider_id":"nnrp.transport.tcp.native","elapsed_us":10000,"rtt_us":2500,"bytes_sent":4096,"bytes_received":4096}
+        let readiness = r#"[
+            {"transport_id":2,"provider_id":"nnrp.transport.tcp.native","route_resolved":true,"security_satisfied":true},
+            {"transport_id":1,"provider_id":"nnrp.transport.quic.native","route_resolved":true,"security_satisfied":true}
         ]"#;
 
-        let output =
-            select_transport_with_probe_json(&providers, "[1,2]", "prefer_tcp", None, samples)
-                .unwrap();
+        let output = select_transport_with_probe_json(
+            &providers,
+            "[1,2]",
+            "prefer_tcp",
+            None,
+            readiness,
+            "[]",
+        )
+        .unwrap();
         let output = serde_json::from_str::<serde_json::Value>(&output).unwrap();
 
         assert_eq!(output["selected"]["kind"], "native_dynamic");
@@ -2216,6 +2319,37 @@ mod tests {
             .find(|candidate| candidate["transport_id"] == 1)
             .unwrap();
         assert_eq!(rejected["rejection_reason"], "local-unavailable");
+    }
+
+    #[cfg(all(feature = "transport-tcp", feature = "transport-quic"))]
+    #[test]
+    fn wasm_probe_selection_rejects_incomplete_and_invalid_evidence() {
+        let providers = format!(
+            "[{},{}]",
+            provider_json("tcp", "nnrp.transport.tcp.native", 2, "pure_rust", true),
+            provider_json("quic", "nnrp.transport.quic.native", 1, "pure_rust", true)
+        );
+        let incomplete = r#"[{"transport_id":2,"provider_id":"nnrp.transport.tcp.native","route_resolved":true,"security_satisfied":true}]"#;
+        assert!(select_transport_with_probe_json(
+            &providers, "[1,2]", "auto", None, incomplete, "[]",
+        )
+        .is_err());
+
+        let readiness = r#"[
+            {"transport_id":2,"provider_id":"nnrp.transport.tcp.native","route_resolved":true,"security_satisfied":true},
+            {"transport_id":1,"provider_id":"nnrp.transport.quic.native","route_resolved":true,"security_satisfied":true}
+        ]"#;
+        let invalid_state =
+            r#"[{"transport_id":2,"provider_id":"nnrp.transport.tcp.native","state":"missing"}]"#;
+        assert!(select_transport_with_probe_json(
+            &providers,
+            "[1,2]",
+            "auto",
+            None,
+            readiness,
+            invalid_state,
+        )
+        .is_err());
     }
 
     #[cfg(feature = "transport-quic")]
@@ -2277,9 +2411,16 @@ mod tests {
             "bytes_received":10
         }]"#;
 
-        let selection =
-            select_transport_with_probe_json(&format!("[{provider}]"), "[2]", "auto", None, "[]")
-                .unwrap();
+        let readiness = r#"[{"transport_id":2,"provider_id":"nnrp.transport.tcp.native","route_resolved":true,"security_satisfied":true}]"#;
+        let selection = select_transport_with_probe_json(
+            &format!("[{provider}]"),
+            "[2]",
+            "auto",
+            None,
+            readiness,
+            "[]",
+        )
+        .unwrap();
         let selection = serde_json::from_str::<serde_json::Value>(&selection).unwrap();
         assert_eq!(
             selection["candidates"][0]["provider"]["limitations"]
@@ -2359,8 +2500,15 @@ mod tests {
             provider_json("tcp", "nnrp.transport.tcp.native", 99, "pure_rust", true);
 
         assert!(
-            select_transport_with_probe_json(&format!("[{tcp}]"), "[2]", "sticky", None, "[]")
-                .is_err()
+            select_transport_with_probe_json(
+                &format!("[{tcp}]"),
+                "[2]",
+                "sticky",
+                None,
+                r#"[{"transport_id":2,"provider_id":"nnrp.transport.tcp.native","route_resolved":true,"security_satisfied":true}]"#,
+                "[]",
+            )
+            .is_err()
         );
         assert!(summarize_provider_probe_json(&unspecified, "[]").is_err());
         assert!(summarize_provider_probe_json(&bad_kind, "[]").is_err());

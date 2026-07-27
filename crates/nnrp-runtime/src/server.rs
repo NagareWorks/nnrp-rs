@@ -1,8 +1,15 @@
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    Arc, Mutex, MutexGuard,
+};
+use std::task::Poll;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use futures_util::{future::poll_fn, lock::Mutex as AsyncMutex};
 use nnrp_core::{
     validate_control_request_semantics, validate_partial_result_semantics,
     validate_pressure_semantics, validate_profile_assignment, validate_progress_semantics,
@@ -39,13 +46,13 @@ use tokio::net::TcpListener;
 #[cfg(all(feature = "native-tcp", not(target_arch = "wasm32")))]
 use crate::TcpFramedListener;
 use crate::{
-    BoxedFramedListener, BoxedFramedTransport, FramedListener, RuntimeError, RuntimePacket,
-    RuntimePressureState, RuntimeTransportKind,
+    server_provider::{bind_server, BoundServerProvider},
+    BoxedFramedListener, BoxedFramedTransport, FramedListener, NnrpServerOptions,
+    NnrpServerProvider, ProviderEndpoint, RuntimeError, RuntimePacket, RuntimePressureState,
 };
 
 #[derive(Clone)]
 pub struct NnrpServerConfig {
-    pub transport: RuntimeTransportKind,
     pub supported_profiles: Vec<u16>,
     pub supported_cache_objects: Vec<CacheObjectKind>,
     pub max_cache_objects: usize,
@@ -63,7 +70,6 @@ impl fmt::Debug for NnrpServerConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("NnrpServerConfig")
-            .field("transport", &self.transport)
             .field("supported_profiles", &self.supported_profiles)
             .field("supported_cache_objects", &self.supported_cache_objects)
             .field("max_cache_objects", &self.max_cache_objects)
@@ -95,7 +101,6 @@ impl NnrpServerPolicy for AllowAllServerPolicy {
 impl Default for NnrpServerConfig {
     fn default() -> Self {
         Self {
-            transport: RuntimeTransportKind::Tcp,
             supported_profiles: vec![nnrp_core::PROFILE_TOKEN],
             supported_cache_objects: Vec::new(),
             max_cache_objects: 0,
@@ -112,11 +117,6 @@ impl Default for NnrpServerConfig {
 }
 
 impl NnrpServerConfig {
-    pub fn with_transport(mut self, transport: RuntimeTransportKind) -> Self {
-        self.transport = transport;
-        self
-    }
-
     pub fn with_supported_profiles(mut self, profiles: impl Into<Vec<u16>>) -> Self {
         self.supported_profiles = profiles.into();
         self
@@ -180,13 +180,18 @@ impl NnrpServerConfig {
 }
 
 pub struct NnrpServer {
-    listener: BoxedFramedListener,
+    listeners: AsyncMutex<Option<Vec<BoundServerProvider>>>,
+    next_accept_index: AtomicUsize,
+    listener_set_closed: AtomicBool,
+    bound_provider_endpoints: BTreeMap<nnrp_core::TransportId, ProviderEndpoint>,
+    primary_local_addr: Option<std::net::SocketAddr>,
     config: NnrpServerConfig,
     sessions: SharedSessionRegistry,
 }
 
 pub struct NnrpServerSession {
     session_id: u32,
+    active_transport_id: nnrp_core::TransportId,
     client_open: SessionOpenMetadata,
     transport: BoxedFramedTransport,
     lifecycle: ConnectionLifecycle,
@@ -328,16 +333,19 @@ pub enum NnrpServerEvent {
 }
 
 impl NnrpServer {
+    pub async fn listen<I>(options: NnrpServerOptions, providers: I) -> Result<Self, RuntimeError>
+    where
+        I: IntoIterator<Item = Arc<dyn NnrpServerProvider>>,
+    {
+        let listeners = bind_server(&options, providers).await?;
+        Ok(Self::from_bound_listeners(listeners, options.session))
+    }
+
     #[cfg(all(feature = "native-tcp", not(target_arch = "wasm32")))]
     pub async fn bind_tcp(
         addr: impl tokio::net::ToSocketAddrs,
         config: NnrpServerConfig,
     ) -> Result<Self, RuntimeError> {
-        if config.transport != RuntimeTransportKind::Tcp {
-            return Err(RuntimeError::UnsupportedTransport(
-                "server config selected a non-TCP transport for bind_tcp",
-            ));
-        }
         Self::from_listener(
             TcpFramedListener::new(TcpListener::bind(addr).await?),
             config,
@@ -346,13 +354,8 @@ impl NnrpServer {
 
     pub async fn bind_quic(
         _endpoint: &str,
-        config: NnrpServerConfig,
+        _config: NnrpServerConfig,
     ) -> Result<Self, RuntimeError> {
-        if config.transport != RuntimeTransportKind::Quic {
-            return Err(RuntimeError::UnsupportedTransport(
-                "server config selected a non-QUIC transport for bind_quic",
-            ));
-        }
         Err(RuntimeError::UnsupportedTransport(
             "QUIC provider is not installed; use from_listener with a QUIC FramedListener",
         ))
@@ -369,28 +372,88 @@ impl NnrpServer {
         listener: BoxedFramedListener,
         config: NnrpServerConfig,
     ) -> Result<Self, RuntimeError> {
-        if listener.transport_kind() != config.transport {
-            return Err(RuntimeError::UnsupportedTransport(
-                "server config transport does not match the provided listener slot",
-            ));
-        }
-        Ok(Self {
-            listener,
+        Ok(Self::from_bound_listeners(
+            vec![BoundServerProvider::from_listener(listener)],
+            config,
+        ))
+    }
+
+    pub fn from_bound_listener<L>(
+        endpoint: ProviderEndpoint,
+        listener: L,
+        config: NnrpServerConfig,
+    ) -> Result<Self, RuntimeError>
+    where
+        L: FramedListener + 'static,
+    {
+        Ok(Self::from_bound_listeners(
+            vec![BoundServerProvider::new(endpoint, Box::new(listener))?],
+            config,
+        ))
+    }
+
+    fn from_bound_listeners(listeners: Vec<BoundServerProvider>, config: NnrpServerConfig) -> Self {
+        let bound_provider_endpoints = listeners
+            .iter()
+            .filter_map(|listener| {
+                listener
+                    .provider_endpoint()
+                    .cloned()
+                    .map(|endpoint| (listener.transport_id(), endpoint))
+            })
+            .collect();
+        let primary_local_addr = listeners.iter().find_map(BoundServerProvider::local_addr);
+        Self {
+            listeners: AsyncMutex::new(Some(listeners)),
+            next_accept_index: AtomicUsize::new(0),
+            listener_set_closed: AtomicBool::new(false),
+            bound_provider_endpoints,
+            primary_local_addr,
             config,
             sessions: Arc::new(Mutex::new(BTreeMap::new())),
-        })
+        }
     }
 
     pub fn local_addr(&self) -> Result<std::net::SocketAddr, RuntimeError> {
-        self.listener.local_addr()
+        self.primary_local_addr
+            .ok_or(RuntimeError::UnsupportedTransport(
+                "server listener set does not expose an IP socket address",
+            ))
+    }
+
+    pub fn bound_provider_endpoints(&self) -> &BTreeMap<nnrp_core::TransportId, ProviderEndpoint> {
+        &self.bound_provider_endpoints
     }
 
     pub fn session_count(&self) -> Result<usize, RuntimeError> {
         Ok(self.session_registry()?.len())
     }
 
+    pub fn is_listener_set_closed(&self) -> bool {
+        self.listener_set_closed.load(Ordering::Acquire)
+    }
+
     pub async fn accept(&self) -> Result<NnrpServerSession, RuntimeError> {
-        let mut transport = self.listener.accept().await?;
+        let (active_transport_id, mut transport) = {
+            let mut listeners = self.listeners.lock().await;
+            let Some(active) = listeners.as_ref() else {
+                self.listener_set_closed.store(true, Ordering::Release);
+                return Err(RuntimeError::ServerListenerSetClosed);
+            };
+            let start_index = self.next_accept_index.load(Ordering::Relaxed);
+            match accept_stable(active, start_index).await {
+                Ok((accepted_index, transport_id, transport)) => {
+                    self.next_accept_index
+                        .store((accepted_index + 1) % active.len(), Ordering::Relaxed);
+                    (transport_id, transport)
+                }
+                Err(error) => {
+                    listeners.take();
+                    self.listener_set_closed.store(true, Ordering::Release);
+                    return Err(error);
+                }
+            }
+        };
         let packet = loop {
             let packet = transport.read_packet().await?;
             if packet.header.message_type == MessageType::TransportProbe {
@@ -447,6 +510,7 @@ impl NnrpServer {
 
         Ok(NnrpServerSession {
             session_id: ack.session_id,
+            active_transport_id,
             client_open: open,
             transport,
             lifecycle,
@@ -533,6 +597,41 @@ impl NnrpServer {
     }
 }
 
+async fn accept_stable(
+    listeners: &[BoundServerProvider],
+    start_index: usize,
+) -> Result<(usize, nnrp_core::TransportId, BoxedFramedTransport), RuntimeError> {
+    if listeners.is_empty() {
+        return Err(RuntimeError::ServerListenerSetClosed);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    type AcceptFuture<'a> =
+        Pin<Box<dyn Future<Output = Result<BoxedFramedTransport, RuntimeError>> + Send + 'a>>;
+    #[cfg(target_arch = "wasm32")]
+    type AcceptFuture<'a> =
+        Pin<Box<dyn Future<Output = Result<BoxedFramedTransport, RuntimeError>> + 'a>>;
+
+    let mut accepts = listeners
+        .iter()
+        .map(|listener| listener.listener().accept())
+        .collect::<Vec<AcceptFuture<'_>>>();
+    let start_index = start_index % listeners.len();
+    poll_fn(|context| {
+        for offset in 0..accepts.len() {
+            let index = (start_index + offset) % accepts.len();
+            let accept = &mut accepts[index];
+            if let Poll::Ready(result) = accept.as_mut().poll(context) {
+                return Poll::Ready(
+                    result.map(|transport| (index, listeners[index].transport_id(), transport)),
+                );
+            }
+        }
+        Poll::Pending
+    })
+    .await
+}
+
 async fn respond_to_transport_probe(
     transport: &mut BoxedFramedTransport,
     packet: RuntimePacket,
@@ -572,7 +671,7 @@ impl fmt::Debug for NnrpServer {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("NnrpServer")
-            .field("transport", &self.listener.transport_kind())
+            .field("bound_provider_endpoints", &self.bound_provider_endpoints)
             .field("config", &self.config)
             .finish_non_exhaustive()
     }
@@ -583,6 +682,7 @@ impl fmt::Debug for NnrpServerSession {
         formatter
             .debug_struct("NnrpServerSession")
             .field("session_id", &self.session_id)
+            .field("active_transport_id", &self.active_transport_id)
             .field("client_open", &self.client_open)
             .field("transport", &self.transport.transport_kind())
             .field("lifecycle", &self.lifecycle)
@@ -597,6 +697,10 @@ impl fmt::Debug for NnrpServerSession {
 impl NnrpServerSession {
     pub fn session_id(&self) -> u32 {
         self.session_id
+    }
+
+    pub fn active_transport_id(&self) -> nnrp_core::TransportId {
+        self.active_transport_id
     }
 
     pub fn client_open(&self) -> &SessionOpenMetadata {
@@ -2130,4 +2234,88 @@ fn require_body_len(
         return Err(RuntimeError::UnexpectedMessage(message));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod accept_tests {
+    use async_trait::async_trait;
+
+    use super::*;
+    use crate::RuntimeTransportKind;
+
+    struct ReadyListener(RuntimeTransportKind);
+
+    #[async_trait]
+    impl FramedListener for ReadyListener {
+        fn transport_kind(&self) -> RuntimeTransportKind {
+            self.0
+        }
+
+        fn local_addr(&self) -> Result<std::net::SocketAddr, RuntimeError> {
+            Ok("127.0.0.1:4500".parse().unwrap())
+        }
+
+        async fn accept(&self) -> Result<BoxedFramedTransport, RuntimeError> {
+            Ok(Box::new(ReadyTransport(self.0)))
+        }
+    }
+
+    struct ReadyTransport(RuntimeTransportKind);
+
+    #[async_trait]
+    impl crate::FramedTransport for ReadyTransport {
+        fn transport_kind(&self) -> RuntimeTransportKind {
+            self.0
+        }
+
+        async fn read_packet(&mut self) -> Result<RuntimePacket, RuntimeError> {
+            Err(RuntimeError::Internal(
+                "ready test transport has no packets",
+            ))
+        }
+
+        async fn write_packet(&mut self, _packet: &RuntimePacket) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+
+        async fn close(&mut self) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn stable_accept_rotates_the_first_polled_ready_listener() {
+        let listeners = [
+            RuntimeTransportKind::Tcp,
+            RuntimeTransportKind::Quic,
+            RuntimeTransportKind::WebSocket,
+        ]
+        .into_iter()
+        .map(|kind| BoundServerProvider::from_listener(Box::new(ReadyListener(kind))))
+        .collect::<Vec<_>>();
+
+        for (start_index, expected_transport) in [
+            nnrp_core::TransportId::Tcp,
+            nnrp_core::TransportId::Quic,
+            nnrp_core::TransportId::WebSocket,
+            nnrp_core::TransportId::Tcp,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (accepted_index, transport_id, transport) =
+                accept_stable(&listeners, start_index).await.unwrap();
+            assert_eq!(accepted_index, start_index % listeners.len());
+            assert_eq!(transport_id, expected_transport);
+            assert_eq!(
+                transport.transport_kind().transport_id(),
+                expected_transport
+            );
+        }
+
+        assert!(matches!(
+            accept_stable(&[], 0).await,
+            Err(RuntimeError::ServerListenerSetClosed)
+        ));
+    }
 }

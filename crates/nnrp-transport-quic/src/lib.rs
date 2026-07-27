@@ -7,9 +7,10 @@ use std::{
 use async_trait::async_trait;
 use nnrp_core::TransportId;
 use nnrp_runtime::{
-    BoxedFramedListener, BoxedFramedTransport, FramedListener, FramedTransport, NnrpClient,
-    NnrpClientConfig, NnrpServer, NnrpServerConfig, RuntimeError, RuntimeFrameLimits,
-    RuntimePacket, RuntimeTransportKind, StreamPacketReader,
+    BoundServerProvider, BoxedFramedListener, BoxedFramedTransport, ClientTransportSecurity,
+    FramedListener, FramedTransport, NnrpClient, NnrpClientConfig, NnrpClientProvider, NnrpServer,
+    NnrpServerConfig, NnrpServerProvider, ProviderEndpoint, RuntimeError, RuntimeFrameLimits,
+    RuntimePacket, RuntimeTransportKind, ServerTransportSecurity, StreamPacketReader,
 };
 use nnrp_transport_provider::{
     TransportProviderDescriptor, TransportProviderKind, TransportProviderRegistry,
@@ -310,8 +311,10 @@ impl QuicProvider {
         TransportProviderDescriptor::available(name, version, TransportId::Quic, kind)
     }
 
-    pub fn register(registry: &mut TransportProviderRegistry) {
-        registry.register(Self::descriptor());
+    pub fn register(
+        registry: &mut TransportProviderRegistry,
+    ) -> Result<(), nnrp_transport_provider::TransportProviderRegistryError> {
+        registry.register(Self::descriptor())
     }
 
     pub async fn connect(
@@ -376,16 +379,77 @@ impl QuicProvider {
     }
 }
 
-pub fn register_quic_provider(registry: &mut TransportProviderRegistry) {
-    QuicProvider::register(registry);
+#[async_trait]
+impl NnrpClientProvider for QuicProvider {
+    fn descriptor(&self) -> TransportProviderDescriptor {
+        QuicProvider::descriptor()
+    }
+
+    async fn connect(
+        &self,
+        endpoint: &ProviderEndpoint,
+        security: Option<&ClientTransportSecurity>,
+        limits: RuntimeFrameLimits,
+    ) -> Result<BoxedFramedTransport, RuntimeError> {
+        let locator =
+            endpoint
+                .as_str()
+                .strip_prefix("quic://")
+                .ok_or(RuntimeError::UnsupportedTransport(
+                    "QUIC provider endpoint must use quic://",
+                ))?;
+        let security = security.ok_or(RuntimeError::UnsupportedTransport(
+            "QUIC requires route-local peer verification credentials",
+        ))?;
+        let addr = resolve_endpoint(locator)?;
+        let config = QuicClientEndpointConfig::with_root_certificate(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+            security.server_name.clone(),
+            security.trusted_certificate_der.clone(),
+        );
+        Ok(Box::new(
+            QuicTransport::connect_with_limits(addr, &config, limits).await?,
+        ))
+    }
 }
 
-pub fn quic_client_config(config: NnrpClientConfig) -> NnrpClientConfig {
-    config.with_transport(RuntimeTransportKind::Quic)
+#[async_trait]
+impl NnrpServerProvider for QuicProvider {
+    fn descriptor(&self) -> TransportProviderDescriptor {
+        QuicProvider::descriptor()
+    }
+
+    async fn bind(
+        &self,
+        endpoint: &ProviderEndpoint,
+        security: Option<&ServerTransportSecurity>,
+        limits: RuntimeFrameLimits,
+    ) -> Result<BoundServerProvider, RuntimeError> {
+        let locator =
+            endpoint
+                .as_str()
+                .strip_prefix("quic://")
+                .ok_or(RuntimeError::UnsupportedTransport(
+                    "QUIC provider endpoint must use quic://",
+                ))?;
+        let security = security.ok_or(RuntimeError::UnsupportedTransport(
+            "QUIC requires route-local server credentials",
+        ))?;
+        let config = QuicServerEndpointConfig::with_single_certificate(
+            resolve_endpoint(locator)?,
+            security.certificate_der.clone(),
+            security.private_key_pkcs8_der.clone(),
+        );
+        let listener = QuicFramedListener::bind_with_limits(&config, limits)?;
+        let endpoint = format!("quic://{}", listener.local_addr()?).parse()?;
+        BoundServerProvider::new(endpoint, Box::new(listener))
+    }
 }
 
-pub fn quic_server_config(config: NnrpServerConfig) -> NnrpServerConfig {
-    config.with_transport(RuntimeTransportKind::Quic)
+pub fn register_quic_provider(
+    registry: &mut TransportProviderRegistry,
+) -> Result<(), nnrp_transport_provider::TransportProviderRegistryError> {
+    QuicProvider::register(registry)
 }
 
 fn resolve_endpoint(endpoint: &str) -> Result<SocketAddr, RuntimeError> {
@@ -404,19 +468,26 @@ fn runtime_io(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Run
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::{
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        sync::Arc,
+    };
 
+    use nnrp_core::TransportPolicy;
     use nnrp_core::{
         CommonHeader, FrameSubmitMetadata, InputProfile, MessageType, PayloadKindBitmap,
         ResultClass, ResultPushMetadata, SessionCloseReason, SubmitMode, TileIndexMode,
     };
-    use nnrp_runtime::{RuntimePacket, RuntimeTransportKind};
-    use nnrp_transport_provider::{RemoteTransportSupport, TransportPolicy};
+    use nnrp_runtime::{
+        ClientProviderRoute, ClientProviderRoutes, ClientTransportSecurity, NnrpClientOptions,
+        NnrpClientProvider, RuntimePacket, RuntimeTransportKind,
+    };
+    use nnrp_transport_provider::RemoteTransportSupport;
 
     #[test]
     fn quic_provider_registers_available_backend_descriptor() {
         let mut registry = TransportProviderRegistry::new();
-        register_quic_provider(&mut registry);
+        register_quic_provider(&mut registry).expect("quic provider should register");
 
         assert_eq!(registry.providers().len(), 1);
         assert_eq!(registry.providers()[0].name, QuicProvider::NAME);
@@ -431,15 +502,20 @@ mod tests {
 
     #[test]
     fn quic_backend_descriptor_participates_in_policy_selection() {
-        let registry =
-            TransportProviderRegistry::new().with_provider(QuicProvider::backend_descriptor(
+        let registry = TransportProviderRegistry::new()
+            .with_provider(QuicProvider::backend_descriptor(
                 "quic-custom",
                 "0.0.0",
                 TransportProviderKind::NativeDynamic,
-            ));
+            ))
+            .expect("quic provider should register");
         let remote = RemoteTransportSupport::new([TransportId::Quic]);
+        let readiness = [nnrp_transport_provider::TransportCandidateReadiness::ready(
+            TransportId::Quic,
+            registry.providers()[0].metadata.id.clone(),
+        )];
         let selection = registry
-            .select(&remote, TransportPolicy::ForceQuic, None)
+            .select(&remote, TransportPolicy::ForceQuic, None, &readiness)
             .expect("available quic backend should satisfy force quic");
 
         assert_eq!(selection.selected.transport_id, TransportId::Quic);
@@ -451,11 +527,7 @@ mod tests {
     ) -> Result<(), RuntimeError> {
         let (endpoint_config, certificate) =
             QuicServerEndpointConfig::self_signed_localhost(stub_addr())?;
-        let server = QuicProvider::bind(
-            endpoint_config,
-            quic_server_config(NnrpServerConfig::default()),
-        )
-        .await?;
+        let server = QuicProvider::bind(endpoint_config, NnrpServerConfig::default()).await?;
         let addr = server.local_addr()?;
 
         let server_task = tokio::spawn(async move {
@@ -474,12 +546,8 @@ mod tests {
 
         let endpoint_config =
             QuicClientEndpointConfig::localhost_with_root_certificate(certificate.certificate_der);
-        let client = QuicProvider::connect_addr(
-            addr,
-            endpoint_config,
-            quic_client_config(NnrpClientConfig::default()),
-        )
-        .await?;
+        let client =
+            QuicProvider::connect_addr(addr, endpoint_config, NnrpClientConfig::default()).await?;
         let mut session = client.open_session().await?;
         let frame_id = session.submit(token_submit(), b"prompt".to_vec()).await?;
         let result = session.await_result().await?;
@@ -487,6 +555,46 @@ mod tests {
         assert_eq!(result.body, b"delta".to_vec());
         session.close().await?;
         server_task.await.expect("server task should join")?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quic_provider_opens_high_level_secure_client_session() -> Result<(), RuntimeError> {
+        let (endpoint_config, certificate) =
+            QuicServerEndpointConfig::self_signed_localhost(stub_addr())?;
+        let server = QuicProvider::bind(endpoint_config, NnrpServerConfig::default()).await?;
+        let addr = server.local_addr()?;
+        let server_task = tokio::spawn(async move { server.accept().await });
+        let client = NnrpClient::connect(
+            NnrpClientOptions {
+                endpoint: format!("nnrps://localhost:{}/session", addr.port())
+                    .parse()
+                    .unwrap(),
+                provider_routes: ClientProviderRoutes::from([(
+                    TransportId::Quic,
+                    ClientProviderRoute {
+                        provider_endpoint: Some(format!("quic://{addr}").parse().unwrap()),
+                        security: Some(ClientTransportSecurity::new(
+                            "localhost",
+                            certificate.certificate_der,
+                        )),
+                    },
+                )]),
+                transport_policy: TransportPolicy::Auto,
+                session: NnrpClientConfig::default(),
+            },
+            [Arc::new(QuicProvider) as Arc<dyn NnrpClientProvider>],
+        )
+        .await?;
+        assert_eq!(
+            client.transport_selection().unwrap().selected.transport_id,
+            TransportId::Quic
+        );
+        let client_session = client.open_session().await?;
+        let server_session = server_task
+            .await
+            .map_err(|_| RuntimeError::Internal("QUIC server task panicked"))??;
+        assert_eq!(client_session.session_id(), server_session.session_id());
         Ok(())
     }
 
@@ -510,36 +618,21 @@ mod tests {
     }
 
     #[test]
-    fn quic_injection_helpers_validate_transport_kind() {
-        let client =
-            QuicProvider::from_transport(StubQuicTransport, quic_client_config(Default::default()))
-                .expect("quic transport injection should be accepted");
+    fn quic_injection_helpers_accept_transport_neutral_config() {
+        let client = QuicProvider::from_transport(StubQuicTransport, Default::default())
+            .expect("quic transport injection should be accepted");
         assert!(format!("{client:?}").contains("Quic"));
 
-        let boxed_client = QuicProvider::from_boxed_transport(
-            Box::new(StubQuicTransport),
-            quic_client_config(Default::default()),
-        )
-        .expect("boxed quic transport injection should be accepted");
+        let boxed_client =
+            QuicProvider::from_boxed_transport(Box::new(StubQuicTransport), Default::default())
+                .expect("boxed quic transport injection should be accepted");
         assert!(format!("{boxed_client:?}").contains("Quic"));
-
-        let mismatch = QuicProvider::from_transport(StubQuicTransport, NnrpClientConfig::default())
-            .expect_err("quic transport should not bind to tcp config");
-        assert!(matches!(
-            mismatch,
-            RuntimeError::UnsupportedTransport(
-                "client config transport does not match the provided transport slot"
-            )
-        ));
     }
 
     #[test]
-    fn quic_listener_injection_helpers_validate_transport_kind() {
-        let server = QuicProvider::from_listener(
-            StubQuicListener,
-            quic_server_config(NnrpServerConfig::default()),
-        )
-        .expect("quic listener injection should be accepted");
+    fn quic_listener_injection_helpers_accept_transport_neutral_config() {
+        let server = QuicProvider::from_listener(StubQuicListener, NnrpServerConfig::default())
+            .expect("quic listener injection should be accepted");
         assert_eq!(
             server.local_addr().expect("stub listener has an address"),
             stub_addr()
@@ -547,7 +640,7 @@ mod tests {
 
         let boxed_server = QuicProvider::from_boxed_listener(
             Box::new(StubQuicListener),
-            quic_server_config(NnrpServerConfig::default()),
+            NnrpServerConfig::default(),
         )
         .expect("boxed quic listener injection should be accepted");
         assert_eq!(
@@ -556,15 +649,6 @@ mod tests {
                 .expect("boxed stub listener has an address"),
             stub_addr()
         );
-
-        let mismatch = QuicProvider::from_listener(StubQuicListener, NnrpServerConfig::default())
-            .expect_err("quic listener should not bind to tcp config");
-        assert!(matches!(
-            mismatch,
-            RuntimeError::UnsupportedTransport(
-                "server config transport does not match the provided listener slot"
-            )
-        ));
     }
 
     #[tokio::test]

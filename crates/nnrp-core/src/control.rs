@@ -170,7 +170,7 @@ impl SessionPatchRejectReason {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u32)]
 pub enum TransportId {
     Unspecified = 0,
@@ -192,6 +192,63 @@ impl TransportId {
                 enum_name: "transport_id",
                 value: value as u64,
             }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TransportPolicy {
+    #[default]
+    Auto,
+    PreferQuic,
+    PreferTcp,
+    PreferIpc,
+    PreferWebSocket,
+    ForceQuic,
+    ForceTcp,
+    ForceIpc,
+    ForceWebSocket,
+}
+
+impl TransportPolicy {
+    pub const fn allows(self, transport_id: TransportId) -> bool {
+        match self {
+            Self::Auto
+            | Self::PreferQuic
+            | Self::PreferTcp
+            | Self::PreferIpc
+            | Self::PreferWebSocket => matches!(
+                transport_id,
+                TransportId::Quic | TransportId::Tcp | TransportId::Ipc | TransportId::WebSocket
+            ),
+            Self::ForceQuic => matches!(transport_id, TransportId::Quic),
+            Self::ForceTcp => matches!(transport_id, TransportId::Tcp),
+            Self::ForceIpc => matches!(transport_id, TransportId::Ipc),
+            Self::ForceWebSocket => matches!(transport_id, TransportId::WebSocket),
+        }
+    }
+
+    pub const fn preferred_transport(self) -> Option<TransportId> {
+        match self {
+            Self::PreferQuic | Self::ForceQuic => Some(TransportId::Quic),
+            Self::PreferTcp | Self::ForceTcp => Some(TransportId::Tcp),
+            Self::PreferIpc | Self::ForceIpc => Some(TransportId::Ipc),
+            Self::PreferWebSocket | Self::ForceWebSocket => Some(TransportId::WebSocket),
+            Self::Auto => None,
+        }
+    }
+
+    pub const fn forced_transport(self) -> Option<TransportId> {
+        match self {
+            Self::ForceQuic => Some(TransportId::Quic),
+            Self::ForceTcp => Some(TransportId::Tcp),
+            Self::ForceIpc => Some(TransportId::Ipc),
+            Self::ForceWebSocket => Some(TransportId::WebSocket),
+            Self::Auto
+            | Self::PreferQuic
+            | Self::PreferTcp
+            | Self::PreferIpc
+            | Self::PreferWebSocket => None,
         }
     }
 }
@@ -3156,6 +3213,44 @@ mod tests {
         assert!(SessionPatchRejectReason::try_from_u16(99).is_err());
         assert!(TransportId::try_from_u32(99).is_err());
         assert!(ErrorScope::try_from_u32(99).is_err());
+    }
+
+    #[test]
+    fn transport_policy_exposes_frozen_selection_semantics() {
+        for policy in [
+            TransportPolicy::Auto,
+            TransportPolicy::PreferQuic,
+            TransportPolicy::PreferTcp,
+            TransportPolicy::PreferIpc,
+            TransportPolicy::PreferWebSocket,
+        ] {
+            for transport_id in [
+                TransportId::Quic,
+                TransportId::Tcp,
+                TransportId::Ipc,
+                TransportId::WebSocket,
+            ] {
+                assert!(policy.allows(transport_id));
+            }
+            assert!(!policy.allows(TransportId::Unspecified));
+            assert_eq!(policy.forced_transport(), None);
+        }
+
+        for (policy, transport_id) in [
+            (TransportPolicy::ForceQuic, TransportId::Quic),
+            (TransportPolicy::ForceTcp, TransportId::Tcp),
+            (TransportPolicy::ForceIpc, TransportId::Ipc),
+            (TransportPolicy::ForceWebSocket, TransportId::WebSocket),
+        ] {
+            assert!(policy.allows(transport_id));
+            assert_eq!(policy.preferred_transport(), Some(transport_id));
+            assert_eq!(policy.forced_transport(), Some(transport_id));
+        }
+        assert!(!TransportPolicy::ForceQuic.allows(TransportId::Tcp));
+        assert!(!TransportPolicy::ForceTcp.allows(TransportId::Ipc));
+        assert!(!TransportPolicy::ForceIpc.allows(TransportId::WebSocket));
+        assert!(!TransportPolicy::ForceWebSocket.allows(TransportId::Quic));
+        assert_eq!(TransportPolicy::Auto, TransportPolicy::default());
     }
 
     #[test]

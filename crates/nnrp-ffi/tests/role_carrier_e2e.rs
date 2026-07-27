@@ -19,14 +19,18 @@ use nnrp_core::{
 use nnrp_ffi::{
     nnrp_buffer_release, nnrp_client_await_event, nnrp_client_await_events, nnrp_client_cancel,
     nnrp_client_close, nnrp_client_connect, nnrp_client_open_session, nnrp_client_submit,
-    nnrp_connection_close, nnrp_runtime_frame_send, nnrp_server_accept, nnrp_server_await_events,
-    nnrp_server_bind, nnrp_server_close, nnrp_server_send_partial_result, nnrp_server_send_result,
-    NnrpBufferView, NnrpClientCancelRequest, NnrpClientConnectRequest, NnrpEvent, NnrpEventKind,
-    NnrpFfiStatus, NnrpFfiStatusCode, NnrpHandle, NnrpHandleKind, NnrpPollResult,
-    NnrpRoleEventPollRequest, NnrpRuntimeFrameSendRequest, NnrpServerAcceptRequest,
-    NnrpServerBindRequest, NnrpServerSendPartialResultRequest, NnrpServerSendResultRequest,
-    NnrpSessionOpenRequest, NnrpSubmitRequest, NnrpTransportFrameBatch, NnrpTransportOpenRequest,
-    NnrpTransportReadBatchRequest,
+    nnrp_connection_close, nnrp_runtime_frame_send, nnrp_server_accept, nnrp_server_accept_begin,
+    nnrp_server_accept_claim, nnrp_server_accept_release, nnrp_server_accept_wait,
+    nnrp_server_await_events, nnrp_server_bind, nnrp_server_close, nnrp_server_send_partial_result,
+    nnrp_server_send_result, NnrpBufferView, NnrpClientCancelRequest, NnrpClientConnectRequest,
+    NnrpEvent, NnrpEventKind, NnrpFfiStatus, NnrpFfiStatusCode, NnrpHandle, NnrpHandleKind,
+    NnrpPollResult, NnrpRoleEventPollRequest, NnrpRuntimeFrameSendRequest,
+    NnrpServerAcceptBeginRequest, NnrpServerAcceptClaimRequest, NnrpServerAcceptRequest,
+    NnrpServerAcceptResult, NnrpServerAcceptWaitRequest, NnrpServerBindRequest,
+    NnrpServerSendPartialResultRequest, NnrpServerSendResultRequest, NnrpSessionOpenRequest,
+    NnrpSubmitRequest, NnrpTransportClientSecurityConfigRequest, NnrpTransportFrameBatch,
+    NnrpTransportOpenRequest, NnrpTransportReadBatchRequest,
+    NnrpTransportServerSecurityConfigRequest,
 };
 
 unsafe extern "C" {
@@ -47,6 +51,15 @@ unsafe extern "C" {
         request: NnrpTransportReadBatchRequest,
         out_batch: *mut NnrpTransportFrameBatch,
     ) -> NnrpFfiStatus;
+    fn nnrp_transport_client_security_config_create(
+        request: NnrpTransportClientSecurityConfigRequest,
+        out_config: *mut NnrpHandle,
+    ) -> NnrpFfiStatus;
+    fn nnrp_transport_server_security_config_create(
+        request: NnrpTransportServerSecurityConfigRequest,
+        out_config: *mut NnrpHandle,
+    ) -> NnrpFfiStatus;
+    fn nnrp_transport_close(handle: NnrpHandle) -> NnrpFfiStatus;
 }
 
 fn view(bytes: &[u8]) -> NnrpBufferView {
@@ -57,11 +70,19 @@ fn view(bytes: &[u8]) -> NnrpBufferView {
 }
 
 fn open_request(transport_id: TransportId, endpoint: &str) -> NnrpTransportOpenRequest {
+    open_request_with_config(transport_id, endpoint, NnrpHandle::invalid())
+}
+
+fn open_request_with_config(
+    transport_id: TransportId,
+    endpoint: &str,
+    config: NnrpHandle,
+) -> NnrpTransportOpenRequest {
     NnrpTransportOpenRequest {
         transport_id: transport_id as u32,
         flags: 0,
         endpoint: view(endpoint.as_bytes()),
-        config: NnrpHandle::invalid(),
+        config,
         max_packet_bytes: 0,
         timeout_ms: 5_000,
         reserved0: 0,
@@ -748,12 +769,24 @@ unsafe fn submit_role_operation(
     (client_operation, server_event.operation)
 }
 
-unsafe fn assert_role_handshake(transport_id: TransportId, listen_endpoint: &str, id_base: u64) {
+unsafe fn assert_role_handshake(
+    transport_id: TransportId,
+    listen_endpoint: &str,
+    id_base: u64,
+    client_config: NnrpHandle,
+    server_config: NnrpHandle,
+) {
     let mut listener = NnrpHandle::invalid();
     assert_eq!(
-        nnrp_transport_listen(open_request(transport_id, listen_endpoint), &mut listener,),
+        nnrp_transport_listen(
+            open_request_with_config(transport_id, listen_endpoint, server_config),
+            &mut listener,
+        ),
         NnrpFfiStatus::ok()
     );
+    if server_config != NnrpHandle::invalid() {
+        assert_eq!(nnrp_transport_close(server_config), NnrpFfiStatus::ok());
+    }
 
     let mut endpoint_owner = NnrpHandle::invalid();
     let mut endpoint_view = NnrpBufferView::empty();
@@ -800,28 +833,55 @@ unsafe fn assert_role_handshake(transport_id: TransportId, listen_endpoint: &str
         NnrpFfiStatus::invalid_handle(NnrpHandleKind::TransportListener as u32)
     );
 
-    let accept = thread::spawn(move || {
-        let mut session = NnrpHandle::invalid();
-        let status = nnrp_server_accept(
-            NnrpServerAcceptRequest {
+    let mut accept = NnrpHandle::invalid();
+    assert_eq!(
+        nnrp_server_accept_begin(
+            NnrpServerAcceptBeginRequest {
                 server,
-                session_handle_id: id_base + 4,
+                accept_handle_id: id_base + 4,
                 generation: 1,
-                timeout_ms: 5_000,
+                reserved0: 0,
             },
-            &mut session,
-        );
-        (status, session, server)
+            &mut accept,
+        ),
+        NnrpFfiStatus::ok()
+    );
+    let would_block = nnrp_server_accept_wait(NnrpServerAcceptWaitRequest {
+        accept,
+        timeout_ms: 1,
+        flags: 0,
     });
+    assert_eq!(
+        would_block.status_code,
+        NnrpFfiStatusCode::WouldBlock as u32
+    );
+    let mut premature_claim = NnrpServerAcceptResult::invalid();
+    let premature_status = nnrp_server_accept_claim(
+        NnrpServerAcceptClaimRequest {
+            accept,
+            session_handle_id: id_base + 4,
+            generation: 1,
+            reserved0: 0,
+        },
+        &mut premature_claim,
+    );
+    assert_eq!(
+        premature_status.status_code,
+        NnrpFfiStatusCode::WouldBlock as u32
+    );
+    assert_eq!(premature_claim, NnrpServerAcceptResult::invalid());
 
     let mut transport_connection = NnrpHandle::invalid();
     assert_eq!(
         nnrp_transport_connect(
-            open_request(transport_id, &endpoint),
+            open_request_with_config(transport_id, &endpoint, client_config),
             &mut transport_connection,
         ),
         NnrpFfiStatus::ok()
     );
+    if client_config != NnrpHandle::invalid() {
+        assert_eq!(nnrp_transport_close(client_config), NnrpFfiStatus::ok());
+    }
     let mut foreign_connection = transport_connection;
     foreign_connection.flags ^= u32::MAX;
     let mut rejected_client = NnrpHandle::invalid();
@@ -880,8 +940,29 @@ unsafe fn assert_role_handshake(transport_id: TransportId, listen_endpoint: &str
         NnrpFfiStatus::ok()
     );
 
-    let (server_status, server_session, server) = accept.join().expect("accept thread joins");
-    assert_eq!(server_status, NnrpFfiStatus::ok());
+    assert_eq!(
+        nnrp_server_accept_wait(NnrpServerAcceptWaitRequest {
+            accept,
+            timeout_ms: 5_000,
+            flags: 0,
+        }),
+        NnrpFfiStatus::ok()
+    );
+    let mut accepted = NnrpServerAcceptResult::invalid();
+    assert_eq!(
+        nnrp_server_accept_claim(
+            NnrpServerAcceptClaimRequest {
+                accept,
+                session_handle_id: id_base + 4,
+                generation: 1,
+                reserved0: 0,
+            },
+            &mut accepted,
+        ),
+        NnrpFfiStatus::ok()
+    );
+    let server_session = accepted.session;
+    assert_eq!(accepted.active_transport_id, transport_id as u32);
     assert_ne!(client_session, NnrpHandle::invalid());
     assert_ne!(server_session, NnrpHandle::invalid());
 
@@ -1457,13 +1538,90 @@ unsafe fn assert_role_handshake(transport_id: TransportId, listen_endpoint: &str
         NnrpFfiStatus::ok()
     );
     assert_eq!(nnrp_connection_close(client), NnrpFfiStatus::ok());
+
+    let mut shutdown_accept = NnrpHandle::invalid();
+    assert_eq!(
+        nnrp_server_accept_begin(
+            NnrpServerAcceptBeginRequest {
+                server,
+                accept_handle_id: id_base + 8,
+                generation: 1,
+                reserved0: 0,
+            },
+            &mut shutdown_accept,
+        ),
+        NnrpFfiStatus::ok()
+    );
+    assert_eq!(
+        nnrp_server_accept_wait(NnrpServerAcceptWaitRequest {
+            accept: shutdown_accept,
+            timeout_ms: 1,
+            flags: 0,
+        })
+        .status_code,
+        NnrpFfiStatusCode::WouldBlock as u32
+    );
+    assert_eq!(
+        nnrp_server_accept_release(shutdown_accept),
+        NnrpFfiStatus::ok()
+    );
     assert_eq!(nnrp_connection_close(server), NnrpFfiStatus::ok());
 }
 
 #[test]
 fn tcp_role_runtime_adopts_carriers_and_completes_real_handshake() {
     unsafe {
-        assert_role_handshake(TransportId::Tcp, "tcp://127.0.0.1:0", 700_000);
+        assert_role_handshake(
+            TransportId::Tcp,
+            "tcp://127.0.0.1:0",
+            700_000,
+            NnrpHandle::invalid(),
+            NnrpHandle::invalid(),
+        );
+    }
+}
+
+#[cfg(feature = "transport-quic")]
+#[test]
+fn ffi_quic_transport_carries_role_runtime_over_secure_session() {
+    unsafe {
+        let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        let certificate_der = certified.cert.der().to_vec();
+        let private_key_pkcs8_der = certified.signing_key.serialize_der();
+        let server_name = b"localhost";
+        let mut client_config = NnrpHandle::invalid();
+        let mut server_config = NnrpHandle::invalid();
+        assert_eq!(
+            nnrp_transport_client_security_config_create(
+                NnrpTransportClientSecurityConfigRequest {
+                    transport_id: TransportId::Quic as u32,
+                    flags: 0,
+                    server_name: view(server_name),
+                    trusted_certificate_der: view(&certificate_der),
+                },
+                &mut client_config,
+            ),
+            NnrpFfiStatus::ok()
+        );
+        assert_eq!(
+            nnrp_transport_server_security_config_create(
+                NnrpTransportServerSecurityConfigRequest {
+                    transport_id: TransportId::Quic as u32,
+                    flags: 0,
+                    certificate_der: view(&certificate_der),
+                    private_key_pkcs8_der: view(&private_key_pkcs8_der),
+                },
+                &mut server_config,
+            ),
+            NnrpFfiStatus::ok()
+        );
+        assert_role_handshake(
+            TransportId::Quic,
+            "quic://127.0.0.1:0",
+            705_000,
+            client_config,
+            server_config,
+        );
     }
 }
 
@@ -1520,6 +1678,39 @@ fn role_runtime_rejects_invalid_arguments_and_cross_role_handles() {
                 &mut output,
             ),
             NnrpFfiStatus::invalid_argument(19)
+        );
+        let mut accept = NnrpHandle::invalid();
+        assert_eq!(
+            nnrp_server_accept_begin(
+                NnrpServerAcceptBeginRequest {
+                    server: NnrpHandle::invalid(),
+                    accept_handle_id: 0,
+                    generation: 1,
+                    reserved0: 0,
+                },
+                &mut accept,
+            ),
+            NnrpFfiStatus::invalid_argument(163)
+        );
+        assert_eq!(
+            nnrp_server_accept_wait(NnrpServerAcceptWaitRequest {
+                accept: NnrpHandle::invalid(),
+                timeout_ms: 1,
+                flags: 1,
+            }),
+            NnrpFfiStatus::invalid_argument(164)
+        );
+        assert_eq!(
+            nnrp_server_accept_claim(
+                NnrpServerAcceptClaimRequest {
+                    accept: NnrpHandle::invalid(),
+                    session_handle_id: 0,
+                    generation: 1,
+                    reserved0: 0,
+                },
+                ptr::null_mut(),
+            ),
+            NnrpFfiStatus::invalid_argument(165)
         );
 
         let mut listener = NnrpHandle::invalid();
@@ -1607,6 +1798,63 @@ fn role_runtime_rejects_invalid_arguments_and_cross_role_handles() {
             nnrp_server_accept(accept_request(NnrpHandle::invalid()), &mut output),
             NnrpFfiStatus::invalid_handle(NnrpHandleKind::Connection as u32)
         );
+        assert_eq!(
+            nnrp_server_accept_begin(
+                NnrpServerAcceptBeginRequest {
+                    server: client,
+                    accept_handle_id: 730_004,
+                    generation: 1,
+                    reserved0: 0,
+                },
+                &mut accept,
+            ),
+            NnrpFfiStatus::invalid_handle(NnrpHandleKind::Connection as u32)
+        );
+        assert_eq!(
+            nnrp_server_accept_begin(
+                NnrpServerAcceptBeginRequest {
+                    server: NnrpHandle::invalid(),
+                    accept_handle_id: 730_004,
+                    generation: 1,
+                    reserved0: 0,
+                },
+                &mut accept,
+            ),
+            NnrpFfiStatus::invalid_handle(NnrpHandleKind::Connection as u32)
+        );
+        assert_eq!(
+            nnrp_server_accept_begin(
+                NnrpServerAcceptBeginRequest {
+                    server,
+                    accept_handle_id: 730_004,
+                    generation: 1,
+                    reserved0: 0,
+                },
+                &mut accept,
+            ),
+            NnrpFfiStatus::ok()
+        );
+        let mut duplicate = NnrpHandle::invalid();
+        assert_eq!(
+            nnrp_server_accept_begin(
+                NnrpServerAcceptBeginRequest {
+                    server,
+                    accept_handle_id: 730_005,
+                    generation: 1,
+                    reserved0: 0,
+                },
+                &mut duplicate,
+            ),
+            NnrpFfiStatus::invalid_state(163)
+        );
+        let stale_accept = NnrpHandle {
+            generation: 2,
+            ..accept
+        };
+        assert_eq!(
+            nnrp_server_accept_release(stale_accept),
+            NnrpFfiStatus::invalid_handle(NnrpHandleKind::ServerAccept as u32)
+        );
 
         assert_eq!(nnrp_connection_close(client), NnrpFfiStatus::ok());
         assert_eq!(nnrp_connection_close(server), NnrpFfiStatus::ok());
@@ -1617,7 +1865,13 @@ fn role_runtime_rejects_invalid_arguments_and_cross_role_handles() {
 #[test]
 fn websocket_role_runtime_adopts_carriers_and_completes_real_handshake() {
     unsafe {
-        assert_role_handshake(TransportId::WebSocket, "ws://127.0.0.1:0/nnrp", 710_000);
+        assert_role_handshake(
+            TransportId::WebSocket,
+            "ws://127.0.0.1:0/nnrp",
+            710_000,
+            NnrpHandle::invalid(),
+            NnrpHandle::invalid(),
+        );
     }
 }
 
@@ -1626,7 +1880,13 @@ fn websocket_role_runtime_adopts_carriers_and_completes_real_handshake() {
 fn named_pipe_role_runtime_adopts_carriers_and_completes_real_handshake() {
     let endpoint = format!("npipe://nnrp-role-{}", std::process::id());
     unsafe {
-        assert_role_handshake(TransportId::Ipc, &endpoint, 720_000);
+        assert_role_handshake(
+            TransportId::Ipc,
+            &endpoint,
+            720_000,
+            NnrpHandle::invalid(),
+            NnrpHandle::invalid(),
+        );
     }
 }
 
@@ -1636,7 +1896,13 @@ fn unix_ipc_role_runtime_adopts_carriers_and_completes_real_handshake() {
     let path = std::env::temp_dir().join(format!("nnrp-role-{}.sock", std::process::id()));
     let endpoint = format!("unix://{}", path.display());
     unsafe {
-        assert_role_handshake(TransportId::Ipc, &endpoint, 720_000);
+        assert_role_handshake(
+            TransportId::Ipc,
+            &endpoint,
+            720_000,
+            NnrpHandle::invalid(),
+            NnrpHandle::invalid(),
+        );
     }
     let _ = std::fs::remove_file(path);
 }

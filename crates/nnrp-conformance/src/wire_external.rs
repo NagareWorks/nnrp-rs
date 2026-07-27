@@ -9,8 +9,7 @@ use nnrp_core::{
 };
 use nnrp_runtime::{FramedListener, NnrpClientEvent, NnrpServer, RuntimeError};
 use nnrp_transport_quic::{
-    quic_client_config, quic_server_config, QuicClientEndpointConfig, QuicFramedListener,
-    QuicProvider, QuicServerEndpointConfig,
+    QuicClientEndpointConfig, QuicFramedListener, QuicProvider, QuicServerEndpointConfig,
 };
 use serde_json::{json, Value};
 
@@ -446,8 +445,7 @@ async fn run_priority_deadline_proxy(
     )?;
     let front_listener = QuicFramedListener::bind(&front_config)?;
     let front_address = front_listener.local_addr()?;
-    let front_server =
-        NnrpServer::from_listener(front_listener, quic_server_config(Default::default()))?;
+    let front_server = NnrpServer::from_listener(front_listener, Default::default())?;
     let front_certificate_der = front_certificate.certificate_der;
 
     let proxy = async {
@@ -486,7 +484,7 @@ async fn run_priority_deadline_proxy(
         let front_client = QuicProvider::connect(
             &front_address.to_string(),
             front_client_config,
-            quic_client_config(Default::default()),
+            Default::default(),
         )
         .await?;
         let mut session = front_client.open_session().await?;

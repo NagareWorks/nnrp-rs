@@ -14,7 +14,14 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.4.16" }
-nnrp-runtime = { path = "../nnrp-runtime", version = "1.0.0-preview.4.16" }
-nnrp-transport-provider = { path = "../nnrp-transport-provider", version = "1.0.0-preview.4.16" }
+async-trait.workspace = true
+nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.4.17" }
+nnrp-runtime = { path = "../nnrp-runtime", version = "1.0.0-preview.4.17" }
+nnrp-transport-provider = { path = "../nnrp-transport-provider", version = "1.0.0-preview.4.17" }
+rustls.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
+
+[dev-dependencies]
+rcgen = "=0.14.7"
+time = { version = "=0.3.45", default-features = false }

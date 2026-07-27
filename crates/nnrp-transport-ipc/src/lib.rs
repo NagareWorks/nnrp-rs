@@ -7,9 +7,10 @@ use std::{
 use async_trait::async_trait;
 use nnrp_core::{CommonHeader, TransportId, COMMON_HEADER_LEN};
 use nnrp_runtime::{
-    BoxedFramedTransport, FramedListener, FramedTransport, NnrpClient, NnrpClientConfig,
-    NnrpServer, NnrpServerConfig, RuntimeError, RuntimeFrameLimits, RuntimePacket,
-    RuntimeTransportKind,
+    BoundServerProvider, BoxedFramedTransport, ClientTransportSecurity, FramedListener,
+    FramedTransport, NnrpClient, NnrpClientConfig, NnrpClientProvider, NnrpServer,
+    NnrpServerConfig, NnrpServerProvider, ProviderEndpoint, RuntimeError, RuntimeFrameLimits,
+    RuntimePacket, RuntimeTransportKind, ServerTransportSecurity,
 };
 use nnrp_transport_provider::{
     TransportProviderDescriptor, TransportProviderKind, TransportProviderRegistry,
@@ -296,8 +297,10 @@ impl IpcProvider {
         )
     }
 
-    pub fn register(registry: &mut TransportProviderRegistry) {
-        registry.register(Self::descriptor());
+    pub fn register(
+        registry: &mut TransportProviderRegistry,
+    ) -> Result<(), nnrp_transport_provider::TransportProviderRegistryError> {
+        registry.register(Self::descriptor())
     }
 
     pub async fn connect_transport(endpoint: &IpcEndpoint) -> Result<IpcTransport, RuntimeError> {
@@ -312,25 +315,68 @@ impl IpcProvider {
         endpoint: &IpcEndpoint,
         config: NnrpClientConfig,
     ) -> Result<NnrpClient, RuntimeError> {
-        NnrpClient::from_transport(
-            Self::connect_transport(endpoint).await?,
-            config.with_transport(RuntimeTransportKind::Ipc),
-        )
+        NnrpClient::from_transport(Self::connect_transport(endpoint).await?, config)
     }
 
     pub async fn bind(
         endpoint: &IpcEndpoint,
         config: NnrpServerConfig,
     ) -> Result<NnrpServer, RuntimeError> {
-        NnrpServer::from_listener(
-            Self::bind_listener(endpoint).await?,
-            config.with_transport(RuntimeTransportKind::Ipc),
-        )
+        NnrpServer::from_listener(Self::bind_listener(endpoint).await?, config)
     }
 }
 
-pub fn register_ipc_provider(registry: &mut TransportProviderRegistry) {
-    IpcProvider::register(registry);
+#[async_trait]
+impl NnrpClientProvider for IpcProvider {
+    fn descriptor(&self) -> TransportProviderDescriptor {
+        IpcProvider::descriptor()
+    }
+
+    async fn connect(
+        &self,
+        endpoint: &ProviderEndpoint,
+        security: Option<&ClientTransportSecurity>,
+        limits: RuntimeFrameLimits,
+    ) -> Result<BoxedFramedTransport, RuntimeError> {
+        if security.is_some() {
+            return Err(RuntimeError::UnsupportedTransport(
+                "IPC does not accept transport security credentials",
+            ));
+        }
+        let endpoint = endpoint.as_str().parse::<IpcEndpoint>()?;
+        Ok(Box::new(
+            IpcTransport::connect_with_limits(&endpoint, limits).await?,
+        ))
+    }
+}
+
+#[async_trait]
+impl NnrpServerProvider for IpcProvider {
+    fn descriptor(&self) -> TransportProviderDescriptor {
+        IpcProvider::descriptor()
+    }
+
+    async fn bind(
+        &self,
+        endpoint: &ProviderEndpoint,
+        security: Option<&ServerTransportSecurity>,
+        limits: RuntimeFrameLimits,
+    ) -> Result<BoundServerProvider, RuntimeError> {
+        if security.is_some() {
+            return Err(RuntimeError::UnsupportedTransport(
+                "IPC does not accept transport security credentials",
+            ));
+        }
+        let ipc_endpoint = endpoint.as_str().parse::<IpcEndpoint>()?;
+        let listener = IpcFramedListener::bind_with_limits(&ipc_endpoint, limits).await?;
+        BoundServerProvider::new(endpoint.clone(), Box::new(listener))
+    }
+}
+
+pub fn register_ipc_provider(
+    registry: &mut TransportProviderRegistry,
+) -> Result<(), nnrp_transport_provider::TransportProviderRegistryError> {
+    IpcProvider::register(registry)
 }
 
 async fn read_packet<R>(
@@ -626,6 +672,7 @@ async fn bind_named_pipe(_path: &str) -> Result<IpcListener, RuntimeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nnrp_core::TransportPolicy;
     #[cfg(unix)]
     use nnrp_core::{
         BackpressureLevel, CommonHeader, FrameSubmitMetadata, InputProfile, MessageType,
@@ -634,7 +681,7 @@ mod tests {
     };
     #[cfg(unix)]
     use nnrp_runtime::{NnrpClientEvent, NnrpResult};
-    use nnrp_transport_provider::{RemoteTransportSupport, TransportPolicy};
+    use nnrp_transport_provider::RemoteTransportSupport;
     #[cfg(unix)]
     use tokio::time::{timeout, Duration};
 
@@ -663,14 +710,18 @@ mod tests {
     #[test]
     fn ipc_provider_registers_and_selects_ipc() {
         let mut registry = TransportProviderRegistry::new();
-        register_ipc_provider(&mut registry);
+        register_ipc_provider(&mut registry).expect("ipc provider should register");
         assert_eq!(registry.providers().len(), 1);
         assert_eq!(registry.providers()[0].name, IpcProvider::NAME);
         assert_eq!(registry.providers()[0].transport_id, TransportId::Ipc);
 
         let remote = RemoteTransportSupport::new([TransportId::Ipc]);
+        let readiness = [nnrp_transport_provider::TransportCandidateReadiness::ready(
+            TransportId::Ipc,
+            registry.providers()[0].metadata.id.clone(),
+        )];
         let selection = registry
-            .select(&remote, TransportPolicy::ForceIpc, None)
+            .select(&remote, TransportPolicy::ForceIpc, None, &readiness)
             .expect("ipc provider should satisfy force ipc");
         assert_eq!(selection.selected.name, IpcProvider::NAME);
     }

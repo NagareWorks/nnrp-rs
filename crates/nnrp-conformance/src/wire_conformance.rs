@@ -96,6 +96,7 @@ pub fn build_wire_execution_plan(
 
     let target_modes = target_modes(target_manifest)?;
     let target_transports = target_transports(target_manifest)?;
+    let target_host_route_providers = target_host_route_providers(target_manifest)?;
     let capabilities = target_capabilities(target_manifest)?;
     let selected = selected_ids_or_all(scenarios, selected_case_ids)?;
 
@@ -111,13 +112,19 @@ pub fn build_wire_execution_plan(
             continue;
         }
 
-        let transport = case
-            .get("transport")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                format!("scenario '{id}' field 'transport' must be a non-empty string")
-            })?;
-        validate_wire_transport(transport, &format!("scenario '{id}' transport"))?;
+        let transport = case.get("transport").and_then(Value::as_str);
+        let host_route = case.get("host_route").and_then(Value::as_object);
+        if transport.is_some() == host_route.is_some() {
+            return Err(format!(
+                "scenario '{id}' must declare exactly one of transport or host_route"
+            ));
+        }
+        let required_host_route_providers = host_route
+            .map(|fixture| scenario_host_route_providers(id, fixture))
+            .transpose()?;
+        if let Some(transport) = transport {
+            validate_wire_transport(transport, &format!("scenario '{id}' transport"))?;
+        }
         let mode = case
             .get("mode")
             .and_then(Value::as_str)
@@ -132,14 +139,36 @@ pub fn build_wire_execution_plan(
             .collect();
 
         let unsupported_mode = !target_modes.contains(mode);
-        let unsupported_transport = !target_transports.contains(transport);
-        let runnable =
-            !unsupported_mode && !unsupported_transport && missing_capabilities.is_empty();
+        let unsupported_transport =
+            transport.is_some_and(|value| !target_transports.contains(value));
+        let missing_host_route_providers = required_host_route_providers
+            .as_ref()
+            .map(|required| {
+                required
+                    .iter()
+                    .filter(|provider| !target_host_route_providers.contains(*provider))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let runnable = !unsupported_mode
+            && !unsupported_transport
+            && missing_host_route_providers.is_empty()
+            && missing_capabilities.is_empty();
         let skip_reason = if unsupported_mode {
             Some(format!("target does not claim required mode '{mode}'"))
-        } else if unsupported_transport {
+        } else if let Some(transport) = transport.filter(|_| unsupported_transport) {
             Some(format!(
                 "target does not claim required transport '{transport}'"
+            ))
+        } else if !missing_host_route_providers.is_empty() {
+            Some(format!(
+                "target does not claim required host-route providers: {}",
+                missing_host_route_providers
+                    .iter()
+                    .map(|(transport, provider_id)| format!("{transport}/{provider_id}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ))
         } else if !missing_capabilities.is_empty() {
             Some(format!(
@@ -150,10 +179,9 @@ pub fn build_wire_execution_plan(
             None
         };
 
-        planned_cases.push(json!({
+        let mut planned_case = json!({
             "id": id,
             "mode": mode,
-            "transport": transport,
             "required_capabilities": required_capabilities,
             "status": if runnable { "ready" } else { "skipped" },
             "skip_reason": skip_reason,
@@ -161,7 +189,13 @@ pub fn build_wire_execution_plan(
                 "frame_log": format!("wire/{id}/frames.ndjson"),
                 "timing_trace": format!("wire/{id}/timing.json")
             }
-        }));
+        });
+        if let Some(transport) = transport {
+            planned_case["transport"] = json!(transport);
+        } else if let Some(host_route) = case.get("host_route") {
+            planned_case["host_route"] = host_route.clone();
+        }
+        planned_cases.push(planned_case);
     }
 
     Ok(json!({
@@ -252,6 +286,81 @@ fn target_transports(target_manifest: &Value) -> Result<BTreeSet<String>, String
         transports.insert(transport.to_string());
     }
     Ok(transports)
+}
+
+fn target_host_route_providers(
+    target_manifest: &Value,
+) -> Result<BTreeSet<(String, String)>, String> {
+    let wire_conformance = required_object(target_manifest, "wire_conformance")?;
+    let Some(entries) = wire_conformance.get("host_route_providers") else {
+        return Ok(BTreeSet::new());
+    };
+    let entries = entries.as_array().ok_or_else(|| {
+        "target wire_conformance host_route_providers must be an array".to_string()
+    })?;
+    let mut providers = BTreeSet::new();
+    for entry in entries {
+        let entry = entry.as_object().ok_or_else(|| {
+            "target wire_conformance host_route_providers must be JSON objects".to_string()
+        })?;
+        let transport = entry
+            .get("transport")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                "target host-route provider field 'transport' must be a non-empty string"
+                    .to_string()
+            })?;
+        validate_wire_transport(transport, "target host-route provider transport")?;
+        let provider_id = entry
+            .get("provider_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                "target host-route provider field 'provider_id' must be a non-empty string"
+                    .to_string()
+            })?;
+        providers.insert((transport.to_string(), provider_id.to_string()));
+    }
+    Ok(providers)
+}
+
+fn scenario_host_route_providers(
+    id: &str,
+    fixture: &serde_json::Map<String, Value>,
+) -> Result<BTreeSet<(String, String)>, String> {
+    let routes = fixture
+        .get("routes")
+        .and_then(Value::as_array)
+        .filter(|routes| !routes.is_empty())
+        .ok_or_else(|| format!("scenario '{id}' host_route routes must be a non-empty array"))?;
+    let mut providers = BTreeSet::new();
+    for route in routes {
+        let route = route
+            .as_object()
+            .ok_or_else(|| format!("scenario '{id}' host_route routes must be JSON objects"))?;
+        let transport = route
+            .get("transport")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "scenario '{id}' host_route route field 'transport' must be a non-empty string"
+                )
+            })?;
+        validate_wire_transport(transport, &format!("scenario '{id}' host_route transport"))?;
+        let provider_id = route
+            .get("provider_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "scenario '{id}' host_route route field 'provider_id' must be a non-empty string"
+                )
+            })?;
+        providers.insert((transport.to_string(), provider_id.to_string()));
+    }
+    Ok(providers)
 }
 
 fn target_capabilities(target_manifest: &Value) -> Result<BTreeSet<String>, String> {
@@ -463,6 +572,70 @@ mod tests {
         })
     }
 
+    fn host_route_suite_manifest() -> serde_json::Value {
+        json!({
+            "protocol_version": "nnrp-1-preview4",
+            "scenarios": [
+                {
+                    "id": "wire.host-route.client.multi-route",
+                    "mode": "suite_as_server",
+                    "host_route": {
+                        "role": "client",
+                        "platform": "native",
+                        "application_endpoint": "nnrp://host-route.test",
+                        "routes": [
+                            {
+                                "transport": "tcp",
+                                "provider_id": "nnrp.transport.tcp.native",
+                                "locator": "suite://allocate/tcp/client-primary",
+                                "security": {"mode": "plain", "credential_owner": "none"}
+                            },
+                            {
+                                "transport": "ipc",
+                                "provider_id": "nnrp.transport.ipc.native",
+                                "locator": "suite://allocate/ipc/client-secondary",
+                                "security": {"mode": "plain", "credential_owner": "none"}
+                            }
+                        ]
+                    },
+                    "required_capabilities": ["host.routes"]
+                }
+            ]
+        })
+    }
+
+    fn host_route_target_manifest() -> serde_json::Value {
+        json!({
+            "target_name": "host-route-rs",
+            "protocol_version": "nnrp-1-preview4",
+            "wire_conformance": {
+                "modes": ["suite_as_server"],
+                "transports": [],
+                "host_route_providers": [
+                    {
+                        "transport": "tcp",
+                        "provider_id": "nnrp.transport.tcp.native",
+                        "installed": true,
+                        "platforms": ["native"],
+                        "security_modes": ["plain"]
+                    },
+                    {
+                        "transport": "ipc",
+                        "provider_id": "nnrp.transport.ipc.native",
+                        "installed": false,
+                        "platforms": ["native"],
+                        "security_modes": ["plain"]
+                    }
+                ],
+                "capabilities": ["host.routes"],
+                "limits": {
+                    "max_frame_bytes": 16777216,
+                    "max_in_flight": 256
+                }
+            }
+        })
+    }
+
     #[test]
     fn wire_execution_plan_preserves_selected_scenario_ids_and_evidence_paths() {
         let plan =
@@ -477,6 +650,37 @@ mod tests {
             "wire/wire.cancel.ipc/frames.ndjson"
         );
         assert_eq!(plan["case_count"], 1);
+    }
+
+    #[test]
+    fn wire_execution_plan_preserves_host_routes_and_known_uninstalled_providers() {
+        let plan = build_wire_execution_plan(
+            &host_route_suite_manifest(),
+            &host_route_target_manifest(),
+            &[],
+        )
+        .expect("plan");
+        let case = &plan["cases"][0];
+        assert_eq!(case["status"], "ready");
+        assert!(case.get("transport").is_none());
+        assert_eq!(case["host_route"]["routes"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn wire_execution_plan_skips_host_routes_with_unclaimed_provider_identity() {
+        let mut target = host_route_target_manifest();
+        target["wire_conformance"]["host_route_providers"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        let plan =
+            build_wire_execution_plan(&host_route_suite_manifest(), &target, &[]).expect("plan");
+        let case = &plan["cases"][0];
+        assert_eq!(case["status"], "skipped");
+        assert!(case["skip_reason"]
+            .as_str()
+            .unwrap()
+            .contains("ipc/nnrp.transport.ipc.native"));
     }
 
     #[test]
@@ -649,7 +853,21 @@ mod tests {
         });
         assert_eq!(
             build_wire_execution_plan(&suite, &target_manifest(), &[]).unwrap_err(),
-            "scenario 'wire.missing.transport' field 'transport' must be a non-empty string"
+            "scenario 'wire.missing.transport' must declare exactly one of transport or host_route"
+        );
+
+        let suite = json!({
+            "protocol_version": "nnrp-1-preview4",
+            "scenarios": [{
+                "id": "wire.ambiguous.carrier",
+                "mode": "suite_as_client",
+                "transport": "ipc",
+                "host_route": {"routes": []}
+            }]
+        });
+        assert_eq!(
+            build_wire_execution_plan(&suite, &target_manifest(), &[]).unwrap_err(),
+            "scenario 'wire.ambiguous.carrier' must declare exactly one of transport or host_route"
         );
 
         let target = json!({

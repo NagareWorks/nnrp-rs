@@ -35,6 +35,7 @@ async fn tcp_packet_read_preserves_partial_bytes_across_timeouts() -> Result<(),
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
     let (prefix_sent, prefix_received) = tokio::sync::oneshot::channel();
+    let (release_suffix, suffix_released) = tokio::sync::oneshot::channel();
     let expected = RuntimePacket::new(
         CommonHeader::new(MessageType::Ping, 3, 5),
         b"met".to_vec(),
@@ -46,7 +47,9 @@ async fn tcp_packet_read_preserves_partial_bytes_across_timeouts() -> Result<(),
         let (mut stream, _) = listener.accept().await?;
         stream.write_all(&encoded[..13]).await?;
         let _ = prefix_sent.send(());
-        tokio::time::sleep(Duration::from_millis(75)).await;
+        suffix_released
+            .await
+            .expect("client should release the packet suffix");
         stream.write_all(&encoded[13..]).await?;
         stream.flush().await?;
         Ok::<_, RuntimeError>(())
@@ -65,6 +68,9 @@ async fn tcp_packet_read_preserves_partial_bytes_across_timeouts() -> Result<(),
             "short poll should time out while the packet remains partial"
         );
     }
+    release_suffix
+        .send(())
+        .expect("server should still be waiting for the suffix release");
 
     let actual = tokio::time::timeout(Duration::from_secs(1), transport.read_packet())
         .await
@@ -836,31 +842,21 @@ async fn tcp_loopback_releases_objects_after_cancel_and_reports_cache_miss(
 }
 
 #[tokio::test]
-async fn runtime_configs_select_transport_cache_hints_and_server_state() -> Result<(), RuntimeError>
-{
-    let client_config = NnrpClientConfig::default()
-        .with_transport(RuntimeTransportKind::Quic)
-        .with_cache_hints(vec![CacheObjectKind::PromptSegment]);
-    assert_eq!(client_config.transport, RuntimeTransportKind::Quic);
+async fn runtime_configs_are_transport_neutral_and_preserve_session_state(
+) -> Result<(), RuntimeError> {
+    let client_config =
+        NnrpClientConfig::default().with_cache_hints(vec![CacheObjectKind::PromptSegment]);
     assert_eq!(
         client_config.cache_hints,
         vec![CacheObjectKind::PromptSegment]
     );
+    let _ = NnrpClient::connect_tcp("127.0.0.1:0", client_config).await;
     assert!(matches!(
-        NnrpClient::connect_tcp("127.0.0.1:0", client_config).await,
-        Err(RuntimeError::UnsupportedTransport(_))
-    ));
-    assert!(matches!(
-        NnrpClient::connect_quic(
-            "localhost:4433",
-            NnrpClientConfig::default().with_transport(RuntimeTransportKind::Quic),
-        )
-        .await,
+        NnrpClient::connect_quic("localhost:4433", NnrpClientConfig::default(),).await,
         Err(RuntimeError::UnsupportedTransport(_))
     ));
 
     let server_config = NnrpServerConfig::default()
-        .with_transport(RuntimeTransportKind::Quic)
         .with_supported_profiles(vec![STANDARD_PROFILE_TOKEN])
         .with_supported_cache_objects(vec![CacheObjectKind::PromptSegment])
         .with_schema_registry(SchemaRegistry::with_standard_preview3_profiles())
@@ -868,22 +864,15 @@ async fn runtime_configs_select_transport_cache_hints_and_server_state() -> Resu
     let debug_text = format!("{server_config:?}");
     assert!(debug_text.contains("NnrpServerConfig"));
     assert!(debug_text.contains("application_policy"));
-    assert_eq!(server_config.transport, RuntimeTransportKind::Quic);
     assert_eq!(
         server_config.supported_cache_objects,
         vec![CacheObjectKind::PromptSegment]
     );
     assert_eq!(server_config.max_cache_object_bytes, 1024);
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", server_config).await?;
+    drop(server);
     assert!(matches!(
-        NnrpServer::bind_tcp("127.0.0.1:0", server_config).await,
-        Err(RuntimeError::UnsupportedTransport(_))
-    ));
-    assert!(matches!(
-        NnrpServer::bind_quic(
-            "localhost:4433",
-            NnrpServerConfig::default().with_transport(RuntimeTransportKind::Quic),
-        )
-        .await,
+        NnrpServer::bind_quic("localhost:4433", NnrpServerConfig::default(),).await,
         Err(RuntimeError::UnsupportedTransport(_))
     ));
 
@@ -2413,7 +2402,6 @@ async fn quic_convenience_hooks_require_provider_crate() {
 #[tokio::test]
 async fn client_accepts_custom_quic_transport_slot() -> Result<(), RuntimeError> {
     let config = NnrpClientConfig {
-        transport: RuntimeTransportKind::Quic,
         requested_session_id: 9,
         ..Default::default()
     };
@@ -2494,10 +2482,7 @@ async fn server_accepts_custom_quic_listener_slot() -> Result<(), RuntimeError> 
             Arc::clone(&writes),
         ),
     );
-    let server = NnrpServer::from_listener(
-        listener,
-        NnrpServerConfig::default().with_transport(RuntimeTransportKind::Quic),
-    )?;
+    let server = NnrpServer::from_listener(listener, NnrpServerConfig::default())?;
     assert_eq!(server.local_addr()?.ip().to_string(), "127.0.0.1");
     let server_debug = format!("{server:?}");
     assert!(server_debug.contains("NnrpServer"));
@@ -2527,25 +2512,24 @@ async fn tcp_framed_listener_slot_exposes_local_addr() -> Result<(), RuntimeErro
 }
 
 #[tokio::test]
-async fn transport_slot_rejects_config_mismatches() {
+async fn transport_slots_accept_transport_neutral_configs() {
     let writes = Arc::new(Mutex::new(Vec::new()));
-    assert!(matches!(
-        NnrpClient::from_transport(
-            ScriptedTransport::new(RuntimeTransportKind::Quic, Vec::new(), Arc::clone(&writes)),
-            NnrpClientConfig::default(),
+    let client = NnrpClient::from_transport(
+        ScriptedTransport::new(RuntimeTransportKind::Quic, Vec::new(), Arc::clone(&writes)),
+        NnrpClientConfig::default(),
+    )
+    .expect("session config must not select the carrier");
+    assert!(format!("{client:?}").contains("Quic"));
+
+    let server = NnrpServer::from_listener(
+        ScriptedListener::new(
+            RuntimeTransportKind::Quic,
+            ScriptedTransport::new(RuntimeTransportKind::Quic, Vec::new(), writes),
         ),
-        Err(RuntimeError::UnsupportedTransport(_))
-    ));
-    assert!(matches!(
-        NnrpServer::from_listener(
-            ScriptedListener::new(
-                RuntimeTransportKind::Quic,
-                ScriptedTransport::new(RuntimeTransportKind::Quic, Vec::new(), writes),
-            ),
-            NnrpServerConfig::default(),
-        ),
-        Err(RuntimeError::UnsupportedTransport(_))
-    ));
+        NnrpServerConfig::default(),
+    )
+    .expect("server session config must not select the listener carrier");
+    assert!(format!("{server:?}").contains("Quic"));
 }
 
 #[tokio::test]

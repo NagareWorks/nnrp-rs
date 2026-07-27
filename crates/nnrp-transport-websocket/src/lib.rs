@@ -4,9 +4,10 @@ use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use nnrp_core::{CommonHeader, TransportId, COMMON_HEADER_LEN};
 use nnrp_runtime::{
-    BoxedFramedTransport, FramedListener, FramedTransport, NnrpClient, NnrpClientConfig,
-    NnrpServer, NnrpServerConfig, RuntimeError, RuntimeFrameLimits, RuntimePacket,
-    RuntimeTransportKind,
+    BoundServerProvider, BoxedFramedTransport, ClientTransportSecurity, FramedListener,
+    FramedTransport, NnrpClient, NnrpClientConfig, NnrpClientProvider, NnrpServer,
+    NnrpServerConfig, NnrpServerProvider, ProviderEndpoint, RuntimeError, RuntimeFrameLimits,
+    RuntimePacket, RuntimeTransportKind, ServerTransportSecurity,
 };
 use nnrp_transport_provider::{
     TransportProviderDescriptor, TransportProviderKind, TransportProviderRegistry,
@@ -286,8 +287,10 @@ impl WebSocketProvider {
         )
     }
 
-    pub fn register(registry: &mut TransportProviderRegistry) {
-        registry.register(Self::descriptor());
+    pub fn register(
+        registry: &mut TransportProviderRegistry,
+    ) -> Result<(), nnrp_transport_provider::TransportProviderRegistryError> {
+        registry.register(Self::descriptor())
     }
 
     pub async fn connect_transport(
@@ -306,25 +309,122 @@ impl WebSocketProvider {
         endpoint: &WebSocketEndpoint,
         config: NnrpClientConfig,
     ) -> Result<NnrpClient, RuntimeError> {
-        NnrpClient::from_transport(
-            Self::connect_transport(endpoint).await?,
-            config.with_transport(RuntimeTransportKind::WebSocket),
-        )
+        NnrpClient::from_transport(Self::connect_transport(endpoint).await?, config)
     }
 
     pub async fn bind(
         addr: impl ToSocketAddrs,
         config: NnrpServerConfig,
     ) -> Result<NnrpServer, RuntimeError> {
-        NnrpServer::from_listener(
-            Self::bind_listener(addr).await?,
-            config.with_transport(RuntimeTransportKind::WebSocket),
-        )
+        NnrpServer::from_listener(Self::bind_listener(addr).await?, config)
     }
 }
 
-pub fn register_websocket_provider(registry: &mut TransportProviderRegistry) {
-    WebSocketProvider::register(registry);
+#[async_trait]
+impl NnrpClientProvider for WebSocketProvider {
+    fn descriptor(&self) -> TransportProviderDescriptor {
+        WebSocketProvider::descriptor()
+    }
+
+    async fn connect(
+        &self,
+        endpoint: &ProviderEndpoint,
+        security: Option<&ClientTransportSecurity>,
+        limits: RuntimeFrameLimits,
+    ) -> Result<BoxedFramedTransport, RuntimeError> {
+        let endpoint = endpoint.as_str().parse::<WebSocketEndpoint>()?;
+        match (endpoint.is_secure(), security) {
+            (true, Some(security)) => Ok(Box::new(
+                WebSocketTransport::connect_secure_with_limits(
+                    &endpoint,
+                    &security.server_name,
+                    security.trusted_certificate_der.clone(),
+                    limits,
+                )
+                .await?,
+            )),
+            (true, None) => Err(RuntimeError::UnsupportedTransport(
+                "native WSS requires route-local peer verification credentials",
+            )),
+            (false, Some(_)) => Err(RuntimeError::UnsupportedTransport(
+                "plain WebSocket does not accept transport security credentials",
+            )),
+            (false, None) => Ok(Box::new(
+                WebSocketTransport::connect_with_limits(&endpoint, limits).await?,
+            )),
+        }
+    }
+}
+
+#[async_trait]
+impl NnrpServerProvider for WebSocketProvider {
+    fn descriptor(&self) -> TransportProviderDescriptor {
+        WebSocketProvider::descriptor()
+    }
+
+    async fn bind(
+        &self,
+        endpoint: &ProviderEndpoint,
+        security: Option<&ServerTransportSecurity>,
+        limits: RuntimeFrameLimits,
+    ) -> Result<BoundServerProvider, RuntimeError> {
+        let websocket_endpoint = endpoint.as_str().parse::<WebSocketEndpoint>()?;
+        let uri = endpoint.as_str().parse::<Uri>().map_err(|_| {
+            RuntimeError::UnsupportedTransport("WebSocket bind endpoint is invalid")
+        })?;
+        let authority = uri.authority().ok_or(RuntimeError::UnsupportedTransport(
+            "WebSocket bind endpoint requires an authority",
+        ))?;
+        let listener = match (websocket_endpoint.is_secure(), security) {
+            (true, Some(security)) => {
+                WebSocketFramedListener::bind_secure_with_limits(
+                    authority.as_str(),
+                    security.certificate_der.clone(),
+                    security.private_key_pkcs8_der.clone(),
+                    limits,
+                )
+                .await?
+            }
+            (true, None) => {
+                return Err(RuntimeError::UnsupportedTransport(
+                    "native WSS requires route-local server credentials",
+                ));
+            }
+            (false, Some(_)) => {
+                return Err(RuntimeError::UnsupportedTransport(
+                    "plain WebSocket does not accept transport security credentials",
+                ));
+            }
+            (false, None) => {
+                WebSocketFramedListener::bind_with_limits(authority.as_str(), limits).await?
+            }
+        };
+        let path_and_query = uri
+            .path_and_query()
+            .map(|value| value.as_str())
+            .unwrap_or("/");
+        let host = authority.host();
+        let host = if host.contains(':') {
+            format!("[{host}]")
+        } else {
+            host.to_owned()
+        };
+        let bound_endpoint = format!(
+            "{}://{}:{}{}",
+            endpoint.scheme(),
+            host,
+            listener.local_addr()?.port(),
+            path_and_query
+        )
+        .parse()?;
+        BoundServerProvider::new(bound_endpoint, Box::new(listener))
+    }
+}
+
+pub fn register_websocket_provider(
+    registry: &mut TransportProviderRegistry,
+) -> Result<(), nnrp_transport_provider::TransportProviderRegistryError> {
+    WebSocketProvider::register(registry)
 }
 
 #[derive(Debug)]
@@ -435,13 +535,18 @@ fn websocket_close_error(close: Option<CloseFrame>) -> RuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nnrp_core::TransportPolicy;
     use nnrp_core::{
         BackpressureLevel, FrameSubmitMetadata, InputProfile, PartialResultMetadata,
         PayloadKindBitmap, PressureMetadata, ProgressMetadata, ResultClass, ResultPushMetadata,
         SubmitMode, TileIndexMode, STANDARD_PROFILE_TOKEN,
     };
-    use nnrp_runtime::{NnrpClientEvent, NnrpResult};
-    use nnrp_transport_provider::{RemoteTransportSupport, TransportPolicy};
+    use nnrp_runtime::{
+        ClientProviderRoute, ClientProviderRoutes, NnrpClientEvent, NnrpClientOptions,
+        NnrpClientProvider, NnrpResult,
+    };
+    use nnrp_transport_provider::RemoteTransportSupport;
+    use std::sync::Arc;
     use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
     #[test]
@@ -465,14 +570,18 @@ mod tests {
     #[test]
     fn websocket_provider_registers_and_selects_websocket() {
         let mut registry = TransportProviderRegistry::new();
-        register_websocket_provider(&mut registry);
+        register_websocket_provider(&mut registry).expect("websocket provider should register");
         assert_eq!(registry.providers().len(), 1);
         assert_eq!(registry.providers()[0].name, WebSocketProvider::NAME);
         assert_eq!(registry.providers()[0].transport_id, TransportId::WebSocket);
 
         let remote = RemoteTransportSupport::new([TransportId::WebSocket]);
+        let readiness = [nnrp_transport_provider::TransportCandidateReadiness::ready(
+            TransportId::WebSocket,
+            registry.providers()[0].metadata.id.clone(),
+        )];
         let selection = registry
-            .select(&remote, TransportPolicy::ForceWebSocket, None)
+            .select(&remote, TransportPolicy::ForceWebSocket, None, &readiness)
             .expect("websocket provider should satisfy force websocket");
         assert_eq!(selection.selected.name, WebSocketProvider::NAME);
     }
@@ -499,6 +608,36 @@ mod tests {
         server_task
             .await
             .map_err(|_| RuntimeError::Internal("websocket server task panicked"))??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn websocket_provider_opens_high_level_client_session() -> Result<(), RuntimeError> {
+        let server = WebSocketProvider::bind("127.0.0.1:0", NnrpServerConfig::default()).await?;
+        let provider_endpoint = format!("ws://{}/nnrp", server.local_addr()?);
+        let server_task = tokio::spawn(async move { server.accept().await });
+        let client = NnrpClient::connect(
+            NnrpClientOptions {
+                endpoint: "nnrp://runtime.example/session".parse().unwrap(),
+                provider_routes: ClientProviderRoutes::from([(
+                    TransportId::WebSocket,
+                    ClientProviderRoute::at(provider_endpoint.parse().unwrap()),
+                )]),
+                transport_policy: TransportPolicy::Auto,
+                session: NnrpClientConfig::default(),
+            },
+            [Arc::new(WebSocketProvider) as Arc<dyn NnrpClientProvider>],
+        )
+        .await?;
+        assert_eq!(
+            client.transport_selection().unwrap().selected.transport_id,
+            TransportId::WebSocket
+        );
+        let client_session = client.open_session().await?;
+        let server_session = server_task
+            .await
+            .map_err(|_| RuntimeError::Internal("websocket server task panicked"))??;
+        assert_eq!(client_session.session_id(), server_session.session_id());
         Ok(())
     }
 

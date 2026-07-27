@@ -41,6 +41,18 @@
 - [x] Add deterministic idempotent transport resource close behavior.
 - [x] Run real Rust FFI loopbacks for TCP, QUIC, IPC, WS, and WSS.
 - [x] Load each packaged host dynamic library and run a real packet-batch loopback through exported symbols.
+- [ ] Complete the route-security ABI required by host SDKs.
+  - [x] Allow TCP transport security handles to configure TLS connect and listen paths.
+  - [ ] Preserve distinct client and server security handle kinds per route.
+  - [ ] Return `route-unresolved` and `security-unsatisfied` through typed selection diagnostics.
+  - [x] Reject security handles from another transport artifact or role.
+  - [x] Add native TCP TLS, QUIC TLS, WS, and WSS loopbacks through exported symbols.
+- [ ] Preserve the singular coarse-FFI ownership boundary.
+  - [x] Keep one carrier connection per client runtime handle.
+  - [x] Keep one provider listener per low-level listener handle.
+  - [x] Keep one carrier connection per accepted server session handle.
+  - [x] Keep multi-route selection and multi-listener ownership in the host SDK layer.
+  - [ ] Add architecture tests that reject per-frame calls across multiple transport libraries.
 
 ## FFI Role Runtime Carrier Ownership
 
@@ -51,7 +63,7 @@
   - [x] Reject handles from another artifact or duplicate library instance.
 - [x] Drive the canonical `nnrp-runtime` state machines from FFI role handles.
   - [x] Perform the client `SESSION_OPEN` / `SESSION_OPEN_ACK` exchange in `nnrp_client_open_session`.
-  - [x] Accept a carrier connection and perform the server handshake in `nnrp_server_accept`.
+  - [x] Keep server accept and handshake alive across bounded host waits through the begin/wait/claim ticket lifecycle.
   - [x] Remove caller-injected server session/profile/schema state.
 - [x] Route every role operation over the adopted carrier.
   - [x] Validate, split, and send `FRAME_SUBMIT` metadata/body with independent wire operation and frame identities in one coarse call.
@@ -103,7 +115,7 @@
   - [x] Native TCP, QUIC, IPC, and WebSocket provider identities and platform limitations.
   - [x] Browser WASM WebSocket provider identity and browser limitation.
   - [x] Canonical decimal cost and frame-limit values.
-- [x] Export structured WASM probe metrics and candidate diagnostics without weighted scores.
+- [x] Export structured WASM readiness, probe observations, probe metrics, and candidate diagnostics without weighted scores.
 - [x] Reject release artifacts that collapse all transport behavior into one hidden package.
 - [x] Reject transport artifacts whose exported ABI cannot establish and use their declared transport.
 - [x] Reject browser artifacts whose ESM glue or declarations omit a manifest-declared export.

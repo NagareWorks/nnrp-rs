@@ -33,15 +33,16 @@ use nnrp_core::{
 #[cfg(all(feature = "native-tcp", not(target_arch = "wasm32")))]
 use crate::TcpTransport;
 use crate::{
+    client_provider::{connect_client, NnrpClientOptions, NnrpClientProvider},
     BoxedFramedTransport, FramedTransport, RuntimeError, RuntimePacket, RuntimePressureState,
-    RuntimeTransportKind,
 };
+use nnrp_transport_provider::TransportSelection;
+use std::sync::Arc;
 
 const MAX_PENDING_EVENTS_DURING_SESSION_PATCH: usize = 1_024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NnrpClientConfig {
-    pub transport: RuntimeTransportKind,
     pub requested_session_id: u32,
     pub profile_id: u16,
     pub schema_id: u32,
@@ -58,7 +59,6 @@ pub struct NnrpClientConfig {
 impl Default for NnrpClientConfig {
     fn default() -> Self {
         Self {
-            transport: RuntimeTransportKind::Tcp,
             requested_session_id: 1,
             profile_id: STANDARD_PROFILE_TOKEN,
             schema_id: TOKEN_DELTA_SCHEMA_ID,
@@ -75,11 +75,6 @@ impl Default for NnrpClientConfig {
 }
 
 impl NnrpClientConfig {
-    pub fn with_transport(mut self, transport: RuntimeTransportKind) -> Self {
-        self.transport = transport;
-        self
-    }
-
     pub fn with_cache_hints(mut self, cache_hints: impl Into<Vec<CacheObjectKind>>) -> Self {
         self.cache_hints = cache_hints.into();
         self
@@ -96,6 +91,7 @@ pub struct NnrpClient {
     transport: BoxedFramedTransport,
     config: NnrpClientConfig,
     lifecycle: ConnectionLifecycle,
+    transport_selection: Option<TransportSelection>,
 }
 
 pub struct NnrpClientSession {
@@ -206,28 +202,35 @@ pub enum NnrpClientEvent {
 }
 
 impl NnrpClient {
+    pub async fn connect<I>(options: NnrpClientOptions, providers: I) -> Result<Self, RuntimeError>
+    where
+        I: IntoIterator<Item = Arc<dyn NnrpClientProvider>>,
+    {
+        let (transport, config, selection) = connect_client(options, providers).await?;
+        Ok(Self {
+            transport,
+            config,
+            lifecycle: ConnectionLifecycle::new(),
+            transport_selection: Some(selection),
+        })
+    }
+
+    pub fn transport_selection(&self) -> Option<&TransportSelection> {
+        self.transport_selection.as_ref()
+    }
+
     #[cfg(all(feature = "native-tcp", not(target_arch = "wasm32")))]
     pub async fn connect_tcp(
         addr: impl tokio::net::ToSocketAddrs,
         config: NnrpClientConfig,
     ) -> Result<Self, RuntimeError> {
-        if config.transport != RuntimeTransportKind::Tcp {
-            return Err(RuntimeError::UnsupportedTransport(
-                "client config selected a non-TCP transport for connect_tcp",
-            ));
-        }
         Self::from_transport(TcpTransport::connect(addr).await?, config)
     }
 
     pub async fn connect_quic(
         _endpoint: &str,
-        config: NnrpClientConfig,
+        _config: NnrpClientConfig,
     ) -> Result<Self, RuntimeError> {
-        if config.transport != RuntimeTransportKind::Quic {
-            return Err(RuntimeError::UnsupportedTransport(
-                "client config selected a non-QUIC transport for connect_quic",
-            ));
-        }
         Err(RuntimeError::UnsupportedTransport(
             "QUIC provider is not installed; use from_transport with a QUIC FramedTransport",
         ))
@@ -244,15 +247,11 @@ impl NnrpClient {
         transport: BoxedFramedTransport,
         config: NnrpClientConfig,
     ) -> Result<Self, RuntimeError> {
-        if transport.transport_kind() != config.transport {
-            return Err(RuntimeError::UnsupportedTransport(
-                "client config transport does not match the provided transport slot",
-            ));
-        }
         Ok(Self {
             transport,
             config,
             lifecycle: ConnectionLifecycle::new(),
+            transport_selection: None,
         })
     }
 

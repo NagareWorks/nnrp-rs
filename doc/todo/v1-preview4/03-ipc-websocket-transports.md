@@ -2,7 +2,7 @@
 
 ## Transport Provider Contract
 
-- [x] Extend the provider registry to expose four named transport providers.
+- [x] Extend the provider registry to expose four named transport providers and reject duplicate transport or provider identities.
   - [x] TCP provider.
   - [x] QUIC provider.
   - [x] IPC provider.
@@ -10,12 +10,58 @@
 - [x] Keep provider probing behavior stable.
   - [x] If one transport package is present, select that transport directly.
   - [x] If multiple transport packages are present, probe candidates by policy.
-  - [x] Match probe samples by stable provider id instead of package display name.
+  - [x] Require one route/security readiness record for every registered provider before selection.
+  - [x] Aggregate raw probe samples before selection and match readiness/observations by transport and provider identity.
+  - [x] Reject duplicate, unmatched, incomplete, or structurally invalid selection evidence with a typed error.
   - [x] Preserve provider cost, preference, limits, and limitations in candidate diagnostics.
   - [x] Apply the frozen success-count, throughput, RTT, comparable-cost, policy, and identity comparator.
   - [x] Expose ordered candidates and registered rejection reasons without an opaque score.
 - [x] Ensure every provider owns real connect/listen/send/receive behavior.
 - [x] Keep provider packages from becoming configuration-only switches.
+
+## Host Route Model
+
+- [x] Add the frozen application and provider endpoint values.
+  - [x] Add `NnrpEndpoint` for `nnrp://` and `nnrps://` only.
+  - [x] Add `ProviderEndpoint` for carrier-local locator overrides.
+  - [x] Preserve application authority, path, query, and security intent.
+  - [x] Reject provider-local schemes in `NnrpEndpoint`.
+- [ ] Add role-specific route values.
+  - [x] Add `ClientProviderRoute` and `ClientProviderRoutes`.
+  - [x] Add `ServerProviderRoute` and `ServerProviderRoutes`.
+  - [x] Add the exact owned fields for `ClientTransportSecurity` and `ServerTransportSecurity`.
+  - [x] Keep locator and security values isolated per transport ID.
+  - [ ] Reject duplicate keys, provider-kind mismatches, and role-mismatched security.
+  - [ ] Report a configured known-but-uninstalled route as `local-unavailable`.
+  - [ ] Apply the exact rejection precedence when multiple checks fail.
+- [x] Add host-level client orchestration.
+  - [x] Resolve every installed provider route before selection.
+  - [x] Keep unresolved and security-incompatible candidates in diagnostics.
+  - [x] Probe all eligible Auto/Prefer candidates.
+  - [x] Adopt only the selected carrier into `NnrpClient`.
+  - [x] Make Force fail without fallback.
+- [x] Add host-level server orchestration.
+  - [x] Resolve every policy-allowed installed provider route.
+  - [x] Bind every eligible Auto/Prefer listener into one logical `NnrpServer`.
+  - [x] Restrict Force to the named listener.
+  - [x] Roll back every listener opened by a failed logical listen operation.
+  - [x] Accept across the listener set while each session adopts one carrier.
+  - [x] Expose the actual `active_transport_id` on every accepted session.
+  - [x] Expose actual bound provider endpoints, including assigned ports.
+  - [x] Break simultaneous accept readiness with stable provider order.
+  - [x] Fail and close the complete logical set after a terminal provider-listener failure.
+
+## Application Security Intent
+
+- [x] Enforce `nnrps://` before probing or binding.
+  - [x] Add TCP TLS client and server paths with route-local credentials.
+  - [x] Keep plain TCP visible as `security-unsatisfied` for `nnrps://`.
+  - [x] Keep QUIC TLS credentials route-local.
+  - [x] Reject IPC for `nnrps://` in Preview4.
+  - [x] Require WSS and route-local credentials for native WebSocket.
+  - [x] Preserve browser-owned TLS verification for browser WSS.
+- [x] Add `route-unresolved` and `security-unsatisfied` to the exact rejection registry.
+- [x] Keep `nnrp://` compatible with both plain and secure eligible routes.
 
 ## IPC Transport
 

@@ -3,8 +3,10 @@ use std::collections::BTreeMap;
 #[cfg(any(test, feature = "benchmark-ffi"))]
 use std::collections::VecDeque;
 #[cfg(not(test))]
-use std::sync::Arc;
+use std::sync::{Arc, Condvar};
 use std::sync::{Mutex, MutexGuard, OnceLock};
+#[cfg(not(test))]
+use std::time::Duration;
 
 use nnrp_core::{
     should_replay_frame_after_migration, token_delta_schema_descriptor,
@@ -32,6 +34,7 @@ use nnrp_core::{
 use nnrp_core::{
     FrameSubmitMetadata, ResultPushMetadata, FRAME_SUBMIT_METADATA_LEN, RESULT_PUSH_METADATA_LEN,
 };
+use nnrp_runtime::RuntimeError;
 #[cfg(not(test))]
 use nnrp_runtime::{
     BoxedFramedTransport, NnrpClient, NnrpClientConfig, NnrpClientEvent, NnrpClientSession,
@@ -50,7 +53,7 @@ pub use transport::*;
 use sdk_version::{SDK_MAJOR, SDK_MINOR, SDK_PATCH, SDK_PREVIEW, SDK_REVISION};
 
 pub const NNRP_FFI_ABI_MAJOR: u16 = 4;
-pub const NNRP_FFI_ABI_MINOR: u16 = 0;
+pub const NNRP_FFI_ABI_MINOR: u16 = 1;
 pub const NNRP_FFI_ABI_PATCH: u16 = 0;
 
 pub const NNRP_TRANSPORT_SLOT_QUIC: u32 = 0x0000_0001;
@@ -415,6 +418,7 @@ pub enum NnrpHandleKind {
     TransportConnection = 10,
     TransportListener = 11,
     TransportSecurityConfig = 12,
+    ServerAccept = 13,
 }
 
 #[repr(C)]
@@ -470,6 +474,11 @@ enum NnrpFfiResource {
         #[cfg(not(test))]
         runtime: NnrpFfiSessionRuntime,
     },
+    ServerAccept {
+        server: NnrpHandle,
+        #[cfg(not(test))]
+        runtime: Arc<NnrpFfiServerAcceptRuntime>,
+    },
     Operation {
         session: NnrpHandle,
         operation_id: u64,
@@ -514,6 +523,149 @@ enum NnrpFfiSessionRuntime {
     Server(Arc<AsyncMutex<NnrpServerSession>>),
     #[cfg(feature = "benchmark-ffi")]
     Benchmark,
+}
+
+#[cfg(not(test))]
+struct NnrpFfiServerAcceptRuntime {
+    shared: Arc<(Mutex<NnrpFfiServerAcceptState>, Condvar)>,
+    abort: tokio::task::AbortHandle,
+}
+
+#[cfg(not(test))]
+enum NnrpFfiServerAcceptState {
+    Pending,
+    Ready(Result<Box<NnrpServerSession>, NnrpFfiStatus>),
+    Claimed,
+    Released,
+}
+
+#[cfg(not(test))]
+impl NnrpFfiServerAcceptRuntime {
+    fn start(server: Arc<NnrpServer>) -> Arc<Self> {
+        let shared = Arc::new((
+            Mutex::new(NnrpFfiServerAcceptState::Pending),
+            Condvar::new(),
+        ));
+        let task_shared = Arc::clone(&shared);
+        let task = transport::spawn_role_task(async move {
+            let outcome = loop {
+                match server.accept().await {
+                    Ok(session) => break Ok(Box::new(session)),
+                    Err(error)
+                        if !server.is_listener_set_closed()
+                            && server_accept_error_is_peer_local(&error) =>
+                    {
+                        continue;
+                    }
+                    Err(error) => break Err(transport::role_status_from_runtime_error(error)),
+                }
+            };
+            let (state, ready) = &*task_shared;
+            let Ok(mut state) = state.lock() else {
+                return;
+            };
+            if matches!(*state, NnrpFfiServerAcceptState::Pending) {
+                *state = NnrpFfiServerAcceptState::Ready(outcome);
+                ready.notify_all();
+            }
+        });
+        Arc::new(Self {
+            shared,
+            abort: task.abort_handle(),
+        })
+    }
+
+    fn wait(&self, timeout_ms: u32) -> NnrpFfiStatus {
+        let (state, ready) = &*self.shared;
+        let mut state = match state.lock() {
+            Ok(state) => state,
+            Err(_) => return server_accept_internal_status(161),
+        };
+        if matches!(*state, NnrpFfiServerAcceptState::Pending) {
+            let timeout_ms = if timeout_ms == 0 { 30_000 } else { timeout_ms };
+            let waited = ready.wait_timeout(state, Duration::from_millis(u64::from(timeout_ms)));
+            let Ok((next_state, _)) = waited else {
+                return server_accept_internal_status(161);
+            };
+            state = next_state;
+        }
+        match &*state {
+            NnrpFfiServerAcceptState::Pending => server_accept_would_block_status(),
+            NnrpFfiServerAcceptState::Ready(Ok(_)) => NnrpFfiStatus::ok(),
+            NnrpFfiServerAcceptState::Ready(Err(status)) => *status,
+            NnrpFfiServerAcceptState::Claimed | NnrpFfiServerAcceptState::Released => {
+                NnrpFfiStatus::invalid_state(161)
+            }
+        }
+    }
+
+    fn claim(&self) -> Result<NnrpServerSession, NnrpFfiStatus> {
+        let (state, _) = &*self.shared;
+        let mut state = state
+            .lock()
+            .map_err(|_| server_accept_internal_status(162))?;
+        match std::mem::replace(&mut *state, NnrpFfiServerAcceptState::Claimed) {
+            NnrpFfiServerAcceptState::Ready(Ok(session)) => Ok(*session),
+            NnrpFfiServerAcceptState::Ready(Err(status)) => {
+                *state = NnrpFfiServerAcceptState::Ready(Err(status));
+                Err(status)
+            }
+            NnrpFfiServerAcceptState::Pending => {
+                *state = NnrpFfiServerAcceptState::Pending;
+                Err(server_accept_would_block_status())
+            }
+            NnrpFfiServerAcceptState::Claimed => {
+                *state = NnrpFfiServerAcceptState::Claimed;
+                Err(NnrpFfiStatus::invalid_state(162))
+            }
+            NnrpFfiServerAcceptState::Released => {
+                *state = NnrpFfiServerAcceptState::Released;
+                Err(NnrpFfiStatus::invalid_state(162))
+            }
+        }
+    }
+
+    fn release(&self) {
+        let (state, ready) = &*self.shared;
+        if let Ok(mut state) = state.lock() {
+            if !matches!(*state, NnrpFfiServerAcceptState::Claimed) {
+                *state = NnrpFfiServerAcceptState::Released;
+            }
+            ready.notify_all();
+        }
+        self.abort.abort();
+    }
+}
+
+fn server_accept_error_is_peer_local(error: &RuntimeError) -> bool {
+    matches!(
+        error,
+        RuntimeError::Io(_)
+            | RuntimeError::Protocol(_)
+            | RuntimeError::FrameTooLarge { .. }
+            | RuntimeError::TransportClosed { .. }
+            | RuntimeError::UnexpectedMessage(_)
+    )
+}
+
+#[cfg(not(test))]
+const fn server_accept_would_block_status() -> NnrpFfiStatus {
+    NnrpFfiStatus {
+        status_code: NnrpFfiStatusCode::WouldBlock as u32,
+        error_family: NnrpErrorFamily::Transport as u32,
+        protocol_error_code: 0,
+        detail_code: 160,
+    }
+}
+
+#[cfg(not(test))]
+const fn server_accept_internal_status(detail_code: u32) -> NnrpFfiStatus {
+    NnrpFfiStatus {
+        status_code: NnrpFfiStatusCode::InternalError as u32,
+        error_family: NnrpErrorFamily::Internal as u32,
+        protocol_error_code: 0,
+        detail_code,
+    }
 }
 
 #[cfg(not(test))]
@@ -609,6 +761,7 @@ impl NnrpFfiHandleStore {
             value if value == NnrpHandleKind::CacheReferenceDescriptor as u32 => {
                 NnrpHandleKind::CacheReferenceDescriptor
             }
+            value if value == NnrpHandleKind::ServerAccept as u32 => NnrpHandleKind::ServerAccept,
             _ => return Err(NnrpFfiStatus::invalid_handle(handle.kind)),
         })?;
         self.entries.insert(
@@ -660,6 +813,22 @@ impl NnrpFfiHandleStore {
     fn close_connection(&mut self, connection: NnrpHandle) -> Result<(), NnrpFfiStatus> {
         self.get(connection, NnrpHandleKind::Connection)?;
 
+        let accepts: Vec<NnrpHandle> = self
+            .entries
+            .iter()
+            .filter_map(|((kind, id), entry)| match &entry.resource {
+                NnrpFfiResource::ServerAccept { server, .. } if *server == connection => {
+                    Some(NnrpHandle {
+                        kind: *kind,
+                        id: *id,
+                        generation: entry.generation,
+                        flags: 0,
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+
         let sessions: Vec<NnrpHandle> = self
             .entries
             .iter()
@@ -695,6 +864,16 @@ impl NnrpFfiHandleStore {
 
         for operation in &operations {
             self.entries.remove(&(operation.kind, operation.id));
+        }
+        for accept in &accepts {
+            if let Some(entry) = self.entries.remove(&(accept.kind, accept.id)) {
+                #[cfg(not(test))]
+                if let NnrpFfiResource::ServerAccept { runtime, .. } = entry.resource {
+                    runtime.release();
+                }
+                #[cfg(test)]
+                let _ = entry;
+            }
         }
         for session in &sessions {
             self.entries.remove(&(session.kind, session.id));
@@ -2099,6 +2278,50 @@ pub struct NnrpServerAcceptRequest {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpServerAcceptBeginRequest {
+    pub server: NnrpHandle,
+    pub accept_handle_id: u64,
+    pub generation: u32,
+    pub reserved0: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpServerAcceptWaitRequest {
+    pub accept: NnrpHandle,
+    pub timeout_ms: u32,
+    pub flags: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpServerAcceptClaimRequest {
+    pub accept: NnrpHandle,
+    pub session_handle_id: u64,
+    pub generation: u32,
+    pub reserved0: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpServerAcceptResult {
+    pub session: NnrpHandle,
+    pub active_transport_id: u32,
+    pub reserved0: u32,
+}
+
+impl NnrpServerAcceptResult {
+    pub const fn invalid() -> Self {
+        Self {
+            session: NnrpHandle::invalid(),
+            active_transport_id: TransportId::Unspecified as u32,
+            reserved0: 0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NnrpRoleEventPollRequest {
     pub scope: NnrpHandle,
     pub max_events: u32,
@@ -2474,11 +2697,13 @@ pub unsafe extern "C" fn nnrp_client_open_session(
         if runtime_transport_id(transport_kind) != transport_id {
             return NnrpFfiStatus::invalid_state(12);
         }
-        let mut config = NnrpClientConfig::default().with_transport(transport_kind);
-        config.requested_session_id = request.requested_session_id;
-        config.profile_id = request.profile_id;
-        config.schema_id = request.schema_id;
-        config.schema_version = request.schema_version;
+        let config = NnrpClientConfig {
+            requested_session_id: request.requested_session_id,
+            profile_id: request.profile_id,
+            schema_id: request.schema_id,
+            schema_version: request.schema_version,
+            ..NnrpClientConfig::default()
+        };
         let client = match NnrpClient::from_boxed_transport(carrier, config) {
             Ok(client) => client,
             Err(error) => return transport::role_status_from_runtime_error(error),
@@ -6104,10 +6329,7 @@ pub unsafe extern "C" fn nnrp_server_bind(
         };
         let transport_kind = listener.transport_kind();
         let transport_id = runtime_transport_id(transport_kind);
-        let server = match NnrpServer::from_boxed_listener(
-            listener,
-            NnrpServerConfig::default().with_transport(transport_kind),
-        ) {
+        let server = match NnrpServer::from_boxed_listener(listener, NnrpServerConfig::default()) {
             Ok(server) => Arc::new(server),
             Err(error) => return transport::role_status_from_runtime_error(error),
         };
@@ -6134,6 +6356,249 @@ pub unsafe extern "C" fn nnrp_server_bind(
         }
         *out_server = handle;
         NnrpFfiStatus::ok()
+    }
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `out_accept` must be either null or a valid writable pointer to one
+/// `NnrpHandle`. The server handle is copied by value and retained by the
+/// returned accept ticket.
+pub unsafe extern "C" fn nnrp_server_accept_begin(
+    request: NnrpServerAcceptBeginRequest,
+    out_accept: *mut NnrpHandle,
+) -> NnrpFfiStatus {
+    if out_accept.is_null()
+        || request.accept_handle_id == 0
+        || request.generation == 0
+        || request.reserved0 != 0
+    {
+        return NnrpFfiStatus::invalid_argument(163);
+    }
+    *out_accept = NnrpHandle::invalid();
+    let mut store = handle_store();
+    #[cfg(not(test))]
+    let server_runtime = match store.get(request.server, NnrpHandleKind::Connection) {
+        Ok(NnrpFfiResource::Connection {
+            role: NnrpFfiConnectionRole::Server,
+            runtime: NnrpFfiConnectionRuntime::Server(server),
+            ..
+        }) => Arc::clone(server),
+        Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Connection as u32),
+        Err(status) => return status,
+    };
+    #[cfg(test)]
+    match store.get(request.server, NnrpHandleKind::Connection) {
+        Ok(NnrpFfiResource::Connection {
+            role: NnrpFfiConnectionRole::Server,
+            ..
+        }) => {}
+        Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Connection as u32),
+        Err(status) => return status,
+    }
+    if store.entries.values().any(|entry| {
+        matches!(
+            entry.resource,
+            NnrpFfiResource::ServerAccept { server, .. } if server == request.server
+        )
+    }) {
+        return NnrpFfiStatus::invalid_state(163);
+    }
+    let handle = NnrpHandle::new(
+        NnrpHandleKind::ServerAccept,
+        request.accept_handle_id,
+        request.generation,
+    );
+    if store.entries.contains_key(&(
+        NnrpHandleKind::ServerAccept as u32,
+        request.accept_handle_id,
+    )) {
+        return NnrpFfiStatus::invalid_state(163);
+    }
+    let resource = NnrpFfiResource::ServerAccept {
+        server: request.server,
+        #[cfg(not(test))]
+        runtime: NnrpFfiServerAcceptRuntime::start(server_runtime),
+    };
+    if let Err(status) = store.insert(handle, resource) {
+        return status;
+    }
+    *out_accept = handle;
+    NnrpFfiStatus::ok()
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// The accept-ticket handle is copied by value. This function does not
+/// dereference caller-provided pointers.
+pub unsafe extern "C" fn nnrp_server_accept_wait(
+    request: NnrpServerAcceptWaitRequest,
+) -> NnrpFfiStatus {
+    if request.flags != 0 {
+        return NnrpFfiStatus::invalid_argument(164);
+    }
+    #[cfg(test)]
+    {
+        let store = handle_store();
+        match store.get(request.accept, NnrpHandleKind::ServerAccept) {
+            Ok(NnrpFfiResource::ServerAccept { .. }) => NnrpFfiStatus::ok(),
+            Ok(_) => NnrpFfiStatus::invalid_handle(NnrpHandleKind::ServerAccept as u32),
+            Err(status) => status,
+        }
+    }
+    #[cfg(not(test))]
+    {
+        let runtime = {
+            let store = handle_store();
+            match store.get(request.accept, NnrpHandleKind::ServerAccept) {
+                Ok(NnrpFfiResource::ServerAccept { runtime, .. }) => Arc::clone(runtime),
+                Ok(_) => {
+                    return NnrpFfiStatus::invalid_handle(NnrpHandleKind::ServerAccept as u32);
+                }
+                Err(status) => return status,
+            }
+        };
+        runtime.wait(request.timeout_ms)
+    }
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `out_result` must be either null or a valid writable pointer to one
+/// `NnrpServerAcceptResult`. A successful claim consumes the accept ticket.
+pub unsafe extern "C" fn nnrp_server_accept_claim(
+    request: NnrpServerAcceptClaimRequest,
+    out_result: *mut NnrpServerAcceptResult,
+) -> NnrpFfiStatus {
+    if out_result.is_null()
+        || request.session_handle_id == 0
+        || request.generation == 0
+        || request.reserved0 != 0
+    {
+        return NnrpFfiStatus::invalid_argument(165);
+    }
+    *out_result = NnrpServerAcceptResult::invalid();
+    let mut store = handle_store();
+    if store
+        .entries
+        .contains_key(&(NnrpHandleKind::Session as u32, request.session_handle_id))
+    {
+        return NnrpFfiStatus::invalid_state(165);
+    }
+    let server = match store.get(request.accept, NnrpHandleKind::ServerAccept) {
+        Ok(NnrpFfiResource::ServerAccept { server, .. }) => *server,
+        Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::ServerAccept as u32),
+        Err(status) => return status,
+    };
+
+    #[cfg(test)]
+    let (profile_id, schema_id, schema_version, active_transport_id) =
+        match store.get(server, NnrpHandleKind::Connection) {
+            Ok(NnrpFfiResource::Connection {
+                transport_id,
+                role: NnrpFfiConnectionRole::Server,
+                ..
+            }) => (0, 0, 0, *transport_id),
+            Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Connection as u32),
+            Err(status) => return status,
+        };
+
+    #[cfg(not(test))]
+    let (profile_id, schema_id, schema_version, active_transport_id, session_runtime) = {
+        let runtime = match store.get(request.accept, NnrpHandleKind::ServerAccept) {
+            Ok(NnrpFfiResource::ServerAccept { runtime, .. }) => Arc::clone(runtime),
+            Ok(_) => {
+                return NnrpFfiStatus::invalid_handle(NnrpHandleKind::ServerAccept as u32);
+            }
+            Err(status) => return status,
+        };
+        let session = match runtime.claim() {
+            Ok(session) => session,
+            Err(status) => return status,
+        };
+        (
+            session.client_open().profile_id,
+            session.client_open().schema_id,
+            session.client_open().schema_version,
+            session.active_transport_id() as u32,
+            NnrpFfiSessionRuntime::Server(Arc::new(AsyncMutex::new(session))),
+        )
+    };
+
+    let session = NnrpHandle::new(
+        NnrpHandleKind::Session,
+        request.session_handle_id,
+        request.generation,
+    );
+    if let Err(status) = store.insert(
+        session,
+        NnrpFfiResource::Session {
+            connection: server,
+            profile_id,
+            schema_id,
+            schema_version,
+            #[cfg(not(test))]
+            runtime: session_runtime,
+        },
+    ) {
+        return status;
+    }
+    if let Err(status) = store.remove(request.accept, NnrpHandleKind::ServerAccept) {
+        let _ = store.remove(session, NnrpHandleKind::Session);
+        return status;
+    }
+    #[cfg(test)]
+    store.push_event(NnrpQueuedEvent::plain(
+        NnrpEventKind::SessionOpened,
+        server,
+        session,
+        NnrpHandle::invalid(),
+        0,
+    ));
+    *out_result = NnrpServerAcceptResult {
+        session,
+        active_transport_id,
+        reserved0: 0,
+    };
+    NnrpFfiStatus::ok()
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// The accept-ticket handle is copied by value. Releasing a ticket cancels any
+/// unclaimed carrier accept and handshake owned by that ticket.
+pub unsafe extern "C" fn nnrp_server_accept_release(accept: NnrpHandle) -> NnrpFfiStatus {
+    let mut store = handle_store();
+    let entry = match store.entries.remove(&(accept.kind, accept.id)) {
+        Some(entry)
+            if accept.kind == NnrpHandleKind::ServerAccept as u32
+                && accept.id != 0
+                && accept.generation != 0
+                && entry.generation == accept.generation =>
+        {
+            entry
+        }
+        Some(entry) => {
+            store.entries.insert((accept.kind, accept.id), entry);
+            return NnrpFfiStatus::invalid_handle(NnrpHandleKind::ServerAccept as u32);
+        }
+        None => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::ServerAccept as u32),
+    };
+    match entry.resource {
+        NnrpFfiResource::ServerAccept {
+            #[cfg(not(test))]
+            runtime,
+            ..
+        } => {
+            #[cfg(not(test))]
+            runtime.release();
+            NnrpFfiStatus::ok()
+        }
+        _ => NnrpFfiStatus::invalid_handle(NnrpHandleKind::ServerAccept as u32),
     }
 }
 
@@ -13753,6 +14218,209 @@ mod tests {
             .error_family,
             NnrpErrorFamily::RuntimeObject as u32
         );
+    }
+
+    #[test]
+    fn server_accept_retries_only_peer_local_failures() {
+        let peer_failures = [
+            RuntimeError::Io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "peer reset",
+            )),
+            RuntimeError::Protocol(NnrpError::InvalidMagic),
+            RuntimeError::FrameTooLarge {
+                declared: 9,
+                max: 8,
+            },
+            RuntimeError::TransportClosed {
+                transport: nnrp_runtime::RuntimeTransportKind::Tcp,
+                detail: "peer closed".to_owned(),
+            },
+            RuntimeError::UnexpectedMessage("peer sent an invalid handshake message"),
+        ];
+        assert!(peer_failures.iter().all(server_accept_error_is_peer_local));
+
+        let terminal_failures = [
+            RuntimeError::ServerListenerSetClosed,
+            RuntimeError::FrameIdOverflow,
+            RuntimeError::Internal("session registry unavailable"),
+        ];
+        assert!(terminal_failures
+            .iter()
+            .all(|error| !server_accept_error_is_peer_local(error)));
+    }
+
+    #[test]
+    fn ffi_server_accept_ticket_claims_once_and_cascades_with_server_close() {
+        unsafe {
+            let mut server = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_server_bind(
+                    NnrpServerBindRequest {
+                        server_id: 194_001,
+                        generation: 1,
+                        transport_id: test_transport_id(),
+                    },
+                    &mut server,
+                ),
+                NnrpFfiStatus::ok()
+            );
+
+            let mut accept = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_server_accept_begin(
+                    NnrpServerAcceptBeginRequest {
+                        server,
+                        accept_handle_id: 194_002,
+                        generation: 1,
+                        reserved0: 1,
+                    },
+                    &mut accept,
+                ),
+                NnrpFfiStatus::invalid_argument(163)
+            );
+            assert_eq!(accept, NnrpHandle::invalid());
+            assert_eq!(
+                nnrp_server_accept_begin(
+                    NnrpServerAcceptBeginRequest {
+                        server,
+                        accept_handle_id: 194_002,
+                        generation: 1,
+                        reserved0: 0,
+                    },
+                    &mut accept,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(accept.kind, NnrpHandleKind::ServerAccept as u32);
+
+            let mut second_server = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_server_bind(
+                    NnrpServerBindRequest {
+                        server_id: 194_007,
+                        generation: 1,
+                        transport_id: test_transport_id(),
+                    },
+                    &mut second_server,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            let mut colliding_accept = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_server_accept_begin(
+                    NnrpServerAcceptBeginRequest {
+                        server: second_server,
+                        accept_handle_id: 194_002,
+                        generation: 2,
+                        reserved0: 0,
+                    },
+                    &mut colliding_accept,
+                ),
+                NnrpFfiStatus::invalid_state(163)
+            );
+            assert_eq!(colliding_accept, NnrpHandle::invalid());
+            assert_eq!(nnrp_connection_close(second_server), NnrpFfiStatus::ok());
+
+            let mut duplicate = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_server_accept_begin(
+                    NnrpServerAcceptBeginRequest {
+                        server,
+                        accept_handle_id: 194_003,
+                        generation: 1,
+                        reserved0: 0,
+                    },
+                    &mut duplicate,
+                ),
+                NnrpFfiStatus::invalid_state(163)
+            );
+            assert_eq!(
+                nnrp_server_accept_wait(NnrpServerAcceptWaitRequest {
+                    accept,
+                    timeout_ms: 0,
+                    flags: 1,
+                }),
+                NnrpFfiStatus::invalid_argument(164)
+            );
+            assert_eq!(
+                nnrp_server_accept_wait(NnrpServerAcceptWaitRequest {
+                    accept,
+                    timeout_ms: 0,
+                    flags: 0,
+                }),
+                NnrpFfiStatus::ok()
+            );
+
+            let mut accepted = NnrpServerAcceptResult::invalid();
+            assert_eq!(
+                nnrp_server_accept_claim(
+                    NnrpServerAcceptClaimRequest {
+                        accept,
+                        session_handle_id: 194_004,
+                        generation: 1,
+                        reserved0: 0,
+                    },
+                    &mut accepted,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(accepted.session.kind, NnrpHandleKind::Session as u32);
+            assert_eq!(accepted.active_transport_id, test_transport_id());
+            assert_eq!(accepted.reserved0, 0);
+            assert_eq!(
+                nnrp_server_accept_wait(NnrpServerAcceptWaitRequest {
+                    accept,
+                    timeout_ms: 0,
+                    flags: 0,
+                }),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::ServerAccept as u32)
+            );
+
+            let mut next_accept = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_server_accept_begin(
+                    NnrpServerAcceptBeginRequest {
+                        server,
+                        accept_handle_id: 194_005,
+                        generation: 1,
+                        reserved0: 0,
+                    },
+                    &mut next_accept,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(nnrp_server_accept_release(next_accept), NnrpFfiStatus::ok());
+            assert_eq!(
+                nnrp_server_accept_release(next_accept),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::ServerAccept as u32)
+            );
+            assert_eq!(
+                nnrp_server_accept_begin(
+                    NnrpServerAcceptBeginRequest {
+                        server,
+                        accept_handle_id: 194_006,
+                        generation: 1,
+                        reserved0: 0,
+                    },
+                    &mut next_accept,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(nnrp_connection_close(server), NnrpFfiStatus::ok());
+            assert_eq!(
+                nnrp_server_accept_wait(NnrpServerAcceptWaitRequest {
+                    accept: next_accept,
+                    timeout_ms: 0,
+                    flags: 0,
+                }),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::ServerAccept as u32)
+            );
+            assert_eq!(
+                nnrp_server_accept_release(next_accept),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::ServerAccept as u32)
+            );
+        }
     }
 
     fn empty_poll_result() -> NnrpPollResult {

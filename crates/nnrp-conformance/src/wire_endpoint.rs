@@ -6,13 +6,10 @@ use std::{
 use http::Uri;
 use nnrp_runtime::{
     NnrpClient, NnrpClientConfig, NnrpServer, NnrpServerConfig, RuntimeError, RuntimeFrameLimits,
-    RuntimeTransportKind,
 };
 use nnrp_transport_ipc::{IpcEndpoint, IpcProvider};
-use nnrp_transport_quic::{
-    quic_client_config, quic_server_config, QuicClientEndpointConfig, QuicProvider,
-    QuicServerEndpointConfig,
-};
+use nnrp_transport_quic::{QuicClientEndpointConfig, QuicProvider, QuicServerEndpointConfig};
+use nnrp_transport_tcp::{TcpTlsFramedListener, TcpTlsTransport};
 use nnrp_transport_websocket::{
     WebSocketEndpoint, WebSocketFramedListener, WebSocketProvider, WebSocketTransport,
 };
@@ -80,8 +77,10 @@ impl WireReferenceEndpoint {
         }
         match self.transport {
             ReferenceTransport::Tcp => {
-                self.require_plain()?;
                 parse_socket_addr(&self.endpoint)?;
+                if self.security.is_some() {
+                    self.require_security()?;
+                }
             }
             ReferenceTransport::Ipc => {
                 self.require_plain()?;
@@ -108,7 +107,21 @@ impl WireReferenceEndpoint {
         self.validate()?;
         match self.transport {
             ReferenceTransport::Tcp => {
-                NnrpClient::connect_tcp(&self.endpoint, NnrpClientConfig::default()).await
+                if let Some(security) = &self.security {
+                    let security = nnrp_runtime::ClientTransportSecurity::new(
+                        security.server_name.clone(),
+                        security.trusted_certificate_der.clone(),
+                    );
+                    let transport = TcpTlsTransport::connect(
+                        &self.endpoint,
+                        &security,
+                        RuntimeFrameLimits::default(),
+                    )
+                    .await?;
+                    NnrpClient::from_transport(transport, NnrpClientConfig::default())
+                } else {
+                    NnrpClient::connect_tcp(&self.endpoint, NnrpClientConfig::default()).await
+                }
             }
             ReferenceTransport::Ipc => {
                 let endpoint = IpcEndpoint::from_str(&self.endpoint)?;
@@ -121,12 +134,8 @@ impl WireReferenceEndpoint {
                     security.server_name.clone(),
                     security.trusted_certificate_der.clone(),
                 );
-                QuicProvider::connect(
-                    &self.endpoint,
-                    endpoint_config,
-                    quic_client_config(NnrpClientConfig::default()),
-                )
-                .await
+                QuicProvider::connect(&self.endpoint, endpoint_config, NnrpClientConfig::default())
+                    .await
             }
             ReferenceTransport::WebSocket => {
                 let endpoint = WebSocketEndpoint::from_str(&self.endpoint)?;
@@ -139,10 +148,7 @@ impl WireReferenceEndpoint {
                         RuntimeFrameLimits::default(),
                     )
                     .await?;
-                    NnrpClient::from_transport(
-                        transport,
-                        NnrpClientConfig::default().with_transport(RuntimeTransportKind::WebSocket),
-                    )
+                    NnrpClient::from_transport(transport, NnrpClientConfig::default())
                 } else {
                     WebSocketProvider::connect(&endpoint, NnrpClientConfig::default()).await
                 }
@@ -154,7 +160,18 @@ impl WireReferenceEndpoint {
         self.validate()?;
         match self.transport {
             ReferenceTransport::Tcp => {
-                NnrpServer::bind_tcp(&self.endpoint, NnrpServerConfig::default()).await
+                if let Some(security) = &self.security {
+                    let listener = TcpTlsFramedListener::bind(
+                        &self.endpoint,
+                        security.certificate_der.clone(),
+                        security.private_key_pkcs8_der.clone(),
+                        RuntimeFrameLimits::default(),
+                    )
+                    .await?;
+                    NnrpServer::from_listener(listener, NnrpServerConfig::default())
+                } else {
+                    NnrpServer::bind_tcp(&self.endpoint, NnrpServerConfig::default()).await
+                }
             }
             ReferenceTransport::Ipc => {
                 let endpoint = IpcEndpoint::from_str(&self.endpoint)?;
@@ -167,11 +184,7 @@ impl WireReferenceEndpoint {
                     security.certificate_der.clone(),
                     security.private_key_pkcs8_der.clone(),
                 );
-                QuicProvider::bind(
-                    endpoint_config,
-                    quic_server_config(NnrpServerConfig::default()),
-                )
-                .await
+                QuicProvider::bind(endpoint_config, NnrpServerConfig::default()).await
             }
             ReferenceTransport::WebSocket => {
                 let endpoint = WebSocketEndpoint::from_str(&self.endpoint)?;
@@ -185,10 +198,7 @@ impl WireReferenceEndpoint {
                         RuntimeFrameLimits::default(),
                     )
                     .await?;
-                    NnrpServer::from_listener(
-                        listener,
-                        NnrpServerConfig::default().with_transport(RuntimeTransportKind::WebSocket),
-                    )
+                    NnrpServer::from_listener(listener, NnrpServerConfig::default())
                 } else {
                     WebSocketProvider::bind(bind_address, NnrpServerConfig::default()).await
                 }
@@ -302,13 +312,45 @@ mod tests {
                 .validate()
                 .is_err()
         );
-        assert!(WireReferenceEndpoint::secure(
+        WireReferenceEndpoint::secure(ReferenceTransport::Tcp, "127.0.0.1:19091", security())
+            .validate()
+            .expect("secure TCP endpoint should validate");
+    }
+
+    #[tokio::test]
+    async fn secure_tcp_endpoint_completes_a_real_role_handshake() {
+        use nnrp_transport_quic::QuicServerEndpointConfig;
+
+        let (_, certificate) =
+            QuicServerEndpointConfig::self_signed_localhost("127.0.0.1:0".parse().unwrap())
+                .unwrap();
+        let security = WireEndpointSecurity {
+            server_name: "localhost".to_string(),
+            trusted_certificate_der: certificate.certificate_der.clone(),
+            certificate_der: certificate.certificate_der,
+            private_key_pkcs8_der: certificate.private_key_pkcs8_der,
+        };
+        let server =
+            WireReferenceEndpoint::secure(ReferenceTransport::Tcp, "127.0.0.1:0", security.clone())
+                .bind()
+                .await
+                .expect("secure TCP listener should bind");
+        let endpoint = WireReferenceEndpoint::secure(
             ReferenceTransport::Tcp,
-            "127.0.0.1:19091",
-            security(),
-        )
-        .validate()
-        .is_err());
+            server.local_addr().unwrap().to_string(),
+            security,
+        );
+        let server_task = tokio::spawn(async move { server.accept().await.unwrap() });
+        let client = endpoint
+            .connect()
+            .await
+            .expect("secure TCP client should connect");
+        let client_session = client
+            .open_session()
+            .await
+            .expect("secure TCP client session should open");
+        let server_session = server_task.await.unwrap();
+        assert_eq!(client_session.session_id(), server_session.session_id());
     }
 
     #[test]

@@ -10,16 +10,14 @@ use nnrp_core::{
     OBJECT_REFERENCE_BLOCK_LEN, PAYLOAD_KIND_KNOWN_MASK, RESULT_PUSH_METADATA_LEN,
     SESSION_PATCH_ACK_METADATA_LEN, STANDARD_PROFILE_TOKEN,
 };
-use nnrp_core::{ClientHelloMetadata, ResultHintReason};
+use nnrp_core::{ClientHelloMetadata, ResultHintReason, TransportPolicy};
 use nnrp_runtime::{NnrpClient, NnrpClientConfig, NnrpServerConfig, RuntimeError};
 use nnrp_transport_provider::{
-    select_transport_with_probe, ProbeSample, RemoteTransportSupport, TransportPolicy,
-    TransportProviderDescriptor, TransportProviderKind,
+    select_transport_with_probe, summarize_provider_probe, ProbeSample, RemoteTransportSupport,
+    TransportCandidateReadiness, TransportProbeObservation, TransportProviderDescriptor,
+    TransportProviderKind,
 };
-use nnrp_transport_quic::{
-    quic_client_config, quic_server_config, QuicClientEndpointConfig, QuicProvider,
-    QuicServerEndpointConfig,
-};
+use nnrp_transport_quic::{QuicClientEndpointConfig, QuicProvider, QuicServerEndpointConfig};
 use nnrp_transport_tcp::TcpProvider;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -406,9 +404,17 @@ fn l3_transport_probe_selection() -> Result<(), String> {
             512,
         ),
     ];
-    let selection =
-        select_transport_with_probe(&providers, &remote, TransportPolicy::Auto, None, &samples)
-            .map_err(|error| error.to_string())?;
+    let readiness = transport_readiness(&providers);
+    let observations = transport_observations(&providers, &samples);
+    let selection = select_transport_with_probe(
+        &providers,
+        &remote,
+        TransportPolicy::Auto,
+        None,
+        &readiness,
+        &observations,
+    )
+    .map_err(|error| error.to_string())?;
     if selection.selected.transport_id != TransportId::Quic {
         return Err("transport probe did not prefer the lower-latency QUIC sample".to_string());
     }
@@ -434,13 +440,59 @@ fn l3_transport_probe_selection() -> Result<(), String> {
         &remote,
         TransportPolicy::PreferQuic,
         None,
-        &fallback_samples,
+        &readiness,
+        &transport_observations(&providers, &fallback_samples),
     )
     .map_err(|error| error.to_string())?;
     if fallback.selected.transport_id != TransportId::Tcp {
         return Err("transport probe did not fall back to TCP after QUIC failure".to_string());
     }
     Ok(())
+}
+
+fn transport_readiness(
+    providers: &[TransportProviderDescriptor],
+) -> Vec<TransportCandidateReadiness> {
+    providers
+        .iter()
+        .map(|provider| {
+            TransportCandidateReadiness::ready(provider.transport_id, &provider.metadata.id)
+        })
+        .collect()
+}
+
+fn transport_observations(
+    providers: &[TransportProviderDescriptor],
+    samples: &[ProbeSample],
+) -> Vec<TransportProbeObservation> {
+    providers
+        .iter()
+        .filter_map(|provider| {
+            summarize_provider_probe(provider, samples)
+                .map(|metrics| {
+                    TransportProbeObservation::succeeded(
+                        provider.transport_id,
+                        &provider.metadata.id,
+                        metrics,
+                    )
+                })
+                .or_else(|| {
+                    samples
+                        .iter()
+                        .any(|sample| {
+                            sample.transport_id == provider.transport_id
+                                && sample.provider_id == provider.metadata.id
+                        })
+                        .then(|| {
+                            TransportProbeObservation::failed(
+                                provider.transport_id,
+                                &provider.metadata.id,
+                                "transport probe failed",
+                            )
+                        })
+                })
+        })
+        .collect()
 }
 
 fn l3_transport_tcp_session_smoke() -> Result<(), String> {
@@ -494,11 +546,7 @@ async fn tcp_session_smoke() -> Result<(), RuntimeError> {
 async fn quic_session_smoke() -> Result<(), RuntimeError> {
     let (endpoint_config, certificate) =
         QuicServerEndpointConfig::self_signed_localhost("127.0.0.1:0".parse().unwrap())?;
-    let server = QuicProvider::bind(
-        endpoint_config,
-        quic_server_config(NnrpServerConfig::default()),
-    )
-    .await?;
+    let server = QuicProvider::bind(endpoint_config, NnrpServerConfig::default()).await?;
     let addr = server.local_addr()?;
     let server_task = tokio::spawn(async move {
         let mut session = server.accept().await?;
@@ -513,12 +561,8 @@ async fn quic_session_smoke() -> Result<(), RuntimeError> {
 
     let endpoint_config =
         QuicClientEndpointConfig::localhost_with_root_certificate(certificate.certificate_der);
-    let client = QuicProvider::connect_addr(
-        addr,
-        endpoint_config,
-        quic_client_config(NnrpClientConfig::default()),
-    )
-    .await?;
+    let client =
+        QuicProvider::connect_addr(addr, endpoint_config, NnrpClientConfig::default()).await?;
     let mut session = client.open_session().await?;
     let frame_id = session.submit(token_submit(1), b"prompt".to_vec()).await?;
     let result = session.await_result().await?;

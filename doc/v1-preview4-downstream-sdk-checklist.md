@@ -15,10 +15,14 @@ Downstream SDKs should consume Preview4 as a protocol and artifact boundary upda
 - Validate `manifest.json` before loading a native library.
 - Reject artifacts whose `transport_scope` does not match the SDK package.
 - Reject artifacts whose `transport_slots` contains transports outside the package boundary.
-- Require FFI ABI `4.0.0` and Rust artifact revision `1.0.0-preview.4.16` for complete cache-lease state, the frozen capability catalog, cascading session-owned handle cleanup, cancellation-safe bounded event polling, canonical cache identity, reachable transport handles, packet batches, the full-duplex browser client role runtime including external carrier ingress, and the release-valid explicit benchmark ABI used by downstream performance gates.
+- Require FFI ABI `4.1.0` and Rust artifact revision `1.0.0-preview.4.17` for provider-route orchestration, exact transport/provider identity selection, route-local security, persistent server accept tickets, complete cache-lease state, the frozen capability catalog, cancellation-safe bounded event polling, reachable transport handles, packet batches, the full-duplex browser client role runtime, and the release-valid explicit benchmark ABI used by downstream performance gates.
 - Bind transport connect, listen, accept, endpoint, probe, batch read/write, security-config, and close exports directly.
 - Keep native calls coarse around session, control, object, progress, result, and release hot paths.
 - Keep complete NNRP packets as the transport FFI unit; do not introduce per-socket-chunk cross-language calls.
+- Reject duplicate transport IDs and duplicate provider IDs during provider registration.
+- Supply exactly one route/security readiness record for every registered provider before selection.
+- Match readiness and aggregate probe observations by the `(transport_id, provider_id)` identity pair; reject duplicate, unmatched, incomplete, or structurally invalid evidence before producing candidate diagnostics.
+- Keep raw probe samples below the SDK selection boundary and pass only succeeded/failed aggregate observations into deterministic selection.
 
 ## Browser WASM
 

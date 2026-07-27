@@ -1,49 +1,11 @@
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use nnrp_core::TransportId;
+use nnrp_core::{TransportId, TransportPolicy};
 use thiserror::Error;
 
 pub const DEFAULT_PROVIDER_MAX_FRAME_BYTES: u64 = 64 * 1024 * 1024;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransportPolicy {
-    Auto,
-    PreferQuic,
-    PreferTcp,
-    PreferIpc,
-    PreferWebSocket,
-    ForceQuic,
-    ForceTcp,
-    ForceIpc,
-    ForceWebSocket,
-}
-
-impl TransportPolicy {
-    pub fn allows(self, transport_id: TransportId) -> bool {
-        match self {
-            Self::Auto
-            | Self::PreferQuic
-            | Self::PreferTcp
-            | Self::PreferIpc
-            | Self::PreferWebSocket => is_selectable_transport(transport_id),
-            Self::ForceQuic => transport_id == TransportId::Quic,
-            Self::ForceTcp => transport_id == TransportId::Tcp,
-            Self::ForceIpc => transport_id == TransportId::Ipc,
-            Self::ForceWebSocket => transport_id == TransportId::WebSocket,
-        }
-    }
-
-    fn preferred_transport(self) -> Option<TransportId> {
-        match self {
-            Self::PreferQuic | Self::ForceQuic => Some(TransportId::Quic),
-            Self::PreferTcp | Self::ForceTcp => Some(TransportId::Tcp),
-            Self::PreferIpc | Self::ForceIpc => Some(TransportId::Ipc),
-            Self::PreferWebSocket | Self::ForceWebSocket => Some(TransportId::WebSocket),
-            Self::Auto => None,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransportProviderKind {
@@ -250,13 +212,21 @@ impl TransportProviderRegistry {
         }
     }
 
-    pub fn with_provider(mut self, provider: TransportProviderDescriptor) -> Self {
-        self.providers.push(provider);
-        self
+    pub fn with_provider(
+        mut self,
+        provider: TransportProviderDescriptor,
+    ) -> Result<Self, TransportProviderRegistryError> {
+        self.register(provider)?;
+        Ok(self)
     }
 
-    pub fn register(&mut self, provider: TransportProviderDescriptor) {
+    pub fn register(
+        &mut self,
+        provider: TransportProviderDescriptor,
+    ) -> Result<(), TransportProviderRegistryError> {
+        validate_provider_registration(&self.providers, &provider)?;
         self.providers.push(provider);
+        Ok(())
     }
 
     pub fn providers(&self) -> &[TransportProviderDescriptor] {
@@ -275,8 +245,15 @@ impl TransportProviderRegistry {
         remote: &RemoteTransportSupport,
         policy: TransportPolicy,
         requested_max_frame_bytes: Option<u64>,
+        readiness: &[TransportCandidateReadiness],
     ) -> Result<TransportSelection, TransportSelectionError> {
-        select_transport(self.providers(), remote, policy, requested_max_frame_bytes)
+        select_transport(
+            self.providers(),
+            remote,
+            policy,
+            requested_max_frame_bytes,
+            readiness,
+        )
     }
 
     pub fn select_with_probe(
@@ -284,16 +261,26 @@ impl TransportProviderRegistry {
         remote: &RemoteTransportSupport,
         policy: TransportPolicy,
         requested_max_frame_bytes: Option<u64>,
-        samples: &[ProbeSample],
+        readiness: &[TransportCandidateReadiness],
+        observations: &[TransportProbeObservation],
     ) -> Result<TransportSelection, TransportSelectionError> {
         select_transport_with_probe(
             self.providers(),
             remote,
             policy,
             requested_max_frame_bytes,
-            samples,
+            readiness,
+            observations,
         )
     }
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum TransportProviderRegistryError {
+    #[error("transport provider already registered for {transport_id:?}")]
+    DuplicateTransportId { transport_id: TransportId },
+    #[error("transport provider id already registered: {provider_id}")]
+    DuplicateProviderId { provider_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -389,12 +376,102 @@ impl ProbeSample {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransportCandidateReadiness {
+    pub transport_id: TransportId,
+    pub provider_id: String,
+    pub route_resolved: bool,
+    pub security_satisfied: bool,
+    pub diagnostic: Option<String>,
+}
+
+impl TransportCandidateReadiness {
+    pub fn ready(transport_id: TransportId, provider_id: impl Into<String>) -> Self {
+        Self {
+            transport_id,
+            provider_id: provider_id.into(),
+            route_resolved: true,
+            security_satisfied: true,
+            diagnostic: None,
+        }
+    }
+
+    pub fn route_unresolved(
+        transport_id: TransportId,
+        provider_id: impl Into<String>,
+        diagnostic: impl Into<String>,
+    ) -> Self {
+        Self {
+            transport_id,
+            provider_id: provider_id.into(),
+            route_resolved: false,
+            security_satisfied: true,
+            diagnostic: Some(diagnostic.into()),
+        }
+    }
+
+    pub fn security_unsatisfied(
+        transport_id: TransportId,
+        provider_id: impl Into<String>,
+        diagnostic: impl Into<String>,
+    ) -> Self {
+        Self {
+            transport_id,
+            provider_id: provider_id.into(),
+            route_resolved: true,
+            security_satisfied: false,
+            diagnostic: Some(diagnostic.into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransportProbeObservation {
+    pub transport_id: TransportId,
+    pub provider_id: String,
+    pub state: ProbeState,
+    pub metrics: Option<ProbeMetrics>,
+    pub diagnostic: Option<String>,
+}
+
+impl TransportProbeObservation {
+    pub fn succeeded(
+        transport_id: TransportId,
+        provider_id: impl Into<String>,
+        metrics: ProbeMetrics,
+    ) -> Self {
+        Self {
+            transport_id,
+            provider_id: provider_id.into(),
+            state: ProbeState::Succeeded,
+            metrics: Some(metrics),
+            diagnostic: None,
+        }
+    }
+
+    pub fn failed(
+        transport_id: TransportId,
+        provider_id: impl Into<String>,
+        diagnostic: impl Into<String>,
+    ) -> Self {
+        Self {
+            transport_id,
+            provider_id: provider_id.into(),
+            state: ProbeState::Failed,
+            metrics: None,
+            diagnostic: Some(diagnostic.into()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransportRejectionReason {
     PolicyDisallowed,
     LocalUnavailable,
     PeerUnsupported,
     LimitExceeded,
+    RouteUnresolved,
+    SecurityUnsatisfied,
     ProbeMissing,
     ProbeFailed,
 }
@@ -421,6 +498,8 @@ pub struct TransportSelection {
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum TransportSelectionError {
+    #[error("invalid transport selection evidence: {diagnostic}")]
+    InvalidEvidence { diagnostic: String },
     #[error("forced transport is not available: {transport_id:?}")]
     ForcedTransportUnavailable {
         transport_id: TransportId,
@@ -437,8 +516,16 @@ pub fn select_transport(
     remote: &RemoteTransportSupport,
     policy: TransportPolicy,
     requested_max_frame_bytes: Option<u64>,
+    readiness: &[TransportCandidateReadiness],
 ) -> Result<TransportSelection, TransportSelectionError> {
-    let mut candidates = evaluate_candidates(providers, remote, policy, requested_max_frame_bytes);
+    validate_selection_evidence(providers, readiness, &[])?;
+    let mut candidates = evaluate_candidates(
+        providers,
+        remote,
+        policy,
+        requested_max_frame_bytes,
+        readiness,
+    );
     let eligible = eligible_indices(&candidates);
 
     if eligible.len() == 1 {
@@ -461,9 +548,17 @@ pub fn select_transport_with_probe(
     remote: &RemoteTransportSupport,
     policy: TransportPolicy,
     requested_max_frame_bytes: Option<u64>,
-    samples: &[ProbeSample],
+    readiness: &[TransportCandidateReadiness],
+    observations: &[TransportProbeObservation],
 ) -> Result<TransportSelection, TransportSelectionError> {
-    let mut candidates = evaluate_candidates(providers, remote, policy, requested_max_frame_bytes);
+    validate_selection_evidence(providers, readiness, observations)?;
+    let mut candidates = evaluate_candidates(
+        providers,
+        remote,
+        policy,
+        requested_max_frame_bytes,
+        readiness,
+    );
     let eligible = eligible_indices(&candidates);
 
     if eligible.len() == 1 {
@@ -472,19 +567,20 @@ pub fn select_transport_with_probe(
 
     for index in eligible {
         let provider = &candidates[index].descriptor;
-        let has_samples = matching_probe_samples(provider, samples).next().is_some();
-        let metrics = summarize_provider_probe(provider, samples);
+        let observation = matching_probe_observation(provider, observations);
         let candidate = &mut candidates[index].diagnostic;
-        match (has_samples, metrics) {
-            (_, Some(metrics)) => {
+        match observation {
+            Some(observation) if observation.state == ProbeState::Succeeded => {
                 candidate.probe_state = ProbeState::Succeeded;
-                candidate.probe = Some(metrics);
+                candidate.probe = observation.metrics.clone();
+                candidate.diagnostic = observation.diagnostic.clone();
             }
-            (true, None) => {
+            Some(observation) => {
                 candidate.probe_state = ProbeState::Failed;
                 candidate.rejection_reason = Some(TransportRejectionReason::ProbeFailed);
+                candidate.diagnostic = observation.diagnostic.clone();
             }
-            (false, None) => {
+            None => {
                 candidate.probe_state = ProbeState::Missing;
                 candidate.rejection_reason = Some(TransportRejectionReason::ProbeMissing);
             }
@@ -515,6 +611,127 @@ pub fn select_transport_with_probe(
         }
         None => selection_error(policy, ordered_diagnostics(candidates)),
     }
+}
+
+fn validate_provider_registration(
+    providers: &[TransportProviderDescriptor],
+    provider: &TransportProviderDescriptor,
+) -> Result<(), TransportProviderRegistryError> {
+    if providers
+        .iter()
+        .any(|registered| registered.transport_id == provider.transport_id)
+    {
+        return Err(TransportProviderRegistryError::DuplicateTransportId {
+            transport_id: provider.transport_id,
+        });
+    }
+    if providers
+        .iter()
+        .any(|registered| registered.metadata.id == provider.metadata.id)
+    {
+        return Err(TransportProviderRegistryError::DuplicateProviderId {
+            provider_id: provider.metadata.id.clone(),
+        });
+    }
+    Ok(())
+}
+
+fn invalid_evidence(diagnostic: impl Into<String>) -> TransportSelectionError {
+    TransportSelectionError::InvalidEvidence {
+        diagnostic: diagnostic.into(),
+    }
+}
+
+fn validate_selection_evidence(
+    providers: &[TransportProviderDescriptor],
+    readiness: &[TransportCandidateReadiness],
+    observations: &[TransportProbeObservation],
+) -> Result<(), TransportSelectionError> {
+    let mut transports = BTreeSet::new();
+    let mut provider_ids = BTreeSet::new();
+    let mut provider_keys = BTreeSet::new();
+    for provider in providers {
+        if !is_selectable_transport(provider.transport_id) {
+            return Err(invalid_evidence(format!(
+                "provider uses non-selectable transport {:?}",
+                provider.transport_id
+            )));
+        }
+        if !transports.insert(provider.transport_id) {
+            return Err(invalid_evidence(format!(
+                "duplicate provider for transport {:?}",
+                provider.transport_id
+            )));
+        }
+        if !provider_ids.insert(provider.metadata.id.as_str()) {
+            return Err(invalid_evidence(format!(
+                "duplicate provider id {}",
+                provider.metadata.id
+            )));
+        }
+        provider_keys.insert((provider.transport_id, provider.metadata.id.as_str()));
+    }
+
+    let mut readiness_keys = BTreeSet::new();
+    for record in readiness {
+        let key = (record.transport_id, record.provider_id.as_str());
+        if !provider_keys.contains(&key) {
+            return Err(invalid_evidence(format!(
+                "unmatched readiness for {:?}/{}",
+                record.transport_id, record.provider_id
+            )));
+        }
+        if !readiness_keys.insert(key) {
+            return Err(invalid_evidence(format!(
+                "duplicate readiness for {:?}/{}",
+                record.transport_id, record.provider_id
+            )));
+        }
+    }
+    if readiness_keys != provider_keys {
+        return Err(invalid_evidence(
+            "readiness must contain exactly one record for every provider",
+        ));
+    }
+
+    let mut observation_keys = BTreeSet::new();
+    for observation in observations {
+        let key = (observation.transport_id, observation.provider_id.as_str());
+        if !provider_keys.contains(&key) {
+            return Err(invalid_evidence(format!(
+                "unmatched probe observation for {:?}/{}",
+                observation.transport_id, observation.provider_id
+            )));
+        }
+        if !observation_keys.insert(key) {
+            return Err(invalid_evidence(format!(
+                "duplicate probe observation for {:?}/{}",
+                observation.transport_id, observation.provider_id
+            )));
+        }
+        match (observation.state, observation.metrics.is_some()) {
+            (ProbeState::Succeeded, true) | (ProbeState::Failed, false) => {}
+            (ProbeState::Succeeded, false) => {
+                return Err(invalid_evidence(format!(
+                    "successful probe observation requires metrics for {:?}/{}",
+                    observation.transport_id, observation.provider_id
+                )));
+            }
+            (ProbeState::Failed, true) => {
+                return Err(invalid_evidence(format!(
+                    "failed probe observation forbids metrics for {:?}/{}",
+                    observation.transport_id, observation.provider_id
+                )));
+            }
+            _ => {
+                return Err(invalid_evidence(format!(
+                    "probe observation state must be succeeded or failed for {:?}/{}",
+                    observation.transport_id, observation.provider_id
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn summarize_provider_probe(
@@ -620,11 +837,16 @@ fn evaluate_candidates(
     remote: &RemoteTransportSupport,
     policy: TransportPolicy,
     requested_max_frame_bytes: Option<u64>,
+    readiness: &[TransportCandidateReadiness],
 ) -> Vec<EvaluatedCandidate> {
     providers
         .iter()
         .filter(|provider| is_selectable_transport(provider.transport_id))
         .map(|provider| {
+            let readiness = readiness.iter().find(|readiness| {
+                readiness.transport_id == provider.transport_id
+                    && readiness.provider_id == provider.metadata.id
+            });
             let peer_supported = remote.supports(provider.transport_id);
             let within_limits = requested_max_frame_bytes
                 .map(|requested| requested <= provider.metadata.limits.max_frame_bytes)
@@ -637,6 +859,10 @@ fn evaluate_candidates(
                 Some(TransportRejectionReason::PeerUnsupported)
             } else if !within_limits {
                 Some(TransportRejectionReason::LimitExceeded)
+            } else if readiness.is_some_and(|readiness| !readiness.route_resolved) {
+                Some(TransportRejectionReason::RouteUnresolved)
+            } else if readiness.is_some_and(|readiness| !readiness.security_satisfied) {
+                Some(TransportRejectionReason::SecurityUnsatisfied)
             } else {
                 None
             };
@@ -653,7 +879,9 @@ fn evaluate_candidates(
                     probe: None,
                     selection_rank: None,
                     rejection_reason,
-                    diagnostic: provider.diagnostic.clone(),
+                    diagnostic: readiness
+                        .and_then(|readiness| readiness.diagnostic.clone())
+                        .or_else(|| provider.diagnostic.clone()),
                 },
             }
         })
@@ -784,6 +1012,16 @@ fn matching_probe_samples<'a>(
     })
 }
 
+fn matching_probe_observation<'a>(
+    provider: &TransportProviderDescriptor,
+    observations: &'a [TransportProbeObservation],
+) -> Option<&'a TransportProbeObservation> {
+    observations.iter().find(|observation| {
+        observation.transport_id == provider.transport_id
+            && observation.provider_id == provider.metadata.id
+    })
+}
+
 fn median(mut values: Vec<u64>) -> u64 {
     values.sort_unstable();
     let upper = values.len() / 2;
@@ -813,13 +1051,7 @@ fn selection_error<T>(
 }
 
 fn forced_transport(policy: TransportPolicy) -> Option<TransportId> {
-    match policy {
-        TransportPolicy::ForceQuic => Some(TransportId::Quic),
-        TransportPolicy::ForceTcp => Some(TransportId::Tcp),
-        TransportPolicy::ForceIpc => Some(TransportId::Ipc),
-        TransportPolicy::ForceWebSocket => Some(TransportId::WebSocket),
-        _ => None,
-    }
+    policy.forced_transport()
 }
 
 fn is_selectable_transport(transport_id: TransportId) -> bool {
@@ -833,6 +1065,50 @@ fn is_selectable_transport(transport_id: TransportId) -> bool {
 mod tests {
     use super::*;
     use std::fs;
+
+    fn ready(providers: &[TransportProviderDescriptor]) -> Vec<TransportCandidateReadiness> {
+        providers
+            .iter()
+            .map(|provider| {
+                TransportCandidateReadiness::ready(provider.transport_id, &provider.metadata.id)
+            })
+            .collect()
+    }
+
+    fn probe_observations(
+        providers: &[TransportProviderDescriptor],
+        samples: &[ProbeSample],
+    ) -> Vec<TransportProbeObservation> {
+        providers
+            .iter()
+            .filter_map(|provider| {
+                let has_samples = matching_probe_samples(provider, samples).next().is_some();
+                match (has_samples, summarize_provider_probe(provider, samples)) {
+                    (_, Some(metrics)) => Some(TransportProbeObservation::succeeded(
+                        provider.transport_id,
+                        &provider.metadata.id,
+                        metrics,
+                    )),
+                    (true, None) => Some(TransportProbeObservation::failed(
+                        provider.transport_id,
+                        &provider.metadata.id,
+                        "transport probe failed",
+                    )),
+                    (false, None) => None,
+                }
+            })
+            .collect()
+    }
+
+    fn registry(
+        providers: impl IntoIterator<Item = TransportProviderDescriptor>,
+    ) -> TransportProviderRegistry {
+        let mut registry = TransportProviderRegistry::new();
+        for provider in providers {
+            registry.register(provider).expect("provider is unique");
+        }
+        registry
+    }
 
     #[test]
     fn official_metadata_matches_transport_contract() {
@@ -924,13 +1200,12 @@ mod tests {
 
     #[test]
     fn registry_selects_single_eligible_provider_without_probe() {
-        let registry = TransportProviderRegistry::new()
-            .with_provider(available(TransportId::Tcp))
-            .with_provider(available(TransportId::Quic));
+        let registry = registry([available(TransportId::Tcp), available(TransportId::Quic)]);
         let remote = RemoteTransportSupport::new([TransportId::Tcp]);
+        let readiness = ready(registry.providers());
 
         let selection = registry
-            .select(&remote, TransportPolicy::Auto, None)
+            .select(&remote, TransportPolicy::Auto, None, &readiness)
             .expect("one eligible provider should be selected directly");
 
         assert_eq!(selection.selected.transport_id, TransportId::Tcp);
@@ -944,13 +1219,12 @@ mod tests {
 
     #[test]
     fn registry_requires_probe_for_multiple_eligible_providers() {
-        let registry = TransportProviderRegistry::new()
-            .with_provider(available(TransportId::Tcp))
-            .with_provider(available(TransportId::Quic));
+        let registry = registry([available(TransportId::Tcp), available(TransportId::Quic)]);
         let remote = RemoteTransportSupport::new([TransportId::Tcp, TransportId::Quic]);
+        let readiness = ready(registry.providers());
 
         let error = registry
-            .select(&remote, TransportPolicy::Auto, None)
+            .select(&remote, TransportPolicy::Auto, None, &readiness)
             .expect_err("multiple providers must not use a private static score");
         let TransportSelectionError::NoViableTransport { candidates } = error else {
             panic!("unexpected forced error")
@@ -960,6 +1234,221 @@ mod tests {
             candidate.probe_state == ProbeState::Missing
                 && candidate.rejection_reason == Some(TransportRejectionReason::ProbeMissing)
         }));
+    }
+
+    #[test]
+    fn readiness_rejections_preserve_frozen_precedence() {
+        let mut provider = available(TransportId::Tcp);
+        let provider_id = provider.metadata.id.clone();
+        let remote = RemoteTransportSupport::new([TransportId::Tcp]);
+        let unresolved = TransportCandidateReadiness {
+            transport_id: TransportId::Tcp,
+            provider_id: provider_id.clone(),
+            route_resolved: false,
+            security_satisfied: false,
+            diagnostic: Some("route could not be derived".to_owned()),
+        };
+
+        let error = select_transport(
+            &[provider.clone()],
+            &remote,
+            TransportPolicy::Auto,
+            None,
+            std::slice::from_ref(&unresolved),
+        )
+        .expect_err("an unresolved route is ineligible");
+        let TransportSelectionError::NoViableTransport { candidates } = error else {
+            panic!("unexpected forced error")
+        };
+        assert_eq!(
+            candidates[0].rejection_reason,
+            Some(TransportRejectionReason::RouteUnresolved)
+        );
+        assert_eq!(
+            candidates[0].diagnostic.as_deref(),
+            Some("route could not be derived")
+        );
+
+        let security = TransportCandidateReadiness::security_unsatisfied(
+            TransportId::Tcp,
+            &provider_id,
+            "route does not satisfy nnrps",
+        );
+        let error = select_transport(
+            &[provider.clone()],
+            &remote,
+            TransportPolicy::Auto,
+            None,
+            &[security],
+        )
+        .expect_err("an insecure route is ineligible");
+        let TransportSelectionError::NoViableTransport { candidates } = error else {
+            panic!("unexpected forced error")
+        };
+        assert_eq!(
+            candidates[0].rejection_reason,
+            Some(TransportRejectionReason::SecurityUnsatisfied)
+        );
+
+        provider.metadata.limits.max_frame_bytes = 1;
+        let error = select_transport(
+            &[provider.clone()],
+            &remote,
+            TransportPolicy::Auto,
+            Some(2),
+            std::slice::from_ref(&unresolved),
+        )
+        .expect_err("frame limits take precedence over route readiness");
+        let TransportSelectionError::NoViableTransport { candidates } = error else {
+            panic!("unexpected forced error")
+        };
+        assert_eq!(
+            candidates[0].rejection_reason,
+            Some(TransportRejectionReason::LimitExceeded)
+        );
+
+        provider.available = false;
+        let error = select_transport(
+            &[provider],
+            &RemoteTransportSupport::new([]),
+            TransportPolicy::ForceQuic,
+            Some(2),
+            &[unresolved],
+        )
+        .expect_err("policy takes precedence over every candidate failure");
+        let TransportSelectionError::ForcedTransportUnavailable { candidates, .. } = error else {
+            panic!("unexpected non-forced error")
+        };
+        assert_eq!(
+            candidates[0].rejection_reason,
+            Some(TransportRejectionReason::PolicyDisallowed)
+        );
+    }
+
+    #[test]
+    fn readiness_helpers_keep_provider_identity_and_diagnostic() {
+        let ready = TransportCandidateReadiness::ready(TransportId::Tcp, "provider.ready");
+        assert!(ready.route_resolved);
+        assert!(ready.security_satisfied);
+        assert_eq!(ready.diagnostic, None);
+
+        let unresolved = TransportCandidateReadiness::route_unresolved(
+            TransportId::Tcp,
+            "provider.route",
+            "missing locator",
+        );
+        assert!(!unresolved.route_resolved);
+        assert!(unresolved.security_satisfied);
+        assert_eq!(unresolved.diagnostic.as_deref(), Some("missing locator"));
+    }
+
+    #[test]
+    fn selection_rejects_incomplete_duplicate_and_unmatched_evidence() {
+        let providers = [available(TransportId::Tcp), available(TransportId::Quic)];
+        let remote = RemoteTransportSupport::new([TransportId::Tcp, TransportId::Quic]);
+        let tcp_ready =
+            TransportCandidateReadiness::ready(TransportId::Tcp, &providers[0].metadata.id);
+
+        assert!(matches!(
+            select_transport(
+                &providers,
+                &remote,
+                TransportPolicy::Auto,
+                None,
+                std::slice::from_ref(&tcp_ready),
+            ),
+            Err(TransportSelectionError::InvalidEvidence { .. })
+        ));
+
+        let duplicate = [tcp_ready.clone(), tcp_ready];
+        assert!(matches!(
+            select_transport(&providers, &remote, TransportPolicy::Auto, None, &duplicate,),
+            Err(TransportSelectionError::InvalidEvidence { .. })
+        ));
+
+        let readiness = ready(&providers);
+        let unmatched = [TransportProbeObservation::failed(
+            TransportId::Tcp,
+            "nnrp.transport.unknown",
+            "probe failed",
+        )];
+        assert!(matches!(
+            select_transport_with_probe(
+                &providers,
+                &remote,
+                TransportPolicy::Auto,
+                None,
+                &readiness,
+                &unmatched,
+            ),
+            Err(TransportSelectionError::InvalidEvidence { .. })
+        ));
+    }
+
+    #[test]
+    fn selection_rejects_invalid_probe_observation_shapes() {
+        let providers = [available(TransportId::Tcp)];
+        let remote = RemoteTransportSupport::new([TransportId::Tcp]);
+        let readiness = ready(&providers);
+        let metrics = ProbeMetrics {
+            sample_count: 1,
+            success_count: 1,
+            median_throughput_bytes_per_sec: 1,
+            median_rtt_us: 1,
+        };
+
+        for observation in [
+            TransportProbeObservation {
+                transport_id: TransportId::Tcp,
+                provider_id: providers[0].metadata.id.clone(),
+                state: ProbeState::Succeeded,
+                metrics: None,
+                diagnostic: None,
+            },
+            TransportProbeObservation {
+                transport_id: TransportId::Tcp,
+                provider_id: providers[0].metadata.id.clone(),
+                state: ProbeState::Failed,
+                metrics: Some(metrics.clone()),
+                diagnostic: None,
+            },
+            TransportProbeObservation {
+                transport_id: TransportId::Tcp,
+                provider_id: providers[0].metadata.id.clone(),
+                state: ProbeState::Missing,
+                metrics: None,
+                diagnostic: None,
+            },
+        ] {
+            assert!(matches!(
+                select_transport_with_probe(
+                    &providers,
+                    &remote,
+                    TransportPolicy::Auto,
+                    None,
+                    &readiness,
+                    &[observation],
+                ),
+                Err(TransportSelectionError::InvalidEvidence { .. })
+            ));
+        }
+
+        let duplicate = TransportProbeObservation::succeeded(
+            TransportId::Tcp,
+            &providers[0].metadata.id,
+            metrics,
+        );
+        assert!(matches!(
+            select_transport_with_probe(
+                &providers,
+                &remote,
+                TransportPolicy::Auto,
+                None,
+                &readiness,
+                &[duplicate.clone(), duplicate],
+            ),
+            Err(TransportSelectionError::InvalidEvidence { .. })
+        ));
     }
 
     #[test]
@@ -989,13 +1478,17 @@ mod tests {
             ProbeSample::success(TransportId::Quic, &quic.metadata.id, 100, 10, 5, 5),
         ];
         let remote = RemoteTransportSupport::new([TransportId::Tcp, TransportId::Quic]);
+        let providers = [tcp, quic];
+        let readiness = ready(&providers);
+        let observations = probe_observations(&providers, &samples);
 
         let selection = select_transport_with_probe(
-            &[tcp, quic],
+            &providers,
             &remote,
             TransportPolicy::PreferQuic,
             None,
-            &samples,
+            &readiness,
+            &observations,
         )
         .expect("both probes succeeded");
 
@@ -1021,72 +1514,60 @@ mod tests {
             ProbeSample::success(TransportId::Quic, &quic.metadata.id, 100, 10, 10, 10),
         ];
         let remote = RemoteTransportSupport::new([TransportId::Tcp, TransportId::Quic]);
+        let providers = [tcp.clone(), quic.clone()];
+        let readiness = ready(&providers);
+        let observations = probe_observations(&providers, &samples);
 
         let by_cost = select_transport_with_probe(
-            &[tcp.clone(), quic.clone()],
+            &providers,
             &remote,
             TransportPolicy::PreferTcp,
             None,
-            &samples,
+            &readiness,
+            &observations,
         )
         .expect("cost should be comparable");
         assert_eq!(by_cost.selected.transport_id, TransportId::Quic);
 
         tcp.metadata.cost.model_id = 8;
+        let providers = [tcp, quic];
+        let readiness = ready(&providers);
+        let observations = probe_observations(&providers, &samples);
         let by_preference = select_transport_with_probe(
-            &[tcp, quic],
+            &providers,
             &remote,
             TransportPolicy::PreferTcp,
             None,
-            &samples,
+            &readiness,
+            &observations,
         )
         .expect("different cost models defer to explicit preference");
         assert_eq!(by_preference.selected.transport_id, TransportId::Tcp);
     }
 
     #[test]
-    fn registry_probe_selection_applies_preference_rank_and_provider_identity() {
+    fn registry_rejects_duplicate_transport_and_provider_identity() {
         let mut first = available(TransportId::Tcp);
         first.metadata.id = "nnrp.transport.tcp.z".to_owned();
-        first.metadata.preference_rank = 9;
         let mut second = available(TransportId::Tcp);
         second.metadata.id = "nnrp.transport.tcp.a".to_owned();
-        second.metadata.preference_rank = 8;
-        let remote = RemoteTransportSupport::new([TransportId::Tcp]);
-        let samples = [
-            ProbeSample::success(TransportId::Tcp, &first.metadata.id, 10, 10, 10, 10),
-            ProbeSample::success(TransportId::Tcp, &second.metadata.id, 10, 10, 10, 10),
-        ];
-        let registry = TransportProviderRegistry::new()
-            .with_provider(first)
-            .with_provider(second.clone());
+        let mut registry = TransportProviderRegistry::new();
+        registry.register(first.clone()).expect("first provider");
+        assert_eq!(
+            registry.register(second),
+            Err(TransportProviderRegistryError::DuplicateTransportId {
+                transport_id: TransportId::Tcp,
+            })
+        );
 
-        let selection = registry
-            .select_with_probe(&remote, TransportPolicy::Auto, None, &samples)
-            .expect("preference rank should break the quality tie");
-        assert_eq!(selection.selected.metadata.id, second.metadata.id);
-        assert_eq!(selection.candidates[0].selection_rank, Some(0));
-        assert_eq!(selection.candidates[1].selection_rank, Some(1));
-
-        let mut first = selection.selected.clone();
-        first.metadata.id = "nnrp.transport.tcp.z".to_owned();
-        first.metadata.preference_rank = 8;
-        let mut second = selection.selected;
-        second.metadata.id = "nnrp.transport.tcp.a".to_owned();
-        let samples = [
-            ProbeSample::success(TransportId::Tcp, &first.metadata.id, 10, 10, 10, 10),
-            ProbeSample::success(TransportId::Tcp, &second.metadata.id, 10, 10, 10, 10),
-        ];
-
-        let selection = select_transport_with_probe(
-            &[first, second.clone()],
-            &remote,
-            TransportPolicy::Auto,
-            None,
-            &samples,
-        )
-        .expect("provider id should break the final tie");
-        assert_eq!(selection.selected.metadata.id, second.metadata.id);
+        let mut duplicate_id = available(TransportId::Quic);
+        duplicate_id.metadata.id = first.metadata.id;
+        assert_eq!(
+            registry.register(duplicate_id),
+            Err(TransportProviderRegistryError::DuplicateProviderId {
+                provider_id: "nnrp.transport.tcp.z".to_owned(),
+            })
+        );
     }
 
     #[test]
@@ -1100,13 +1581,17 @@ mod tests {
             true,
         )];
         let remote = RemoteTransportSupport::new([TransportId::Tcp, TransportId::Quic]);
+        let providers = [tcp, quic];
+        let readiness = ready(&providers);
+        let observations = probe_observations(&providers, &samples);
 
         let error = select_transport_with_probe(
-            &[tcp, quic],
+            &providers,
             &remote,
             TransportPolicy::Auto,
             Some(DEFAULT_PROVIDER_MAX_FRAME_BYTES + 1),
-            &samples,
+            &readiness,
+            &observations,
         )
         .expect_err("both providers exceed the requested frame size");
         let TransportSelectionError::NoViableTransport { candidates } = error else {
@@ -1124,12 +1609,16 @@ mod tests {
             50,
             true,
         )];
+        let providers = [tcp, quic];
+        let readiness = ready(&providers);
+        let observations = probe_observations(&providers, &samples);
         let error = select_transport_with_probe(
-            &[tcp, quic],
+            &providers,
             &remote,
             TransportPolicy::Auto,
             None,
-            &samples,
+            &readiness,
+            &observations,
         )
         .expect_err("failed and missing probes leave no candidate");
         let TransportSelectionError::NoViableTransport { candidates } = error else {
@@ -1145,13 +1634,12 @@ mod tests {
 
     #[test]
     fn force_policy_preserves_complete_candidate_diagnostics() {
-        let registry = TransportProviderRegistry::new()
-            .with_provider(available(TransportId::Tcp))
-            .with_provider(available(TransportId::Quic));
+        let registry = registry([available(TransportId::Tcp), available(TransportId::Quic)]);
         let remote = RemoteTransportSupport::new([TransportId::Tcp]);
+        let readiness = ready(registry.providers());
 
         let error = registry
-            .select(&remote, TransportPolicy::ForceQuic, None)
+            .select(&remote, TransportPolicy::ForceQuic, None, &readiness)
             .expect_err("forced quic is unavailable remotely");
         let TransportSelectionError::ForcedTransportUnavailable {
             transport_id,
