@@ -53,7 +53,6 @@ impl BoundServerProvider {
             let scheme = match transport_id {
                 TransportId::Tcp => "tcp",
                 TransportId::Quic => "quic",
-                TransportId::WebSocket => "ws",
                 _ => return None,
             };
             format!("{scheme}://{addr}").parse().ok()
@@ -702,6 +701,42 @@ mod tests {
 
         assert_eq!(
             server.bound_provider_endpoints().get(&TransportId::Tcp),
+            Some(&endpoint)
+        );
+    }
+
+    #[test]
+    fn websocket_listener_requires_an_explicit_path_bearing_endpoint() {
+        let inferred = crate::NnrpServer::from_listener(
+            ScriptedListener {
+                transport: RuntimeTransportKind::WebSocket,
+                fail_accept: false,
+                drops: Arc::new(AtomicUsize::new(0)),
+            },
+            NnrpServerConfig::default(),
+        )
+        .unwrap();
+        assert!(inferred.bound_provider_endpoints().is_empty());
+        assert_eq!(
+            inferred.local_addr().unwrap(),
+            "127.0.0.1:4500".parse().unwrap()
+        );
+
+        let endpoint: ProviderEndpoint = "wss://127.0.0.1:4500/nnrp".parse().unwrap();
+        let explicit = crate::NnrpServer::from_bound_listener(
+            endpoint.clone(),
+            ScriptedListener {
+                transport: RuntimeTransportKind::WebSocket,
+                fail_accept: false,
+                drops: Arc::new(AtomicUsize::new(0)),
+            },
+            NnrpServerConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            explicit
+                .bound_provider_endpoints()
+                .get(&TransportId::WebSocket),
             Some(&endpoint)
         );
     }

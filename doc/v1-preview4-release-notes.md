@@ -2,6 +2,19 @@
 
 Preview4 moves the Rust workspace beyond token-stream transport substitution and into runtime orchestration features that help SDKs model cancellation, priority, progress, partial results, cache references, route hints, trace context, result drop reasons, IPC, and WebSocket endpoints directly.
 
+## 1.0.0-preview.4.17
+
+Native client and server runtimes now orchestrate independently packaged transport providers as concrete routes. Route
+selection preserves the exact `(transport, provider_id)` identity, readiness diagnostics, measured probe evidence, cost,
+preference, and limits. A single eligible provider is selected directly; multiple eligible providers require comparable
+probe evidence. Server hosts bind and accept multiple provider listeners while retaining each route's security material
+and accept ticket for the lifetime required by the underlying carrier.
+
+The official TCP, QUIC, IPC, and WebSocket providers expose high-level connect and listen paths without moving carrier
+logic into the host package. FFI sessions can adopt those real carriers, including route-local TCP TLS and secure QUIC
+role handshakes. The wire Conformance planner now consumes host-route scenarios directly, preserves exact provider
+identity, and distinguishes uninstalled declared providers from routes the target does not claim.
+
 ## 1.0.0-preview.4.16
 
 The explicit `benchmark-ffi` build now opens and closes an isolated logical benchmark session instead of routing

@@ -3,7 +3,7 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc, Mutex, MutexGuard,
 };
 use std::task::Poll;
@@ -181,6 +181,7 @@ impl NnrpServerConfig {
 
 pub struct NnrpServer {
     listeners: AsyncMutex<Option<Vec<BoundServerProvider>>>,
+    next_accept_index: AtomicUsize,
     listener_set_closed: AtomicBool,
     bound_provider_endpoints: BTreeMap<nnrp_core::TransportId, ProviderEndpoint>,
     primary_local_addr: Option<std::net::SocketAddr>,
@@ -404,6 +405,7 @@ impl NnrpServer {
         let primary_local_addr = listeners.iter().find_map(BoundServerProvider::local_addr);
         Self {
             listeners: AsyncMutex::new(Some(listeners)),
+            next_accept_index: AtomicUsize::new(0),
             listener_set_closed: AtomicBool::new(false),
             bound_provider_endpoints,
             primary_local_addr,
@@ -438,8 +440,13 @@ impl NnrpServer {
                 self.listener_set_closed.store(true, Ordering::Release);
                 return Err(RuntimeError::ServerListenerSetClosed);
             };
-            match accept_stable(active).await {
-                Ok(accepted) => accepted,
+            let start_index = self.next_accept_index.load(Ordering::Relaxed);
+            match accept_stable(active, start_index).await {
+                Ok((accepted_index, transport_id, transport)) => {
+                    self.next_accept_index
+                        .store((accepted_index + 1) % active.len(), Ordering::Relaxed);
+                    (transport_id, transport)
+                }
                 Err(error) => {
                     listeners.take();
                     self.listener_set_closed.store(true, Ordering::Release);
@@ -592,7 +599,12 @@ impl NnrpServer {
 
 async fn accept_stable(
     listeners: &[BoundServerProvider],
-) -> Result<(nnrp_core::TransportId, BoxedFramedTransport), RuntimeError> {
+    start_index: usize,
+) -> Result<(usize, nnrp_core::TransportId, BoxedFramedTransport), RuntimeError> {
+    if listeners.is_empty() {
+        return Err(RuntimeError::ServerListenerSetClosed);
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     type AcceptFuture<'a> =
         Pin<Box<dyn Future<Output = Result<BoxedFramedTransport, RuntimeError>> + Send + 'a>>;
@@ -604,11 +616,14 @@ async fn accept_stable(
         .iter()
         .map(|listener| listener.listener().accept())
         .collect::<Vec<AcceptFuture<'_>>>();
+    let start_index = start_index % listeners.len();
     poll_fn(|context| {
-        for (index, accept) in accepts.iter_mut().enumerate() {
+        for offset in 0..accepts.len() {
+            let index = (start_index + offset) % accepts.len();
+            let accept = &mut accepts[index];
             if let Poll::Ready(result) = accept.as_mut().poll(context) {
                 return Poll::Ready(
-                    result.map(|transport| (listeners[index].transport_id(), transport)),
+                    result.map(|transport| (index, listeners[index].transport_id(), transport)),
                 );
             }
         }
@@ -2219,4 +2234,88 @@ fn require_body_len(
         return Err(RuntimeError::UnexpectedMessage(message));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod accept_tests {
+    use async_trait::async_trait;
+
+    use super::*;
+    use crate::RuntimeTransportKind;
+
+    struct ReadyListener(RuntimeTransportKind);
+
+    #[async_trait]
+    impl FramedListener for ReadyListener {
+        fn transport_kind(&self) -> RuntimeTransportKind {
+            self.0
+        }
+
+        fn local_addr(&self) -> Result<std::net::SocketAddr, RuntimeError> {
+            Ok("127.0.0.1:4500".parse().unwrap())
+        }
+
+        async fn accept(&self) -> Result<BoxedFramedTransport, RuntimeError> {
+            Ok(Box::new(ReadyTransport(self.0)))
+        }
+    }
+
+    struct ReadyTransport(RuntimeTransportKind);
+
+    #[async_trait]
+    impl crate::FramedTransport for ReadyTransport {
+        fn transport_kind(&self) -> RuntimeTransportKind {
+            self.0
+        }
+
+        async fn read_packet(&mut self) -> Result<RuntimePacket, RuntimeError> {
+            Err(RuntimeError::Internal(
+                "ready test transport has no packets",
+            ))
+        }
+
+        async fn write_packet(&mut self, _packet: &RuntimePacket) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+
+        async fn close(&mut self) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn stable_accept_rotates_the_first_polled_ready_listener() {
+        let listeners = [
+            RuntimeTransportKind::Tcp,
+            RuntimeTransportKind::Quic,
+            RuntimeTransportKind::WebSocket,
+        ]
+        .into_iter()
+        .map(|kind| BoundServerProvider::from_listener(Box::new(ReadyListener(kind))))
+        .collect::<Vec<_>>();
+
+        for (start_index, expected_transport) in [
+            nnrp_core::TransportId::Tcp,
+            nnrp_core::TransportId::Quic,
+            nnrp_core::TransportId::WebSocket,
+            nnrp_core::TransportId::Tcp,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (accepted_index, transport_id, transport) =
+                accept_stable(&listeners, start_index).await.unwrap();
+            assert_eq!(accepted_index, start_index % listeners.len());
+            assert_eq!(transport_id, expected_transport);
+            assert_eq!(
+                transport.transport_kind().transport_id(),
+                expected_transport
+            );
+        }
+
+        assert!(matches!(
+            accept_stable(&[], 0).await,
+            Err(RuntimeError::ServerListenerSetClosed)
+        ));
+    }
 }
