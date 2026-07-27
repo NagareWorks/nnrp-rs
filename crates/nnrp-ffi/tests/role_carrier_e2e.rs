@@ -28,8 +28,9 @@ use nnrp_ffi::{
     NnrpServerAcceptBeginRequest, NnrpServerAcceptClaimRequest, NnrpServerAcceptRequest,
     NnrpServerAcceptResult, NnrpServerAcceptWaitRequest, NnrpServerBindRequest,
     NnrpServerSendPartialResultRequest, NnrpServerSendResultRequest, NnrpSessionOpenRequest,
-    NnrpSubmitRequest, NnrpTransportFrameBatch, NnrpTransportOpenRequest,
-    NnrpTransportReadBatchRequest,
+    NnrpSubmitRequest, NnrpTransportClientSecurityConfigRequest, NnrpTransportFrameBatch,
+    NnrpTransportOpenRequest, NnrpTransportReadBatchRequest,
+    NnrpTransportServerSecurityConfigRequest,
 };
 
 unsafe extern "C" {
@@ -50,6 +51,15 @@ unsafe extern "C" {
         request: NnrpTransportReadBatchRequest,
         out_batch: *mut NnrpTransportFrameBatch,
     ) -> NnrpFfiStatus;
+    fn nnrp_transport_client_security_config_create(
+        request: NnrpTransportClientSecurityConfigRequest,
+        out_config: *mut NnrpHandle,
+    ) -> NnrpFfiStatus;
+    fn nnrp_transport_server_security_config_create(
+        request: NnrpTransportServerSecurityConfigRequest,
+        out_config: *mut NnrpHandle,
+    ) -> NnrpFfiStatus;
+    fn nnrp_transport_close(handle: NnrpHandle) -> NnrpFfiStatus;
 }
 
 fn view(bytes: &[u8]) -> NnrpBufferView {
@@ -60,11 +70,19 @@ fn view(bytes: &[u8]) -> NnrpBufferView {
 }
 
 fn open_request(transport_id: TransportId, endpoint: &str) -> NnrpTransportOpenRequest {
+    open_request_with_config(transport_id, endpoint, NnrpHandle::invalid())
+}
+
+fn open_request_with_config(
+    transport_id: TransportId,
+    endpoint: &str,
+    config: NnrpHandle,
+) -> NnrpTransportOpenRequest {
     NnrpTransportOpenRequest {
         transport_id: transport_id as u32,
         flags: 0,
         endpoint: view(endpoint.as_bytes()),
-        config: NnrpHandle::invalid(),
+        config,
         max_packet_bytes: 0,
         timeout_ms: 5_000,
         reserved0: 0,
@@ -751,12 +769,24 @@ unsafe fn submit_role_operation(
     (client_operation, server_event.operation)
 }
 
-unsafe fn assert_role_handshake(transport_id: TransportId, listen_endpoint: &str, id_base: u64) {
+unsafe fn assert_role_handshake(
+    transport_id: TransportId,
+    listen_endpoint: &str,
+    id_base: u64,
+    client_config: NnrpHandle,
+    server_config: NnrpHandle,
+) {
     let mut listener = NnrpHandle::invalid();
     assert_eq!(
-        nnrp_transport_listen(open_request(transport_id, listen_endpoint), &mut listener,),
+        nnrp_transport_listen(
+            open_request_with_config(transport_id, listen_endpoint, server_config),
+            &mut listener,
+        ),
         NnrpFfiStatus::ok()
     );
+    if server_config != NnrpHandle::invalid() {
+        assert_eq!(nnrp_transport_close(server_config), NnrpFfiStatus::ok());
+    }
 
     let mut endpoint_owner = NnrpHandle::invalid();
     let mut endpoint_view = NnrpBufferView::empty();
@@ -844,11 +874,14 @@ unsafe fn assert_role_handshake(transport_id: TransportId, listen_endpoint: &str
     let mut transport_connection = NnrpHandle::invalid();
     assert_eq!(
         nnrp_transport_connect(
-            open_request(transport_id, &endpoint),
+            open_request_with_config(transport_id, &endpoint, client_config),
             &mut transport_connection,
         ),
         NnrpFfiStatus::ok()
     );
+    if client_config != NnrpHandle::invalid() {
+        assert_eq!(nnrp_transport_close(client_config), NnrpFfiStatus::ok());
+    }
     let mut foreign_connection = transport_connection;
     foreign_connection.flags ^= u32::MAX;
     let mut rejected_client = NnrpHandle::invalid();
@@ -1538,7 +1571,57 @@ unsafe fn assert_role_handshake(transport_id: TransportId, listen_endpoint: &str
 #[test]
 fn tcp_role_runtime_adopts_carriers_and_completes_real_handshake() {
     unsafe {
-        assert_role_handshake(TransportId::Tcp, "tcp://127.0.0.1:0", 700_000);
+        assert_role_handshake(
+            TransportId::Tcp,
+            "tcp://127.0.0.1:0",
+            700_000,
+            NnrpHandle::invalid(),
+            NnrpHandle::invalid(),
+        );
+    }
+}
+
+#[cfg(feature = "transport-quic")]
+#[test]
+fn ffi_quic_transport_carries_role_runtime_over_secure_session() {
+    unsafe {
+        let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        let certificate_der = certified.cert.der().to_vec();
+        let private_key_pkcs8_der = certified.signing_key.serialize_der();
+        let server_name = b"localhost";
+        let mut client_config = NnrpHandle::invalid();
+        let mut server_config = NnrpHandle::invalid();
+        assert_eq!(
+            nnrp_transport_client_security_config_create(
+                NnrpTransportClientSecurityConfigRequest {
+                    transport_id: TransportId::Quic as u32,
+                    flags: 0,
+                    server_name: view(server_name),
+                    trusted_certificate_der: view(&certificate_der),
+                },
+                &mut client_config,
+            ),
+            NnrpFfiStatus::ok()
+        );
+        assert_eq!(
+            nnrp_transport_server_security_config_create(
+                NnrpTransportServerSecurityConfigRequest {
+                    transport_id: TransportId::Quic as u32,
+                    flags: 0,
+                    certificate_der: view(&certificate_der),
+                    private_key_pkcs8_der: view(&private_key_pkcs8_der),
+                },
+                &mut server_config,
+            ),
+            NnrpFfiStatus::ok()
+        );
+        assert_role_handshake(
+            TransportId::Quic,
+            "quic://127.0.0.1:0",
+            705_000,
+            client_config,
+            server_config,
+        );
     }
 }
 
@@ -1782,7 +1865,13 @@ fn role_runtime_rejects_invalid_arguments_and_cross_role_handles() {
 #[test]
 fn websocket_role_runtime_adopts_carriers_and_completes_real_handshake() {
     unsafe {
-        assert_role_handshake(TransportId::WebSocket, "ws://127.0.0.1:0/nnrp", 710_000);
+        assert_role_handshake(
+            TransportId::WebSocket,
+            "ws://127.0.0.1:0/nnrp",
+            710_000,
+            NnrpHandle::invalid(),
+            NnrpHandle::invalid(),
+        );
     }
 }
 
@@ -1791,7 +1880,13 @@ fn websocket_role_runtime_adopts_carriers_and_completes_real_handshake() {
 fn named_pipe_role_runtime_adopts_carriers_and_completes_real_handshake() {
     let endpoint = format!("npipe://nnrp-role-{}", std::process::id());
     unsafe {
-        assert_role_handshake(TransportId::Ipc, &endpoint, 720_000);
+        assert_role_handshake(
+            TransportId::Ipc,
+            &endpoint,
+            720_000,
+            NnrpHandle::invalid(),
+            NnrpHandle::invalid(),
+        );
     }
 }
 
@@ -1801,7 +1896,13 @@ fn unix_ipc_role_runtime_adopts_carriers_and_completes_real_handshake() {
     let path = std::env::temp_dir().join(format!("nnrp-role-{}.sock", std::process::id()));
     let endpoint = format!("unix://{}", path.display());
     unsafe {
-        assert_role_handshake(TransportId::Ipc, &endpoint, 720_000);
+        assert_role_handshake(
+            TransportId::Ipc,
+            &endpoint,
+            720_000,
+            NnrpHandle::invalid(),
+            NnrpHandle::invalid(),
+        );
     }
     let _ = std::fs::remove_file(path);
 }
