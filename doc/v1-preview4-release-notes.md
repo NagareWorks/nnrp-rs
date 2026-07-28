@@ -2,6 +2,21 @@
 
 Preview4 moves the Rust workspace beyond token-stream transport substitution and into runtime orchestration features that help SDKs model cancellation, priority, progress, partial results, cache references, route hints, trace context, result drop reasons, IPC, and WebSocket endpoints directly.
 
+## 1.0.0-preview.4.19
+
+Native transport artifacts now expose an explicit runtime shutdown operation for dynamically loaded SDK hosts. After
+the host quiesces concurrent FFI calls, the operation invalidates every role and transport handle owned by that library
+instance, cancels pending work, and stops the worker runtime before unload. A later open operation creates a fresh
+runtime while every pre-shutdown handle remains invalid. Packet and role operations retain the existing coarse FFI
+boundary; no per-frame lifecycle crossing was added.
+
+The required shutdown export advances the native FFI ABI to `4.1.1`. Release and downstream tests use the production
+`repr(C)` request and event layouts, assert target-specific sizes and offsets, and exercise multiple events returned by
+one poll so an SDK cannot accept a binding whose array stride differs from the Rust ABI.
+
+Artifact packaging and dynamic-library smoke tests require the shutdown export, exercise shutdown and restart, and
+continue to validate transport-scoped TCP, QUIC, IPC, and WebSocket artifacts independently.
+
 ## 1.0.0-preview.4.18
 
 This coordinated correction closes the frozen Preview4 host-route contract across Rust, native FFI, WASM, wire

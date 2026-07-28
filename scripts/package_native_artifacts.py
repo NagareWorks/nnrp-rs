@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PROTOCOL_VERSION = "NNRP/1"
-FFI_ABI_VERSION = "4.1.0"
+FFI_ABI_VERSION = "4.1.1"
 EXPECTED_EXPORTS = [
     "nnrp_current_protocol_version",
     "nnrp_runtime_capabilities",
@@ -24,6 +24,7 @@ EXPECTED_EXPORTS = [
     "nnrp_transport_write_batch",
     "nnrp_transport_read_batch",
     "nnrp_transport_close",
+    "nnrp_transport_runtime_shutdown",
     "nnrp_client_connect",
     "nnrp_session_open",
     "nnrp_client_open_session",
@@ -198,7 +199,7 @@ def list_exports(library: Path, os_name: str, library_kind: str) -> set[str]:
         if dumpbin is None:
             raise SystemExit("dumpbin is required to verify Windows DLL exports")
         output = subprocess.check_output([str(dumpbin), "/nologo", "/exports", str(library)], text=True)
-        return {line.split()[-1] for line in output.splitlines() if "nnrp_" in line}
+        return parse_dumpbin_exports(output)
 
     if os_name == "macos":
         output = subprocess.check_output(["nm", "-gU", str(library)], text=True)
@@ -215,6 +216,16 @@ def parse_nm_exports(output: str) -> set[str]:
             symbol = symbol[1:]
         if symbol.startswith("nnrp_"):
             exports.add(symbol)
+    return exports
+
+
+def parse_dumpbin_exports(output: str) -> set[str]:
+    exports = set()
+    for line in output.splitlines():
+        for token in line.split():
+            if token.startswith("nnrp_"):
+                exports.add(token)
+                break
     return exports
 
 
@@ -392,7 +403,6 @@ def main() -> None:
     parser.add_argument("--out", type=Path, default=ROOT / "artifacts" / "native")
     parser.add_argument("--debug", action="store_true", help="Use the debug target profile.")
     parser.add_argument("--skip-build", action="store_true")
-    parser.add_argument("--skip-symbol-check", action="store_true")
     parser.add_argument(
         "--transport-scope",
         action="append",
@@ -419,8 +429,7 @@ def main() -> None:
         if not args.skip_build:
             build_library(release, args.target, transport_scope)
         library = locate_library(os_name, library_kind, release, args.target)
-        if not args.skip_symbol_check:
-            verify_exports(library, os_name, library_kind)
+        verify_exports(library, os_name, library_kind)
         if args.target is None and library_kind == "dynamic":
             smoke_test_transport(library, transport_scope)
         package_dir = package_artifact(

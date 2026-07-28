@@ -178,7 +178,6 @@ jobs:
           --target ${{ matrix.target }}
           --package-name ${{ matrix.name }}
           --out artifacts/native
-          --skip-symbol-check
           --transport-scope tcp
           --transport-scope quic
           --transport-scope ipc
