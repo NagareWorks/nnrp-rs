@@ -540,7 +540,17 @@ NnrpFfiStatus nnrp_transport_accept(NnrpTransportAcceptRequest request, NnrpHand
 NnrpFfiStatus nnrp_transport_listener_endpoint(NnrpHandle listener, NnrpHandle *out_buffer, NnrpBufferView *out_endpoint);
 NnrpFfiStatus nnrp_transport_write_batch(NnrpTransportWriteBatchRequest request);
 NnrpFfiStatus nnrp_transport_read_batch(NnrpTransportReadBatchRequest request, NnrpTransportFrameBatch *out_batch);
+/*
+ * Repeating close succeeds until the released slot is reused. Once a new generation occupies the
+ * slot, the old handle is stale and close returns INVALID_HANDLE.
+ */
 NnrpFfiStatus nnrp_transport_close(NnrpHandle handle);
+/*
+ * Quiesces this dynamic-library instance: invalidates all role and transport handles and stops
+ * its worker runtime. The host must stop concurrent FFI calls first. Later open operations create
+ * a fresh runtime; handles issued before shutdown remain invalid.
+ */
+NnrpFfiStatus nnrp_transport_runtime_shutdown(void);
 NnrpFfiStatus nnrp_object_metadata_buffer_acquire_copy(NnrpBufferView source, NnrpHandle *out_buffer, NnrpBufferView *out_view);
 NnrpFfiStatus nnrp_object_metadata_buffer_view(NnrpHandle buffer, NnrpBufferView *out_view);
 NnrpFfiStatus nnrp_object_metadata_buffer_release(NnrpHandle buffer);

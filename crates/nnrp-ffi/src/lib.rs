@@ -741,6 +741,18 @@ impl NnrpQueuedEvent {
 }
 
 impl NnrpFfiHandleStore {
+    fn invalidate_all(&mut self) {
+        #[cfg(not(test))]
+        for entry in self.entries.values() {
+            if let NnrpFfiResource::ServerAccept { runtime, .. } = &entry.resource {
+                runtime.release();
+            }
+        }
+        self.entries.clear();
+        #[cfg(any(test, feature = "benchmark-ffi"))]
+        self.events.clear();
+    }
+
     fn insert(
         &mut self,
         handle: NnrpHandle,
@@ -1006,6 +1018,10 @@ fn handle_store() -> MutexGuard<'static, NnrpFfiHandleStore> {
         .get_or_init(|| Mutex::new(NnrpFfiHandleStore::default()))
         .lock()
         .expect("FFI handle store lock should not be poisoned")
+}
+
+pub(crate) fn invalidate_all_ffi_handles() {
+    handle_store().invalidate_all();
 }
 
 #[repr(C)]
@@ -14110,6 +14126,40 @@ mod tests {
                 NnrpHandleKind::Session as u32
             ))
         );
+    }
+
+    #[test]
+    fn ffi_handle_store_shutdown_invalidates_resources_and_queued_events() {
+        let connection = NnrpHandle::new(NnrpHandleKind::Connection, 71, 1);
+        let mut store = NnrpFfiHandleStore::default();
+        store
+            .insert(
+                connection,
+                NnrpFfiResource::Connection {
+                    transport_id: test_transport_id(),
+                    role: NnrpFfiConnectionRole::Client,
+                },
+            )
+            .unwrap();
+        store.push_event(NnrpQueuedEvent::plain(
+            NnrpEventKind::ConnectionOpened,
+            connection,
+            NnrpHandle::invalid(),
+            NnrpHandle::invalid(),
+            0,
+        ));
+
+        store.invalidate_all();
+
+        assert!(store.entries.is_empty());
+        assert!(store.events.is_empty());
+        assert!(matches!(
+            store.get(connection, NnrpHandleKind::Connection),
+            Err(status)
+                if status == NnrpFfiStatus::invalid_handle(
+                    NnrpHandleKind::Connection as u32
+                )
+        ));
     }
 
     #[test]

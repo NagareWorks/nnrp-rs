@@ -24,6 +24,7 @@ EXPECTED_EXPORTS = [
     "nnrp_transport_write_batch",
     "nnrp_transport_read_batch",
     "nnrp_transport_close",
+    "nnrp_transport_runtime_shutdown",
     "nnrp_client_connect",
     "nnrp_session_open",
     "nnrp_client_open_session",

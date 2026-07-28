@@ -2,7 +2,8 @@ use crate::{
     transport::{
         transport_accept, transport_client_security_config_create, transport_close,
         transport_connect, transport_listen, transport_listener_endpoint, transport_probe,
-        transport_read_batch, transport_server_security_config_create, transport_write_batch,
+        transport_read_batch, transport_runtime_shutdown, transport_server_security_config_create,
+        transport_write_batch,
     },
     NnrpBufferView, NnrpFfiStatus, NnrpHandle, NnrpTransportAcceptRequest,
     NnrpTransportClientSecurityConfigRequest, NnrpTransportFrameBatch, NnrpTransportOpenRequest,
@@ -85,4 +86,12 @@ pub unsafe extern "C" fn nnrp_transport_probe(
 #[no_mangle]
 pub unsafe extern "C" fn nnrp_transport_close(handle: NnrpHandle) -> NnrpFfiStatus {
     transport_close(handle)
+}
+
+#[no_mangle]
+/// Stops the dynamic-library transport runtime and invalidates every handle issued by this
+/// library instance. The host must quiesce concurrent FFI calls before invoking this function.
+pub extern "C" fn nnrp_transport_runtime_shutdown() -> NnrpFfiStatus {
+    transport_runtime_shutdown();
+    NnrpFfiStatus::ok()
 }

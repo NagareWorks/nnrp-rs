@@ -13,6 +13,7 @@ from pathlib import Path
 
 
 TRANSPORT_IDS = {"quic": 1, "tcp": 2, "ipc": 3, "websocket": 4}
+STATUS_INVALID_HANDLE = 2
 PROFILE_TOKEN = 0x0002
 TOKEN_DELTA_SCHEMA_ID = 0x0000_1001
 TOKEN_DELTA_SCHEMA_VERSION = 3
@@ -279,6 +280,7 @@ def configure_library(library: ctypes.CDLL) -> None:
             NnrpFfiStatus,
         ),
         "nnrp_transport_close": ([NnrpHandle], NnrpFfiStatus),
+        "nnrp_transport_runtime_shutdown": ([], NnrpFfiStatus),
         "nnrp_buffer_release": ([NnrpHandle], NnrpFfiStatus),
         "nnrp_client_connect": (
             [NnrpClientConnectRequest, ctypes.POINTER(NnrpHandle)],
@@ -828,6 +830,80 @@ def run_smoke_test(library_path: Path, scope: str) -> None:
             ipc_path.unlink(missing_ok=True)
 
 
+def run_shutdown_smoke_test(library_path: Path, scope: str) -> None:
+    library = ctypes.CDLL(str(library_path.resolve()))
+    configure_library(library)
+    transport_id = TRANSPORT_IDS[scope]
+    endpoint, ipc_path = endpoint_for(scope)
+    try:
+        client_config = invalid_handle()
+        server_config = invalid_handle()
+        if scope == "quic":
+            client_config, server_config = security_configs(library, transport_id)
+        endpoint_owner, request = open_request(transport_id, endpoint, server_config)
+        listener = invalid_handle()
+        require_ok(
+            library.nnrp_transport_listen(request, ctypes.byref(listener)),
+            "pre-shutdown transport listen",
+        )
+        require_ok(library.nnrp_transport_runtime_shutdown(), "transport runtime shutdown")
+        stale_status = library.nnrp_transport_close(listener)
+        if stale_status.status_code != STATUS_INVALID_HANDLE:
+            raise RuntimeError(
+                "transport runtime shutdown retained a live handle: "
+                f"status={stale_status.status_code}"
+            )
+        if scope == "quic":
+            for config, name in (
+                (client_config, "client security config"),
+                (server_config, "server security config"),
+            ):
+                stale_status = library.nnrp_transport_close(config)
+                if stale_status.status_code != STATUS_INVALID_HANDLE:
+                    raise RuntimeError(
+                        f"transport runtime shutdown retained a live {name}: "
+                        f"status={stale_status.status_code}"
+                    )
+
+        restarted_client_config = invalid_handle()
+        restarted_server_config = invalid_handle()
+        if scope == "quic":
+            restarted_client_config, restarted_server_config = security_configs(
+                library, transport_id
+            )
+        restarted_owner, restarted_request = open_request(
+            transport_id, endpoint, restarted_server_config
+        )
+        restarted_listener = invalid_handle()
+        require_ok(
+            library.nnrp_transport_listen(
+                restarted_request, ctypes.byref(restarted_listener)
+            ),
+            "transport runtime restart listen",
+        )
+        require_ok(
+            library.nnrp_transport_close(restarted_listener),
+            "transport runtime restart close",
+        )
+        if scope == "quic":
+            require_ok(
+                library.nnrp_transport_close(restarted_client_config),
+                "close restarted client security config",
+            )
+            require_ok(
+                library.nnrp_transport_close(restarted_server_config),
+                "close restarted server security config",
+            )
+        require_ok(
+            library.nnrp_transport_runtime_shutdown(),
+            "restarted transport runtime shutdown",
+        )
+        _ = (endpoint_owner, restarted_owner)
+    finally:
+        if ipc_path is not None:
+            ipc_path.unlink(missing_ok=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
@@ -838,6 +914,7 @@ def main() -> None:
     parser.add_argument("--transport-scope", choices=sorted(TRANSPORT_IDS), required=True)
     args = parser.parse_args()
     run_smoke_test(args.library, args.transport_scope)
+    run_shutdown_smoke_test(args.library, args.transport_scope)
     print(f"{args.transport_scope}: dynamic-library packet and role E2E passed")
 
 
