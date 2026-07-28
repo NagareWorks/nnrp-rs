@@ -691,6 +691,11 @@ fn validate_selection_evidence(
 
     let mut readiness_keys = BTreeSet::new();
     for record in readiness {
+        if record.provider_id.is_empty() || !record.provider_id.is_ascii() {
+            return Err(invalid_evidence(
+                "candidate readiness provider id must be a non-empty ASCII string",
+            ));
+        }
         let key = (record.transport_id, record.provider_id.as_str());
         if !provider_keys.contains(&key) {
             return Err(invalid_evidence(format!(
@@ -713,6 +718,11 @@ fn validate_selection_evidence(
 
     let mut observation_keys = BTreeSet::new();
     for observation in observations {
+        if observation.provider_id.is_empty() || !observation.provider_id.is_ascii() {
+            return Err(invalid_evidence(
+                "probe observation provider id must be a non-empty ASCII string",
+            ));
+        }
         let key = (observation.transport_id, observation.provider_id.as_str());
         if !provider_keys.contains(&key) {
             return Err(invalid_evidence(format!(
@@ -1469,6 +1479,17 @@ mod tests {
             Err(TransportSelectionError::InvalidEvidence { .. })
         ));
 
+        for provider_id in ["", "nnrp.transport.\u{8f93}\u{5165}"] {
+            let invalid = [TransportCandidateReadiness::ready(
+                TransportId::Tcp,
+                provider_id,
+            )];
+            assert!(matches!(
+                select_transport(&providers, &remote, TransportPolicy::Auto, None, &invalid,),
+                Err(TransportSelectionError::InvalidEvidence { .. })
+            ));
+        }
+
         let readiness = ready(&providers);
         let unmatched = [TransportProbeObservation::failed(
             TransportId::Tcp,
@@ -1486,6 +1507,25 @@ mod tests {
             ),
             Err(TransportSelectionError::InvalidEvidence { .. })
         ));
+
+        for provider_id in ["", "nnrp.transport.\u{8f93}\u{5165}"] {
+            let invalid = [TransportProbeObservation::failed(
+                TransportId::Tcp,
+                provider_id,
+                "probe failed",
+            )];
+            assert!(matches!(
+                select_transport_with_probe(
+                    &providers,
+                    &remote,
+                    TransportPolicy::Auto,
+                    None,
+                    &readiness,
+                    &invalid,
+                ),
+                Err(TransportSelectionError::InvalidEvidence { .. })
+            ));
+        }
     }
 
     #[test]
