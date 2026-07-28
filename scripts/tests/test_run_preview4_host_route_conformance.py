@@ -38,11 +38,6 @@ class HostRouteConformanceScriptTests(unittest.TestCase):
             root = Path(temporary)
             case_path = root / MODULE.HOST_ROUTE_CASES
             case_path.parent.mkdir(parents=True)
-            public_ids = {
-                "wire.host-route.client.multi-route",
-                MODULE.UNINSTALLED_CASE,
-                MODULE.BROWSER_CASE,
-            }
             scenarios = [
                 {"id": "wire.host-route.client.multi-route"},
                 {"id": MODULE.UNINSTALLED_CASE},
