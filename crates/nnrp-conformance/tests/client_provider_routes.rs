@@ -11,6 +11,7 @@ use nnrp_runtime::{
     ServerProviderRoutes, ServerTransportSecurity,
 };
 use nnrp_transport_ipc::{IpcEndpoint, IpcFramedListener, IpcProvider};
+use nnrp_transport_provider::{TransportRejectionReason, TransportSelectionError};
 use nnrp_transport_quic::{QuicProvider, QuicServerEndpointConfig};
 use nnrp_transport_tcp::TcpProvider;
 use nnrp_transport_websocket::WebSocketProvider;
@@ -235,6 +236,93 @@ async fn logical_server_uses_route_local_security_for_tcp_quic_and_websocket() {
         assert_eq!(accepted.active_transport_id(), case.transport_id);
         assert_eq!(accepted.session_id(), opened.session_id());
     }
+}
+
+#[test]
+fn route_sets_keep_one_role_specific_route_per_transport() {
+    let mut client_routes = ClientProviderRoutes::new();
+    assert!(client_routes
+        .insert(
+            TransportId::Tcp,
+            ClientProviderRoute::at("tcp://127.0.0.1:4400".parse().unwrap()),
+        )
+        .is_none());
+    assert!(client_routes
+        .insert(
+            TransportId::Tcp,
+            ClientProviderRoute::at("tcp://127.0.0.1:4401".parse().unwrap()),
+        )
+        .is_some());
+    assert_eq!(client_routes.len(), 1);
+    assert_ne!(
+        std::any::TypeId::of::<ClientTransportSecurity>(),
+        std::any::TypeId::of::<ServerTransportSecurity>()
+    );
+}
+
+#[tokio::test]
+async fn client_route_validation_preserves_frozen_rejection_precedence() {
+    let error = NnrpClient::connect(
+        NnrpClientOptions {
+            endpoint: "nnrps://localhost:443/session/default".parse().unwrap(),
+            provider_routes: ClientProviderRoutes::from([(
+                TransportId::Tcp,
+                ClientProviderRoute {
+                    provider_endpoint: Some("ws://localhost/nnrp".parse().unwrap()),
+                    security: Some(ClientTransportSecurity::new("", Vec::<u8>::new())),
+                },
+            )]),
+            transport_policy: TransportPolicy::Auto,
+            session: NnrpClientConfig::default(),
+        },
+        [Arc::new(TcpProvider) as Arc<dyn NnrpClientProvider>],
+    )
+    .await
+    .unwrap_err();
+
+    let RuntimeError::TransportSelection(TransportSelectionError::NoViableTransport { candidates }) =
+        error
+    else {
+        panic!("unexpected route validation error: {error}");
+    };
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(
+        candidates[0].rejection_reason,
+        Some(TransportRejectionReason::RouteUnresolved)
+    );
+}
+
+#[tokio::test]
+async fn server_route_validation_preserves_frozen_rejection_precedence() {
+    let error = NnrpServer::listen(
+        NnrpServerOptions {
+            endpoint: "nnrps://localhost:443/session/default".parse().unwrap(),
+            provider_routes: ServerProviderRoutes::from([(
+                TransportId::Tcp,
+                ServerProviderRoute {
+                    provider_endpoint: Some("ws://localhost/nnrp".parse().unwrap()),
+                    security: Some(ServerTransportSecurity::new(
+                        Vec::<u8>::new(),
+                        Vec::<u8>::new(),
+                    )),
+                },
+            )]),
+            transport_policy: TransportPolicy::Auto,
+            session: NnrpServerConfig::default(),
+        },
+        [Arc::new(TcpProvider) as Arc<dyn NnrpServerProvider>],
+    )
+    .await
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        RuntimeError::ServerRouteRejected {
+            transport_id: TransportId::Tcp,
+            reason: TransportRejectionReason::RouteUnresolved,
+            ..
+        }
+    ));
 }
 
 async fn open_forced_session(
