@@ -191,7 +191,16 @@ def locate_library(os_name: str, library_kind: str, release: bool, target: str |
 
 def list_exports(library: Path, os_name: str, library_kind: str) -> set[str]:
     if library_kind == "static":
-        output = subprocess.check_output(["nm", "-g", str(library)], text=True)
+        llvm_nm = find_rust_llvm_tool("llvm-nm")
+        if llvm_nm is None:
+            raise SystemExit(
+                "Rust llvm-nm is required to verify static native library exports; "
+                "install the llvm-tools-preview rustup component"
+            )
+        output = subprocess.check_output(
+            [str(llvm_nm), "--extern-only", "--defined-only", str(library)],
+            text=True,
+        )
         return parse_nm_exports(output)
 
     if os_name == "windows":
@@ -227,6 +236,27 @@ def parse_dumpbin_exports(output: str) -> set[str]:
                 exports.add(token)
                 break
     return exports
+
+
+def find_rust_llvm_tool(tool_name: str) -> Path | None:
+    sysroot = Path(
+        subprocess.check_output(["rustc", "--print", "sysroot"], text=True).strip()
+    )
+    version = subprocess.check_output(["rustc", "-vV"], text=True)
+    host = next(
+        (
+            line.removeprefix("host: ").strip()
+            for line in version.splitlines()
+            if line.startswith("host: ")
+        ),
+        "",
+    )
+    if not host:
+        return None
+
+    executable = f"{tool_name}.exe" if os.name == "nt" else tool_name
+    bundled = sysroot / "lib" / "rustlib" / host / "bin" / executable
+    return bundled if bundled.is_file() else None
 
 
 def find_dumpbin() -> Path | None:

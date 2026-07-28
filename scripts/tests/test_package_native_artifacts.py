@@ -1,4 +1,6 @@
 import importlib.util
+import os
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -18,6 +20,59 @@ def load_package_script():
 
 
 class NativeExportVerificationTests(unittest.TestCase):
+    def test_static_exports_use_rust_llvm_nm(self):
+        package = load_package_script()
+        library = Path("libnnrp_ffi.a")
+        llvm_nm = Path("llvm-nm")
+        output = "00000000 T _nnrp_ffi_abi_version\n"
+
+        with mock.patch.object(package, "find_rust_llvm_tool", return_value=llvm_nm):
+            with mock.patch.object(
+                package.subprocess,
+                "check_output",
+                return_value=output,
+            ) as check_output:
+                self.assertEqual(
+                    package.list_exports(library, "ios", "static"),
+                    {"nnrp_ffi_abi_version"},
+                )
+
+        check_output.assert_called_once_with(
+            [
+                str(llvm_nm),
+                "--extern-only",
+                "--defined-only",
+                str(library),
+            ],
+            text=True,
+        )
+
+    def test_static_exports_require_rust_llvm_nm(self):
+        package = load_package_script()
+        with mock.patch.object(package, "find_rust_llvm_tool", return_value=None):
+            with self.assertRaisesRegex(SystemExit, "llvm-tools-preview"):
+                package.list_exports(Path("libnnrp_ffi.a"), "ios", "static")
+
+    def test_find_rust_llvm_tool_uses_active_toolchain_sysroot(self):
+        package = load_package_script()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sysroot = Path(temp_dir)
+            executable = "llvm-nm.exe" if os.name == "nt" else "llvm-nm"
+            bundled = sysroot / "lib" / "rustlib" / "test-host" / "bin" / executable
+            bundled.parent.mkdir(parents=True)
+            bundled.touch()
+            with mock.patch.object(
+                package.shutil,
+                "which",
+                return_value=str(Path("system-tools") / executable),
+            ):
+                with mock.patch.object(
+                    package.subprocess,
+                    "check_output",
+                    side_effect=[str(sysroot), "rustc 1.0\nhost: test-host\n"],
+                ):
+                    self.assertEqual(package.find_rust_llvm_tool("llvm-nm"), bundled)
+
     def test_dumpbin_exports_accept_x86_alias_format(self):
         package = load_package_script()
         output = """
