@@ -10,8 +10,9 @@ SCRIPT_PATH = (
     / "run_preview4_host_route_conformance.py"
 )
 SPEC = importlib.util.spec_from_file_location("host_route_conformance", SCRIPT_PATH)
+if SPEC is None or SPEC.loader is None:
+    raise RuntimeError(f"cannot load host-route conformance script: {SCRIPT_PATH}")
 MODULE = importlib.util.module_from_spec(SPEC)
-assert SPEC.loader is not None
 SPEC.loader.exec_module(MODULE)
 
 
@@ -95,6 +96,32 @@ class HostRouteConformanceScriptTests(unittest.TestCase):
             native.write_text(json.dumps({"results": []}), encoding="utf-8")
             with self.assertRaisesRegex(RuntimeError, "result report is empty"):
                 MODULE.assert_native_coverage(root, native, uninstalled)
+
+            for invalid_result in (
+                "not-an-object",
+                {"outcome": "passed"},
+                {"id": 7, "outcome": "passed"},
+                {"id": "", "outcome": "passed"},
+            ):
+                native.write_text(
+                    json.dumps({"results": [invalid_result]}), encoding="utf-8"
+                )
+                with self.assertRaisesRegex(RuntimeError, "invalid result entry"):
+                    MODULE.result_ids(native)
+
+            native.write_text(
+                json.dumps(
+                    {
+                        "results": [
+                            {"id": "valid.case", "outcome": "failed"},
+                            {"id": "second.case", "outcome": "passed"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(RuntimeError, "valid.case"):
+                MODULE.result_ids(native)
 
             manifest = json.loads(case_path.read_text(encoding="utf-8"))
             browser = next(

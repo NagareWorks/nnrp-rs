@@ -8,8 +8,11 @@ from pathlib import Path
 import smoke_test_native_transport_ffi as smoke
 
 
+NNRP_FFI_STATUS_INVALID_HANDLE = 2
+
+
 def require_invalid_handle(status: smoke.NnrpFfiStatus, operation: str) -> None:
-    if status.status_code != 2:
+    if status.status_code != NNRP_FFI_STATUS_INVALID_HANDLE:
         raise RuntimeError(
             f"{operation} must reject a foreign handle: "
             f"status={status.status_code} family={status.error_family} "

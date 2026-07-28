@@ -131,14 +131,22 @@ def result_ids(path: Path) -> set[str]:
     results = report.get("results")
     if not isinstance(results, list) or not results:
         raise RuntimeError(f"host-route result report is empty: {path}")
-    failed = [
-        result.get("id")
-        for result in results
-        if result.get("outcome") != "passed"
-    ]
+    identifiers: list[str] = []
+    failed: list[str] = []
+    for index, result in enumerate(results):
+        if not isinstance(result, dict):
+            raise RuntimeError(f"invalid result entry at index {index}: expected object")
+        identifier = result.get("id")
+        if not isinstance(identifier, str) or not identifier:
+            raise RuntimeError(
+                f"invalid result entry at index {index}: id must be a non-empty string"
+            )
+        identifiers.append(identifier)
+        if result.get("outcome") != "passed":
+            failed.append(identifier)
     if failed:
         raise RuntimeError(f"host-route scenarios did not pass: {', '.join(failed)}")
-    return {result["id"] for result in results}
+    return set(identifiers)
 
 
 def assert_native_coverage(
