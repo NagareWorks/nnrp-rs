@@ -280,6 +280,18 @@ def smoke_test_transport(library: Path, transport_scope: str) -> None:
     )
 
 
+def verify_library_isolation(packaged_libraries: dict[str, Path]) -> None:
+    command = [
+        sys.executable,
+        str(ROOT / "scripts" / "check_native_transport_library_isolation.py"),
+    ]
+    for transport_scope in sorted(packaged_libraries):
+        command.extend(
+            ["--library", f"{transport_scope}={packaged_libraries[transport_scope]}"]
+        )
+    subprocess.run(command, cwd=ROOT, check=True)
+
+
 def copy_headers(package_dir: Path) -> list[str]:
     include_root = ROOT / "include" / "nnrp"
     package_include = package_dir / "include" / "nnrp"
@@ -402,6 +414,7 @@ def main() -> None:
 
     release = not args.debug
     transport_scopes = args.transport_scope or ["tcp", "quic", "ipc", "websocket"]
+    packaged_libraries = {}
     for transport_scope in transport_scopes:
         if not args.skip_build:
             build_library(release, args.target, transport_scope)
@@ -421,7 +434,14 @@ def main() -> None:
             release,
             transport_scope,
         )
+        packaged_libraries[transport_scope] = package_dir / library.name
         print(package_dir)
+    if (
+        args.target is None
+        and library_kind == "dynamic"
+        and set(transport_scopes) == set(TRANSPORT_SCOPES)
+    ):
+        verify_library_isolation(packaged_libraries)
 
 
 if __name__ == "__main__":
