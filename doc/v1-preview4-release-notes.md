@@ -10,6 +10,10 @@ instance, cancels pending work, and stops the worker runtime before unload. A la
 runtime while every pre-shutdown handle remains invalid. Packet and role operations retain the existing coarse FFI
 boundary; no per-frame lifecycle crossing was added.
 
+The required shutdown export advances the native FFI ABI to `4.1.1`. Release and downstream tests use the production
+`repr(C)` request and event layouts, assert target-specific sizes and offsets, and exercise multiple events returned by
+one poll so an SDK cannot accept a binding whose array stride differs from the Rust ABI.
+
 Artifact packaging and dynamic-library smoke tests require the shutdown export, exercise shutdown and restart, and
 continue to validate transport-scoped TCP, QUIC, IPC, and WebSocket artifacts independently.
 

@@ -15,7 +15,7 @@ typedef struct NnrpProtocolVersion {
 
 #define NNRP_FFI_ABI_MAJOR 4
 #define NNRP_FFI_ABI_MINOR 1
-#define NNRP_FFI_ABI_PATCH 0
+#define NNRP_FFI_ABI_PATCH 1
 
 #define NNRP_TRANSPORT_SLOT_QUIC 0x00000001u
 #define NNRP_TRANSPORT_SLOT_TCP 0x00000002u

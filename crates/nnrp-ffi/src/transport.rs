@@ -255,8 +255,9 @@ impl TransportStore {
 
     fn invalidate_all(&mut self) {
         for ((kind, id), slot) in &mut self.slots {
-            if slot.resource.take().is_some() && slot.generation < u32::MAX {
-                slot.invalidated = true;
+            let released_live_resource = slot.resource.take().is_some();
+            slot.invalidated = true;
+            if released_live_resource && slot.generation < u32::MAX {
                 self.reusable.entry(*kind).or_default().push(*id);
             }
         }
@@ -2234,6 +2235,81 @@ mod tests {
         assert!(store.get(first).is_none());
         assert!(store.get(second).is_none());
         assert!(store.get(replacement).is_some());
+    }
+
+    #[test]
+    fn transport_store_shutdown_invalidates_closed_slots_without_duplicate_reuse() {
+        fn resource() -> TransportResource {
+            TransportResource::SecurityConfig(TransportSecurityConfig::Client {
+                transport_id: TransportId::Quic,
+                server_name: "localhost".to_string(),
+                trusted_certificate_der: Vec::new(),
+            })
+        }
+
+        let mut store = TransportStore::default();
+        let closed = store.insert(NnrpHandleKind::TransportSecurityConfig, resource());
+        assert!(store.close(closed).unwrap().is_some());
+        assert!(store.close(closed).unwrap().is_none());
+
+        store.invalidate_all();
+
+        assert!(matches!(
+            store.close(closed),
+            Err(status)
+                if status == NnrpFfiStatus::invalid_handle(
+                    NnrpHandleKind::TransportSecurityConfig as u32
+                )
+        ));
+        assert_eq!(
+            store
+                .reusable
+                .get(&closed.kind)
+                .expect("closed slot must remain reusable"),
+            &[closed.id]
+        );
+
+        let replacement = store.insert(NnrpHandleKind::TransportSecurityConfig, resource());
+        assert_eq!(replacement.id, closed.id);
+        assert_eq!(replacement.generation, closed.generation + 1);
+        let next = store.insert(NnrpHandleKind::TransportSecurityConfig, resource());
+        assert_ne!(next.id, closed.id);
+    }
+
+    #[test]
+    fn transport_store_shutdown_invalidates_generation_exhausted_slots_without_reuse() {
+        let resource = TransportResource::SecurityConfig(TransportSecurityConfig::Client {
+            transport_id: TransportId::Quic,
+            server_name: "localhost".to_string(),
+            trusted_certificate_der: Vec::new(),
+        });
+        let mut store = TransportStore::default();
+        let inserted = store.insert(NnrpHandleKind::TransportSecurityConfig, resource);
+        let slot = store
+            .slots
+            .get_mut(&(inserted.kind, inserted.id))
+            .expect("inserted transport slot must exist");
+        slot.generation = u32::MAX;
+        let exhausted = transport_handle(
+            NnrpHandleKind::TransportSecurityConfig,
+            inserted.id,
+            u32::MAX,
+        );
+
+        assert!(store.get(exhausted).is_some());
+        store.invalidate_all();
+
+        let slot = store
+            .slots
+            .get(&(exhausted.kind, exhausted.id))
+            .expect("invalidated transport slot must remain recorded");
+        assert!(slot.resource.is_none());
+        assert!(slot.invalidated);
+        assert!(store.get(exhausted).is_none());
+        assert!(!store
+            .reusable
+            .get(&exhausted.kind)
+            .is_some_and(|ids| ids.contains(&exhausted.id)));
     }
 
     #[cfg(feature = "transport-websocket")]

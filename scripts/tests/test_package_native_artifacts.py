@@ -18,6 +18,18 @@ def load_package_script():
 
 
 class NativeExportVerificationTests(unittest.TestCase):
+    def test_dumpbin_exports_accept_x86_alias_format(self):
+        package = load_package_script()
+        output = """
+              22   15 00093390 nnrp_current_protocol_version = _nnrp_current_protocol_version
+              66   41 000A1020 nnrp_transport_runtime_shutdown = _nnrp_transport_runtime_shutdown
+        """
+
+        self.assertEqual(
+            package.parse_dumpbin_exports(output),
+            {"nnrp_current_protocol_version", "nnrp_transport_runtime_shutdown"},
+        )
+
     def test_role_connection_lifecycle_exports_are_required(self):
         package = load_package_script()
 

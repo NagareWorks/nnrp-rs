@@ -2,7 +2,7 @@
 
 This audit records the release evidence for the frozen Preview4 host-route contract. It compares the protocol-facing
 Rust API, the native and WASM artifact surfaces, and the three downstream SDK implementations available at the time of
-the `1.0.0-preview.4.18` release. Carrier-local APIs remain singular by design; logical client and server host APIs own
+the `1.0.0-preview.4.19` release. Carrier-local APIs remain singular by design; logical client and server host APIs own
 transport-keyed route sets.
 
 ## Frozen Host-Route Contract
@@ -34,8 +34,8 @@ role entry points differ from this contract.
 
 ## Downstream API Mapping
 
-The release audit used the following downstream revisions. These revisions consume ABI `4.1.0`; they will update their
-artifact pin from Preview4 revision 17 to revision 18 after this Rust release is published.
+The release audit used the following downstream revisions. The coordinated downstream boundary is Rust artifact
+`1.0.0-preview.4.19` with exact FFI ABI `4.1.1`; an SDK release must reject any other artifact revision or ABI.
 
 | SDK | Audited revision | Logical route-set API | Route-local API |
 | --- | --- | --- | --- |
@@ -63,6 +63,6 @@ packaging and inspection scripts under `scripts/`.
 
 ## Release Decision
 
-Preview4 revision 18 is one coordinated correction release. It closes the host-route cardinality, route-local security,
-provider-identity evidence, host-route wire execution, and complete WASM rejection-registry contract together. No part
-of that correction is deferred to a downstream SDK-specific exception.
+Preview4 revision 19 is one coordinated correction release. It closes the host-route cardinality, route-local security,
+provider-identity evidence, host-route wire execution, complete WASM rejection-registry contract, and exact FFI ABI
+layout and export validation together. No part of that correction is deferred to a downstream SDK-specific exception.
