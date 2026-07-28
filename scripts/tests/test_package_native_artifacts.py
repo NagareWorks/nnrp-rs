@@ -36,6 +36,24 @@ class NativeExportVerificationTests(unittest.TestCase):
                     with self.assertRaisesRegex(SystemExit, retired):
                         package.verify_exports(library, "linux", "dynamic")
 
+    def test_library_isolation_check_receives_every_packaged_transport(self):
+        package = load_package_script()
+        libraries = {
+            scope: Path(f"artifacts/{scope}/nnrp_ffi.test")
+            for scope in package.TRANSPORT_SCOPES
+        }
+
+        with mock.patch.object(package.subprocess, "run") as run:
+            package.verify_library_isolation(libraries)
+
+        command = run.call_args.args[0]
+        self.assertEqual(
+            command[1], str(ROOT / "scripts/check_native_transport_library_isolation.py")
+        )
+        for scope, library in libraries.items():
+            self.assertIn(f"{scope}={library}", command)
+        self.assertTrue(run.call_args.kwargs["check"])
+
 
 if __name__ == "__main__":
     unittest.main()

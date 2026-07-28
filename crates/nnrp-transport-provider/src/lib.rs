@@ -277,6 +277,11 @@ impl TransportProviderRegistry {
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum TransportProviderRegistryError {
+    #[error("invalid transport provider metadata for {provider_id}: {diagnostic}")]
+    InvalidProviderMetadata {
+        provider_id: String,
+        diagnostic: String,
+    },
     #[error("transport provider already registered for {transport_id:?}")]
     DuplicateTransportId { transport_id: TransportId },
     #[error("transport provider id already registered: {provider_id}")]
@@ -617,6 +622,12 @@ fn validate_provider_registration(
     providers: &[TransportProviderDescriptor],
     provider: &TransportProviderDescriptor,
 ) -> Result<(), TransportProviderRegistryError> {
+    validate_provider_metadata(&provider.metadata).map_err(|diagnostic| {
+        TransportProviderRegistryError::InvalidProviderMetadata {
+            provider_id: provider.metadata.id.clone(),
+            diagnostic: diagnostic.to_owned(),
+        }
+    })?;
     if providers
         .iter()
         .any(|registered| registered.transport_id == provider.transport_id)
@@ -651,6 +662,12 @@ fn validate_selection_evidence(
     let mut provider_ids = BTreeSet::new();
     let mut provider_keys = BTreeSet::new();
     for provider in providers {
+        validate_provider_metadata(&provider.metadata).map_err(|diagnostic| {
+            invalid_evidence(format!(
+                "provider {} has invalid metadata: {diagnostic}",
+                provider.metadata.id
+            ))
+        })?;
         if !is_selectable_transport(provider.transport_id) {
             return Err(invalid_evidence(format!(
                 "provider uses non-selectable transport {:?}",
@@ -674,6 +691,11 @@ fn validate_selection_evidence(
 
     let mut readiness_keys = BTreeSet::new();
     for record in readiness {
+        if record.provider_id.is_empty() || !record.provider_id.is_ascii() {
+            return Err(invalid_evidence(
+                "candidate readiness provider id must be a non-empty ASCII string",
+            ));
+        }
         let key = (record.transport_id, record.provider_id.as_str());
         if !provider_keys.contains(&key) {
             return Err(invalid_evidence(format!(
@@ -696,6 +718,11 @@ fn validate_selection_evidence(
 
     let mut observation_keys = BTreeSet::new();
     for observation in observations {
+        if observation.provider_id.is_empty() || !observation.provider_id.is_ascii() {
+            return Err(invalid_evidence(
+                "probe observation provider id must be a non-empty ASCII string",
+            ));
+        }
         let key = (observation.transport_id, observation.provider_id.as_str());
         if !provider_keys.contains(&key) {
             return Err(invalid_evidence(format!(
@@ -710,7 +737,18 @@ fn validate_selection_evidence(
             )));
         }
         match (observation.state, observation.metrics.is_some()) {
-            (ProbeState::Succeeded, true) | (ProbeState::Failed, false) => {}
+            (ProbeState::Succeeded, true) => {
+                validate_probe_metrics(
+                    observation.metrics.as_ref().expect("metrics checked above"),
+                )
+                .map_err(|diagnostic| {
+                    invalid_evidence(format!(
+                        "invalid probe metrics for {:?}/{}: {diagnostic}",
+                        observation.transport_id, observation.provider_id
+                    ))
+                })?;
+            }
+            (ProbeState::Failed, false) => {}
             (ProbeState::Succeeded, false) => {
                 return Err(invalid_evidence(format!(
                     "successful probe observation requires metrics for {:?}/{}",
@@ -730,6 +768,37 @@ fn validate_selection_evidence(
                 )));
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_provider_metadata(metadata: &TransportProviderMetadata) -> Result<(), &'static str> {
+    if metadata.id.is_empty() || !metadata.id.is_ascii() {
+        return Err("provider id must be a non-empty ASCII string");
+    }
+    if metadata.cost.model_id == 0 && metadata.cost.units != 0 {
+        return Err("provider cost units must be zero when model id is zero");
+    }
+    if metadata.limits.max_frame_bytes == 0 {
+        return Err("provider max frame bytes must be positive");
+    }
+    let unique_limitations = metadata
+        .limitations
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if unique_limitations.len() != metadata.limitations.len() {
+        return Err("provider limitations must not contain duplicates");
+    }
+    Ok(())
+}
+
+fn validate_probe_metrics(metrics: &ProbeMetrics) -> Result<(), &'static str> {
+    if metrics.sample_count == 0 {
+        return Err("sample count must be positive");
+    }
+    if metrics.success_count == 0 || metrics.success_count > metrics.sample_count {
+        return Err("success count must be in 1..=sample count");
     }
     Ok(())
 }
@@ -1160,6 +1229,50 @@ mod tests {
     }
 
     #[test]
+    fn registry_and_selection_reject_invalid_provider_metadata() {
+        let mut invalid_providers = Vec::new();
+
+        let mut non_ascii = available(TransportId::Tcp);
+        non_ascii.metadata.id = "nnrp.transport.tcp.\u{00e9}".to_owned();
+        invalid_providers.push(non_ascii);
+
+        let mut unspecified_cost = available(TransportId::Tcp);
+        unspecified_cost.metadata.cost.units = 1;
+        invalid_providers.push(unspecified_cost);
+
+        let mut zero_limit = available(TransportId::Tcp);
+        zero_limit.metadata.limits.max_frame_bytes = 0;
+        invalid_providers.push(zero_limit);
+
+        let mut duplicate_limitation = available(TransportId::Tcp);
+        duplicate_limitation
+            .metadata
+            .limitations
+            .push(ProviderLimitation::RequiresTcp);
+        invalid_providers.push(duplicate_limitation);
+
+        for provider in invalid_providers {
+            assert!(matches!(
+                TransportProviderRegistry::new().with_provider(provider.clone()),
+                Err(TransportProviderRegistryError::InvalidProviderMetadata { .. })
+            ));
+            assert!(matches!(
+                select_transport(
+                    std::slice::from_ref(&provider),
+                    &RemoteTransportSupport::new([TransportId::Tcp]),
+                    TransportPolicy::Auto,
+                    None,
+                    &[TransportCandidateReadiness::ready(
+                        TransportId::Tcp,
+                        &provider.metadata.id,
+                    )],
+                ),
+                Err(TransportSelectionError::InvalidEvidence { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn transport_policy_helpers_cover_all_frozen_variants() {
         assert_eq!(
             TransportPolicy::PreferQuic.preferred_transport(),
@@ -1366,6 +1479,17 @@ mod tests {
             Err(TransportSelectionError::InvalidEvidence { .. })
         ));
 
+        for provider_id in ["", "nnrp.transport.\u{8f93}\u{5165}"] {
+            let invalid = [TransportCandidateReadiness::ready(
+                TransportId::Tcp,
+                provider_id,
+            )];
+            assert!(matches!(
+                select_transport(&providers, &remote, TransportPolicy::Auto, None, &invalid,),
+                Err(TransportSelectionError::InvalidEvidence { .. })
+            ));
+        }
+
         let readiness = ready(&providers);
         let unmatched = [TransportProbeObservation::failed(
             TransportId::Tcp,
@@ -1383,6 +1507,25 @@ mod tests {
             ),
             Err(TransportSelectionError::InvalidEvidence { .. })
         ));
+
+        for provider_id in ["", "nnrp.transport.\u{8f93}\u{5165}"] {
+            let invalid = [TransportProbeObservation::failed(
+                TransportId::Tcp,
+                provider_id,
+                "probe failed",
+            )];
+            assert!(matches!(
+                select_transport_with_probe(
+                    &providers,
+                    &remote,
+                    TransportPolicy::Auto,
+                    None,
+                    &readiness,
+                    &invalid,
+                ),
+                Err(TransportSelectionError::InvalidEvidence { .. })
+            ));
+        }
     }
 
     #[test]
@@ -1449,6 +1592,43 @@ mod tests {
             ),
             Err(TransportSelectionError::InvalidEvidence { .. })
         ));
+
+        for metrics in [
+            ProbeMetrics {
+                sample_count: 0,
+                success_count: 0,
+                median_throughput_bytes_per_sec: 1,
+                median_rtt_us: 1,
+            },
+            ProbeMetrics {
+                sample_count: 1,
+                success_count: 0,
+                median_throughput_bytes_per_sec: 1,
+                median_rtt_us: 1,
+            },
+            ProbeMetrics {
+                sample_count: 1,
+                success_count: 2,
+                median_throughput_bytes_per_sec: 1,
+                median_rtt_us: 1,
+            },
+        ] {
+            assert!(matches!(
+                select_transport_with_probe(
+                    &providers,
+                    &remote,
+                    TransportPolicy::Auto,
+                    None,
+                    &readiness,
+                    &[TransportProbeObservation::succeeded(
+                        TransportId::Tcp,
+                        &providers[0].metadata.id,
+                        metrics,
+                    )],
+                ),
+                Err(TransportSelectionError::InvalidEvidence { .. })
+            ));
+        }
     }
 
     #[test]

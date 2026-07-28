@@ -7,10 +7,10 @@ Preview4 moves NNRP from token-stream transport substitution toward runtime obje
 - [x] [00 - Scope and ownership](00-scope-and-ownership.md)
 - [x] [01 - Runtime control protocol](01-runtime-control-protocol.md)
 - [x] [02 - Runtime object and cache reference](02-runtime-object-cache-reference.md)
-- [ ] [03 - IPC and WebSocket transports](03-ipc-websocket-transports.md)
-- [ ] [04 - FFI and WASM artifact surface](04-ffi-wasm-artifact-surface.md)
-- [ ] [05 - Wire conformance runner](05-wire-conformance-runner.md)
-- [ ] [06 - Release validation and docs](06-release-validation-and-docs.md)
+- [x] [03 - IPC and WebSocket transports](03-ipc-websocket-transports.md)
+- [x] [04 - FFI and WASM artifact surface](04-ffi-wasm-artifact-surface.md)
+- [x] [05 - Wire conformance runner](05-wire-conformance-runner.md)
+- [x] [06 - Release validation and docs](06-release-validation-and-docs.md)
 
 ## Coordination Rules
 

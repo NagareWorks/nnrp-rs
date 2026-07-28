@@ -26,14 +26,14 @@
   - [x] Add `ProviderEndpoint` for carrier-local locator overrides.
   - [x] Preserve application authority, path, query, and security intent.
   - [x] Reject provider-local schemes in `NnrpEndpoint`.
-- [ ] Add role-specific route values.
+- [x] Add role-specific route values.
   - [x] Add `ClientProviderRoute` and `ClientProviderRoutes`.
   - [x] Add `ServerProviderRoute` and `ServerProviderRoutes`.
   - [x] Add the exact owned fields for `ClientTransportSecurity` and `ServerTransportSecurity`.
   - [x] Keep locator and security values isolated per transport ID.
-  - [ ] Reject duplicate keys, provider-kind mismatches, and role-mismatched security.
-  - [ ] Report a configured known-but-uninstalled route as `local-unavailable`.
-  - [ ] Apply the exact rejection precedence when multiple checks fail.
+  - [x] Make duplicate transport keys unrepresentable in route maps, reject provider/locator mismatches, and keep client/server security types distinct.
+  - [x] Report a configured known-but-uninstalled route as `local-unavailable`.
+  - [x] Apply the exact rejection precedence when multiple checks fail.
 - [x] Add host-level client orchestration.
   - [x] Resolve every installed provider route before selection.
   - [x] Keep unresolved and security-incompatible candidates in diagnostics.

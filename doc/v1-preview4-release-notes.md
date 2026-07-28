@@ -2,6 +2,25 @@
 
 Preview4 moves the Rust workspace beyond token-stream transport substitution and into runtime orchestration features that help SDKs model cancellation, priority, progress, partial results, cache references, route hints, trace context, result drop reasons, IPC, and WebSocket endpoints directly.
 
+## 1.0.0-preview.4.18
+
+This coordinated correction closes the frozen Preview4 host-route contract across Rust, native FFI, WASM, wire
+Conformance, and downstream SDK bindings. Client and server hosts own transport-keyed route sets while each route owns
+its provider-local locator and role-local security. Client Auto/Prefer resolves and adopts one eligible carrier; server
+Auto/Prefer binds the complete eligible listener set atomically and preserves provider identity through accepted
+sessions. Carrier APIs and runtime FFI remain singular and coarse, so route-set orchestration does not add per-frame
+cross-library calls.
+
+TCP now executes route-local TLS through the same native host path used by QUIC and secure WebSocket. Host-route wire
+tests cover deterministic multi-route selection, forced-route failure, simultaneous multi-listener accept, atomic bind
+rollback, terminal listener failure, `nnrps://` filtering, route-local security isolation, and exact precedence for
+known-but-uninstalled providers. Candidate evidence always identifies both transport and provider and reports the
+complete frozen rejection registry.
+
+Native and WASM artifact inspection now rejects incomplete rejection registries in addition to ABI, export, role, and
+transport-boundary drift. The complete design-to-code evidence and audited downstream revisions are recorded in
+[`v1-preview4-design-to-code-audit.md`](v1-preview4-design-to-code-audit.md).
+
 ## 1.0.0-preview.4.17
 
 Native client and server runtimes now orchestrate independently packaged transport providers as concrete routes. Route

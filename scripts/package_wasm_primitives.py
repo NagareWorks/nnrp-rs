@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -24,6 +25,16 @@ WASM_EXPORTS = [
     "decodeRuntimeObjectMetadataJson",
     "openBrowserClientRole",
 ]
+TRANSPORT_REJECTION_REASONS = {
+    "policy-disallowed",
+    "local-unavailable",
+    "peer-unsupported",
+    "limit-exceeded",
+    "route-unresolved",
+    "security-unsatisfied",
+    "probe-missing",
+    "probe-failed",
+}
 
 TRANSPORT_SCOPES = {
     "browser": {
@@ -41,6 +52,17 @@ TRANSPORT_SCOPES = {
         },
     },
 }
+
+
+def declared_string_union(typescript: str, name: str) -> set[str]:
+    match = re.search(
+        rf"\bexport type\s+{re.escape(name)}\s*=\s*(.*?);",
+        typescript,
+        re.DOTALL,
+    )
+    if match is None:
+        raise SystemExit(f"missing TypeScript string union {name}")
+    return set(re.findall(r'"([^"]+)"', match.group(1)))
 
 def build_wasm(transport_scope: str) -> None:
     subprocess.run(
@@ -123,6 +145,15 @@ def package_wasm(out_dir: Path, transport_scope: str) -> Path:
     for method in ("ingestPackets", "failReceive"):
         if method not in generated_declarations or method not in packaged_declarations:
             raise SystemExit(f"browser WASM declarations are missing BrowserClientRole.{method}")
+    rejection_reasons = declared_string_union(
+        packaged_declarations, "TransportRejectionReason"
+    )
+    if rejection_reasons != TRANSPORT_REJECTION_REASONS:
+        raise SystemExit(
+            "browser WASM declarations have an incomplete transport rejection registry: "
+            f"expected {sorted(TRANSPORT_REJECTION_REASONS)}, "
+            f"found {sorted(rejection_reasons)}"
+        )
 
     scope = TRANSPORT_SCOPES[transport_scope]
     package_dir = out_dir / scope["directory"]

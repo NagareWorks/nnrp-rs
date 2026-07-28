@@ -321,13 +321,11 @@ jobs:
           working-directory: .
           artifact-name: nnrp-rs-preview4-conformance
 
-      - name: Run preview4 wire conformance dry-run
-        shell: bash
-        run: |
-          cargo run -p nnrp-conformance --bin nnrp-conformance-wire -- \
-            --suite nnrp-conformance-action/wire-conformance/nnrp-1-preview4/manifest.json \
-            --target nnrp-conformance-action/docs/examples/wire-conformance-target.sample.json \
-            --output target/wire-conformance/preview4-dry-run.json
+      - name: Run preview4 host-route wire conformance
+        run: >-
+          python scripts/run_preview4_host_route_conformance.py
+          --suite-root nnrp-conformance-action
+          --output-root target/wire-conformance/preview4-host-route
 
       - name: Download native link libraries
         uses: actions/download-artifact@v7
