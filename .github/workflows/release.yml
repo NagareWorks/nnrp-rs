@@ -108,6 +108,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+          components: llvm-tools-preview
 
       - name: Install Linux cross linker
         if: runner.os == 'Linux' && matrix.apt
