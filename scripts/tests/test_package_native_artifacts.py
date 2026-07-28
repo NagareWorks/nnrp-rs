@@ -24,7 +24,13 @@ class NativeExportVerificationTests(unittest.TestCase):
         package = load_package_script()
         library = Path("libnnrp_ffi.a")
         llvm_nm = Path("llvm-nm")
-        output = "00000000 T _nnrp_ffi_abi_version\n"
+        output = """
+libnnrp_ffi.a[empty.rcgu.o]:
+
+libnnrp_ffi.a[ffi.rcgu.o]:
+_nnrp_ffi_abi_version T 00000000 00000004
+not_an_nnrp_export T 00000004 00000004
+"""
 
         with mock.patch.object(package, "find_rust_llvm_tool", return_value=llvm_nm):
             with mock.patch.object(
@@ -40,6 +46,7 @@ class NativeExportVerificationTests(unittest.TestCase):
         check_output.assert_called_once_with(
             [
                 str(llvm_nm),
+                "--format=posix",
                 "--extern-only",
                 "--defined-only",
                 str(library),

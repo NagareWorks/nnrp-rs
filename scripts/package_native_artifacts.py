@@ -198,10 +198,16 @@ def list_exports(library: Path, os_name: str, library_kind: str) -> set[str]:
                 "install the llvm-tools-preview rustup component"
             )
         output = subprocess.check_output(
-            [str(llvm_nm), "--extern-only", "--defined-only", str(library)],
+            [
+                str(llvm_nm),
+                "--format=posix",
+                "--extern-only",
+                "--defined-only",
+                str(library),
+            ],
             text=True,
         )
-        return parse_nm_exports(output)
+        return parse_llvm_nm_posix_exports(output)
 
     if os_name == "windows":
         dumpbin = find_dumpbin()
@@ -221,6 +227,20 @@ def parse_nm_exports(output: str) -> set[str]:
     exports = set()
     for line in output.splitlines():
         symbol = line.split()[-1]
+        if symbol.startswith("_nnrp_"):
+            symbol = symbol[1:]
+        if symbol.startswith("nnrp_"):
+            exports.add(symbol)
+    return exports
+
+
+def parse_llvm_nm_posix_exports(output: str) -> set[str]:
+    exports = set()
+    for line in output.splitlines():
+        fields = line.split()
+        if len(fields) < 2 or len(fields[1]) != 1 or not fields[1].isalpha():
+            continue
+        symbol = fields[0]
         if symbol.startswith("_nnrp_"):
             symbol = symbol[1:]
         if symbol.startswith("nnrp_"):
