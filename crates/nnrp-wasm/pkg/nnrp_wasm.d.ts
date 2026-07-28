@@ -118,6 +118,8 @@ export type TransportRejectionReason =
   | "local-unavailable"
   | "peer-unsupported"
   | "limit-exceeded"
+  | "route-unresolved"
+  | "security-unsatisfied"
   | "probe-missing"
   | "probe-failed";
 

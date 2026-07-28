@@ -67,6 +67,16 @@ BROWSER_WASM_SCOPE = {
         "limitations": ["requires-tcp", "browser-host-only"],
     },
 }
+TRANSPORT_REJECTION_REASONS = {
+    "policy-disallowed",
+    "local-unavailable",
+    "peer-unsupported",
+    "limit-exceeded",
+    "route-unresolved",
+    "security-unsatisfied",
+    "probe-missing",
+    "probe-failed",
+}
 
 
 def load_script(path: Path):
@@ -127,6 +137,17 @@ def declared_ffi_functions(header: str) -> set[str]:
 
 def declared_wasm_functions(typescript: str) -> set[str]:
     return set(re.findall(r"\bexport function\s+([a-zA-Z0-9_]+)\s*\(", typescript))
+
+
+def declared_typescript_string_union(typescript: str, name: str) -> set[str]:
+    match = re.search(
+        rf"\bexport type\s+{re.escape(name)}\s*=\s*(.*?);",
+        typescript,
+        re.DOTALL,
+    )
+    if match is None:
+        raise SystemExit(f"missing TypeScript string union {name}")
+    return set(re.findall(r'"([^"]+)"', match.group(1)))
 
 
 def check_abi_version() -> None:
@@ -233,7 +254,8 @@ def check_native_manifests() -> None:
 def check_wasm_manifest() -> None:
     wasm = load_script(ROOT / "scripts" / "package_wasm_primitives.py")
     inspector = load_script(ROOT / "scripts" / "inspect_release_artifacts.py")
-    declarations = declared_wasm_functions(read_text("crates/nnrp-wasm/pkg/nnrp_wasm.d.ts"))
+    typescript = read_text("crates/nnrp-wasm/pkg/nnrp_wasm.d.ts")
+    declarations = declared_wasm_functions(typescript)
 
     packaged = wasm.TRANSPORT_SCOPES.get(BROWSER_WASM_SCOPE["scope"])
     if packaged is None:
@@ -276,12 +298,27 @@ def check_wasm_manifest() -> None:
         BROWSER_WASM_SCOPE["provider"],
         "browser WASM inspector provider",
     )
+    require_equal(
+        wasm.TRANSPORT_REJECTION_REASONS,
+        TRANSPORT_REJECTION_REASONS,
+        "browser WASM packaging transport rejection registry",
+    )
+    require_equal(
+        inspector.TRANSPORT_REJECTION_REASONS,
+        TRANSPORT_REJECTION_REASONS,
+        "browser WASM inspector transport rejection registry",
+    )
     missing = sorted(set(BROWSER_WASM_SCOPE["exports"]) - declarations)
     if missing:
         raise SystemExit(
             "browser WASM manifest expects functions missing from TypeScript declarations: "
             + ", ".join(missing)
         )
+    require_equal(
+        declared_typescript_string_union(typescript, "TransportRejectionReason"),
+        TRANSPORT_REJECTION_REASONS,
+        "browser WASM transport rejection registry",
+    )
 
 
 def check_expected_exports_are_declared() -> None:

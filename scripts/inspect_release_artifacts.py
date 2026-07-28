@@ -63,6 +63,27 @@ BROWSER_WASM_SCOPE = {
         "limitations": ["requires-tcp", "browser-host-only"],
     },
 }
+TRANSPORT_REJECTION_REASONS = {
+    "policy-disallowed",
+    "local-unavailable",
+    "peer-unsupported",
+    "limit-exceeded",
+    "route-unresolved",
+    "security-unsatisfied",
+    "probe-missing",
+    "probe-failed",
+}
+
+
+def declared_string_union(typescript: str, name: str) -> set[str]:
+    match = re.search(
+        rf"\bexport type\s+{re.escape(name)}\s*=\s*(.*?);",
+        typescript,
+        re.DOTALL,
+    )
+    if match is None:
+        raise SystemExit(f"missing TypeScript string union {name}")
+    return set(re.findall(r'"([^"]+)"', match.group(1)))
 
 
 def read_manifest(path: Path) -> dict:
@@ -226,6 +247,15 @@ def inspect_wasm(wasm_dir: Path) -> None:
                 raise SystemExit(f"{glue_path}: missing callable export {export_name}")
             if re.search(pattern, declarations) is None:
                 raise SystemExit(f"{types_path}: missing declaration for {export_name}")
+        rejection_reasons = declared_string_union(
+            declarations, "TransportRejectionReason"
+        )
+        if rejection_reasons != TRANSPORT_REJECTION_REASONS:
+            raise SystemExit(
+                f"{types_path}: incomplete transport rejection registry; "
+                f"expected {sorted(TRANSPORT_REJECTION_REASONS)}, "
+                f"found {sorted(rejection_reasons)}"
+            )
 
 
 def main() -> None:

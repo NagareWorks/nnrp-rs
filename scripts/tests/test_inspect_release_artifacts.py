@@ -45,6 +45,12 @@ class WasmArtifactInspectionTests(unittest.TestCase):
         declarations = "\n".join(
             f"export function {name}(): void;" for name in scope["exports"]
         )
+        declarations += "\nexport type TransportRejectionReason =\n"
+        declarations += "\n".join(
+            f'  | "{reason}"'
+            for reason in sorted(self.inspector.TRANSPORT_REJECTION_REASONS)
+        )
+        declarations += ";\n"
         glue = f"// nnrp_wasm_bg.wasm\n{declarations}\n"
         (self.package_dir / "nnrp_wasm.js").write_text(glue)
         (self.package_dir / "nnrp_wasm.d.ts").write_text(declarations)
@@ -71,6 +77,17 @@ class WasmArtifactInspectionTests(unittest.TestCase):
         (self.package_dir / "nnrp_wasm_bg.wasm").write_bytes(b"not-wasm")
 
         with self.assertRaisesRegex(SystemExit, "not a WebAssembly 1 binary"):
+            self.inspector.inspect_wasm(self.wasm_dir)
+
+    def test_rejects_incomplete_transport_rejection_registry(self):
+        declarations_path = self.package_dir / "nnrp_wasm.d.ts"
+        declarations_path.write_text(
+            declarations_path.read_text().replace(
+                '"security-unsatisfied"', '"not-frozen"'
+            )
+        )
+
+        with self.assertRaisesRegex(SystemExit, "incomplete transport rejection registry"):
             self.inspector.inspect_wasm(self.wasm_dir)
 
 
