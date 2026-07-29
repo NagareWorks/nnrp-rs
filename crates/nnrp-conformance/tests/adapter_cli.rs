@@ -16,8 +16,8 @@ fn adapter_cli_writes_results_report() {
     fs::write(
         &plan_path,
         json!({
-            "protocol_version": "nnrp-1-preview3",
-            "cases": [{ "id": "l1.handshake.basic" }]
+            "protocol_version": "nnrp-1-preview4",
+            "cases": [{ "id": "l1.control.cancel-abort" }]
         })
         .to_string(),
     )
@@ -38,8 +38,9 @@ fn adapter_cli_writes_results_report() {
             .expect("output should be valid JSON");
     assert_eq!(
         output["results"][0]["id"],
-        Value::String("l1.handshake.basic".to_string())
+        Value::String("l1.control.cancel-abort".to_string())
     );
+    assert_eq!(output["results"][0]["outcome"], "pass");
 
     fs::remove_dir_all(&temp_directory).expect("temp directory should be removed");
 }

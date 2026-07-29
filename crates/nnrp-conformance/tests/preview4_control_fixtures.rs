@@ -1,5 +1,6 @@
 use nnrp_conformance::{
-    execute_preview4_case, preview4_case_ids, preview4_fixture_manifest, PREVIEW4_PROTOCOL_VERSION,
+    execute_preview4_case, execute_preview4_public_case, preview4_case_ids,
+    preview4_fixture_manifest, preview4_public_case_ids, PREVIEW4_PROTOCOL_VERSION,
 };
 
 #[test]
@@ -27,5 +28,12 @@ fn preview4_fixture_manifest_lists_executable_cases() {
 fn preview4_control_fixture_cases_execute() {
     for case_id in preview4_case_ids() {
         assert_eq!(execute_preview4_case(case_id), Some(Ok(())));
+    }
+}
+
+#[test]
+fn preview4_public_suite_cases_execute() {
+    for case_id in preview4_public_case_ids() {
+        assert_eq!(execute_preview4_public_case(case_id), Some(Ok(())));
     }
 }

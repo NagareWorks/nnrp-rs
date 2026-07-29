@@ -2,14 +2,13 @@ use std::{fs, path::Path};
 
 use serde_json::{json, Value};
 
-use crate::nnrp1_baseline::execute_nnrp1_baseline_case;
-use crate::preview3_vectors::execute_preview3_case;
+use crate::preview4_vectors::{execute_preview4_public_case, PREVIEW4_PROTOCOL_VERSION};
 
 pub const RESULTS_SCHEMA_URL: &str =
     "https://raw.githubusercontent.com/NagareWorks/nnrp-conformance/main/schemas/adapter-case-results.schema.json";
 pub const DEFAULT_IMPLEMENTATION_NAME: &str = "nnrp-rs";
 pub const NOT_IMPLEMENTED_MESSAGE: &str =
-    "Preview3 adapter execution is not implemented in nnrp-rs yet.";
+    "Preview4 adapter execution is not implemented in nnrp-rs yet.";
 
 pub struct AdapterOptions {
     pub plan_path: String,
@@ -60,6 +59,11 @@ pub fn build_results_report(plan: &Value) -> Result<Value, String> {
         .ok_or_else(|| {
             "adapter execution plan field 'protocol_version' must be a non-empty string".to_string()
         })?;
+    if protocol_version != PREVIEW4_PROTOCOL_VERSION {
+        return Err(format!(
+            "adapter execution plan protocol_version must be '{PREVIEW4_PROTOCOL_VERSION}', got '{protocol_version}'"
+        ));
+    }
     let cases = plan_object
         .get("cases")
         .and_then(Value::as_array)
@@ -78,26 +82,24 @@ pub fn build_results_report(plan: &Value) -> Result<Value, String> {
                 "adapter execution plan case field 'id' must be a non-empty string".to_string()
             })?;
 
-        results.push(
-            match execute_preview3_case(case_id).or_else(|| execute_nnrp1_baseline_case(case_id)) {
-                Some(Ok(())) => json!({
-                    "id": case_id,
-                    "outcome": "pass",
-                }),
-                Some(Err(message)) => json!({
-                    "id": case_id,
-                    "outcome": "fail",
-                    "failure_kind": "assertion_failed",
-                    "message": message,
-                }),
-                None => json!({
-                    "id": case_id,
-                    "outcome": "error",
-                    "failure_kind": "not_implemented",
-                    "message": NOT_IMPLEMENTED_MESSAGE,
-                }),
-            },
-        );
+        results.push(match execute_preview4_public_case(case_id) {
+            Some(Ok(())) => json!({
+                "id": case_id,
+                "outcome": "pass",
+            }),
+            Some(Err(message)) => json!({
+                "id": case_id,
+                "outcome": "fail",
+                "failure_kind": "assertion_failed",
+                "message": message,
+            }),
+            None => json!({
+                "id": case_id,
+                "outcome": "error",
+                "failure_kind": "not_implemented",
+                "message": NOT_IMPLEMENTED_MESSAGE,
+            }),
+        });
     }
 
     Ok(json!({
@@ -166,7 +168,7 @@ mod tests {
     #[test]
     fn build_results_report_marks_cases_as_not_implemented() {
         let report = build_results_report(&json!({
-            "protocol_version": "nnrp-1-preview3",
+            "protocol_version": "nnrp-1-preview4",
             "cases": [
                 { "id": "l9.unknown.public.case" },
                 { "id": "l9.unknown.public.case.two" }
@@ -193,84 +195,20 @@ mod tests {
     }
 
     #[test]
-    fn build_results_report_passes_nnrp1_mandatory_baseline_cases() {
-        let mandatory_cases = [
-            "l0.header.fixed_shape.golden",
-            "l0.control.client_hello.golden",
-            "l0.control.session_patch_ack.golden",
-            "l0.flow_update.packet.golden",
-            "l0.result_hint.packet.golden",
-            "l0.frame_submit.metadata.golden",
-            "l0.result_push.metadata.golden",
-            "l0.body_region.prelude.golden",
-            "l0.object_reference.block.golden",
-            "l0.typed_payload.descriptor.golden",
-            "l0.typed_payload.frame_regions.golden",
-            "l1.flow_update.metadata.validation",
-            "l1.result_hint.metadata.validation",
-            "l1.cache.lifecycle.roundtrip",
-            "l1.frame_submit.message.parse_emit",
-            "l1.result_push.message.parse_emit",
-        ];
-        let cases: Vec<Value> = mandatory_cases
+    fn build_results_report_passes_preview4_public_suite_cases() {
+        let cases: Vec<Value> = crate::preview4_public_case_ids()
             .iter()
             .map(|id| json!({ "id": id }))
             .collect();
 
         let report = build_results_report(&json!({
-            "protocol_version": "nnrp-1-preview3",
+            "protocol_version": "nnrp-1-preview4",
             "cases": cases
         }))
-        .expect("NNRP/1 baseline report should build");
+        .expect("preview4 public report should build");
 
         let results = report["results"].as_array().expect("results array");
-        assert_eq!(results.len(), mandatory_cases.len());
-        for (case_id, result) in mandatory_cases.iter().zip(results) {
-            assert_eq!(
-                result["outcome"],
-                Value::String("pass".to_string()),
-                "mandatory baseline case {case_id} failed: {result}"
-            );
-            assert!(result.get("failure_kind").is_none());
-        }
-    }
-
-    #[test]
-    fn build_results_report_passes_preview3_canonical_cases() {
-        let cases: Vec<Value> = crate::preview3_case_ids()
-            .iter()
-            .map(|id| json!({ "id": id }))
-            .collect();
-
-        let report = build_results_report(&json!({
-            "protocol_version": "nnrp-1-preview3",
-            "cases": cases
-        }))
-        .expect("preview3 report should build");
-
-        let results = report["results"].as_array().expect("results array");
-        assert_eq!(results.len(), crate::preview3_case_ids().len());
-        for result in results {
-            assert_eq!(result["outcome"], Value::String("pass".to_string()));
-            assert!(result.get("failure_kind").is_none());
-        }
-    }
-
-    #[test]
-    fn build_results_report_passes_preview3_public_suite_cases() {
-        let cases: Vec<Value> = crate::public_preview3_case_ids()
-            .iter()
-            .map(|id| json!({ "id": id }))
-            .collect();
-
-        let report = build_results_report(&json!({
-            "protocol_version": "nnrp-1-preview3",
-            "cases": cases
-        }))
-        .expect("preview3 public report should build");
-
-        let results = report["results"].as_array().expect("results array");
-        assert_eq!(results.len(), crate::public_preview3_case_ids().len());
+        assert_eq!(results.len(), crate::preview4_public_case_ids().len());
         for result in results {
             assert_eq!(result["outcome"], Value::String("pass".to_string()));
             assert!(result.get("failure_kind").is_none());
@@ -309,29 +247,36 @@ mod tests {
             )
         );
         assert_eq!(
-            build_results_report(&json!({ "protocol_version": "nnrp-1-preview3" })),
+            build_results_report(&json!({ "protocol_version": "nnrp-1-preview4" })),
             Err("adapter execution plan must contain a cases array".to_string())
         );
         assert_eq!(
             build_results_report(&json!({
-                "protocol_version": "nnrp-1-preview3",
+                "protocol_version": "nnrp-1-preview4",
                 "cases": [null]
             })),
             Err("adapter execution plan cases must be JSON objects".to_string())
         );
         assert_eq!(
             build_results_report(&json!({
-                "protocol_version": "nnrp-1-preview3",
+                "protocol_version": "nnrp-1-preview4",
                 "cases": [{}]
             })),
             Err("adapter execution plan case field 'id' must be a non-empty string".to_string())
+        );
+        assert_eq!(
+            build_results_report(&json!({
+                "protocol_version": "nnrp-1-preview3",
+                "cases": []
+            })),
+            Err("adapter execution plan protocol_version must be 'nnrp-1-preview4', got 'nnrp-1-preview3'".to_string())
         );
     }
 
     #[test]
     fn build_results_report_sets_schema_and_protocol_version() {
         let report = build_results_report(&json!({
-            "protocol_version": "nnrp-1-preview3",
+            "protocol_version": "nnrp-1-preview4",
             "cases": []
         }))
         .expect("report should build");
@@ -342,7 +287,7 @@ mod tests {
         );
         assert_eq!(
             report["protocol_version"],
-            Value::String("nnrp-1-preview3".to_string())
+            Value::String("nnrp-1-preview4".to_string())
         );
         assert_eq!(
             report["results"].as_array().expect("results array").len(),
@@ -428,7 +373,7 @@ mod tests {
         fs::write(
             &plan_path,
             json!({
-                "protocol_version": "nnrp-1-preview3",
+                "protocol_version": "nnrp-1-preview4",
                 "cases": [{ "id": "l9.unknown.public.case" }]
             })
             .to_string(),
@@ -443,7 +388,7 @@ mod tests {
         assert_eq!(
             output["results"][0]["message"],
             Value::String(
-                "Preview3 adapter execution is not implemented in nnrp-rs yet.".to_string()
+                "Preview4 adapter execution is not implemented in nnrp-rs yet.".to_string()
             )
         );
 
