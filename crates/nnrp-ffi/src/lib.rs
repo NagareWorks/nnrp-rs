@@ -4785,7 +4785,7 @@ unsafe fn poll_matching_operation_result(
 unsafe fn poll_matching_operation_event_from_scope(
     scope: OperationEventScope,
     operation: NnrpHandle,
-    operation_id: u64,
+    _operation_id: u64,
     event_kind: NnrpEventKind,
     payload: NnrpBufferView,
     max_events: usize,
@@ -4801,8 +4801,6 @@ unsafe fn poll_matching_operation_event_from_scope(
                     && event.session == scope.session
                     && event.operation.id == operation.id
                     && event.operation.generation == operation.generation
-                    && (event.operation.id == operation_id
-                        || event.header.frame_id == scope.frame_id)
                 {
                     event.payload = payload;
                     *out_result = NnrpPollResult {
@@ -5039,7 +5037,7 @@ fn event_is_operation_result(
     event: NnrpEvent,
     session: NnrpHandle,
     operation: NnrpHandle,
-    frame_id: u32,
+    _frame_id: u32,
 ) -> bool {
     matches!(
         event.kind,
@@ -5047,7 +5045,7 @@ fn event_is_operation_result(
             || value == NnrpEventKind::ResultDropped as u32
             || value == NnrpEventKind::Error as u32
     ) && event.session == session
-        && (event.operation.id == operation.id || event.header.frame_id == frame_id)
+        && event.operation == operation
 }
 
 fn validate_control_metadata_payload(
@@ -13345,7 +13343,7 @@ mod tests {
                 poll_matching_operation_event_from_scope(
                     scope,
                     operation,
-                    operation.id,
+                    92_303,
                     NnrpEventKind::PartialResult,
                     NnrpBufferView::empty(),
                     1,
@@ -13373,7 +13371,7 @@ mod tests {
                 poll_matching_operation_event_from_scope(
                     scope,
                     operation,
-                    operation.id,
+                    92_303,
                     NnrpEventKind::PartialResult,
                     NnrpBufferView::empty(),
                     1,
@@ -13391,7 +13389,7 @@ mod tests {
                         frame_id: 80,
                     },
                     operation,
-                    operation.id,
+                    92_303,
                     NnrpEventKind::PartialResult,
                     NnrpBufferView::empty(),
                     1,
@@ -13400,6 +13398,23 @@ mod tests {
                 NnrpFfiStatus::invalid_handle(NnrpHandleKind::Connection as u32)
             );
         }
+    }
+
+    #[test]
+    fn operation_result_matching_never_substitutes_frame_identity_for_handle_identity() {
+        let session = NnrpHandle::new(NnrpHandleKind::Session, 92_401, 1);
+        let operation = NnrpHandle::new(NnrpHandleKind::Operation, 92_402, 1);
+        let other_operation = NnrpHandle::new(NnrpHandleKind::Operation, 92_403, 1);
+        let mut event = NnrpEvent::none();
+        event.kind = NnrpEventKind::ResultPushed as u32;
+        event.session = session;
+        event.operation = other_operation;
+        event.header.frame_id = 80;
+
+        assert!(!event_is_operation_result(event, session, operation, 80));
+
+        event.operation = operation;
+        assert!(event_is_operation_result(event, session, operation, 80));
     }
 
     #[test]
