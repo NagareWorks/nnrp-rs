@@ -432,7 +432,7 @@ pub struct BrowserClientEventBatch {
 
 impl BrowserClientEventBatch {
     fn from_events(
-        events: Vec<(nnrp_runtime::NnrpClientEvent, RuntimePacket)>,
+        events: Vec<(nnrp_runtime::NnrpRuntimeEvent, RuntimePacket)>,
     ) -> Result<Self, RuntimeError> {
         let mut packet_bytes = Vec::new();
         let mut packet_offsets = Vec::with_capacity(events.len() + 1);
@@ -763,7 +763,7 @@ impl BrowserClientRoleState {
     async fn receive_event_packets(
         &self,
         max_events: u32,
-    ) -> Result<Vec<(nnrp_runtime::NnrpClientEvent, RuntimePacket)>, JsValue> {
+    ) -> Result<Vec<(nnrp_runtime::NnrpRuntimeEvent, RuntimePacket)>, JsValue> {
         let max_events = usize::try_from(max_events)
             .map_err(|_| js_error("maxEvents is not representable on this host"))?;
         let _receive_guard = self.receive_gate.lock().await;
@@ -778,7 +778,7 @@ impl BrowserClientRoleState {
     async fn receive_event_packets_locked(
         &self,
         max_events: usize,
-    ) -> Result<Vec<(nnrp_runtime::NnrpClientEvent, RuntimePacket)>, JsValue> {
+    ) -> Result<Vec<(nnrp_runtime::NnrpRuntimeEvent, RuntimePacket)>, JsValue> {
         loop {
             let observed_generation = self.carrier.event_generation();
             let buffered = self.poll_session_event_packets(max_events).await?;
@@ -795,7 +795,7 @@ impl BrowserClientRoleState {
     async fn poll_session_event_packets(
         &self,
         max_events: usize,
-    ) -> Result<Vec<(nnrp_runtime::NnrpClientEvent, RuntimePacket)>, JsValue> {
+    ) -> Result<Vec<(nnrp_runtime::NnrpRuntimeEvent, RuntimePacket)>, JsValue> {
         let mut session_slot = self.session.lock().await;
         session_slot
             .as_mut()

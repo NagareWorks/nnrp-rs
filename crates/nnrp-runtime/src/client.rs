@@ -34,8 +34,9 @@ use nnrp_core::{
 use crate::TcpTransport;
 use crate::{
     client_provider::{connect_client, NnrpClientOptions, NnrpClientProvider},
-    BoxedFramedTransport, FramedTransport, NnrpSubmitRequest, RuntimeError, RuntimeFrameHeader,
-    RuntimePacket, RuntimePressureState,
+    BoxedFramedTransport, FramedTransport, NnrpRuntimeEvent, NnrpRuntimeEventMetadata,
+    NnrpRuntimeEventTail, NnrpSubmitRequest, RuntimeError, RuntimeFrameHeader, RuntimePacket,
+    RuntimePressureState,
 };
 use nnrp_transport_provider::TransportSelection;
 use std::sync::Arc;
@@ -116,7 +117,7 @@ pub struct NnrpResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NnrpClientEvent {
+pub(crate) enum NnrpClientEvent {
     Result(NnrpResult),
     PartialResult {
         metadata: PartialResultMetadata,
@@ -531,74 +532,42 @@ impl NnrpClientSession {
     }
 
     pub async fn await_result(&mut self) -> Result<NnrpResult, RuntimeError> {
-        match self.await_event().await? {
-            NnrpClientEvent::Result(result) => Ok(result),
-            NnrpClientEvent::ResultDrop { .. } => Err(RuntimeError::UnexpectedMessage(
-                "client expected RESULT_PUSH but received RESULT_DROP",
-            )),
-            NnrpClientEvent::ResultDropReason { .. } => Err(RuntimeError::UnexpectedMessage(
-                "client expected RESULT_PUSH but received RESULT_DROP_REASON",
-            )),
-            NnrpClientEvent::FlowUpdate(_) => Err(RuntimeError::UnexpectedMessage(
-                "client expected RESULT_PUSH but received FLOW_UPDATE",
-            )),
-            NnrpClientEvent::PartialResult { .. } => Err(RuntimeError::UnexpectedMessage(
-                "client expected RESULT_PUSH but received PARTIAL_RESULT",
-            )),
-            NnrpClientEvent::Backpressure(_) => Err(RuntimeError::UnexpectedMessage(
-                "client expected RESULT_PUSH but received BACKPRESSURE",
-            )),
-            NnrpClientEvent::CreditUpdate(_) => Err(RuntimeError::UnexpectedMessage(
-                "client expected RESULT_PUSH but received CREDIT_UPDATE",
-            )),
-            NnrpClientEvent::Progress { .. }
-            | NnrpClientEvent::Control { .. }
-            | NnrpClientEvent::Scheduling { .. }
-            | NnrpClientEvent::Supersede { .. }
-            | NnrpClientEvent::Budget(_)
-            | NnrpClientEvent::ObjectDeclare { .. }
-            | NnrpClientEvent::ObjectRef { .. }
-            | NnrpClientEvent::ObjectRelease { .. }
-            | NnrpClientEvent::ObjectDelta { .. }
-            | NnrpClientEvent::CacheReference { .. }
-            | NnrpClientEvent::CacheMiss { .. }
-            | NnrpClientEvent::CacheInvalidate(_)
-            | NnrpClientEvent::Capability { .. }
-            | NnrpClientEvent::RouteHint { .. }
-            | NnrpClientEvent::TraceContext { .. }
-            | NnrpClientEvent::RecoverableError { .. }
-            | NnrpClientEvent::RetryAfter { .. }
-            | NnrpClientEvent::ResultHint(_) => Err(RuntimeError::UnexpectedMessage(
-                "client expected RESULT_PUSH but received a non-terminal runtime event",
+        let event = self.await_event().await?;
+        match (event.metadata, event.tail) {
+            (NnrpRuntimeEventMetadata::ResultPush(metadata), NnrpRuntimeEventTail::Body(body)) => {
+                Ok(NnrpResult {
+                    frame_id: event.header.frame_id,
+                    metadata,
+                    body,
+                })
+            }
+            _ => Err(RuntimeError::UnexpectedMessage(
+                "client expected RESULT_PUSH but received another runtime event",
             )),
         }
     }
 
-    pub async fn await_event(&mut self) -> Result<NnrpClientEvent, RuntimeError> {
+    pub async fn await_event(&mut self) -> Result<NnrpRuntimeEvent, RuntimeError> {
         Ok(self.await_event_packet().await?.0)
-    }
-
-    pub async fn await_event_with_header(
-        &mut self,
-    ) -> Result<(NnrpClientEvent, RuntimeFrameHeader), RuntimeError> {
-        let (event, packet) = self.await_event_packet().await?;
-        Ok((event, RuntimeFrameHeader::from(&packet.header)))
     }
 
     pub async fn await_event_packet(
         &mut self,
-    ) -> Result<(NnrpClientEvent, RuntimePacket), RuntimeError> {
-        if let Some(event) = self.pending_events.pop_front() {
-            return Ok(event);
+    ) -> Result<(NnrpRuntimeEvent, RuntimePacket), RuntimeError> {
+        if let Some((event, packet)) = self.pending_events.pop_front() {
+            let header = RuntimeFrameHeader::from(&packet.header);
+            return Ok((NnrpRuntimeEvent::from_client(header, event), packet));
         }
         let packet = self.transport.read_packet().await?;
-        self.decode_event_packet(packet)
+        let (event, packet) = self.decode_event_packet(packet)?;
+        let header = RuntimeFrameHeader::from(&packet.header);
+        Ok((NnrpRuntimeEvent::from_client(header, event), packet))
     }
 
     pub async fn await_event_packet_batch(
         &mut self,
         max_events: usize,
-    ) -> Result<Vec<(NnrpClientEvent, RuntimePacket)>, RuntimeError> {
+    ) -> Result<Vec<(NnrpRuntimeEvent, RuntimePacket)>, RuntimeError> {
         validate_event_batch_limit(max_events)?;
         let mut events = Vec::with_capacity(max_events);
         events.push(self.await_event_packet().await?);
@@ -609,19 +578,22 @@ impl NnrpClientSession {
     pub fn poll_event_packet_batch(
         &mut self,
         max_events: usize,
-    ) -> Result<Vec<(NnrpClientEvent, RuntimePacket)>, RuntimeError> {
+    ) -> Result<Vec<(NnrpRuntimeEvent, RuntimePacket)>, RuntimeError> {
         let mut events = Vec::with_capacity(max_events);
         while events.len() < max_events {
-            let Some(event) = self.pending_events.pop_front() else {
+            let Some((event, packet)) = self.pending_events.pop_front() else {
                 break;
             };
-            events.push(event);
+            let header = RuntimeFrameHeader::from(&packet.header);
+            events.push((NnrpRuntimeEvent::from_client(header, event), packet));
         }
         while events.len() < max_events {
             let Some(packet) = self.transport.try_read_packet()? else {
                 break;
             };
-            events.push(self.decode_event_packet(packet)?);
+            let (event, packet) = self.decode_event_packet(packet)?;
+            let header = RuntimeFrameHeader::from(&packet.header);
+            events.push((NnrpRuntimeEvent::from_client(header, event), packet));
         }
         Ok(events)
     }

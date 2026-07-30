@@ -7,8 +7,8 @@ use nnrp_core::{
     STANDARD_PROFILE_TOKEN,
 };
 use nnrp_runtime::{
-    FramedTransport, NnrpClient, NnrpClientConfig, NnrpClientEvent, NnrpServer, NnrpServerConfig,
-    RuntimeError, RuntimePacket, TcpTransport,
+    FramedTransport, NnrpClient, NnrpClientConfig, NnrpRuntimeEvent, NnrpRuntimeEventMetadata,
+    NnrpRuntimeEventTail, NnrpServer, NnrpServerConfig, RuntimeError, RuntimePacket, TcpTransport,
 };
 use nnrp_transport_ipc::{IpcEndpoint, IpcProvider};
 use nnrp_transport_quic::{QuicClientEndpointConfig, QuicProvider, QuicServerEndpointConfig};
@@ -1364,18 +1364,20 @@ fn wire_message_name(message_type: MessageType) -> &'static str {
     }
 }
 
-fn expect_backpressure(event: NnrpClientEvent) -> Result<PressureMetadata, RuntimeError> {
-    match event {
-        NnrpClientEvent::Backpressure(metadata) => Ok(metadata),
+fn expect_backpressure(event: NnrpRuntimeEvent) -> Result<PressureMetadata, RuntimeError> {
+    match (event.metadata, event.tail) {
+        (NnrpRuntimeEventMetadata::Pressure(metadata), NnrpRuntimeEventTail::None) => Ok(metadata),
         _ => Err(RuntimeError::UnexpectedMessage(
             "wire reference expected BACKPRESSURE event",
         )),
     }
 }
 
-fn expect_progress(event: NnrpClientEvent) -> Result<(ProgressMetadata, Vec<u8>), RuntimeError> {
-    match event {
-        NnrpClientEvent::Progress { metadata, body } => Ok((metadata, body)),
+fn expect_progress(event: NnrpRuntimeEvent) -> Result<(ProgressMetadata, Vec<u8>), RuntimeError> {
+    match (event.metadata, event.tail) {
+        (NnrpRuntimeEventMetadata::Progress(metadata), NnrpRuntimeEventTail::Body(body)) => {
+            Ok((metadata, body))
+        }
         _ => Err(RuntimeError::UnexpectedMessage(
             "wire reference expected PROGRESS event",
         )),
@@ -1383,10 +1385,12 @@ fn expect_progress(event: NnrpClientEvent) -> Result<(ProgressMetadata, Vec<u8>)
 }
 
 fn expect_partial_result(
-    event: NnrpClientEvent,
+    event: NnrpRuntimeEvent,
 ) -> Result<(PartialResultMetadata, Vec<u8>), RuntimeError> {
-    match event {
-        NnrpClientEvent::PartialResult { metadata, body } => Ok((metadata, body)),
+    match (event.metadata, event.tail) {
+        (NnrpRuntimeEventMetadata::PartialResult(metadata), NnrpRuntimeEventTail::Body(body)) => {
+            Ok((metadata, body))
+        }
         _ => Err(RuntimeError::UnexpectedMessage(
             "wire reference expected PARTIAL_RESULT event",
         )),
@@ -1394,37 +1398,37 @@ fn expect_partial_result(
 }
 
 fn expect_result_drop_reason(
-    event: NnrpClientEvent,
+    event: NnrpRuntimeEvent,
 ) -> Result<ResultDropReasonMetadata, RuntimeError> {
-    match event {
-        NnrpClientEvent::ResultDropReason { metadata, .. } => Ok(metadata),
+    match event.metadata {
+        NnrpRuntimeEventMetadata::ResultDropReason(metadata) => Ok(metadata),
         _ => Err(RuntimeError::UnexpectedMessage(
             "wire reference expected RESULT_DROP_REASON event",
         )),
     }
 }
 
-fn expect_capability(event: NnrpClientEvent) -> Result<CapabilityMetadata, RuntimeError> {
-    match event {
-        NnrpClientEvent::Capability { metadata, .. } => Ok(metadata),
+fn expect_capability(event: NnrpRuntimeEvent) -> Result<CapabilityMetadata, RuntimeError> {
+    match event.metadata {
+        NnrpRuntimeEventMetadata::Capability(metadata) => Ok(metadata),
         _ => Err(RuntimeError::UnexpectedMessage(
             "wire reference expected CAPABILITY_NEGOTIATION event",
         )),
     }
 }
 
-fn expect_route_hint(event: NnrpClientEvent) -> Result<RouteHintMetadata, RuntimeError> {
-    match event {
-        NnrpClientEvent::RouteHint { metadata, .. } => Ok(metadata),
+fn expect_route_hint(event: NnrpRuntimeEvent) -> Result<RouteHintMetadata, RuntimeError> {
+    match event.metadata {
+        NnrpRuntimeEventMetadata::RouteHint(metadata) => Ok(metadata),
         _ => Err(RuntimeError::UnexpectedMessage(
             "wire reference expected ROUTE_HINT event",
         )),
     }
 }
 
-fn expect_cache_reference(event: NnrpClientEvent) -> Result<CacheReferenceMetadata, RuntimeError> {
-    match event {
-        NnrpClientEvent::CacheReference { metadata, .. } => Ok(metadata),
+fn expect_cache_reference(event: NnrpRuntimeEvent) -> Result<CacheReferenceMetadata, RuntimeError> {
+    match event.metadata {
+        NnrpRuntimeEventMetadata::CacheReference(metadata) => Ok(metadata),
         _ => Err(RuntimeError::UnexpectedMessage(
             "wire reference expected CACHE_REFERENCE event",
         )),
@@ -1432,10 +1436,10 @@ fn expect_cache_reference(event: NnrpClientEvent) -> Result<CacheReferenceMetada
 }
 
 fn expect_cache_invalidate(
-    event: NnrpClientEvent,
+    event: NnrpRuntimeEvent,
 ) -> Result<CacheInvalidateMetadata, RuntimeError> {
-    match event {
-        NnrpClientEvent::CacheInvalidate(metadata) => Ok(metadata),
+    match event.metadata {
+        NnrpRuntimeEventMetadata::CacheInvalidate(metadata) => Ok(metadata),
         _ => Err(RuntimeError::UnexpectedMessage(
             "wire reference expected CACHE_INVALIDATE event",
         )),

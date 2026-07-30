@@ -47,7 +47,7 @@ use tokio::net::TcpListener;
 use crate::TcpFramedListener;
 use crate::{
     server_provider::{bind_server, BoundServerProvider},
-    BoxedFramedListener, BoxedFramedTransport, FramedListener, NnrpServerOptions,
+    BoxedFramedListener, BoxedFramedTransport, FramedListener, NnrpRuntimeEvent, NnrpServerOptions,
     NnrpServerProvider, ProviderEndpoint, RuntimeError, RuntimeFrameHeader, RuntimePacket,
     RuntimePressureState,
 };
@@ -257,7 +257,7 @@ pub struct NnrpPressureUpdate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NnrpServerEvent {
+pub(crate) enum NnrpServerEvent {
     Submit(NnrpSubmit),
     FrameCancel(NnrpCancel),
     PartialResult {
@@ -773,13 +773,7 @@ impl NnrpServerSession {
         })
     }
 
-    pub async fn await_event(&mut self) -> Result<NnrpServerEvent, RuntimeError> {
-        Ok(self.await_event_with_header().await?.0)
-    }
-
-    pub async fn await_event_with_header(
-        &mut self,
-    ) -> Result<(NnrpServerEvent, RuntimeFrameHeader), RuntimeError> {
+    pub async fn await_event(&mut self) -> Result<NnrpRuntimeEvent, RuntimeError> {
         let packet = self.transport.read_packet().await?;
         let header = RuntimeFrameHeader::from(&packet.header);
         let event = match packet.header.message_type {
@@ -1262,7 +1256,7 @@ impl NnrpServerSession {
                 "server expected a submit, control, object, cache, or close event",
             )),
         }?;
-        Ok((event, header))
+        Ok(NnrpRuntimeEvent::from_server(header, event))
     }
 
     pub async fn send_result(

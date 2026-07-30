@@ -36,8 +36,8 @@ use nnrp_core::{
 };
 #[cfg(not(test))]
 use nnrp_runtime::{
-    BoxedFramedTransport, NnrpClient, NnrpClientConfig, NnrpClientEvent, NnrpClientSession,
-    NnrpServer, NnrpServerConfig, NnrpServerEvent, NnrpServerSession, RuntimeTransportKind,
+    BoxedFramedTransport, NnrpClient, NnrpClientConfig, NnrpClientSession, NnrpRuntimeEvent,
+    NnrpServer, NnrpServerConfig, NnrpServerSession, RuntimeTransportKind,
 };
 #[cfg(not(test))]
 use nnrp_runtime::{
@@ -4403,307 +4403,23 @@ fn validate_role_event_poll(
 #[cfg(not(test))]
 fn client_role_event(
     scope: NnrpHandle,
-    event: NnrpClientEvent,
-    header: RuntimeFrameHeader,
+    event: NnrpRuntimeEvent,
 ) -> Result<NnrpEvent, NnrpFfiStatus> {
     let connection = role_session_connection(scope, NnrpFfiConnectionRole::Client)?;
-    let (kind, frame_id, operation_id, message_type, payload, terminal) = match event {
-        NnrpClientEvent::Result(result) => {
-            let mut payload = result
-                .metadata
-                .to_bytes()
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?
-                .to_vec();
-            payload.extend_from_slice(&result.body);
-            (
-                NnrpEventKind::ResultPushed,
-                result.frame_id,
-                None,
-                MessageType::ResultPush,
-                payload,
-                true,
-            )
+    let header = event.header;
+    let operation_id = event.metadata.operation_id();
+    let (kind, terminal) = match header.message_type {
+        MessageType::ResultPush => (NnrpEventKind::ResultPushed, true),
+        MessageType::ResultDrop | MessageType::ResultDropReason => {
+            (NnrpEventKind::ResultDropped, true)
         }
-        NnrpClientEvent::PartialResult { metadata, body } => {
-            let operation_id = metadata.operation_id;
-            (
-                NnrpEventKind::RuntimeFrame,
-                0,
-                Some(operation_id),
-                MessageType::PartialResult,
-                metadata
-                    .to_vec_with_body(&body)
-                    .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
-                false,
-            )
-        }
-        NnrpClientEvent::Progress { metadata, body } => (
-            NnrpEventKind::RuntimeFrame,
-            0,
-            Some(metadata.operation_id),
-            MessageType::Progress,
-            metadata
-                .to_vec_with_body(&body)
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
-            false,
-        ),
-        NnrpClientEvent::Control {
-            message_type,
-            metadata,
-            body,
-        } => (
-            NnrpEventKind::RuntimeFrame,
-            0,
-            Some(metadata.operation_id),
-            message_type,
-            metadata
-                .to_vec_with_diagnostics(&body)
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
-            false,
-        ),
-        NnrpClientEvent::Scheduling {
-            message_type,
-            metadata,
-        } => (
-            NnrpEventKind::RuntimeFrame,
-            0,
-            Some(metadata.operation_id),
-            message_type,
-            metadata
-                .to_bytes()
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?
-                .to_vec(),
-            false,
-        ),
-        NnrpClientEvent::Supersede { metadata, body } => (
-            NnrpEventKind::RuntimeFrame,
-            0,
-            Some(metadata.old_operation_id),
-            MessageType::Supersede,
-            metadata
-                .to_vec_with_diagnostics(&body)
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
-            false,
-        ),
-        NnrpClientEvent::Budget(metadata) => (
-            NnrpEventKind::RuntimeFrame,
-            0,
-            Some(metadata.operation_id),
-            MessageType::BudgetUpdate,
-            metadata
-                .to_bytes()
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?
-                .to_vec(),
-            false,
-        ),
-        NnrpClientEvent::ResultDrop { frame_id } => (
-            NnrpEventKind::ResultDropped,
-            frame_id,
-            None,
-            MessageType::ResultDrop,
-            Vec::new(),
-            true,
-        ),
-        NnrpClientEvent::ResultDropReason { metadata, body } => (
-            NnrpEventKind::ResultDropped,
-            0,
-            Some(metadata.operation_id),
-            MessageType::ResultDropReason,
-            metadata
-                .to_vec_with_diagnostics(&body)
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
-            true,
-        ),
-        NnrpClientEvent::FlowUpdate(metadata) => (
-            NnrpEventKind::FlowUpdated,
-            0,
-            None,
-            MessageType::FlowUpdate,
-            metadata
-                .to_bytes()
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?
-                .to_vec(),
-            false,
-        ),
-        NnrpClientEvent::Backpressure(metadata) => (
-            NnrpEventKind::RuntimeFrame,
-            0,
-            None,
-            MessageType::Backpressure,
-            metadata
-                .to_bytes()
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?
-                .to_vec(),
-            false,
-        ),
-        NnrpClientEvent::CreditUpdate(metadata) => (
-            NnrpEventKind::RuntimeFrame,
-            0,
-            None,
-            MessageType::CreditUpdate,
-            metadata
-                .to_bytes()
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?
-                .to_vec(),
-            false,
-        ),
-        NnrpClientEvent::Capability {
-            message_type,
-            metadata,
-            body,
-        } => (
-            NnrpEventKind::RuntimeFrame,
-            0,
-            None,
-            message_type,
-            metadata
-                .to_vec_with_body(&body)
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
-            false,
-        ),
-        NnrpClientEvent::RouteHint {
-            message_type,
-            metadata,
-            body,
-        } => (
-            NnrpEventKind::RuntimeFrame,
-            0,
-            (metadata.operation_id != 0).then_some(metadata.operation_id),
-            message_type,
-            metadata
-                .to_vec_with_body(&body)
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
-            false,
-        ),
-        NnrpClientEvent::TraceContext {
-            frame_id,
-            metadata,
-            body,
-        } => (
-            NnrpEventKind::RuntimeFrame,
-            frame_id,
-            None,
-            MessageType::TraceContext,
-            metadata
-                .to_vec_with_body(&body)
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
-            false,
-        ),
-        NnrpClientEvent::RecoverableError { metadata, body } => (
-            NnrpEventKind::RuntimeFrame,
-            metadata.related_frame_id,
-            None,
-            MessageType::ErrorRecoverable,
-            metadata
-                .to_vec_with_diagnostics(&body)
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
-            false,
-        ),
-        NnrpClientEvent::RetryAfter { metadata, body } => (
-            NnrpEventKind::RuntimeFrame,
-            0,
-            None,
-            MessageType::RetryAfter,
-            metadata
-                .to_vec_with_diagnostics(&body)
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
-            false,
-        ),
-        NnrpClientEvent::ResultHint(metadata) => (
-            NnrpEventKind::ResultHint,
-            0,
-            None,
-            MessageType::ResultHint,
-            metadata
-                .to_bytes()
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?
-                .to_vec(),
-            false,
-        ),
-        NnrpClientEvent::ObjectDeclare { metadata, body } => (
-            NnrpEventKind::RuntimeFrame,
-            0,
-            None,
-            MessageType::ObjectDeclare,
-            metadata
-                .to_vec_with_extension(&body)
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
-            false,
-        ),
-        NnrpClientEvent::ObjectRef { metadata, body } => (
-            NnrpEventKind::RuntimeFrame,
-            0,
-            Some(metadata.operation_id),
-            MessageType::ObjectRef,
-            metadata
-                .to_vec_with_extension(&body)
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
-            false,
-        ),
-        NnrpClientEvent::ObjectRelease { metadata, body } => (
-            NnrpEventKind::RuntimeFrame,
-            0,
-            Some(metadata.operation_id),
-            MessageType::ObjectRelease,
-            metadata
-                .to_vec_with_diagnostics(&body)
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
-            false,
-        ),
-        NnrpClientEvent::ObjectDelta {
-            message_type,
-            metadata,
-            body,
-        } => {
-            let mut payload = metadata
-                .to_bytes()
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?
-                .to_vec();
-            payload.extend_from_slice(&body);
-            (
-                NnrpEventKind::RuntimeFrame,
-                0,
-                None,
-                message_type,
-                payload,
-                false,
-            )
-        }
-        NnrpClientEvent::CacheReference { metadata, body } => (
-            NnrpEventKind::RuntimeFrame,
-            0,
-            None,
-            MessageType::CacheReference,
-            metadata
-                .to_vec_with_extension(&body)
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
-            false,
-        ),
-        NnrpClientEvent::CacheMiss { metadata, body } => (
-            NnrpEventKind::RuntimeFrame,
-            0,
-            None,
-            MessageType::CacheMiss,
-            metadata
-                .to_vec_with_diagnostics(&body)
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
-            false,
-        ),
-        NnrpClientEvent::CacheInvalidate(metadata) => (
-            NnrpEventKind::RuntimeFrame,
-            0,
-            None,
-            MessageType::CacheInvalidate,
-            metadata
-                .to_bytes()
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?
-                .to_vec(),
-            false,
-        ),
+        MessageType::FlowUpdate => (NnrpEventKind::FlowUpdated, false),
+        MessageType::ResultHint => (NnrpEventKind::ResultHint, false),
+        _ => (NnrpEventKind::RuntimeFrame, false),
     };
-
-    debug_assert_eq!(message_type, header.message_type);
-    debug_assert!(frame_id == 0 || frame_id == header.frame_id);
+    let payload = event
+        .into_payload()
+        .map_err(|error| NnrpFfiStatus::from_core_error(&error))?;
     let wire_frame_id = header.frame_id;
     let mut store = handle_store();
     let operation = if let Some(operation_id) = operation_id {
@@ -4825,8 +4541,8 @@ unsafe fn role_client_await_events_impl(
     for index in 0..limit {
         let timeout_ms = if index == 0 { request.timeout_ms } else { 1 };
         let runtime = Arc::clone(&session);
-        let (event, header) = match transport::run_role_async(
-            async move { runtime.lock().await.await_event_with_header().await },
+        let event = match transport::run_role_async(
+            async move { runtime.lock().await.await_event().await },
             timeout_ms,
         ) {
             Ok(event) => event,
@@ -4837,7 +4553,7 @@ unsafe fn role_client_await_events_impl(
             }
             Err(status) => return status,
         };
-        let event = match client_role_event(request.scope, event, header) {
+        let event = match client_role_event(request.scope, event) {
             Ok(event) => event,
             Err(status) => return status,
         };
@@ -4879,8 +4595,8 @@ unsafe fn role_server_await_events_impl(
     for index in 0..limit {
         let timeout_ms = if index == 0 { request.timeout_ms } else { 1 };
         let runtime = Arc::clone(&session);
-        let (event, header) = match transport::run_role_async(
-            async move { runtime.lock().await.await_event_with_header().await },
+        let event = match transport::run_role_async(
+            async move { runtime.lock().await.await_event().await },
             timeout_ms,
         ) {
             Ok(event) => event,
@@ -4891,7 +4607,7 @@ unsafe fn role_server_await_events_impl(
             }
             Err(status) => return status,
         };
-        *out_events.add(index) = match server_role_event(request.scope, connection, event, header) {
+        *out_events.add(index) = match server_role_event(request.scope, connection, event) {
             Ok(event) => event,
             Err(status) => return status,
         };
@@ -4904,288 +4620,22 @@ unsafe fn role_server_await_events_impl(
 fn server_role_event(
     scope: NnrpHandle,
     connection: NnrpHandle,
-    event: NnrpServerEvent,
-    header: RuntimeFrameHeader,
+    event: NnrpRuntimeEvent,
 ) -> Result<NnrpEvent, NnrpFfiStatus> {
-    let (kind, message_type, operation_id, frame_id, payload, create_operation) = match event {
-        NnrpServerEvent::Submit(submit) => {
-            let mut payload = submit
-                .metadata
-                .to_bytes()
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?
-                .to_vec();
-            payload.extend_from_slice(&submit.body);
-            (
-                NnrpEventKind::SubmitAccepted,
-                MessageType::FrameSubmit,
-                Some(submit.operation_id),
-                submit.frame_id,
-                payload,
-                true,
-            )
-        }
-        NnrpServerEvent::FrameCancel(cancel) => (
-            NnrpEventKind::Control,
-            MessageType::FrameCancel,
-            None,
-            cancel.frame_id,
-            Vec::new(),
-            false,
-        ),
-        NnrpServerEvent::PartialResult { metadata, body } => (
-            NnrpEventKind::RuntimeFrame,
-            MessageType::PartialResult,
-            Some(metadata.operation_id),
-            0,
-            metadata
-                .to_vec_with_body(&body)
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
-            false,
-        ),
-        NnrpServerEvent::Progress { metadata, body } => (
-            NnrpEventKind::RuntimeFrame,
-            MessageType::Progress,
-            Some(metadata.operation_id),
-            0,
-            metadata
-                .to_vec_with_body(&body)
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
-            false,
-        ),
-        NnrpServerEvent::ResultDropReason { metadata, body } => (
-            NnrpEventKind::ResultDropped,
-            MessageType::ResultDropReason,
-            Some(metadata.operation_id),
-            0,
-            metadata
-                .to_vec_with_diagnostics(&body)
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
-            false,
-        ),
-        NnrpServerEvent::Control(control) => (
-            NnrpEventKind::RuntimeFrame,
-            control.message_type,
-            Some(control.metadata.operation_id),
-            0,
-            control
-                .metadata
-                .to_vec_with_diagnostics(&control.body)
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
-            false,
-        ),
-        NnrpServerEvent::Scheduling(update) => (
-            NnrpEventKind::RuntimeFrame,
-            update.message_type,
-            Some(update.metadata.operation_id),
-            0,
-            update
-                .metadata
-                .to_bytes()
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?
-                .to_vec(),
-            false,
-        ),
-        NnrpServerEvent::Supersede { metadata, body } => (
-            NnrpEventKind::RuntimeFrame,
-            MessageType::Supersede,
-            Some(metadata.old_operation_id),
-            0,
-            metadata
-                .to_vec_with_diagnostics(&body)
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
-            false,
-        ),
-        NnrpServerEvent::Budget(metadata) => (
-            NnrpEventKind::RuntimeFrame,
-            MessageType::BudgetUpdate,
-            Some(metadata.operation_id),
-            0,
-            metadata
-                .to_bytes()
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?
-                .to_vec(),
-            false,
-        ),
-        NnrpServerEvent::FlowUpdate(metadata) => (
-            NnrpEventKind::FlowUpdated,
-            MessageType::FlowUpdate,
-            None,
-            0,
-            metadata
-                .to_bytes()
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?
-                .to_vec(),
-            false,
-        ),
-        NnrpServerEvent::Pressure(update) => (
-            NnrpEventKind::RuntimeFrame,
-            update.message_type,
-            None,
-            0,
-            update
-                .metadata
-                .to_bytes()
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?
-                .to_vec(),
-            false,
-        ),
-        NnrpServerEvent::Capability {
-            message_type,
-            metadata,
-            body,
-        } => (
-            NnrpEventKind::RuntimeFrame,
-            message_type,
-            None,
-            0,
-            metadata
-                .to_vec_with_body(&body)
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
-            false,
-        ),
-        NnrpServerEvent::RouteHint {
-            message_type,
-            metadata,
-            body,
-        } => (
-            NnrpEventKind::RuntimeFrame,
-            message_type,
-            (metadata.operation_id != 0).then_some(metadata.operation_id),
-            0,
-            metadata
-                .to_vec_with_body(&body)
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
-            false,
-        ),
-        NnrpServerEvent::TraceContext {
-            frame_id,
-            metadata,
-            body,
-        } => (
-            NnrpEventKind::RuntimeFrame,
-            MessageType::TraceContext,
-            None,
-            frame_id,
-            metadata
-                .to_vec_with_body(&body)
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
-            false,
-        ),
-        NnrpServerEvent::RecoverableError { metadata, body } => (
-            NnrpEventKind::RuntimeFrame,
-            MessageType::ErrorRecoverable,
-            None,
-            metadata.related_frame_id,
-            metadata
-                .to_vec_with_diagnostics(&body)
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
-            false,
-        ),
-        NnrpServerEvent::RetryAfter { metadata, body } => (
-            NnrpEventKind::RuntimeFrame,
-            MessageType::RetryAfter,
-            None,
-            0,
-            metadata
-                .to_vec_with_diagnostics(&body)
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
-            false,
-        ),
-        NnrpServerEvent::ObjectDeclare { metadata, body } => (
-            NnrpEventKind::RuntimeFrame,
-            MessageType::ObjectDeclare,
-            None,
-            0,
-            metadata
-                .to_vec_with_extension(&body)
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
-            false,
-        ),
-        NnrpServerEvent::ObjectRef { metadata, body } => (
-            NnrpEventKind::RuntimeFrame,
-            MessageType::ObjectRef,
-            Some(metadata.operation_id),
-            0,
-            metadata
-                .to_vec_with_extension(&body)
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
-            false,
-        ),
-        NnrpServerEvent::ObjectRelease { metadata, body } => (
-            NnrpEventKind::RuntimeFrame,
-            MessageType::ObjectRelease,
-            Some(metadata.operation_id),
-            0,
-            metadata
-                .to_vec_with_diagnostics(&body)
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
-            false,
-        ),
-        NnrpServerEvent::ObjectDelta {
-            message_type,
-            metadata,
-            body,
-        } => {
-            let mut payload = metadata
-                .to_bytes()
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?
-                .to_vec();
-            payload.extend_from_slice(&body);
-            (
-                NnrpEventKind::RuntimeFrame,
-                message_type,
-                None,
-                0,
-                payload,
-                false,
-            )
-        }
-        NnrpServerEvent::CacheReference { metadata, body } => (
-            NnrpEventKind::RuntimeFrame,
-            MessageType::CacheReference,
-            None,
-            0,
-            metadata
-                .to_vec_with_extension(&body)
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
-            false,
-        ),
-        NnrpServerEvent::CacheMiss { metadata, body } => (
-            NnrpEventKind::RuntimeFrame,
-            MessageType::CacheMiss,
-            None,
-            0,
-            metadata
-                .to_vec_with_diagnostics(&body)
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?,
-            false,
-        ),
-        NnrpServerEvent::CacheInvalidate(metadata) => (
-            NnrpEventKind::RuntimeFrame,
-            MessageType::CacheInvalidate,
-            None,
-            0,
-            metadata
-                .to_bytes()
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?
-                .to_vec(),
-            false,
-        ),
-        NnrpServerEvent::Close(metadata) => (
-            NnrpEventKind::SessionClosed,
-            MessageType::SessionClose,
-            None,
-            0,
-            metadata
-                .to_bytes()
-                .map_err(|error| NnrpFfiStatus::from_core_error(&error))?
-                .to_vec(),
-            false,
-        ),
+    let header = event.header;
+    let operation_id = event.metadata.operation_id();
+    let create_operation = header.message_type == MessageType::FrameSubmit;
+    let kind = match header.message_type {
+        MessageType::FrameSubmit => NnrpEventKind::SubmitAccepted,
+        MessageType::FrameCancel => NnrpEventKind::Control,
+        MessageType::SessionClose => NnrpEventKind::SessionClosed,
+        MessageType::ResultDropReason => NnrpEventKind::ResultDropped,
+        MessageType::FlowUpdate => NnrpEventKind::FlowUpdated,
+        _ => NnrpEventKind::RuntimeFrame,
     };
-
-    debug_assert_eq!(message_type, header.message_type);
-    debug_assert!(frame_id == 0 || frame_id == header.frame_id);
+    let payload = event
+        .into_payload()
+        .map_err(|error| NnrpFfiStatus::from_core_error(&error))?;
     let wire_frame_id = header.frame_id;
     let mut store = handle_store();
     let operation = if create_operation {
@@ -5199,7 +4649,7 @@ fn server_role_event(
             NnrpFfiResource::Operation {
                 session: scope,
                 operation_id: operation_id.expect("submit event has operation id"),
-                frame_id,
+                frame_id: wire_frame_id,
                 payload_len: payload.len(),
             },
         )?;

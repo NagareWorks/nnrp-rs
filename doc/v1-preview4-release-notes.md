@@ -2,6 +2,24 @@
 
 Preview4 moves the Rust workspace beyond token-stream transport substitution and into runtime orchestration features that help SDKs model cancellation, priority, progress, partial results, cache references, route hints, trace context, result drop reasons, IPC, and WebSocket endpoints directly.
 
+## 1.0.0-preview.4.20
+
+Rust role sessions now expose one public `NnrpRuntimeEvent` envelope for client and server event
+pumps. Every wire event retains the complete non-derived common header, one closed typed metadata
+variant, and one closed owned tail variant. Private role decoders no longer leak language-specific
+client or server event enums into SDK bindings.
+
+The native FFI projects the same envelope without reconstructing message types, frame identities,
+or payload boundaries in each binding. The FFI ABI is `4.3.0`; downstream SDKs must keep local
+lifecycle events separate from wire events and may construct a public runtime event only when the
+native event carries a wire header.
+
+The release validation matrix covers the unified event contract through Rust client/server
+loopbacks, TCP, QUIC, IPC, WebSocket, secure carrier cases, browser WASM role tests, external wire
+conformance, dynamically loaded transport-scoped libraries, and native/WASM artifact inspection.
+Preview4 revision 20 is the coordinated Rust baseline for Python, JavaScript, and C# parity work;
+those SDKs must complete their public API and E2E gates before their corresponding release.
+
 ## 1.0.0-preview.4.19
 
 Native transport artifacts now expose an explicit runtime shutdown operation for dynamically loaded SDK hosts. After

@@ -680,7 +680,7 @@ mod tests {
         ResultPushMetadata, SubmitMode, TileIndexMode, STANDARD_PROFILE_TOKEN,
     };
     #[cfg(unix)]
-    use nnrp_runtime::{NnrpClientEvent, NnrpResult};
+    use nnrp_runtime::{NnrpResult, NnrpRuntimeEventMetadata, NnrpRuntimeEventTail};
     use nnrp_transport_provider::RemoteTransportSupport;
     #[cfg(unix)]
     use tokio::time::{timeout, Duration};
@@ -928,16 +928,21 @@ mod tests {
         session.cancel_operation(frame_id as u64, 7).await?;
 
         match session.await_event().await? {
-            NnrpClientEvent::Backpressure(pressure) => {
+            nnrp_runtime::NnrpRuntimeEvent {
+                metadata: NnrpRuntimeEventMetadata::Pressure(pressure),
+                tail: NnrpRuntimeEventTail::None,
+                ..
+            } => {
                 assert_eq!(pressure.pressure_level, BackpressureLevel::Soft as u16);
                 assert_eq!(pressure.credit_window, 2);
             }
             event => panic!("expected backpressure event, got {event:?}"),
         }
         match session.await_event().await? {
-            NnrpClientEvent::ResultDropReason {
-                metadata: reason,
-                body,
+            nnrp_runtime::NnrpRuntimeEvent {
+                metadata: NnrpRuntimeEventMetadata::ResultDropReason(reason),
+                tail: NnrpRuntimeEventTail::Diagnostic(body),
+                ..
             } => {
                 assert_eq!(reason.operation_id, frame_id as u64);
                 assert_eq!(reason.drop_reason_code, 7);

@@ -3,8 +3,8 @@ use nnrp_core::{
     BackpressureLevel, BudgetMetadata, CacheInvalidateMetadata, CacheInvalidateScope,
     CacheMissMetadata, CacheMissReason, CacheObjectId, CacheObjectKind, CacheReferenceMetadata,
     CacheReuseScope, CapabilityMetadata, CommonHeader, ControlRequestMetadata, FlowScopeKind,
-    FlowUpdateMetadata, FlowUpdateReason, FrameSubmitMetadata, InFlightPolicy, InputProfile,
-    MemoryLocationHint, MessageType, ObjectDeltaMetadata, ObjectDescriptorMetadata,
+    FlowUpdateMetadata, FlowUpdateReason, FrameSubmitMetadata, HeaderFlags, InFlightPolicy,
+    InputProfile, MemoryLocationHint, MessageType, ObjectDeltaMetadata, ObjectDescriptorMetadata,
     ObjectReferenceMetadata, ObjectReleaseMetadata, ObjectReleaseReason, OperationState,
     OwnershipHint, PartialResultMetadata, PayloadKindBitmap, PressureMetadata, ProgressMetadata,
     ResultClass, ResultDropReasonMetadata, ResultPushMetadata, RetryAfterMetadata,
@@ -21,8 +21,9 @@ use nnrp_core::{
 };
 use nnrp_runtime::{
     BoxedFramedTransport, FramedListener, FramedTransport, NnrpClient, NnrpClientConfig,
-    NnrpClientEvent, NnrpServer, NnrpServerConfig, NnrpServerPolicy, RuntimeError,
-    RuntimeFrameLimits, RuntimePacket, RuntimeTransportKind, TcpFramedListener, TcpTransport,
+    NnrpRuntimeEvent, NnrpRuntimeEventMetadata, NnrpRuntimeEventTail, NnrpServer, NnrpServerConfig,
+    NnrpServerPolicy, RuntimeError, RuntimeFrameLimits, RuntimePacket, RuntimeTransportKind,
+    TcpFramedListener, TcpTransport,
 };
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -357,14 +358,24 @@ async fn tcp_loopback_handles_cancel_drop_flow_and_patch() -> Result<(), Runtime
     assert_eq!(patch_ack.ack_status, SessionPatchAckStatus::Accepted);
 
     match session.await_event().await? {
-        NnrpClientEvent::FlowUpdate(flow) => {
+        NnrpRuntimeEvent {
+            metadata: NnrpRuntimeEventMetadata::FlowUpdate(flow),
+            tail: NnrpRuntimeEventTail::None,
+            ..
+        } => {
             assert_eq!(flow.scope_kind, FlowScopeKind::Session);
             assert_eq!(flow.session_credit, 7);
         }
         event => panic!("expected flow update, got {event:?}"),
     }
     match session.await_event().await? {
-        NnrpClientEvent::ResultDrop { frame_id: dropped } => assert_eq!(dropped, frame_id),
+        NnrpRuntimeEvent {
+            header,
+            metadata: NnrpRuntimeEventMetadata::None,
+            tail: NnrpRuntimeEventTail::None,
+        } if header.message_type == MessageType::ResultDrop => {
+            assert_eq!(header.frame_id, frame_id)
+        }
         event => panic!("expected result drop, got {event:?}"),
     }
 
@@ -502,7 +513,11 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
         .await?;
 
     match session.await_event().await? {
-        NnrpClientEvent::Backpressure(pressure) => {
+        NnrpRuntimeEvent {
+            header,
+            metadata: NnrpRuntimeEventMetadata::Pressure(pressure),
+            tail: NnrpRuntimeEventTail::None,
+        } if header.message_type == MessageType::Backpressure => {
             assert_eq!(pressure.pressure_level, BackpressureLevel::Soft as u16);
             assert_eq!(pressure.retry_after_ms, 25);
             assert_eq!(
@@ -514,7 +529,11 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
         event => panic!("expected backpressure, got {event:?}"),
     }
     match session.await_event().await? {
-        NnrpClientEvent::Progress { metadata, body } => {
+        NnrpRuntimeEvent {
+            metadata: NnrpRuntimeEventMetadata::Progress(metadata),
+            tail: NnrpRuntimeEventTail::Body(body),
+            ..
+        } => {
             assert_eq!(metadata.operation_id, operation_id);
             assert_eq!(metadata.progress_sequence, 1);
             assert_eq!(metadata.percent_x100, 2_500);
@@ -523,16 +542,21 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
         event => panic!("expected progress, got {event:?}"),
     }
     match session.await_event().await? {
-        NnrpClientEvent::PartialResult { metadata, body } => {
+        NnrpRuntimeEvent {
+            metadata: NnrpRuntimeEventMetadata::PartialResult(metadata),
+            tail: NnrpRuntimeEventTail::Body(body),
+            ..
+        } => {
             assert_eq!(metadata.operation_id, operation_id);
             assert_eq!(body, b"partial".to_vec());
         }
         event => panic!("expected partial result, got {event:?}"),
     }
     match session.await_event().await? {
-        NnrpClientEvent::ResultDropReason {
-            metadata: reason,
-            body,
+        NnrpRuntimeEvent {
+            metadata: NnrpRuntimeEventMetadata::ResultDropReason(reason),
+            tail: NnrpRuntimeEventTail::Diagnostic(body),
+            ..
         } => {
             assert_eq!(reason.operation_id, operation_id);
             assert_eq!(reason.drop_reason_code, 7);
@@ -551,7 +575,11 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
     session.abort_operation(abort_operation_id, 9).await?;
 
     match session.await_event().await? {
-        NnrpClientEvent::Backpressure(pressure) => {
+        NnrpRuntimeEvent {
+            header,
+            metadata: NnrpRuntimeEventMetadata::Pressure(pressure),
+            tail: NnrpRuntimeEventTail::None,
+        } if header.message_type == MessageType::Backpressure => {
             assert_eq!(pressure.pressure_level, BackpressureLevel::Soft as u16);
             assert_eq!(pressure.retry_after_ms, 25);
         }
@@ -693,12 +721,12 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
         .await?;
 
     match session.await_event().await? {
-        NnrpClientEvent::Capability {
-            message_type,
-            metadata,
-            body,
+        NnrpRuntimeEvent {
+            header,
+            metadata: NnrpRuntimeEventMetadata::Capability(metadata),
+            tail: NnrpRuntimeEventTail::Body(body),
         } => {
-            assert_eq!(message_type, MessageType::CapabilityNegotiation);
+            assert_eq!(header.message_type, MessageType::CapabilityNegotiation);
             assert_eq!(metadata.profile_id, STANDARD_PROFILE_TOKEN);
             assert_eq!(metadata.capability_count, 2);
             assert_eq!(metadata.preference_rank, 1);
@@ -707,12 +735,12 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
         event => panic!("expected capability negotiation, got {event:?}"),
     }
     match session.await_event().await? {
-        NnrpClientEvent::RouteHint {
-            message_type,
-            metadata,
-            body,
+        NnrpRuntimeEvent {
+            header,
+            metadata: NnrpRuntimeEventMetadata::RouteHint(metadata),
+            tail: NnrpRuntimeEventTail::Body(body),
         } => {
-            assert_eq!(message_type, MessageType::RouteHint);
+            assert_eq!(header.message_type, MessageType::RouteHint);
             assert_eq!(metadata.operation_id, operation_id);
             assert_eq!(metadata.route_id, 92);
             assert_eq!(metadata.executor_class, 3);
@@ -721,7 +749,11 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
         event => panic!("expected route hint, got {event:?}"),
     }
     match session.await_event().await? {
-        NnrpClientEvent::ObjectDeclare { metadata, body } => {
+        NnrpRuntimeEvent {
+            metadata: NnrpRuntimeEventMetadata::ObjectDescriptor(metadata),
+            tail: NnrpRuntimeEventTail::Body(body),
+            ..
+        } => {
             assert_eq!(metadata.object_id, 900);
             assert_eq!(metadata.object_kind, RuntimeObjectKind::ImageTile);
             assert_eq!(body, b"meta".to_vec());
@@ -729,7 +761,11 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
         event => panic!("expected object declaration, got {event:?}"),
     }
     match session.await_event().await? {
-        NnrpClientEvent::ObjectRef { metadata, body } => {
+        NnrpRuntimeEvent {
+            metadata: NnrpRuntimeEventMetadata::ObjectReference(metadata),
+            tail: NnrpRuntimeEventTail::Body(body),
+            ..
+        } => {
             assert_eq!(metadata.operation_id, operation_id);
             assert_eq!(metadata.length, 4);
             assert!(body.is_empty());
@@ -737,15 +773,28 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
         event => panic!("expected object reference, got {event:?}"),
     }
     match session.await_event().await? {
-        NnrpClientEvent::ObjectDelta { metadata, body, .. } => {
+        NnrpRuntimeEvent {
+            metadata: NnrpRuntimeEventMetadata::ObjectDelta(metadata),
+            tail:
+                NnrpRuntimeEventTail::MetadataBodyAndDelta {
+                    metadata_body,
+                    delta,
+                },
+            ..
+        } => {
             assert_eq!(metadata.object_id, 900);
             assert_eq!(metadata.delta_bytes, 4);
-            assert_eq!(body, b"abcd".to_vec());
+            assert!(metadata_body.is_empty());
+            assert_eq!(delta, b"abcd".to_vec());
         }
         event => panic!("expected object delta, got {event:?}"),
     }
     match session.await_event().await? {
-        NnrpClientEvent::CacheReference { metadata, body } => {
+        NnrpRuntimeEvent {
+            metadata: NnrpRuntimeEventMetadata::CacheReference(metadata),
+            tail: NnrpRuntimeEventTail::Body(body),
+            ..
+        } => {
             assert_eq!(metadata.cache_key_lo, 0x5678);
             assert_eq!(metadata.reuse_scope, CacheReuseScope::Session);
             assert_eq!(body, b"hint".to_vec());
@@ -753,7 +802,11 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
         event => panic!("expected cache reference, got {event:?}"),
     }
     match session.await_event().await? {
-        NnrpClientEvent::CacheInvalidate(metadata) => {
+        NnrpRuntimeEvent {
+            metadata: NnrpRuntimeEventMetadata::CacheInvalidate(metadata),
+            tail: NnrpRuntimeEventTail::None,
+            ..
+        } => {
             assert_eq!(metadata.invalidate_scope, CacheInvalidateScope::ObjectKey);
             assert_eq!(metadata.cache_namespace, 42);
             assert_eq!(metadata.cache_key_hi, 0x1234);
@@ -763,7 +816,11 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
         event => panic!("expected cache invalidate, got {event:?}"),
     }
     match session.await_event().await? {
-        NnrpClientEvent::ObjectRelease { metadata, body } => {
+        NnrpRuntimeEvent {
+            metadata: NnrpRuntimeEventMetadata::ObjectRelease(metadata),
+            tail: NnrpRuntimeEventTail::Diagnostic(body),
+            ..
+        } => {
             assert_eq!(metadata.object_id, 900);
             assert_eq!(metadata.release_reason, ObjectReleaseReason::Completed);
             assert!(body.is_empty());
@@ -771,9 +828,13 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
         event => panic!("expected object release, got {event:?}"),
     }
     match session.await_event().await? {
-        NnrpClientEvent::Result(result) => {
-            assert_eq!(result.frame_id, frame_id);
-            assert_eq!(result.body, b"done".to_vec());
+        NnrpRuntimeEvent {
+            header,
+            metadata: NnrpRuntimeEventMetadata::ResultPush(_),
+            tail: NnrpRuntimeEventTail::Body(body),
+        } => {
+            assert_eq!(header.frame_id, frame_id);
+            assert_eq!(body, b"done".to_vec());
         }
         event => panic!("expected result, got {event:?}"),
     }
@@ -820,7 +881,11 @@ async fn tcp_loopback_releases_objects_after_cancel_and_reports_cache_miss(
     session.cancel_operation(operation_id, 7).await?;
 
     match session.await_event().await? {
-        NnrpClientEvent::ObjectRelease { metadata, body } => {
+        NnrpRuntimeEvent {
+            metadata: NnrpRuntimeEventMetadata::ObjectRelease(metadata),
+            tail: NnrpRuntimeEventTail::Diagnostic(body),
+            ..
+        } => {
             assert_eq!(metadata.operation_id, operation_id);
             assert_eq!(metadata.release_reason, ObjectReleaseReason::Cancelled);
             assert_eq!(body, b"cancel".to_vec());
@@ -828,7 +893,11 @@ async fn tcp_loopback_releases_objects_after_cancel_and_reports_cache_miss(
         event => panic!("expected cancelled object release, got {event:?}"),
     }
     match session.await_event().await? {
-        NnrpClientEvent::CacheMiss { metadata, body } => {
+        NnrpRuntimeEvent {
+            metadata: NnrpRuntimeEventMetadata::CacheMiss(metadata),
+            tail: NnrpRuntimeEventTail::Diagnostic(body),
+            ..
+        } => {
             assert_eq!(metadata.miss_reason, CacheMissReason::SchemaMismatch);
             assert_eq!(metadata.profile_id, STANDARD_PROFILE_TOKEN);
             assert_eq!(body, b"schema".to_vec());
@@ -1077,9 +1146,10 @@ async fn tcp_loopback_suppresses_expired_final_results() -> Result<(), RuntimeEr
         .await?;
     session.expire_at(operation_id, 1).await?;
     match session.await_event().await? {
-        NnrpClientEvent::ResultDropReason {
-            metadata: reason,
-            body,
+        NnrpRuntimeEvent {
+            metadata: NnrpRuntimeEventMetadata::ResultDropReason(reason),
+            tail: NnrpRuntimeEventTail::Diagnostic(body),
+            ..
         } => {
             assert_eq!(reason.operation_id, operation_id);
             assert_eq!(reason.result_sequence, operation_id);
@@ -1794,9 +1864,10 @@ async fn client_preview4_result_drop_reason_preserves_diagnostic_body() -> Resul
     )?)
     .await?;
     match session.await_event().await? {
-        NnrpClientEvent::ResultDropReason {
-            metadata: actual,
-            body,
+        NnrpRuntimeEvent {
+            metadata: NnrpRuntimeEventMetadata::ResultDropReason(actual),
+            tail: NnrpRuntimeEventTail::Diagnostic(body),
+            ..
         } => {
             assert_eq!(actual, metadata);
             assert_eq!(body, b"drop");
@@ -2559,6 +2630,10 @@ async fn client_event_packet_batch_drains_only_buffered_validated_events(
     );
     progress_header.session_id = ack.session_id;
     progress_header.frame_id = 1;
+    progress_header.flags = HeaderFlags::ACK_REQUIRED;
+    progress_header.view_id = 7;
+    progress_header.route_id = 11;
+    progress_header.trace_id = 0x1122_3344_5566_7788;
 
     let result = token_result();
     let mut result_header =
@@ -2592,9 +2667,21 @@ async fn client_event_packet_batch_drains_only_buffered_validated_events(
     ));
     let events = session.await_event_packet_batch(3).await?;
     assert_eq!(events.len(), 2);
-    assert!(matches!(events[0].0, NnrpClientEvent::Progress { .. }));
+    assert!(matches!(
+        events[0].0.metadata,
+        NnrpRuntimeEventMetadata::Progress(_)
+    ));
+    assert_eq!(events[0].0.header.flags, HeaderFlags::ACK_REQUIRED);
+    assert_eq!(events[0].0.header.session_id, ack.session_id);
+    assert_eq!(events[0].0.header.frame_id, 1);
+    assert_eq!(events[0].0.header.view_id, 7);
+    assert_eq!(events[0].0.header.route_id, 11);
+    assert_eq!(events[0].0.header.trace_id, 0x1122_3344_5566_7788);
     assert_eq!(events[0].1.header.message_type, MessageType::Progress);
-    assert!(matches!(events[1].0, NnrpClientEvent::Result(_)));
+    assert!(matches!(
+        events[1].0.metadata,
+        NnrpRuntimeEventMetadata::ResultPush(_)
+    ));
     assert_eq!(events[1].1.header.message_type, MessageType::ResultPush);
     session.close_transport().await
 }
@@ -3289,16 +3376,16 @@ fn partial_result_sequence(
 }
 
 fn assert_partial_result_event(
-    event: NnrpClientEvent,
+    event: NnrpRuntimeEvent,
     operation_id: u64,
     result_sequence: u64,
     body: &[u8],
 ) {
-    match event {
-        NnrpClientEvent::PartialResult {
-            metadata,
-            body: actual_body,
-        } => {
+    match (event.metadata, event.tail) {
+        (
+            NnrpRuntimeEventMetadata::PartialResult(metadata),
+            NnrpRuntimeEventTail::Body(actual_body),
+        ) => {
             assert_eq!(metadata.operation_id, operation_id);
             assert_eq!(metadata.result_sequence, result_sequence);
             assert_eq!(actual_body, body);
