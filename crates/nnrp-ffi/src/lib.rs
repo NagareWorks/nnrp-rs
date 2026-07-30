@@ -796,6 +796,9 @@ impl NnrpFfiHandleStore {
             value if value == NnrpHandleKind::ServerAccept as u32 => NnrpHandleKind::ServerAccept,
             _ => return Err(NnrpFfiStatus::invalid_handle(handle.kind)),
         })?;
+        if self.entries.contains_key(&(handle.kind, handle.id)) {
+            return Err(NnrpFfiStatus::invalid_state(handle.kind));
+        }
         self.entries.insert(
             (handle.kind, handle.id),
             NnrpFfiResourceEntry {
@@ -4430,6 +4433,16 @@ fn client_role_event(
     } else {
         NnrpHandle::invalid()
     };
+    let related_operation_id = operation_id.or_else(|| {
+        if operation.kind != NnrpHandleKind::Operation as u32 {
+            return None;
+        }
+        match store.get(operation, NnrpHandleKind::Operation) {
+            Ok(NnrpFfiResource::Operation { operation_id, .. }) => Some(*operation_id),
+            _ => None,
+        }
+    });
+    let diagnostic = role_event_diagnostic(connection, header, related_operation_id);
     if matches!(
         kind,
         NnrpEventKind::ResultPushed | NnrpEventKind::ResultDropped | NnrpEventKind::PartialResult
@@ -4455,8 +4468,23 @@ fn client_role_event(
         operation,
         payload_owner,
         payload: payload_view,
-        ..NnrpEvent::none()
+        diagnostic,
     })
+}
+
+#[cfg(not(test))]
+fn role_event_diagnostic(
+    connection: NnrpHandle,
+    header: RuntimeFrameHeader,
+    operation_id: Option<u64>,
+) -> NnrpFfiDiagnostic {
+    NnrpFfiDiagnostic {
+        status: NnrpFfiStatus::ok(),
+        related_connection_id: connection.id,
+        related_session_id: header.session_id,
+        related_operation_id: operation_id.unwrap_or(0),
+        related_frame_id: header.frame_id,
+    }
 }
 
 #[cfg(not(test))]
@@ -4637,6 +4665,7 @@ fn server_role_event(
         .into_payload()
         .map_err(|error| NnrpFfiStatus::from_core_error(&error))?;
     let wire_frame_id = header.frame_id;
+    let diagnostic = role_event_diagnostic(connection, header, operation_id);
     let mut store = handle_store();
     let operation = if create_operation {
         let operation = NnrpHandle::new(
@@ -4683,7 +4712,7 @@ fn server_role_event(
         operation,
         payload_owner,
         payload: payload_view,
-        ..NnrpEvent::none()
+        diagnostic,
     })
 }
 
@@ -12360,7 +12389,7 @@ mod tests {
             assert_eq!(
                 nnrp_connection_bootstrap(
                     NnrpConnectionBootstrap {
-                        connection_id: 91_201,
+                        connection_id: 91_202,
                         generation: 1,
                         transport_id: test_transport_id(),
                     },
@@ -13900,6 +13929,37 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn ffi_handle_store_rejects_duplicate_identity_without_replacing_owner() {
+        let mut store = NnrpFfiHandleStore::default();
+        let handle = NnrpHandle::new(NnrpHandleKind::Connection, 7, 1);
+        assert!(store
+            .insert(
+                handle,
+                NnrpFfiResource::Connection {
+                    transport_id: TransportId::Ipc as u32,
+                    role: NnrpFfiConnectionRole::Client,
+                },
+            )
+            .is_ok());
+        assert_eq!(
+            store.insert(
+                handle,
+                NnrpFfiResource::Connection {
+                    transport_id: TransportId::Ipc as u32,
+                    role: NnrpFfiConnectionRole::Server,
+                },
+            ),
+            Err(NnrpFfiStatus::invalid_state(
+                NnrpHandleKind::Connection as u32
+            ))
+        );
+        assert!(matches!(
+            store.get_connection_role(handle),
+            Ok(NnrpFfiConnectionRole::Client)
+        ));
     }
 
     #[test]

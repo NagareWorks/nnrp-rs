@@ -765,6 +765,8 @@ unsafe fn submit_role_operation(
     let server_event = poll_server_event(server_session);
     assert_eq!(server_event.kind, NnrpEventKind::SubmitAccepted as u32);
     assert_eq!(server_event.header.frame_id, frame_id);
+    assert_eq!(server_event.diagnostic.related_operation_id, operation_id);
+    assert_eq!(server_event.diagnostic.related_frame_id, frame_id);
     assert_eq!(
         slice::from_raw_parts(server_event.payload.ptr, server_event.payload.len),
         payload
@@ -1461,6 +1463,14 @@ unsafe fn assert_role_handshake(
     assert_eq!(client_event_count, 1);
     assert_eq!(client_event.kind, NnrpEventKind::ResultPushed as u32);
     assert_eq!(client_event.operation, client_operation);
+    assert_eq!(
+        client_event.diagnostic.related_operation_id,
+        submit_request.operation_id
+    );
+    assert_eq!(
+        client_event.diagnostic.related_frame_id,
+        submit_request.frame_id
+    );
     assert_eq!(client_event.header.frame_id, 42);
     assert_eq!(
         slice::from_raw_parts(client_event.payload.ptr, client_event.payload.len),
