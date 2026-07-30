@@ -2,6 +2,17 @@
 
 Preview4 moves the Rust workspace beyond token-stream transport substitution and into runtime orchestration features that help SDKs model cancellation, priority, progress, partial results, cache references, route hints, trace context, result drop reasons, IPC, and WebSocket endpoints directly.
 
+## 1.0.0-preview.4.21
+
+IPC shutdown now treats terminal Windows named-pipe peer states as an idempotent close after the
+NNRP `SESSION_CLOSE`/`SESSION_CLOSE_ACK` handshake has completed. In particular, Windows
+`ERROR_BROKEN_PIPE`, `ERROR_NO_DATA`, and `ERROR_PIPE_NOT_CONNECTED` no longer surface as a
+generic transport-internal failure when the peer closes immediately after sending the close ACK.
+
+The native FFI ABI remains `4.3.0`. Dynamic-library packet and role E2E validation covers the
+corrected IPC close path while preserving the transport-scoped artifact boundary and coarse FFI
+call shape.
+
 ## 1.0.0-preview.4.20
 
 Rust role sessions now expose one public `NnrpRuntimeEvent` envelope for client and server event

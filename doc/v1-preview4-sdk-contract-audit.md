@@ -21,7 +21,7 @@ not add per-field or per-frame boundary calls.
 
 ## Coordinated Baseline
 
-The coordinated baseline is Rust `1.0.0-preview.4.20` with native FFI ABI `4.3.0`. Python,
+The coordinated baseline is Rust `1.0.0-preview.4.21` with native FFI ABI `4.3.0`. Python,
 JavaScript, and C# releases must each prove all of the following against that exact baseline:
 
 1. Public names and field ownership match the frozen language projection.
