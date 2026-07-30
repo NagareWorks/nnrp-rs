@@ -22,6 +22,12 @@ use tokio::{
 };
 
 const IPC_TASK_CHANNEL_CAPACITY: usize = 16;
+#[cfg(windows)]
+const WINDOWS_ERROR_BROKEN_PIPE: i32 = 109;
+#[cfg(windows)]
+const WINDOWS_ERROR_NO_DATA: i32 = 232;
+#[cfg(windows)]
+const WINDOWS_ERROR_PIPE_NOT_CONNECTED: i32 = 233;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IpcEndpoint {
@@ -218,18 +224,38 @@ fn spawn_ipc_write_task(
 fn normalize_shutdown(result: io::Result<()>) -> Result<(), RuntimeError> {
     match result {
         Ok(()) => Ok(()),
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::BrokenPipe
-                    | io::ErrorKind::ConnectionAborted
-                    | io::ErrorKind::ConnectionReset
-                    | io::ErrorKind::NotConnected
-            ) =>
-        {
-            Ok(())
-        }
+        Err(error) if is_terminal_shutdown_error(&error) => Ok(()),
         Err(error) => Err(error.into()),
+    }
+}
+
+fn is_terminal_shutdown_error(error: &io::Error) -> bool {
+    if matches!(
+        error.kind(),
+        io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::NotConnected
+    ) {
+        return true;
+    }
+
+    #[cfg(windows)]
+    {
+        // Tokio can preserve these named-pipe shutdown states as raw Windows errors.
+        matches!(
+            error.raw_os_error(),
+            Some(
+                WINDOWS_ERROR_BROKEN_PIPE
+                    | WINDOWS_ERROR_NO_DATA
+                    | WINDOWS_ERROR_PIPE_NOT_CONNECTED
+            )
+        )
+    }
+
+    #[cfg(not(windows))]
+    {
+        false
     }
 }
 
@@ -809,6 +835,15 @@ mod tests {
             assert!(normalize_shutdown(Err(io::Error::from(kind))).is_ok());
         }
         assert!(normalize_shutdown(Err(io::Error::from(io::ErrorKind::PermissionDenied))).is_err());
+
+        #[cfg(windows)]
+        for raw_os_error in [
+            WINDOWS_ERROR_BROKEN_PIPE,
+            WINDOWS_ERROR_NO_DATA,
+            WINDOWS_ERROR_PIPE_NOT_CONNECTED,
+        ] {
+            assert!(normalize_shutdown(Err(io::Error::from_raw_os_error(raw_os_error))).is_ok());
+        }
     }
 
     #[cfg(unix)]
