@@ -34,12 +34,17 @@ use nnrp_core::{
 use nnrp_core::{
     FrameSubmitMetadata, ResultPushMetadata, FRAME_SUBMIT_METADATA_LEN, RESULT_PUSH_METADATA_LEN,
 };
-use nnrp_runtime::RuntimeError;
 #[cfg(not(test))]
 use nnrp_runtime::{
     BoxedFramedTransport, NnrpClient, NnrpClientConfig, NnrpClientEvent, NnrpClientSession,
     NnrpServer, NnrpServerConfig, NnrpServerEvent, NnrpServerSession, RuntimeTransportKind,
 };
+#[cfg(not(test))]
+use nnrp_runtime::{
+    NnrpSubmitHeaderContext as RuntimeSubmitHeaderContext,
+    NnrpSubmitRequest as RuntimeSubmitRequest,
+};
+use nnrp_runtime::{RuntimeError, RuntimeFrameHeader};
 #[cfg(not(test))]
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -53,8 +58,8 @@ pub use transport::*;
 use sdk_version::{SDK_MAJOR, SDK_MINOR, SDK_PATCH, SDK_PREVIEW, SDK_REVISION};
 
 pub const NNRP_FFI_ABI_MAJOR: u16 = 4;
-pub const NNRP_FFI_ABI_MINOR: u16 = 1;
-pub const NNRP_FFI_ABI_PATCH: u16 = 1;
+pub const NNRP_FFI_ABI_MINOR: u16 = 3;
+pub const NNRP_FFI_ABI_PATCH: u16 = 0;
 
 pub const NNRP_TRANSPORT_SLOT_QUIC: u32 = 0x0000_0001;
 pub const NNRP_TRANSPORT_SLOT_TCP: u32 = 0x0000_0002;
@@ -726,13 +731,28 @@ impl NnrpQueuedEvent {
     }
 
     fn into_event(self, payload: NnrpBufferView) -> NnrpEvent {
+        let header = if self.message_type == 0 {
+            NnrpRuntimeFrameHeader::absent()
+        } else {
+            NnrpRuntimeFrameHeader {
+                present: 1,
+                version_major: nnrp_core::CURRENT_VERSION_MAJOR,
+                wire_format: nnrp_core::CURRENT_WIRE_FORMAT,
+                message_type: self.message_type as u8,
+                flags: 0,
+                session_id: 0,
+                frame_id: self.frame_id,
+                view_id: 0,
+                route_id: 0,
+                trace_id: 0,
+            }
+        };
         NnrpEvent {
             kind: self.kind,
-            message_type: self.message_type,
+            header,
             connection: self.connection,
             session: self.session,
             operation: self.operation,
-            frame_id: self.frame_id,
             payload_owner: self.payload_owner,
             payload,
             ..NnrpEvent::none()
@@ -1134,7 +1154,8 @@ impl NnrpSchemaDescriptorHeader {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NnrpTypedPayloadDescriptor {
     pub profile_id: u16,
-    pub descriptor_flags: u16,
+    pub payload_kind: u8,
+    pub descriptor_flags: u8,
     pub schema_id: u32,
     pub schema_version: u32,
     pub stream_semantics: u16,
@@ -2018,6 +2039,7 @@ impl From<TypedPayloadDescriptor> for NnrpTypedPayloadDescriptor {
     fn from(value: TypedPayloadDescriptor) -> Self {
         Self {
             profile_id: value.profile_id,
+            payload_kind: value.payload_kind as u8,
             descriptor_flags: value.descriptor_flags,
             schema_id: value.schema_id,
             schema_version: value.schema_version,
@@ -2029,17 +2051,20 @@ impl From<TypedPayloadDescriptor> for NnrpTypedPayloadDescriptor {
     }
 }
 
-impl From<NnrpTypedPayloadDescriptor> for TypedPayloadDescriptor {
-    fn from(value: NnrpTypedPayloadDescriptor) -> Self {
-        Self {
+impl TryFrom<NnrpTypedPayloadDescriptor> for TypedPayloadDescriptor {
+    type Error = NnrpError;
+
+    fn try_from(value: NnrpTypedPayloadDescriptor) -> Result<Self, Self::Error> {
+        Ok(Self {
             profile_id: value.profile_id,
+            payload_kind: nnrp_core::PayloadKind::try_from_bit(u32::from(value.payload_kind))?,
             descriptor_flags: value.descriptor_flags,
             schema_id: value.schema_id,
             schema_version: value.schema_version,
             stream_semantics: value.stream_semantics,
             offset: value.offset,
             length: value.length,
-        }
+        })
     }
 }
 
@@ -2053,7 +2078,8 @@ impl NnrpTypedPayloadDescriptor {
             ));
         }
 
-        Ok(self.into())
+        self.try_into()
+            .map_err(|error| NnrpFfiStatus::from_core_error(&error))
     }
 }
 
@@ -2108,13 +2134,61 @@ pub enum NnrpEventKind {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpRuntimeFrameHeader {
+    pub present: u8,
+    pub version_major: u8,
+    pub wire_format: u8,
+    pub message_type: u8,
+    pub flags: u32,
+    pub session_id: u32,
+    pub frame_id: u32,
+    pub view_id: u16,
+    pub route_id: u16,
+    pub trace_id: u64,
+}
+
+impl NnrpRuntimeFrameHeader {
+    pub const fn absent() -> Self {
+        Self {
+            present: 0,
+            version_major: 0,
+            wire_format: 0,
+            message_type: 0,
+            flags: 0,
+            session_id: 0,
+            frame_id: 0,
+            view_id: 0,
+            route_id: 0,
+            trace_id: 0,
+        }
+    }
+}
+
+impl From<RuntimeFrameHeader> for NnrpRuntimeFrameHeader {
+    fn from(header: RuntimeFrameHeader) -> Self {
+        Self {
+            present: 1,
+            version_major: header.version_major,
+            wire_format: header.wire_format,
+            message_type: header.message_type as u8,
+            flags: header.flags.0,
+            session_id: header.session_id,
+            frame_id: header.frame_id,
+            view_id: header.view_id,
+            route_id: header.route_id,
+            trace_id: header.trace_id,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NnrpEvent {
     pub kind: u32,
-    pub message_type: u32,
+    pub header: NnrpRuntimeFrameHeader,
     pub connection: NnrpHandle,
     pub session: NnrpHandle,
     pub operation: NnrpHandle,
-    pub frame_id: u32,
     pub payload_owner: NnrpHandle,
     pub payload: NnrpBufferView,
     pub diagnostic: NnrpFfiDiagnostic,
@@ -2124,11 +2198,10 @@ impl NnrpEvent {
     pub const fn none() -> Self {
         Self {
             kind: NnrpEventKind::None as u32,
-            message_type: 0,
+            header: NnrpRuntimeFrameHeader::absent(),
             connection: NnrpHandle::invalid(),
             session: NnrpHandle::invalid(),
             operation: NnrpHandle::invalid(),
-            frame_id: 0,
             payload_owner: NnrpHandle::invalid(),
             payload: NnrpBufferView::empty(),
             diagnostic: NnrpFfiDiagnostic {
@@ -2196,7 +2269,12 @@ impl NnrpCompactResult {
     }
 
     #[cfg(any(test, feature = "benchmark-ffi"))]
-    fn from_event(status: NnrpFfiStatus, event: NnrpEvent, operation_id: u64) -> Self {
+    fn from_event(
+        status: NnrpFfiStatus,
+        event: NnrpEvent,
+        operation_id: u64,
+        frame_id: u32,
+    ) -> Self {
         Self {
             status,
             has_result: 1,
@@ -2204,7 +2282,7 @@ impl NnrpCompactResult {
             result_state: compact_result_state(status, event.kind),
             operation: event.operation,
             operation_id,
-            frame_id: event.frame_id,
+            frame_id,
             payload: event.payload,
             diagnostic: event.diagnostic,
         }
@@ -2255,6 +2333,10 @@ pub struct NnrpSubmitRequest {
     pub session: NnrpHandle,
     pub operation_id: u64,
     pub frame_id: u32,
+    pub header_flags: u32,
+    pub view_id: u16,
+    pub route_id: u16,
+    pub trace_id: u64,
     pub payload: NnrpBufferView,
 }
 
@@ -2937,6 +3019,10 @@ unsafe fn nnrp_client_submit_impl(
     if metadata.operation_id != request.operation_id {
         return NnrpFfiStatus::invalid_argument(150);
     }
+    let header_flags = nnrp_core::HeaderFlags(request.header_flags);
+    if let Err(error) = header_flags.validate_known() {
+        return NnrpFfiStatus::from_core_error(&error);
+    }
     let body = payload[FRAME_SUBMIT_METADATA_LEN..].to_vec();
     let (session, operation) = {
         let mut store = handle_store();
@@ -2978,13 +3064,24 @@ unsafe fn nnrp_client_submit_impl(
         }
         (session, operation)
     };
-    let frame_id = request.frame_id;
+    let runtime_request = RuntimeSubmitRequest {
+        operation_id: request.operation_id,
+        frame_id: request.frame_id,
+        header: RuntimeSubmitHeaderContext {
+            flags: header_flags,
+            view_id: request.view_id,
+            route_id: request.route_id,
+            trace_id: request.trace_id,
+        },
+        metadata,
+        body,
+    };
     if let Err(status) = transport::run_role_async(
         async move {
             session
                 .lock()
                 .await
-                .submit_with_frame_id(frame_id, metadata, body)
+                .submit(runtime_request)
                 .await
                 .map(|_| ())
         },
@@ -3316,6 +3413,10 @@ unsafe fn benchmark_client_submit_result_impl(
         session: request.session,
         operation_id: request.operation_id,
         frame_id: request.frame_id,
+        header_flags: 0,
+        view_id: 0,
+        route_id: 0,
+        trace_id: 0,
         payload: request.submit_payload,
     };
     let mut operation = NnrpHandle::invalid();
@@ -3356,6 +3457,10 @@ unsafe fn benchmark_client_submit_result_compact_impl(
         session: request.session,
         operation_id: request.operation_id,
         frame_id: request.frame_id,
+        header_flags: 0,
+        view_id: 0,
+        route_id: 0,
+        trace_id: 0,
         payload: request.submit_payload,
     };
     let mut operation = NnrpHandle::invalid();
@@ -3523,7 +3628,7 @@ unsafe fn benchmark_client_submit_result_compact_batch_impl(
             frame_id,
         )
         .into_event(request.result_payload);
-        last = NnrpCompactResult::from_event(NnrpFfiStatus::ok(), event, operation_id);
+        last = NnrpCompactResult::from_event(NnrpFfiStatus::ok(), event, operation_id, frame_id);
         completed += 1;
     }
 
@@ -4299,6 +4404,7 @@ fn validate_role_event_poll(
 fn client_role_event(
     scope: NnrpHandle,
     event: NnrpClientEvent,
+    header: RuntimeFrameHeader,
 ) -> Result<NnrpEvent, NnrpFfiStatus> {
     let connection = role_session_connection(scope, NnrpFfiConnectionRole::Client)?;
     let (kind, frame_id, operation_id, message_type, payload, terminal) = match event {
@@ -4596,11 +4702,15 @@ fn client_role_event(
         ),
     };
 
+    debug_assert_eq!(message_type, header.message_type);
+    debug_assert!(frame_id == 0 || frame_id == header.frame_id);
+    let wire_frame_id = header.frame_id;
     let mut store = handle_store();
     let operation = if let Some(operation_id) = operation_id {
         find_operation_handle(&store, scope, Some(operation_id), None)?
-    } else if frame_id != 0 {
-        find_operation_handle(&store, scope, None, Some(frame_id)).unwrap_or(NnrpHandle::invalid())
+    } else if wire_frame_id != 0 {
+        find_operation_handle(&store, scope, None, Some(wire_frame_id))
+            .unwrap_or(NnrpHandle::invalid())
     } else {
         NnrpHandle::invalid()
     };
@@ -4613,16 +4723,6 @@ fn client_role_event(
             NnrpHandleKind::Operation as u32,
         ));
     }
-    let frame_id = if frame_id != 0 {
-        frame_id
-    } else if operation.kind == NnrpHandleKind::Operation as u32 {
-        match store.get(operation, NnrpHandleKind::Operation)? {
-            NnrpFfiResource::Operation { frame_id, .. } => *frame_id,
-            _ => 0,
-        }
-    } else {
-        0
-    };
     let (payload_owner, payload_view) = if payload.is_empty() {
         (NnrpHandle::invalid(), NnrpBufferView::empty())
     } else {
@@ -4633,11 +4733,10 @@ fn client_role_event(
     }
     Ok(NnrpEvent {
         kind: kind as u32,
-        message_type: message_type as u32,
+        header: header.into(),
         connection,
         session: scope,
         operation,
-        frame_id,
         payload_owner,
         payload: payload_view,
         ..NnrpEvent::none()
@@ -4726,8 +4825,8 @@ unsafe fn role_client_await_events_impl(
     for index in 0..limit {
         let timeout_ms = if index == 0 { request.timeout_ms } else { 1 };
         let runtime = Arc::clone(&session);
-        let event = match transport::run_role_async(
-            async move { runtime.lock().await.await_event().await },
+        let (event, header) = match transport::run_role_async(
+            async move { runtime.lock().await.await_event_with_header().await },
             timeout_ms,
         ) {
             Ok(event) => event,
@@ -4738,7 +4837,7 @@ unsafe fn role_client_await_events_impl(
             }
             Err(status) => return status,
         };
-        let event = match client_role_event(request.scope, event) {
+        let event = match client_role_event(request.scope, event, header) {
             Ok(event) => event,
             Err(status) => return status,
         };
@@ -4780,8 +4879,8 @@ unsafe fn role_server_await_events_impl(
     for index in 0..limit {
         let timeout_ms = if index == 0 { request.timeout_ms } else { 1 };
         let runtime = Arc::clone(&session);
-        let event = match transport::run_role_async(
-            async move { runtime.lock().await.await_event().await },
+        let (event, header) = match transport::run_role_async(
+            async move { runtime.lock().await.await_event_with_header().await },
             timeout_ms,
         ) {
             Ok(event) => event,
@@ -4792,7 +4891,7 @@ unsafe fn role_server_await_events_impl(
             }
             Err(status) => return status,
         };
-        *out_events.add(index) = match server_role_event(request.scope, connection, event) {
+        *out_events.add(index) = match server_role_event(request.scope, connection, event, header) {
             Ok(event) => event,
             Err(status) => return status,
         };
@@ -4806,6 +4905,7 @@ fn server_role_event(
     scope: NnrpHandle,
     connection: NnrpHandle,
     event: NnrpServerEvent,
+    header: RuntimeFrameHeader,
 ) -> Result<NnrpEvent, NnrpFfiStatus> {
     let (kind, message_type, operation_id, frame_id, payload, create_operation) = match event {
         NnrpServerEvent::Submit(submit) => {
@@ -5084,6 +5184,9 @@ fn server_role_event(
         ),
     };
 
+    debug_assert_eq!(message_type, header.message_type);
+    debug_assert!(frame_id == 0 || frame_id == header.frame_id);
+    let wire_frame_id = header.frame_id;
     let mut store = handle_store();
     let operation = if create_operation {
         let operation = NnrpHandle::new(
@@ -5103,20 +5206,11 @@ fn server_role_event(
         operation
     } else if let Some(operation_id) = operation_id {
         find_operation_handle(&store, scope, Some(operation_id), None)?
-    } else if frame_id != 0 {
-        find_operation_handle(&store, scope, None, Some(frame_id)).unwrap_or(NnrpHandle::invalid())
+    } else if wire_frame_id != 0 {
+        find_operation_handle(&store, scope, None, Some(wire_frame_id))
+            .unwrap_or(NnrpHandle::invalid())
     } else {
         NnrpHandle::invalid()
-    };
-    let frame_id = if frame_id != 0 {
-        frame_id
-    } else if operation.kind == NnrpHandleKind::Operation as u32 {
-        match store.get(operation, NnrpHandleKind::Operation)? {
-            NnrpFfiResource::Operation { frame_id, .. } => *frame_id,
-            _ => 0,
-        }
-    } else {
-        0
     };
     let (payload_owner, payload_view) = if payload.is_empty() {
         (NnrpHandle::invalid(), NnrpBufferView::empty())
@@ -5133,11 +5227,10 @@ fn server_role_event(
     };
     Ok(NnrpEvent {
         kind: kind as u32,
-        message_type: message_type as u32,
+        header: header.into(),
         connection,
         session: scope,
         operation,
-        frame_id,
         payload_owner,
         payload: payload_view,
         ..NnrpEvent::none()
@@ -5229,7 +5322,8 @@ unsafe fn poll_matching_operation_event_from_scope(
                     && event.session == scope.session
                     && event.operation.id == operation.id
                     && event.operation.generation == operation.generation
-                    && (event.operation.id == operation_id || event.frame_id == scope.frame_id)
+                    && (event.operation.id == operation_id
+                        || event.header.frame_id == scope.frame_id)
                 {
                     event.payload = payload;
                     *out_result = NnrpPollResult {
@@ -5357,8 +5451,12 @@ unsafe fn poll_matching_operation_compact_result(
             Ok(Some(event)) => {
                 seen_events += 1;
                 if event_is_operation_result(event, session, operation, frame_id) {
-                    let mut result =
-                        NnrpCompactResult::from_event(NnrpFfiStatus::ok(), event, operation_id);
+                    let mut result = NnrpCompactResult::from_event(
+                        NnrpFfiStatus::ok(),
+                        event,
+                        operation_id,
+                        frame_id,
+                    );
                     result.payload = payload;
                     *out_result = result;
                     return NnrpFfiStatus::ok();
@@ -5470,7 +5568,7 @@ fn event_is_operation_result(
             || value == NnrpEventKind::ResultDropped as u32
             || value == NnrpEventKind::Error as u32
     ) && event.session == session
-        && (event.operation.id == operation.id || event.frame_id == frame_id)
+        && (event.operation.id == operation.id || event.header.frame_id == frame_id)
 }
 
 fn validate_control_metadata_payload(
@@ -8577,6 +8675,10 @@ mod tests {
                         session,
                         operation_id: 100,
                         frame_id: 9,
+                        header_flags: 0,
+                        view_id: 0,
+                        route_id: 0,
+                        trace_id: 0,
                         payload: NnrpBufferView {
                             ptr: payload.as_ptr(),
                             len: payload.len(),
@@ -8645,6 +8747,10 @@ mod tests {
                         session,
                         operation_id: 91_003,
                         frame_id: 44,
+                        header_flags: 0,
+                        view_id: 0,
+                        route_id: 0,
+                        trace_id: 0,
                         payload: NnrpBufferView {
                             ptr: payload.as_ptr(),
                             len: payload.len(),
@@ -8660,7 +8766,7 @@ mod tests {
             );
             assert_eq!(result.event.kind, NnrpEventKind::SubmitAccepted as u32);
             assert_eq!(result.event.operation, operation);
-            assert_eq!(result.event.frame_id, 44);
+            assert_eq!(result.event.header.present, 0);
             assert_eq!(result.event.payload, NnrpBufferView::empty());
 
             assert_eq!(
@@ -8675,7 +8781,7 @@ mod tests {
                 NnrpFfiStatus::ok()
             );
             assert_eq!(result.event.kind, NnrpEventKind::Control as u32);
-            assert_eq!(result.event.frame_id, 44);
+            assert_eq!(result.event.header.present, 0);
 
             assert_eq!(nnrp_client_close(session), NnrpFfiStatus::ok());
             assert_eq!(
@@ -8720,6 +8826,10 @@ mod tests {
                         session: reopened_session,
                         operation_id: 91_003,
                         frame_id: 45,
+                        header_flags: 0,
+                        view_id: 0,
+                        route_id: 0,
+                        trace_id: 0,
                         payload: NnrpBufferView {
                             ptr: payload.as_ptr(),
                             len: payload.len(),
@@ -8770,6 +8880,10 @@ mod tests {
                         session,
                         operation_id: 91_103,
                         frame_id: 7,
+                        header_flags: 0,
+                        view_id: 0,
+                        route_id: 0,
+                        trace_id: 0,
                         payload: NnrpBufferView::empty(),
                     },
                     &mut operation
@@ -8848,6 +8962,10 @@ mod tests {
                         session,
                         operation_id: 91_403,
                         frame_id: 55,
+                        header_flags: 0,
+                        view_id: 0,
+                        route_id: 0,
+                        trace_id: 0,
                         payload: NnrpBufferView {
                             ptr: payload.as_ptr(),
                             len: payload.len(),
@@ -8877,7 +8995,7 @@ mod tests {
             assert_eq!(result.has_event, 1);
             assert_eq!(result.event.kind, NnrpEventKind::ResultPushed as u32);
             assert_eq!(result.event.operation, completed_operation);
-            assert_eq!(result.event.frame_id, 55);
+            assert_eq!(result.event.header.present, 0);
             assert_eq!(
                 benchmark_client_complete_operation(NnrpClientCompleteOperationRequest {
                     operation: completed_operation,
@@ -8893,6 +9011,10 @@ mod tests {
                         session,
                         operation_id: 91_404,
                         frame_id: 56,
+                        header_flags: 0,
+                        view_id: 0,
+                        route_id: 0,
+                        trace_id: 0,
                         payload: NnrpBufferView::empty(),
                     },
                     &mut dropped_operation
@@ -8912,7 +9034,7 @@ mod tests {
             );
             assert_eq!(result.event.kind, NnrpEventKind::ResultDropped as u32);
             assert_eq!(result.event.operation, dropped_operation);
-            assert_eq!(result.event.frame_id, 56);
+            assert_eq!(result.event.header.present, 0);
         }
     }
 
@@ -8975,7 +9097,7 @@ mod tests {
             assert_eq!(result.event.kind, NnrpEventKind::ResultPushed as u32);
             assert_eq!(result.event.session, session);
             assert_eq!(result.event.operation, operation);
-            assert_eq!(result.event.frame_id, 58);
+            assert_eq!(result.event.header.present, 0);
             assert_eq!(
                 benchmark_client_complete_operation(NnrpClientCompleteOperationRequest {
                     operation,
@@ -9300,6 +9422,10 @@ mod tests {
                         session,
                         operation_id: 93_200,
                         frame_id: 200,
+                        header_flags: 0,
+                        view_id: 0,
+                        route_id: 0,
+                        trace_id: 0,
                         payload: NnrpBufferView {
                             ptr: payload.as_ptr(),
                             len: payload.len(),
@@ -9315,6 +9441,10 @@ mod tests {
                         session,
                         operation_id: 93_200,
                         frame_id: 201,
+                        header_flags: 0,
+                        view_id: 0,
+                        route_id: 0,
+                        trace_id: 0,
                         payload: NnrpBufferView::empty(),
                     },
                     &mut duplicate
@@ -9874,7 +10004,8 @@ mod tests {
             );
             assert_eq!(event_count, 2);
             assert_eq!(events[0].kind, NnrpEventKind::FlowUpdated as u32);
-            assert_eq!(events[0].frame_id, 57);
+            assert_eq!(events[0].header.present, 1);
+            assert_eq!(events[0].header.frame_id, 57);
             assert_eq!(events[1].kind, NnrpEventKind::ResultHint as u32);
             assert_eq!(events[1].session, session);
         }
@@ -10464,6 +10595,10 @@ mod tests {
                         session,
                         operation_id: 91_533,
                         frame_id: 8,
+                        header_flags: 0,
+                        view_id: 0,
+                        route_id: 0,
+                        trace_id: 0,
                         payload: NnrpBufferView::empty(),
                     },
                     &mut operation
@@ -10632,9 +10767,10 @@ mod tests {
             );
             assert_eq!(round_trip.as_slice(), schema_bytes.as_slice());
 
-            let typed_bytes = hex_to_bytes("020002000110000003000000020000000000000018000000");
+            let typed_bytes = hex_to_bytes("020002020110000003000000020000000000000018000000");
             let mut typed = NnrpTypedPayloadDescriptor {
                 profile_id: 0,
+                payload_kind: nnrp_core::PayloadKind::OpaqueBytes as u8,
                 descriptor_flags: 0,
                 schema_id: 0,
                 schema_version: 0,
@@ -10654,6 +10790,7 @@ mod tests {
                 NnrpFfiStatus::ok()
             );
             assert_eq!(typed.profile_id, 2);
+            assert_eq!(typed.payload_kind, nnrp_core::PayloadKind::TokenChunk as u8);
             assert_eq!(typed.descriptor_flags, 2);
             assert_eq!(typed.schema_id, 0x0000_1001);
             assert_eq!(typed.reserved0, 0);
@@ -10699,6 +10836,7 @@ mod tests {
 
             let descriptor = NnrpTypedPayloadDescriptor {
                 profile_id: nnrp_core::PROFILE_TOKEN,
+                payload_kind: nnrp_core::PayloadKind::TokenChunk as u8,
                 descriptor_flags: 0,
                 schema_id: nnrp_core::TOKEN_DELTA_SCHEMA_ID,
                 schema_version: nnrp_core::TOKEN_DELTA_SCHEMA_VERSION,
@@ -10750,6 +10888,7 @@ mod tests {
             };
             let mut typed = NnrpTypedPayloadDescriptor {
                 profile_id: 0,
+                payload_kind: nnrp_core::PayloadKind::OpaqueBytes as u8,
                 descriptor_flags: 0,
                 schema_id: 0,
                 schema_version: 0,
@@ -10869,6 +11008,7 @@ mod tests {
 
             let unspecified = NnrpTypedPayloadDescriptor {
                 profile_id: nnrp_core::PROFILE_UNSPECIFIED,
+                payload_kind: nnrp_core::PayloadKind::OpaqueBytes as u8,
                 descriptor_flags: 0,
                 schema_id: 0,
                 schema_version: 0,
@@ -10945,6 +11085,7 @@ mod tests {
 
             let descriptor = NnrpTypedPayloadDescriptor {
                 profile_id: nnrp_core::PROFILE_TOKEN,
+                payload_kind: nnrp_core::PayloadKind::TokenChunk as u8,
                 descriptor_flags: 0,
                 schema_id: token_schema.schema_id,
                 schema_version: token_schema.schema_version,
@@ -11080,6 +11221,7 @@ mod tests {
 
             let bad_descriptor = NnrpTypedPayloadDescriptor {
                 profile_id: nnrp_core::PROFILE_TENSOR,
+                payload_kind: nnrp_core::PayloadKind::Tensor as u8,
                 descriptor_flags: 0,
                 schema_id: schema_v1.schema_id,
                 schema_version: schema_v1.schema_version,
@@ -11729,6 +11871,10 @@ mod tests {
                         session,
                         operation_id: 481_011,
                         frame_id: 91,
+                        header_flags: 0,
+                        view_id: 0,
+                        route_id: 0,
+                        trace_id: 0,
                         payload: NnrpBufferView {
                             ptr: payload.as_ptr(),
                             len: payload.len(),
@@ -11998,6 +12144,10 @@ mod tests {
                         session,
                         operation_id: 481_201,
                         frame_id: 77,
+                        header_flags: 0,
+                        view_id: 0,
+                        route_id: 0,
+                        trace_id: 0,
                         payload: NnrpBufferView {
                             ptr: payload.as_ptr(),
                             len: payload.len(),
@@ -12150,6 +12300,7 @@ mod tests {
             let mut schema_out = schema;
             let descriptor = NnrpTypedPayloadDescriptor {
                 profile_id: nnrp_core::PROFILE_TENSOR,
+                payload_kind: nnrp_core::PayloadKind::Tensor as u8,
                 descriptor_flags: 0,
                 schema_id: schema.schema_id,
                 schema_version: schema.schema_version,
@@ -12711,6 +12862,10 @@ mod tests {
                         session,
                         operation_id: 95_103,
                         frame_id: 7,
+                        header_flags: 0,
+                        view_id: 0,
+                        route_id: 0,
+                        trace_id: 0,
                         payload: NnrpBufferView {
                             ptr: payload.as_ptr(),
                             len: payload.len(),
@@ -12832,11 +12987,14 @@ mod tests {
             );
             assert_eq!(result.has_event, 1);
             assert_eq!(result.event.kind, NnrpEventKind::RuntimeFrame as u32);
-            assert_eq!(result.event.message_type, MessageType::TraceContext as u32);
+            assert_eq!(
+                result.event.header.message_type,
+                MessageType::TraceContext as u8
+            );
             assert_eq!(result.event.connection, connection);
             assert_eq!(result.event.session, session);
             assert_eq!(result.event.operation, NnrpHandle::invalid());
-            assert_eq!(result.event.frame_id, 93);
+            assert_eq!(result.event.header.frame_id, 93);
             assert_eq!(ffi_read_slice(result.event.payload), expected.as_slice());
             assert_eq!(
                 result.event.payload_owner.kind,
@@ -13057,7 +13215,10 @@ mod tests {
                 NnrpFfiStatus::ok()
             );
             assert_eq!(result.event.kind, NnrpEventKind::RuntimeFrame as u32);
-            assert_eq!(result.event.message_type, MessageType::Progress as u32);
+            assert_eq!(
+                result.event.header.message_type,
+                MessageType::Progress as u8
+            );
             assert_eq!(ffi_read_slice(result.event.payload), progress.as_slice());
             assert_eq!(
                 nnrp_buffer_release(result.event.payload_owner),
@@ -13193,7 +13354,7 @@ mod tests {
             );
             assert_eq!(result.event.kind, NnrpEventKind::SubmitAccepted as u32);
             assert_eq!(result.event.operation, operation);
-            assert_eq!(result.event.frame_id, 55);
+            assert_eq!(result.event.header.present, 0);
 
             assert_eq!(
                 nnrp_server_send_result(NnrpServerSendResultRequest {
@@ -13210,7 +13371,7 @@ mod tests {
                 NnrpFfiStatus::ok()
             );
             assert_eq!(result.event.kind, NnrpEventKind::ResultPushed as u32);
-            assert_eq!(result.event.frame_id, 55);
+            assert_eq!(result.event.header.present, 0);
 
             let flow_update = flow_update_payload();
             assert_eq!(
@@ -13304,7 +13465,7 @@ mod tests {
             assert_eq!(result.has_event, 1);
             assert_eq!(result.event.kind, NnrpEventKind::PartialResult as u32);
             assert_eq!(result.event.operation, partial_operation);
-            assert_eq!(result.event.frame_id, 77);
+            assert_eq!(result.event.header.present, 0);
             assert_eq!(result.event.payload.len, partial_body.len());
             assert_eq!(
                 core::slice::from_raw_parts(result.event.payload.ptr, result.event.payload.len),
@@ -13372,7 +13533,7 @@ mod tests {
             assert_eq!(result.has_event, 1);
             assert_eq!(result.event.kind, NnrpEventKind::ResultDropped as u32);
             assert_eq!(result.event.operation, stale_operation);
-            assert_eq!(result.event.frame_id, 78);
+            assert_eq!(result.event.header.present, 0);
             assert_eq!(result.event.payload.len, diagnostics.len());
             assert_eq!(
                 core::slice::from_raw_parts(result.event.payload.ptr, result.event.payload.len),
@@ -13907,6 +14068,10 @@ mod tests {
                         session: stale_session,
                         operation_id: 90_006,
                         frame_id: 1,
+                        header_flags: 0,
+                        view_id: 0,
+                        route_id: 0,
+                        trace_id: 0,
                         payload: NnrpBufferView {
                             ptr: payload.as_ptr(),
                             len: payload.len(),
@@ -13923,6 +14088,10 @@ mod tests {
                         session,
                         operation_id: 90_006,
                         frame_id: 9,
+                        header_flags: 0,
+                        view_id: 0,
+                        route_id: 0,
+                        trace_id: 0,
                         payload: NnrpBufferView {
                             ptr: payload.as_ptr(),
                             len: payload.len(),
@@ -14007,6 +14176,32 @@ mod tests {
     }
 
     #[test]
+    fn ffi_runtime_frame_header_preserves_all_wire_values() {
+        let header = NnrpRuntimeFrameHeader::from(RuntimeFrameHeader {
+            version_major: 1,
+            wire_format: 0,
+            message_type: MessageType::TraceContext,
+            flags: nnrp_core::HeaderFlags(3),
+            session_id: 5,
+            frame_id: 7,
+            view_id: 11,
+            route_id: 13,
+            trace_id: 17,
+        });
+
+        assert_eq!(header.present, 1);
+        assert_eq!(header.version_major, 1);
+        assert_eq!(header.wire_format, 0);
+        assert_eq!(header.message_type, MessageType::TraceContext as u8);
+        assert_eq!(header.flags, 3);
+        assert_eq!(header.session_id, 5);
+        assert_eq!(header.frame_id, 7);
+        assert_eq!(header.view_id, 11);
+        assert_eq!(header.route_id, 13);
+        assert_eq!(header.trace_id, 17);
+    }
+
+    #[test]
     fn ffi_role_event_layouts_are_frozen_for_abi_v4() {
         let (diagnostic_size, diagnostic_operation, diagnostic_frame) =
             match (core::mem::size_of::<usize>(), core::mem::align_of::<u64>()) {
@@ -14016,16 +14211,17 @@ mod tests {
             };
         let (
             event_size,
+            event_header,
+            event_connection,
             event_session,
             event_operation,
-            event_frame,
             event_payload_owner,
             event_payload,
             event_diagnostic,
         ) = match (core::mem::size_of::<usize>(), core::mem::align_of::<u64>()) {
-            (8, 8) => (176, 32, 56, 80, 88, 112, 128),
-            (4, 8) => (168, 32, 56, 80, 88, 112, 120),
-            (4, 4) => (140, 28, 48, 68, 72, 92, 100),
+            (8, 8) => (200, 8, 40, 64, 88, 112, 136, 152),
+            (4, 8) => (192, 8, 40, 64, 88, 112, 136, 144),
+            (4, 4) => (160, 4, 32, 52, 72, 92, 112, 120),
             layout => panic!("unsupported FFI ABI layout: {layout:?}"),
         };
 
@@ -14048,13 +14244,38 @@ mod tests {
             diagnostic_frame
         );
 
+        assert_eq!(
+            core::mem::size_of::<NnrpRuntimeFrameHeader>(),
+            if core::mem::align_of::<u64>() == 8 {
+                32
+            } else {
+                28
+            }
+        );
+        assert_eq!(core::mem::offset_of!(NnrpRuntimeFrameHeader, present), 0);
+        assert_eq!(core::mem::offset_of!(NnrpRuntimeFrameHeader, flags), 4);
+        assert_eq!(core::mem::offset_of!(NnrpRuntimeFrameHeader, session_id), 8);
+        assert_eq!(core::mem::offset_of!(NnrpRuntimeFrameHeader, frame_id), 12);
+        assert_eq!(core::mem::offset_of!(NnrpRuntimeFrameHeader, view_id), 16);
+        assert_eq!(core::mem::offset_of!(NnrpRuntimeFrameHeader, route_id), 18);
+        assert_eq!(
+            core::mem::offset_of!(NnrpRuntimeFrameHeader, trace_id),
+            if core::mem::align_of::<u64>() == 8 {
+                24
+            } else {
+                20
+            }
+        );
+
         assert_eq!(core::mem::size_of::<NnrpEvent>(), event_size);
         assert_eq!(core::mem::offset_of!(NnrpEvent, kind), 0);
-        assert_eq!(core::mem::offset_of!(NnrpEvent, message_type), 4);
-        assert_eq!(core::mem::offset_of!(NnrpEvent, connection), 8);
+        assert_eq!(core::mem::offset_of!(NnrpEvent, header), event_header);
+        assert_eq!(
+            core::mem::offset_of!(NnrpEvent, connection),
+            event_connection
+        );
         assert_eq!(core::mem::offset_of!(NnrpEvent, session), event_session);
         assert_eq!(core::mem::offset_of!(NnrpEvent, operation), event_operation);
-        assert_eq!(core::mem::offset_of!(NnrpEvent, frame_id), event_frame);
         assert_eq!(
             core::mem::offset_of!(NnrpEvent, payload_owner),
             event_payload_owner
@@ -14083,9 +14304,9 @@ mod tests {
             poll_result_size,
             poll_result_event,
         ) = match (core::mem::size_of::<usize>(), core::mem::align_of::<u64>()) {
-            (8, 8) => (24, 8, 64, 24, 48, 60, 40, 40, 24, 32, 36, 200, 24),
-            (4, 8) => (24, 8, 56, 16, 40, 52, 40, 40, 24, 32, 36, 192, 24),
-            (4, 4) => (20, 4, 52, 16, 36, 48, 36, 36, 20, 28, 32, 160, 20),
+            (8, 8) => (24, 8, 64, 24, 48, 60, 40, 40, 24, 32, 36, 224, 24),
+            (4, 8) => (24, 8, 56, 16, 40, 52, 40, 40, 24, 32, 36, 216, 24),
+            (4, 4) => (20, 4, 52, 16, 36, 48, 36, 36, 20, 28, 32, 184, 20),
             layout => panic!("unsupported FFI ABI layout: {layout:?}"),
         };
 

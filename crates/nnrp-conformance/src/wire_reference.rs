@@ -523,7 +523,7 @@ async fn reference_server_task(server: NnrpServer) -> Result<(), RuntimeError> {
 async fn target_client_task(client: NnrpClient) -> Result<(), RuntimeError> {
     let mut session = client.open_session().await?;
     let frame_id = session
-        .submit(token_submit(1_001), REQUEST_BODY.to_vec())
+        .submit_encoded(token_submit(1_001), REQUEST_BODY.to_vec())
         .await?;
     let result = session.await_result().await?;
     if result.frame_id != frame_id || result.body != RESPONSE_BODY {
@@ -654,7 +654,7 @@ async fn run_reference_client(
     );
     let operation_id = 1_002;
     let frame_id = session
-        .submit(token_submit(operation_id), REQUEST_BODY.to_vec())
+        .submit_encoded(token_submit(operation_id), REQUEST_BODY.to_vec())
         .await?;
     frames.push(
         "suite->target",
@@ -805,7 +805,7 @@ async fn run_reference_scenario_client(
         WireReferenceScenario::CancelAbort => {
             let operation_id = 101;
             let frame_id = session
-                .submit_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
+                .submit_encoded_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
                 .await?;
             frames.push(
                 "suite->target",
@@ -842,7 +842,7 @@ async fn run_reference_scenario_client(
 
             let abort_operation_id = 102;
             let abort_frame_id = session
-                .submit_nowait(token_submit(abort_operation_id), b"abort-request".to_vec())
+                .submit_encoded_nowait(token_submit(abort_operation_id), b"abort-request".to_vec())
                 .await?;
             frames.push(
                 "suite->target",
@@ -892,7 +892,7 @@ async fn run_reference_scenario_client(
         WireReferenceScenario::PriorityDeadline => {
             let operation_id = 201;
             let frame_id = session
-                .submit_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
+                .submit_encoded_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
                 .await?;
             frames.push(
                 "suite->target",
@@ -942,7 +942,7 @@ async fn run_reference_scenario_client(
         WireReferenceScenario::ProgressBackpressure => {
             let operation_id = 301;
             let frame_id = session
-                .submit_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
+                .submit_encoded_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
                 .await?;
             frames.push(
                 "suite->target",
@@ -1010,7 +1010,7 @@ async fn run_reference_scenario_client(
         WireReferenceScenario::CapabilityRouteCache => {
             let operation_id = 401;
             let frame_id = session
-                .submit_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
+                .submit_encoded_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
                 .await?;
             frames.push(
                 "suite->target",
@@ -1261,7 +1261,7 @@ async fn run_reference_proxy_client(
 ) -> Result<(), RuntimeError> {
     let mut session = client.open_session().await?;
     session
-        .submit_nowait(token_submit(1_301), REQUEST_BODY.to_vec())
+        .submit_encoded_nowait(token_submit(1_301), REQUEST_BODY.to_vec())
         .await?;
     match action {
         ReferenceProxyAction::InjectBackpressure => {
@@ -1499,8 +1499,8 @@ fn token_submit(operation_id: u64) -> FrameSubmitMetadata {
         tile_index_bytes: 0,
         operation_id,
         submit_mode: SubmitMode::Inline,
-        budget_policy: 0,
-        loss_tolerance_policy: 0,
+        budget_policy: nnrp_core::BudgetPolicy::NONE,
+        loss_tolerance_policy: nnrp_core::LossTolerancePolicy::Strict,
         object_ref_mask: 0,
         dependency_frame_id: 0,
         payload_kind_bitmap: PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),

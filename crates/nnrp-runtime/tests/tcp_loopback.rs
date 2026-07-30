@@ -219,7 +219,7 @@ async fn tcp_loopback_submits_frame_receives_result_and_closes() -> Result<(), R
     let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
     let mut session = client.open_session().await?;
     let frame_id = session
-        .submit(token_submit(101), b"prompt".to_vec())
+        .submit_encoded(token_submit(101), b"prompt".to_vec())
         .await?;
     assert_eq!(frame_id, 1);
 
@@ -258,31 +258,31 @@ async fn tcp_loopback_preserves_explicit_frame_ids_and_advances_allocator(
     let mut session = client.open_session().await?;
     assert!(matches!(
         session
-            .submit_with_frame_id(41, token_submit(0), b"zero-operation".to_vec())
+            .submit_encoded_with_frame_id(41, token_submit(0), b"zero-operation".to_vec())
             .await,
         Err(RuntimeError::UnexpectedMessage(_))
     ));
     assert_eq!(
         session
-            .submit_with_frame_id(42, token_submit(4_200), b"prompt".to_vec())
+            .submit_encoded_with_frame_id(42, token_submit(4_200), b"prompt".to_vec())
             .await?,
         42
     );
     assert!(matches!(
         session
-            .submit_with_frame_id(42, token_submit(4_200), b"duplicate".to_vec())
+            .submit_encoded_with_frame_id(42, token_submit(4_200), b"duplicate".to_vec())
             .await,
         Err(RuntimeError::UnexpectedMessage(_))
     ));
     assert!(matches!(
         session
-            .submit_with_frame_id(43, token_submit(4_200), b"duplicate-operation".to_vec())
+            .submit_encoded_with_frame_id(43, token_submit(4_200), b"duplicate-operation".to_vec())
             .await,
         Err(RuntimeError::UnexpectedMessage(_))
     ));
     assert_eq!(
         session
-            .submit(token_submit(4_300), b"prompt".to_vec())
+            .submit_encoded(token_submit(4_300), b"prompt".to_vec())
             .await?,
         43
     );
@@ -290,7 +290,7 @@ async fn tcp_loopback_preserves_explicit_frame_ids_and_advances_allocator(
     assert_eq!(session.await_result().await?.frame_id, 43);
     assert!(matches!(
         session
-            .submit_with_frame_id(44, token_submit(4_200), b"completed-operation".to_vec())
+            .submit_encoded_with_frame_id(44, token_submit(4_200), b"completed-operation".to_vec())
             .await,
         Err(RuntimeError::UnexpectedMessage(_))
     ));
@@ -342,7 +342,7 @@ async fn tcp_loopback_handles_cancel_drop_flow_and_patch() -> Result<(), Runtime
     let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
     let mut session = client.open_session().await?;
     let frame_id = session
-        .submit_nowait(token_submit(201), b"prompt".to_vec())
+        .submit_encoded_nowait(token_submit(201), b"prompt".to_vec())
         .await?;
     session.cancel_frame(frame_id).await?;
 
@@ -477,7 +477,7 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
     let mut session = client.open_session().await?;
     let operation_id = 1_001;
     let frame_id = session
-        .submit_nowait(token_submit(operation_id), b"prompt".to_vec())
+        .submit_encoded_nowait(token_submit(operation_id), b"prompt".to_vec())
         .await?;
     assert_eq!(frame_id, 1);
     session.update_priority(operation_id, 1, -2).await?;
@@ -543,7 +543,7 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
 
     let abort_operation_id = 2_002;
     session
-        .submit_nowait(token_submit(abort_operation_id), b"abort-prompt".to_vec())
+        .submit_encoded_nowait(token_submit(abort_operation_id), b"abort-prompt".to_vec())
         .await?;
     session
         .expire_at(abort_operation_id, 1_800_000_000_500)
@@ -603,10 +603,10 @@ async fn tcp_loopback_preserves_partial_result_order_with_interleaving() -> Resu
     let first_operation_id = 1_101;
     let second_operation_id = 2_202;
     session
-        .submit_nowait(token_submit(first_operation_id), b"first".to_vec())
+        .submit_encoded_nowait(token_submit(first_operation_id), b"first".to_vec())
         .await?;
     session
-        .submit_nowait(token_submit(second_operation_id), b"second".to_vec())
+        .submit_encoded_nowait(token_submit(second_operation_id), b"second".to_vec())
         .await?;
 
     assert_partial_result_event(
@@ -689,7 +689,7 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
     let mut session = client.open_session().await?;
     let operation_id = 3_003;
     let frame_id = session
-        .submit_nowait(token_submit(operation_id), b"prompt".to_vec())
+        .submit_encoded_nowait(token_submit(operation_id), b"prompt".to_vec())
         .await?;
 
     match session.await_event().await? {
@@ -815,7 +815,7 @@ async fn tcp_loopback_releases_objects_after_cancel_and_reports_cache_miss(
     let mut session = client.open_session().await?;
     let operation_id = 4_004;
     session
-        .submit_nowait(token_submit(operation_id), b"prompt".to_vec())
+        .submit_encoded_nowait(token_submit(operation_id), b"prompt".to_vec())
         .await?;
     session.cancel_operation(operation_id, 7).await?;
 
@@ -1073,7 +1073,7 @@ async fn tcp_loopback_suppresses_expired_final_results() -> Result<(), RuntimeEr
     let mut session = client.open_session().await?;
     let operation_id = 5_005;
     session
-        .submit_nowait(token_submit(operation_id), b"prompt".to_vec())
+        .submit_encoded_nowait(token_submit(operation_id), b"prompt".to_vec())
         .await?;
     session.expire_at(operation_id, 1).await?;
     match session.await_event().await? {
@@ -2582,7 +2582,9 @@ async fn client_event_packet_batch_drains_only_buffered_validated_events(
     );
     let client = NnrpClient::from_transport(transport, NnrpClientConfig::default())?;
     let mut session = client.open_session().await?;
-    session.submit(token_submit(1), b"prompt".to_vec()).await?;
+    session
+        .submit_encoded(token_submit(1), b"prompt".to_vec())
+        .await?;
 
     assert!(matches!(
         session.await_event_packet_batch(0).await,
@@ -2677,8 +2679,8 @@ fn token_submit(operation_id: u64) -> FrameSubmitMetadata {
         tile_index_bytes: 0,
         operation_id,
         submit_mode: SubmitMode::Inline,
-        budget_policy: 0,
-        loss_tolerance_policy: 0,
+        budget_policy: nnrp_core::BudgetPolicy::NONE,
+        loss_tolerance_policy: nnrp_core::LossTolerancePolicy::Strict,
         object_ref_mask: 0,
         dependency_frame_id: 0,
         payload_kind_bitmap: PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),
@@ -2840,7 +2842,9 @@ async fn scripted_client_session_packets(
     let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
     let mut session = client.open_session().await?;
     if operation_correlated {
-        session.submit(token_submit(1), b"prompt".to_vec()).await?;
+        session
+            .submit_encoded(token_submit(1), b"prompt".to_vec())
+            .await?;
     }
     server_task.await.expect("scripted server should join")?;
     Ok(session)

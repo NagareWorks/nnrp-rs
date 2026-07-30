@@ -2,11 +2,14 @@ use crate::{
     CacheObjectKind, CommonHeader, ErrorMetadata, ErrorScope, MessageType, NnrpError,
     TypedPayloadDescriptor, CACHE_ERROR_MISS, TYPED_PAYLOAD_DESCRIPTOR_LEN,
 };
+use core::ops::{BitOr, BitOrAssign};
 
 pub const FRAME_SUBMIT_METADATA_LEN: usize = 72;
 pub const RESULT_PUSH_METADATA_LEN: usize = 64;
 pub const BODY_REGION_PRELUDE_LEN: usize = 32;
+pub const INLINE_OBJECT_BLOCK_HEADER_LEN: usize = 16;
 pub const OBJECT_REFERENCE_BLOCK_LEN: usize = 24;
+pub const TENSOR_SECTION_DESCRIPTOR_LEN: usize = 32;
 
 pub const BUDGET_POLICY_KNOWN_MASK: u8 = 0x0f;
 pub const RESULT_FLAGS_KNOWN_MASK: u16 = 0x0007;
@@ -15,6 +18,71 @@ pub const SUBMIT_OBJECT_REF_MASK_KNOWN_BITS: u32 = 0x0000_000f;
 pub const STANDARD_PROFILE_UNSPECIFIED: u16 = 0x0000;
 pub const STANDARD_PROFILE_TENSOR: u16 = 0x0001;
 pub const STANDARD_PROFILE_TOKEN: u16 = 0x0002;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BudgetPolicy(pub u8);
+
+impl BudgetPolicy {
+    pub const NONE: Self = Self(0);
+    pub const ALLOW_PARTIAL: Self = Self(0x01);
+    pub const ALLOW_STALE_REUSE: Self = Self(0x02);
+    pub const ALLOW_DEGRADED: Self = Self(0x04);
+    pub const ALLOW_DROP: Self = Self(0x08);
+
+    pub fn try_from_u8(value: u8) -> Result<Self, NnrpError> {
+        validate_mask_u8(value, BUDGET_POLICY_KNOWN_MASK)?;
+        Ok(Self(value))
+    }
+
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
+    pub const fn contains(self, policy: Self) -> bool {
+        self.0 & policy.0 == policy.0
+    }
+}
+
+impl BitOr for BudgetPolicy {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl BitOrAssign for BudgetPolicy {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum LossTolerancePolicy {
+    #[default]
+    Strict = 0,
+    BestEffort = 1,
+    LowLatency = 2,
+    FireAndForget = 3,
+    InheritSession = 0xff,
+}
+
+impl LossTolerancePolicy {
+    pub fn try_from_u8(value: u8) -> Result<Self, NnrpError> {
+        match value {
+            0 => Ok(Self::Strict),
+            1 => Ok(Self::BestEffort),
+            2 => Ok(Self::LowLatency),
+            3 => Ok(Self::FireAndForget),
+            0xff => Ok(Self::InheritSession),
+            _ => Err(NnrpError::UnknownEnumValue {
+                enum_name: "loss_tolerance_policy",
+                value: value as u64,
+            }),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -128,14 +196,14 @@ impl PayloadKindBitmap {
         self.0 & Self::TENSOR != 0
     }
 
-    pub fn contains(self, family: PayloadFamily) -> bool {
-        self.0 & family.bit() != 0
+    pub fn contains(self, kind: PayloadKind) -> bool {
+        self.0 & kind.bit() != 0
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
-pub enum PayloadFamily {
+pub enum PayloadKind {
     Tensor = PayloadKindBitmap::TENSOR,
     TokenChunk = PayloadKindBitmap::TOKEN_CHUNK,
     AudioChunk = PayloadKindBitmap::AUDIO_CHUNK,
@@ -145,7 +213,7 @@ pub enum PayloadFamily {
     OpaqueBytes = PayloadKindBitmap::OPAQUE_BYTES,
 }
 
-impl PayloadFamily {
+impl PayloadKind {
     pub fn try_from_bit(bit: u32) -> Result<Self, NnrpError> {
         match bit {
             PayloadKindBitmap::TENSOR => Ok(Self::Tensor),
@@ -156,7 +224,7 @@ impl PayloadFamily {
             PayloadKindBitmap::TOOL_DELTA => Ok(Self::ToolDelta),
             PayloadKindBitmap::OPAQUE_BYTES => Ok(Self::OpaqueBytes),
             _ => Err(NnrpError::UnknownEnumValue {
-                enum_name: "payload_family_bit",
+                enum_name: "payload_kind",
                 value: bit as u64,
             }),
         }
@@ -201,8 +269,8 @@ pub struct FrameSubmitMetadata {
     pub tile_index_bytes: u32,
     pub operation_id: u64,
     pub submit_mode: SubmitMode,
-    pub budget_policy: u8,
-    pub loss_tolerance_policy: u8,
+    pub budget_policy: BudgetPolicy,
+    pub loss_tolerance_policy: LossTolerancePolicy,
     pub object_ref_mask: u32,
     pub dependency_frame_id: u32,
     pub payload_kind_bitmap: PayloadKindBitmap,
@@ -218,8 +286,7 @@ impl FrameSubmitMetadata {
         validate_zero_u8("frame_submit.reserved3", source[55])?;
         validate_zero_u16("frame_submit.reserved4", read_u16(source, 70))?;
 
-        let budget_policy = source[53];
-        validate_mask_u8(budget_policy, BUDGET_POLICY_KNOWN_MASK)?;
+        let budget_policy = BudgetPolicy::try_from_u8(source[53])?;
         let payload_kind_bitmap = PayloadKindBitmap(read_u32(source, 64));
         payload_kind_bitmap.validate()?;
 
@@ -242,7 +309,7 @@ impl FrameSubmitMetadata {
             operation_id: read_u64(source, 40),
             submit_mode: SubmitMode::try_from_u8(source[52])?,
             budget_policy,
-            loss_tolerance_policy: source[54],
+            loss_tolerance_policy: LossTolerancePolicy::try_from_u8(source[54])?,
             object_ref_mask: read_u32(source, 56),
             dependency_frame_id: read_u32(source, 60),
             payload_kind_bitmap,
@@ -254,7 +321,7 @@ impl FrameSubmitMetadata {
 
     pub fn write(&self, destination: &mut [u8]) -> Result<(), NnrpError> {
         require_destination_len(destination, FRAME_SUBMIT_METADATA_LEN)?;
-        validate_mask_u8(self.budget_policy, BUDGET_POLICY_KNOWN_MASK)?;
+        BudgetPolicy::try_from_u8(self.budget_policy.bits())?;
         self.payload_kind_bitmap.validate()?;
         self.validate_payload_shape()?;
 
@@ -276,8 +343,8 @@ impl FrameSubmitMetadata {
         write_u32(destination, 32, self.tile_index_bytes);
         write_u64(destination, 40, self.operation_id);
         destination[52] = self.submit_mode as u8;
-        destination[53] = self.budget_policy;
-        destination[54] = self.loss_tolerance_policy;
+        destination[53] = self.budget_policy.bits();
+        destination[54] = self.loss_tolerance_policy as u8;
         write_u32(destination, 56, self.object_ref_mask);
         write_u32(destination, 60, self.dependency_frame_id);
         write_u32(destination, 64, self.payload_kind_bitmap.0);
@@ -505,6 +572,136 @@ impl BodyRegionPrelude {
         if self.object_reference_bytes as usize % OBJECT_REFERENCE_BLOCK_LEN != 0 {
             return Err(NnrpError::InvalidProtocolCombination {
                 rule: "object_reference_bytes must be a multiple of object reference block length",
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InlineObjectBlockHeader {
+    pub object_kind: CacheObjectKind,
+    pub object_flags: u16,
+    pub profile_id: u16,
+    pub object_bytes: u32,
+}
+
+impl InlineObjectBlockHeader {
+    pub fn parse(source: &[u8]) -> Result<Self, NnrpError> {
+        require_len(source, INLINE_OBJECT_BLOCK_HEADER_LEN)?;
+        let object_flags = read_u16(source, 2);
+        validate_zero_u16("inline_object.object_flags", object_flags)?;
+        validate_zero_u16("inline_object.reserved0", read_u16(source, 6))?;
+        validate_zero_u32("inline_object.reserved1", read_u32(source, 12))?;
+        Ok(Self {
+            object_kind: CacheObjectKind::try_from_u32(read_u16(source, 0) as u32)?,
+            object_flags,
+            profile_id: read_u16(source, 4),
+            object_bytes: read_u32(source, 8),
+        })
+    }
+
+    pub fn write(&self, destination: &mut [u8]) -> Result<(), NnrpError> {
+        require_destination_len(destination, INLINE_OBJECT_BLOCK_HEADER_LEN)?;
+        validate_zero_u16("inline_object.object_flags", self.object_flags)?;
+        destination[..INLINE_OBJECT_BLOCK_HEADER_LEN].fill(0);
+        write_u16(destination, 0, self.object_kind as u16);
+        write_u16(destination, 2, self.object_flags);
+        write_u16(destination, 4, self.profile_id);
+        write_u32(destination, 8, self.object_bytes);
+        Ok(())
+    }
+
+    pub fn to_bytes(&self) -> Result<[u8; INLINE_OBJECT_BLOCK_HEADER_LEN], NnrpError> {
+        let mut bytes = [0u8; INLINE_OBJECT_BLOCK_HEADER_LEN];
+        self.write(&mut bytes)?;
+        Ok(bytes)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TensorSectionDescriptor {
+    pub role_id: u16,
+    pub codec_id: u8,
+    pub dtype_id: u8,
+    pub layout_id: u8,
+    pub scale_policy: u8,
+    pub section_flags: u16,
+    pub element_count_per_tile: u32,
+    pub codec_table_bytes: u32,
+    pub length_table_bytes: u32,
+    pub payload_bytes: u32,
+    pub payload_stride_bytes: u32,
+}
+
+impl TensorSectionDescriptor {
+    pub const MIXED_CODEC: u16 = 0x0001;
+    pub const FIXED_STRIDE: u16 = 0x0002;
+    pub const KNOWN_FLAGS: u16 = Self::MIXED_CODEC | Self::FIXED_STRIDE;
+
+    pub fn parse(source: &[u8]) -> Result<Self, NnrpError> {
+        require_len(source, TENSOR_SECTION_DESCRIPTOR_LEN)?;
+        validate_zero_u32("tensor_section.reserved", read_u32(source, 28))?;
+        let descriptor = Self {
+            role_id: read_u16(source, 0),
+            codec_id: source[2],
+            dtype_id: source[3],
+            layout_id: source[4],
+            scale_policy: source[5],
+            section_flags: read_u16(source, 6),
+            element_count_per_tile: read_u32(source, 8),
+            codec_table_bytes: read_u32(source, 12),
+            length_table_bytes: read_u32(source, 16),
+            payload_bytes: read_u32(source, 20),
+            payload_stride_bytes: read_u32(source, 24),
+        };
+        descriptor.validate()?;
+        Ok(descriptor)
+    }
+
+    pub fn write(&self, destination: &mut [u8]) -> Result<(), NnrpError> {
+        require_destination_len(destination, TENSOR_SECTION_DESCRIPTOR_LEN)?;
+        self.validate()?;
+        destination[..TENSOR_SECTION_DESCRIPTOR_LEN].fill(0);
+        write_u16(destination, 0, self.role_id);
+        destination[2] = self.codec_id;
+        destination[3] = self.dtype_id;
+        destination[4] = self.layout_id;
+        destination[5] = self.scale_policy;
+        write_u16(destination, 6, self.section_flags);
+        write_u32(destination, 8, self.element_count_per_tile);
+        write_u32(destination, 12, self.codec_table_bytes);
+        write_u32(destination, 16, self.length_table_bytes);
+        write_u32(destination, 20, self.payload_bytes);
+        write_u32(destination, 24, self.payload_stride_bytes);
+        Ok(())
+    }
+
+    pub fn to_bytes(&self) -> Result<[u8; TENSOR_SECTION_DESCRIPTOR_LEN], NnrpError> {
+        let mut bytes = [0u8; TENSOR_SECTION_DESCRIPTOR_LEN];
+        self.write(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    fn validate(&self) -> Result<(), NnrpError> {
+        if self.section_flags & !Self::KNOWN_FLAGS != 0 {
+            return Err(NnrpError::InvalidProtocolCombination {
+                rule: "tensor section flags contain unknown bits",
+            });
+        }
+        if (self.codec_table_bytes == 0) != (self.section_flags & Self::MIXED_CODEC == 0) {
+            return Err(NnrpError::InvalidProtocolCombination {
+                rule: "tensor codec table presence must match MIXED_CODEC",
+            });
+        }
+        if (self.payload_stride_bytes == 0) != (self.section_flags & Self::FIXED_STRIDE == 0) {
+            return Err(NnrpError::InvalidProtocolCombination {
+                rule: "tensor payload stride presence must match FIXED_STRIDE",
+            });
+        }
+        if self.length_table_bytes % 4 != 0 {
+            return Err(NnrpError::InvalidProtocolCombination {
+                rule: "tensor length table bytes must be a multiple of four",
             });
         }
         Ok(())
@@ -811,8 +1008,10 @@ impl<'a> TypedPayloadRegion<'a> {
         }
 
         let mut next_expected_offset = 0usize;
+        let mut descriptor_kind_union = 0u32;
         for descriptor in &self.descriptors {
-            validate_descriptor_profile(payload_kind_bitmap, descriptor)?;
+            validate_descriptor_profile(descriptor)?;
+            descriptor_kind_union |= descriptor.payload_kind.bit();
             if descriptor.offset as usize != next_expected_offset {
                 return Err(NnrpError::InvalidProtocolCombination {
                     rule: "typed payload descriptors must be packed in strictly contiguous order",
@@ -832,22 +1031,32 @@ impl<'a> TypedPayloadRegion<'a> {
             });
         }
 
+        let expected_kind_union = payload_kind_bitmap.0 & !PayloadKindBitmap::TENSOR;
+        if descriptor_kind_union != expected_kind_union {
+            return Err(NnrpError::InvalidProtocolCombination {
+                rule:
+                    "payload_kind_bitmap non-tensor bits must equal the typed descriptor kind union",
+            });
+        }
+
         Ok(())
     }
 }
 
-fn validate_descriptor_profile(
-    payload_kind_bitmap: PayloadKindBitmap,
-    descriptor: &TypedPayloadDescriptor,
-) -> Result<(), NnrpError> {
-    let non_tensor_payloads = payload_kind_bitmap.0 & !PayloadKindBitmap::TENSOR;
-    if non_tensor_payloads != 0 && descriptor.profile_id == STANDARD_PROFILE_TENSOR {
+fn validate_descriptor_profile(descriptor: &TypedPayloadDescriptor) -> Result<(), NnrpError> {
+    if descriptor.payload_kind == PayloadKind::Tensor {
+        return Err(NnrpError::InvalidProtocolCombination {
+            rule: "tensor payloads use tensor sections and must not use typed payload descriptors",
+        });
+    }
+
+    if descriptor.profile_id == STANDARD_PROFILE_TENSOR {
         return Err(NnrpError::InvalidProtocolCombination {
             rule: "non-tensor typed payload frames must not use tensor profile",
         });
     }
 
-    if payload_kind_bitmap.0 == PayloadKindBitmap::TOKEN_CHUNK
+    if descriptor.payload_kind == PayloadKind::TokenChunk
         && descriptor.profile_id != STANDARD_PROFILE_TOKEN
     {
         return Err(NnrpError::InvalidProtocolCombination {
@@ -1040,8 +1249,8 @@ mod tests {
             tile_index_bytes: 24,
             operation_id: 0x0102_0304_0506_0708,
             submit_mode: SubmitMode::Mixed,
-            budget_policy: 0x05,
-            loss_tolerance_policy: 0xff,
+            budget_policy: BudgetPolicy(0x05),
+            loss_tolerance_policy: LossTolerancePolicy::InheritSession,
             object_ref_mask: 0x0000_0003,
             dependency_frame_id: 41,
             payload_kind_bitmap: PayloadKindBitmap(
@@ -1078,8 +1287,8 @@ mod tests {
             tile_index_bytes: 0,
             operation_id: 1,
             submit_mode: SubmitMode::Inline,
-            budget_policy: 0,
-            loss_tolerance_policy: 0,
+            budget_policy: BudgetPolicy::NONE,
+            loss_tolerance_policy: LossTolerancePolicy::Strict,
             object_ref_mask: 0,
             dependency_frame_id: 0,
             payload_kind_bitmap: PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),
@@ -1137,8 +1346,8 @@ mod tests {
             tile_index_bytes: 0,
             operation_id: 1,
             submit_mode: SubmitMode::Inline,
-            budget_policy: 0,
-            loss_tolerance_policy: 0xff,
+            budget_policy: BudgetPolicy::NONE,
+            loss_tolerance_policy: LossTolerancePolicy::InheritSession,
             object_ref_mask: 0,
             dependency_frame_id: 0,
             payload_kind_bitmap: PayloadKindBitmap(PayloadKindBitmap::STRUCTURED_EVENT),
@@ -1221,28 +1430,28 @@ mod tests {
     }
 
     #[test]
-    fn payload_family_boundary_keeps_tool_and_event_out_of_profile_space() {
+    fn payload_kind_boundary_keeps_tool_and_event_out_of_profile_space() {
         let bitmap = PayloadKindBitmap(
             PayloadKindBitmap::TOKEN_CHUNK
                 | PayloadKindBitmap::STRUCTURED_EVENT
                 | PayloadKindBitmap::TOOL_DELTA,
         );
 
-        assert!(bitmap.contains(PayloadFamily::TokenChunk));
-        assert!(bitmap.contains(PayloadFamily::StructuredEvent));
-        assert!(PayloadFamily::TokenChunk.is_standard_profile());
-        assert!(!PayloadFamily::StructuredEvent.is_standard_profile());
-        assert!(!PayloadFamily::ToolDelta.is_standard_profile());
-        assert!(PayloadFamily::StructuredEvent.is_registry_bound_family());
-        assert!(PayloadFamily::ToolDelta.is_registry_bound_family());
+        assert!(bitmap.contains(PayloadKind::TokenChunk));
+        assert!(bitmap.contains(PayloadKind::StructuredEvent));
+        assert!(PayloadKind::TokenChunk.is_standard_profile());
+        assert!(!PayloadKind::StructuredEvent.is_standard_profile());
+        assert!(!PayloadKind::ToolDelta.is_standard_profile());
+        assert!(PayloadKind::StructuredEvent.is_registry_bound_family());
+        assert!(PayloadKind::ToolDelta.is_registry_bound_family());
         assert_eq!(
-            PayloadFamily::try_from_bit(PayloadKindBitmap::TOOL_DELTA),
-            Ok(PayloadFamily::ToolDelta)
+            PayloadKind::try_from_bit(PayloadKindBitmap::TOOL_DELTA),
+            Ok(PayloadKind::ToolDelta)
         );
         assert_eq!(
-            PayloadFamily::try_from_bit(0x8000_0000),
+            PayloadKind::try_from_bit(0x8000_0000),
             Err(NnrpError::UnknownEnumValue {
-                enum_name: "payload_family_bit",
+                enum_name: "payload_kind",
                 value: 0x8000_0000
             })
         );
@@ -1412,6 +1621,7 @@ mod tests {
     fn typed_payload_region_packs_descriptors_and_projects_frames() {
         let first = TypedPayloadDescriptor {
             profile_id: STANDARD_PROFILE_TOKEN,
+            payload_kind: PayloadKind::TokenChunk,
             descriptor_flags: 0x0002,
             schema_id: 0x0000_1001,
             schema_version: 3,
@@ -1421,6 +1631,7 @@ mod tests {
         };
         let second = TypedPayloadDescriptor {
             profile_id: STANDARD_PROFILE_TOKEN,
+            payload_kind: PayloadKind::TokenChunk,
             descriptor_flags: 0x0001,
             schema_id: 0x0000_1001,
             schema_version: 3,
@@ -1455,6 +1666,7 @@ mod tests {
     fn typed_payload_region_rejects_bad_lengths_offsets_and_profiles() {
         let token = TypedPayloadDescriptor {
             profile_id: STANDARD_PROFILE_TOKEN,
+            payload_kind: PayloadKind::TokenChunk,
             descriptor_flags: 0,
             schema_id: 0x0000_1001,
             schema_version: 3,

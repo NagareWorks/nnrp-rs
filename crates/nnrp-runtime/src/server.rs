@@ -48,7 +48,8 @@ use crate::TcpFramedListener;
 use crate::{
     server_provider::{bind_server, BoundServerProvider},
     BoxedFramedListener, BoxedFramedTransport, FramedListener, NnrpServerOptions,
-    NnrpServerProvider, ProviderEndpoint, RuntimeError, RuntimePacket, RuntimePressureState,
+    NnrpServerProvider, ProviderEndpoint, RuntimeError, RuntimeFrameHeader, RuntimePacket,
+    RuntimePressureState,
 };
 
 #[derive(Clone)]
@@ -773,8 +774,15 @@ impl NnrpServerSession {
     }
 
     pub async fn await_event(&mut self) -> Result<NnrpServerEvent, RuntimeError> {
+        Ok(self.await_event_with_header().await?.0)
+    }
+
+    pub async fn await_event_with_header(
+        &mut self,
+    ) -> Result<(NnrpServerEvent, RuntimeFrameHeader), RuntimeError> {
         let packet = self.transport.read_packet().await?;
-        match packet.header.message_type {
+        let header = RuntimeFrameHeader::from(&packet.header);
+        let event = match packet.header.message_type {
             MessageType::FrameSubmit => self
                 .handle_frame_submit_packet(packet)
                 .map(NnrpServerEvent::Submit),
@@ -1253,7 +1261,8 @@ impl NnrpServerSession {
             _ => Err(RuntimeError::UnexpectedMessage(
                 "server expected a submit, control, object, cache, or close event",
             )),
-        }
+        }?;
+        Ok((event, header))
     }
 
     pub async fn send_result(

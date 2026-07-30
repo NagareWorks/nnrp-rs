@@ -289,7 +289,7 @@ async fn bench_ipc_loopback(iterations: u64) -> Result<BenchCase, Box<dyn Error>
     let mut session = client.open_session().await?;
     for operation_id in 1..=iterations {
         session
-            .submit(token_submit(operation_id), b"hello".to_vec())
+            .submit_encoded(token_submit(operation_id), b"hello".to_vec())
             .await?;
         let NnrpResult { body, .. } = session.await_result().await?;
         black_box(body);
@@ -324,7 +324,7 @@ async fn bench_websocket_loopback(iterations: u64) -> Result<BenchCase, Box<dyn 
     let mut session = client.open_session().await?;
     for operation_id in 1..=iterations {
         session
-            .submit(token_submit(operation_id), b"hello".to_vec())
+            .submit_encoded(token_submit(operation_id), b"hello".to_vec())
             .await?;
         let NnrpResult { body, .. } = session.await_result().await?;
         black_box(body);
@@ -358,8 +358,8 @@ fn token_submit(operation_id: u64) -> FrameSubmitMetadata {
         tile_index_bytes: 0,
         operation_id,
         submit_mode: SubmitMode::Inline,
-        budget_policy: 0,
-        loss_tolerance_policy: 0,
+        budget_policy: nnrp_core::BudgetPolicy::NONE,
+        loss_tolerance_policy: nnrp_core::LossTolerancePolicy::Strict,
         object_ref_mask: 0,
         dependency_frame_id: 0,
         payload_kind_bitmap: PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),

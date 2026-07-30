@@ -299,6 +299,7 @@ fn l1_frame_submit_parse_emit() -> Result<(), String> {
 
     let typed_descriptor = TypedPayloadDescriptor {
         profile_id: STANDARD_PROFILE_TOKEN,
+        payload_kind: nnrp_core::PayloadKind::TokenChunk,
         descriptor_flags: 0x0002,
         schema_id: 0x0000_1001,
         schema_version: 3,
@@ -531,7 +532,9 @@ async fn tcp_session_smoke() -> Result<(), RuntimeError> {
 
     let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
     let mut session = client.open_session().await?;
-    let frame_id = session.submit(token_submit(1), b"prompt".to_vec()).await?;
+    let frame_id = session
+        .submit_encoded(token_submit(1), b"prompt".to_vec())
+        .await?;
     let result = session.await_result().await?;
     if result.frame_id != frame_id || result.body != b"delta" {
         return Err(RuntimeError::UnexpectedMessage(
@@ -564,7 +567,9 @@ async fn quic_session_smoke() -> Result<(), RuntimeError> {
     let client =
         QuicProvider::connect_addr(addr, endpoint_config, NnrpClientConfig::default()).await?;
     let mut session = client.open_session().await?;
-    let frame_id = session.submit(token_submit(1), b"prompt".to_vec()).await?;
+    let frame_id = session
+        .submit_encoded(token_submit(1), b"prompt".to_vec())
+        .await?;
     let result = session.await_result().await?;
     if result.frame_id != frame_id || result.body != b"delta" {
         return Err(RuntimeError::UnexpectedMessage(
@@ -595,8 +600,8 @@ fn token_submit(operation_id: u64) -> FrameSubmitMetadata {
         tile_index_bytes: 0,
         operation_id,
         submit_mode: SubmitMode::Inline,
-        budget_policy: 0,
-        loss_tolerance_policy: 0,
+        budget_policy: nnrp_core::BudgetPolicy::NONE,
+        loss_tolerance_policy: nnrp_core::LossTolerancePolicy::Strict,
         payload_frame_count: 1,
         object_ref_mask: 0,
         dependency_frame_id: 0,

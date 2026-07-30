@@ -34,7 +34,8 @@ use nnrp_core::{
 use crate::TcpTransport;
 use crate::{
     client_provider::{connect_client, NnrpClientOptions, NnrpClientProvider},
-    BoxedFramedTransport, FramedTransport, RuntimeError, RuntimePacket, RuntimePressureState,
+    BoxedFramedTransport, FramedTransport, NnrpSubmitRequest, RuntimeError, RuntimeFrameHeader,
+    RuntimePacket, RuntimePressureState,
 };
 use nnrp_transport_provider::TransportSelection;
 use std::sync::Arc;
@@ -338,29 +339,47 @@ impl NnrpClientSession {
         self.pressure
     }
 
-    pub async fn submit(
-        &mut self,
-        metadata: FrameSubmitMetadata,
-        body: Vec<u8>,
-    ) -> Result<u32, RuntimeError> {
-        self.submit_nowait(metadata, body).await
+    pub async fn submit(&mut self, request: NnrpSubmitRequest) -> Result<u32, RuntimeError> {
+        self.submit_nowait(request).await
     }
 
-    pub async fn submit_nowait(
+    pub async fn submit_encoded(
         &mut self,
         metadata: FrameSubmitMetadata,
         body: Vec<u8>,
     ) -> Result<u32, RuntimeError> {
         let frame_id = self.next_frame_id;
-        self.submit_with_frame_id(frame_id, metadata, body).await
+        self.submit_encoded_with_frame_id(frame_id, metadata, body)
+            .await
     }
 
-    pub async fn submit_with_frame_id(
+    pub async fn submit_encoded_nowait(
+        &mut self,
+        metadata: FrameSubmitMetadata,
+        body: Vec<u8>,
+    ) -> Result<u32, RuntimeError> {
+        self.submit_encoded(metadata, body).await
+    }
+
+    pub async fn submit_encoded_with_frame_id(
         &mut self,
         frame_id: u32,
         metadata: FrameSubmitMetadata,
         body: Vec<u8>,
     ) -> Result<u32, RuntimeError> {
+        self.submit_nowait(NnrpSubmitRequest {
+            operation_id: metadata.operation_id,
+            frame_id,
+            header: Default::default(),
+            metadata,
+            body,
+        })
+        .await
+    }
+
+    pub async fn submit_nowait(&mut self, request: NnrpSubmitRequest) -> Result<u32, RuntimeError> {
+        let frame_id = request.frame_id;
+        let metadata = request.metadata;
         if frame_id == 0 || frame_id < self.next_frame_id {
             return Err(RuntimeError::UnexpectedMessage(
                 "client frame id must not be zero, reused, or moved backward",
@@ -378,16 +397,20 @@ impl NnrpClientSession {
         let mut header = CommonHeader::new(
             MessageType::FrameSubmit,
             FRAME_SUBMIT_METADATA_LEN as u32,
-            body.len() as u32,
+            request.body.len() as u32,
         );
         header.session_id = self.session_id;
         header.frame_id = frame_id;
+        header.flags = request.header.flags;
+        header.view_id = request.header.view_id;
+        header.route_id = request.header.route_id;
+        header.trace_id = request.header.trace_id;
 
         self.transport
             .write_packet(&RuntimePacket::new(
                 header,
                 metadata.to_bytes()?.to_vec(),
-                body,
+                request.body,
             )?)
             .await?;
         self.next_frame_id = next_frame_id;
@@ -553,6 +576,13 @@ impl NnrpClientSession {
 
     pub async fn await_event(&mut self) -> Result<NnrpClientEvent, RuntimeError> {
         Ok(self.await_event_packet().await?.0)
+    }
+
+    pub async fn await_event_with_header(
+        &mut self,
+    ) -> Result<(NnrpClientEvent, RuntimeFrameHeader), RuntimeError> {
+        let (event, packet) = self.await_event_packet().await?;
+        Ok((event, RuntimeFrameHeader::from(&packet.header)))
     }
 
     pub async fn await_event_packet(

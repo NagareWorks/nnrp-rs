@@ -57,14 +57,28 @@ class NnrpFfiDiagnostic(ctypes.Structure):
     ]
 
 
+class NnrpRuntimeFrameHeader(ctypes.Structure):
+    _fields_ = [
+        ("present", ctypes.c_uint8),
+        ("version_major", ctypes.c_uint8),
+        ("wire_format", ctypes.c_uint8),
+        ("message_type", ctypes.c_uint8),
+        ("flags", ctypes.c_uint32),
+        ("session_id", ctypes.c_uint32),
+        ("frame_id", ctypes.c_uint32),
+        ("view_id", ctypes.c_uint16),
+        ("route_id", ctypes.c_uint16),
+        ("trace_id", ctypes.c_uint64),
+    ]
+
+
 class NnrpEvent(ctypes.Structure):
     _fields_ = [
         ("kind", ctypes.c_uint32),
-        ("message_type", ctypes.c_uint32),
+        ("header", NnrpRuntimeFrameHeader),
         ("connection", NnrpHandle),
         ("session", NnrpHandle),
         ("operation", NnrpHandle),
-        ("frame_id", ctypes.c_uint32),
         ("payload_owner", NnrpHandle),
         ("payload", NnrpBufferView),
         ("diagnostic", NnrpFfiDiagnostic),
@@ -105,6 +119,10 @@ class NnrpSubmitRequest(ctypes.Structure):
         ("session", NnrpHandle),
         ("operation_id", ctypes.c_uint64),
         ("frame_id", ctypes.c_uint32),
+        ("header_flags", ctypes.c_uint32),
+        ("view_id", ctypes.c_uint16),
+        ("route_id", ctypes.c_uint16),
+        ("trace_id", ctypes.c_uint64),
         ("payload", NnrpBufferView),
     ]
 
@@ -475,6 +493,23 @@ def packet(frame_id: int) -> bytes:
     )
 
 
+def typed_token_body(body: bytes) -> bytes:
+    prelude = struct.pack("<IIIIIIII", 0, 0, 24, len(body), 0, 0, 0, 0)
+    descriptor = struct.pack(
+        "<HBBIIHHII",
+        PROFILE_TOKEN,
+        0x02,
+        0x02,
+        TOKEN_DELTA_SCHEMA_ID,
+        TOKEN_DELTA_SCHEMA_VERSION,
+        0x02,
+        0,
+        0,
+        len(body),
+    )
+    return prelude + descriptor + body
+
+
 def token_submit_payload(operation_id: int, body: bytes) -> bytes:
     metadata = bytearray(FRAME_SUBMIT_METADATA_LEN)
     struct.pack_into("<H", metadata, 16, 25)
@@ -482,7 +517,7 @@ def token_submit_payload(operation_id: int, body: bytes) -> bytes:
     metadata[52] = 0
     struct.pack_into("<I", metadata, 64, 0x0000_0002)
     struct.pack_into("<H", metadata, 68, 1)
-    return bytes(metadata) + body
+    return bytes(metadata) + typed_token_body(body)
 
 
 def token_result_payload(body: bytes) -> bytes:
@@ -495,7 +530,7 @@ def token_result_payload(body: bytes) -> bytes:
     metadata[44] = 0
     struct.pack_into("<I", metadata, 56, 0x0000_0002)
     struct.pack_into("<H", metadata, 60, 1)
-    return bytes(metadata) + body
+    return bytes(metadata) + typed_token_body(body)
 
 
 def await_role_event(
@@ -736,7 +771,14 @@ def run_role_smoke_test_at_endpoint(
     require_ok(
         library.nnrp_client_submit(
             NnrpSubmitRequest(
-                client_session, operation_id, frame_id, submit_view
+                client_session,
+                operation_id,
+                frame_id,
+                0,
+                0,
+                0,
+                0,
+                submit_view,
             ),
             ctypes.byref(client_operation),
         ),
@@ -746,7 +788,7 @@ def run_role_smoke_test_at_endpoint(
         library, "nnrp_server_await_events", server_session
     )
     server_operation = server_event.operation
-    if server_event.kind != EVENT_SUBMIT_ACCEPTED or server_event.frame_id != frame_id:
+    if server_event.kind != EVENT_SUBMIT_ACCEPTED or server_event.header.frame_id != frame_id:
         raise RuntimeError("server did not receive the submitted operation")
     if event_payload(library, server_event) != submit_payload:
         raise RuntimeError("server received an invalid submit payload")
@@ -764,7 +806,7 @@ def run_role_smoke_test_at_endpoint(
     )
     if (
         client_event.kind != EVENT_RESULT_PUSHED
-        or client_event.frame_id != frame_id
+        or client_event.header.frame_id != frame_id
         or client_event.operation.id != client_operation.id
     ):
         raise RuntimeError("client did not receive the operation result")

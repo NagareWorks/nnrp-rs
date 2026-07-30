@@ -14,8 +14,8 @@ typedef struct NnrpProtocolVersion {
 } NnrpProtocolVersion;
 
 #define NNRP_FFI_ABI_MAJOR 4
-#define NNRP_FFI_ABI_MINOR 1
-#define NNRP_FFI_ABI_PATCH 1
+#define NNRP_FFI_ABI_MINOR 3
+#define NNRP_FFI_ABI_PATCH 0
 
 #define NNRP_TRANSPORT_SLOT_QUIC 0x00000001u
 #define NNRP_TRANSPORT_SLOT_TCP 0x00000002u
@@ -250,7 +250,8 @@ typedef struct NnrpSchemaDescriptorHeader {
 
 typedef struct NnrpTypedPayloadDescriptor {
   uint16_t profile_id;
-  uint16_t descriptor_flags;
+  uint8_t payload_kind;
+  uint8_t descriptor_flags;
   uint32_t schema_id;
   uint32_t schema_version;
   uint16_t stream_semantics;
@@ -301,13 +302,25 @@ typedef struct NnrpSessionResumeRequest {
   uint32_t resume_token_bytes;
 } NnrpSessionResumeRequest;
 
+typedef struct NnrpRuntimeFrameHeader {
+  uint8_t present;
+  uint8_t version_major;
+  uint8_t wire_format;
+  uint8_t message_type;
+  uint32_t flags;
+  uint32_t session_id;
+  uint32_t frame_id;
+  uint16_t view_id;
+  uint16_t route_id;
+  uint64_t trace_id;
+} NnrpRuntimeFrameHeader;
+
 typedef struct NnrpEvent {
   uint32_t kind;
-  uint32_t message_type;
+  NnrpRuntimeFrameHeader header;
   NnrpHandle connection;
   NnrpHandle session;
   NnrpHandle operation;
-  uint32_t frame_id;
   NnrpHandle payload_owner;
   NnrpBufferView payload;
   NnrpFfiDiagnostic diagnostic;
@@ -353,6 +366,10 @@ typedef struct NnrpSubmitRequest {
   NnrpHandle session;
   uint64_t operation_id;
   uint32_t frame_id;
+  uint32_t header_flags;
+  uint16_t view_id;
+  uint16_t route_id;
+  uint64_t trace_id;
   NnrpBufferView payload;
 } NnrpSubmitRequest;
 

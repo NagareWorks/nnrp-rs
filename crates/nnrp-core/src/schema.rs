@@ -1,14 +1,14 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    NnrpError, SCHEMA_ERROR_HASH_CONFLICT, SCHEMA_ERROR_INCOMPATIBLE, SCHEMA_ERROR_UNKNOWN,
-    SCHEMA_ERROR_UPDATE_REJECTED, SCHEMA_ERROR_VERSION_UNKNOWN,
+    NnrpError, PayloadKind, SCHEMA_ERROR_HASH_CONFLICT, SCHEMA_ERROR_INCOMPATIBLE,
+    SCHEMA_ERROR_UNKNOWN, SCHEMA_ERROR_UPDATE_REJECTED, SCHEMA_ERROR_VERSION_UNKNOWN,
 };
 
 pub const SCHEMA_DESCRIPTOR_HEADER_LEN: usize = 32;
 pub const TYPED_PAYLOAD_DESCRIPTOR_LEN: usize = 24;
 pub const SCHEMA_FLAGS_KNOWN_MASK: u16 = 0x000f;
-pub const DESCRIPTOR_FLAGS_KNOWN_MASK: u16 = 0x000f;
+pub const DESCRIPTOR_FLAGS_KNOWN_MASK: u8 = 0x0f;
 pub const PROFILE_UNSPECIFIED: u16 = 0;
 pub const PROFILE_TENSOR: u16 = 1;
 pub const PROFILE_TOKEN: u16 = 2;
@@ -79,7 +79,8 @@ impl SchemaDescriptorHeader {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TypedPayloadDescriptor {
     pub profile_id: u16,
-    pub descriptor_flags: u16,
+    pub payload_kind: PayloadKind,
+    pub descriptor_flags: u8,
     pub schema_id: u32,
     pub schema_version: u32,
     pub stream_semantics: u16,
@@ -91,11 +92,13 @@ impl TypedPayloadDescriptor {
     pub fn parse(source: &[u8]) -> Result<Self, NnrpError> {
         require_len(source, TYPED_PAYLOAD_DESCRIPTOR_LEN)?;
         validate_zero_u16("typed_payload_descriptor.reserved0", read_u16(source, 14))?;
-        let descriptor_flags = read_u16(source, 2);
-        validate_mask_u16(descriptor_flags, DESCRIPTOR_FLAGS_KNOWN_MASK)?;
+        let payload_kind = PayloadKind::try_from_bit(u32::from(source[2]))?;
+        let descriptor_flags = source[3];
+        validate_mask_u8(descriptor_flags, DESCRIPTOR_FLAGS_KNOWN_MASK)?;
 
         Ok(Self {
             profile_id: read_u16(source, 0),
+            payload_kind,
             descriptor_flags,
             schema_id: read_u32(source, 4),
             schema_version: read_u32(source, 8),
@@ -107,11 +110,12 @@ impl TypedPayloadDescriptor {
 
     pub fn write(&self, destination: &mut [u8]) -> Result<(), NnrpError> {
         require_destination_len(destination, TYPED_PAYLOAD_DESCRIPTOR_LEN)?;
-        validate_mask_u16(self.descriptor_flags, DESCRIPTOR_FLAGS_KNOWN_MASK)?;
+        validate_mask_u8(self.descriptor_flags, DESCRIPTOR_FLAGS_KNOWN_MASK)?;
 
         destination[..TYPED_PAYLOAD_DESCRIPTOR_LEN].fill(0);
         write_u16(destination, 0, self.profile_id);
-        write_u16(destination, 2, self.descriptor_flags);
+        destination[2] = self.payload_kind as u8;
+        destination[3] = self.descriptor_flags;
         write_u32(destination, 4, self.schema_id);
         write_u32(destination, 8, self.schema_version);
         write_u16(destination, 12, self.stream_semantics);
@@ -319,6 +323,17 @@ fn validate_mask_u16(value: u16, allowed: u16) -> Result<(), NnrpError> {
     Ok(())
 }
 
+fn validate_mask_u8(value: u8, allowed: u8) -> Result<(), NnrpError> {
+    if value & !allowed != 0 {
+        return Err(NnrpError::ReservedBitsSet {
+            value: value as u64,
+            allowed: allowed as u64,
+        });
+    }
+
+    Ok(())
+}
+
 fn read_u16(source: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes(source[offset..offset + 2].try_into().expect("slice length"))
 }
@@ -352,7 +367,7 @@ mod tests {
         TOKEN_DELTA_SCHEMA_VERSION,
     };
     use crate::{
-        NnrpError, DESCRIPTOR_FLAGS_KNOWN_MASK, SCHEMA_ERROR_HASH_CONFLICT,
+        NnrpError, PayloadKind, DESCRIPTOR_FLAGS_KNOWN_MASK, SCHEMA_ERROR_HASH_CONFLICT,
         SCHEMA_ERROR_INCOMPATIBLE, SCHEMA_ERROR_UPDATE_REJECTED, SCHEMA_FLAGS_KNOWN_MASK,
     };
 
@@ -393,11 +408,12 @@ mod tests {
 
     #[test]
     fn typed_payload_descriptor_round_trips_golden_vector() {
-        let bytes = hex_to_bytes("020002000110000003000000020000000000000018000000");
+        let bytes = hex_to_bytes("020002020110000003000000020000000000000018000000");
 
         let descriptor = TypedPayloadDescriptor::parse(&bytes).unwrap();
 
         assert_eq!(descriptor.profile_id, 2);
+        assert_eq!(descriptor.payload_kind, PayloadKind::TokenChunk);
         assert_eq!(descriptor.descriptor_flags, 2);
         assert_eq!(descriptor.schema_id, 0x0000_1001);
         assert_eq!(descriptor.schema_version, 3);
@@ -409,8 +425,8 @@ mod tests {
 
     #[test]
     fn typed_payload_descriptor_rejects_reserved_flags() {
-        let mut bytes = hex_to_bytes("020002000110000003000000020000000000000018000000");
-        bytes[2..4].copy_from_slice(&0x0010u16.to_le_bytes());
+        let mut bytes = hex_to_bytes("020002020110000003000000020000000000000018000000");
+        bytes[3] = 0x10;
 
         assert_eq!(
             TypedPayloadDescriptor::parse(&bytes),
@@ -568,6 +584,7 @@ mod tests {
     ) -> TypedPayloadDescriptor {
         TypedPayloadDescriptor {
             profile_id,
+            payload_kind: PayloadKind::TokenChunk,
             descriptor_flags: 0,
             schema_id,
             schema_version,

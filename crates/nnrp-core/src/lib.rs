@@ -69,13 +69,15 @@ pub use control::{
     TRACE_CONTEXT_METADATA_LEN, TRANSPORT_PROBE_ACK_METADATA_LEN, TRANSPORT_PROBE_METADATA_LEN,
 };
 pub use data::{
-    validate_result_drop_header, validate_submit_object_ref_mask, BodyRegionPrelude,
-    FrameSubmitMetadata, InputProfile, ObjectReferenceBlock, ObjectReferenceRegion, PayloadFamily,
-    PayloadKindBitmap, ResultClass, ResultPushMetadata, SubmitMode, TileIndexMode,
-    TypedPayloadFrameView, TypedPayloadRegion, BODY_REGION_PRELUDE_LEN, BUDGET_POLICY_KNOWN_MASK,
-    FRAME_SUBMIT_METADATA_LEN, OBJECT_REFERENCE_BLOCK_LEN, PAYLOAD_KIND_KNOWN_MASK,
-    RESULT_FLAGS_KNOWN_MASK, RESULT_PUSH_METADATA_LEN, STANDARD_PROFILE_TENSOR,
-    STANDARD_PROFILE_TOKEN, STANDARD_PROFILE_UNSPECIFIED, SUBMIT_OBJECT_REF_MASK_KNOWN_BITS,
+    validate_result_drop_header, validate_submit_object_ref_mask, BodyRegionPrelude, BudgetPolicy,
+    FrameSubmitMetadata, InlineObjectBlockHeader, InputProfile, LossTolerancePolicy,
+    ObjectReferenceBlock, ObjectReferenceRegion, PayloadKind, PayloadKindBitmap, ResultClass,
+    ResultPushMetadata, SubmitMode, TensorSectionDescriptor, TileIndexMode, TypedPayloadFrameView,
+    TypedPayloadRegion, BODY_REGION_PRELUDE_LEN, BUDGET_POLICY_KNOWN_MASK,
+    FRAME_SUBMIT_METADATA_LEN, INLINE_OBJECT_BLOCK_HEADER_LEN, OBJECT_REFERENCE_BLOCK_LEN,
+    PAYLOAD_KIND_KNOWN_MASK, RESULT_FLAGS_KNOWN_MASK, RESULT_PUSH_METADATA_LEN,
+    STANDARD_PROFILE_TENSOR, STANDARD_PROFILE_TOKEN, STANDARD_PROFILE_UNSPECIFIED,
+    SUBMIT_OBJECT_REF_MASK_KNOWN_BITS, TENSOR_SECTION_DESCRIPTOR_LEN,
 };
 pub use enums::{
     BackpressureLevel, CancelScope, FlowScopeKind, FlowUpdateReason, HeaderFlags, InFlightPolicy,

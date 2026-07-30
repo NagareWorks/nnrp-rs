@@ -4,17 +4,17 @@ use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
 use js_sys::{Array, Function, Promise, Reflect, Uint8Array};
 use nnrp_core::{
-    BudgetMetadata, CommonHeader, ControlRequestMetadata, FrameSubmitMetadata, InputProfile,
-    MessageType, PayloadKindBitmap, ProgressMetadata, ResultClass, ResultPushMetadata, RuntimeRole,
-    SessionCloseAckMetadata, SessionCloseMetadata, SessionCloseStatus, SessionOpenAckMetadata,
-    SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata,
-    SessionPatchRejectReason, SessionStatus, SubmitMode, TileIndexMode,
-    CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED, PROGRESS_METADATA_LEN, RESULT_PUSH_METADATA_LEN,
-    SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE, SESSION_OPEN_ACK_METADATA_LEN,
-    SESSION_PATCH_ACK_METADATA_LEN, STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID,
-    TOKEN_DELTA_SCHEMA_VERSION,
+    BudgetMetadata, CommonHeader, ControlRequestMetadata, FrameSubmitMetadata, HeaderFlags,
+    InputProfile, MessageType, PayloadKindBitmap, ProgressMetadata, ResultClass,
+    ResultPushMetadata, RuntimeRole, SessionCloseAckMetadata, SessionCloseMetadata,
+    SessionCloseStatus, SessionOpenAckMetadata, SessionOpenMetadata, SessionPatchAckMetadata,
+    SessionPatchAckStatus, SessionPatchMetadata, SessionPatchRejectReason, SessionStatus,
+    SubmitMode, TileIndexMode, CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED, PROGRESS_METADATA_LEN,
+    RESULT_PUSH_METADATA_LEN, SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE,
+    SESSION_OPEN_ACK_METADATA_LEN, SESSION_PATCH_ACK_METADATA_LEN, STANDARD_PROFILE_TOKEN,
+    TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
 };
-use nnrp_runtime::RuntimePacket;
+use nnrp_runtime::{NnrpSubmitHeaderContext, RuntimePacket};
 use nnrp_wasm::{
     decode_runtime_control_metadata_json, decode_websocket_binary_frame_batch_json,
     decode_websocket_binary_frame_json, encode_runtime_control_metadata_json,
@@ -160,9 +160,18 @@ async fn wasm_bindgen_browser_role_runs_real_session_submit_and_close() {
     let mut payload = Vec::from(submit.to_bytes().expect("submit metadata should encode"));
     payload.extend_from_slice(b"prompt");
     assert_eq!(
-        role.submit_no_wait(9, &payload)
-            .await
-            .expect("browser role should submit through the Rust runtime"),
+        role.submit_no_wait(
+            9,
+            NnrpSubmitHeaderContext {
+                flags: HeaderFlags::ACK_REQUIRED,
+                view_id: 3,
+                route_id: 4,
+                trace_id: 5,
+            },
+            &payload,
+        )
+        .await
+        .expect("browser role should submit through the Rust runtime"),
         9
     );
 
@@ -370,7 +379,7 @@ async fn browser_role_routes_control_and_patch_while_event_receive_is_pending() 
     let submit = token_submit(42);
     let mut submit_payload = Vec::from(submit.to_bytes().expect("submit metadata should encode"));
     submit_payload.extend_from_slice(b"prompt");
-    role.submit_no_wait(9, &submit_payload)
+    role.submit_no_wait(9, NnrpSubmitHeaderContext::default(), &submit_payload)
         .await
         .expect("concurrent browser role should submit");
 
@@ -541,6 +550,10 @@ fn browser_role_responses(packet: &[u8]) -> Vec<Vec<u8>> {
         }
         MessageType::FrameSubmit => {
             FrameSubmitMetadata::parse(metadata).expect("frame submit should parse");
+            assert_eq!(header.flags, HeaderFlags::ACK_REQUIRED);
+            assert_eq!(header.view_id, 3);
+            assert_eq!(header.route_id, 4);
+            assert_eq!(header.trace_id, 5);
             let progress = ProgressMetadata {
                 operation_id: 42,
                 progress_sequence: 1,
@@ -687,8 +700,8 @@ fn token_submit(operation_id: u64) -> FrameSubmitMetadata {
         tile_index_bytes: 0,
         operation_id,
         submit_mode: SubmitMode::Inline,
-        budget_policy: 0,
-        loss_tolerance_policy: 0,
+        budget_policy: nnrp_core::BudgetPolicy::NONE,
+        loss_tolerance_policy: nnrp_core::LossTolerancePolicy::Strict,
         object_ref_mask: 0,
         dependency_frame_id: 0,
         payload_kind_bitmap: PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),

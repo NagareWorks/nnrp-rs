@@ -601,7 +601,9 @@ mod tests {
 
         let client = WebSocketProvider::connect(&endpoint, NnrpClientConfig::default()).await?;
         let mut session = client.open_session().await?;
-        session.submit(token_submit(), b"hello".to_vec()).await?;
+        session
+            .submit_encoded(token_submit(), b"hello".to_vec())
+            .await?;
         let NnrpResult { body, .. } = session.await_result().await?;
         assert_eq!(body, b"ws-ok");
 
@@ -752,7 +754,7 @@ mod tests {
         let client = WebSocketProvider::connect(&endpoint, NnrpClientConfig::default()).await?;
         let mut session = client.open_session().await?;
         let frame_id = session
-            .submit_nowait(token_submit(), b"partial-request".to_vec())
+            .submit_encoded_nowait(token_submit(), b"partial-request".to_vec())
             .await?;
         session.send_credit_update(credit_update()).await?;
 
@@ -806,8 +808,8 @@ mod tests {
             tile_index_bytes: 0,
             operation_id: 1,
             submit_mode: SubmitMode::Inline,
-            budget_policy: 0,
-            loss_tolerance_policy: 0,
+            budget_policy: nnrp_core::BudgetPolicy::NONE,
+            loss_tolerance_policy: nnrp_core::LossTolerancePolicy::Strict,
             object_ref_mask: 0,
             dependency_frame_id: 0,
             payload_kind_bitmap: PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),

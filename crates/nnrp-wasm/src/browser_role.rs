@@ -14,12 +14,12 @@ use futures_util::{
 };
 use js_sys::{Array, Function, Promise, Uint32Array, Uint8Array};
 use nnrp_core::{
-    CommonHeader, FrameSubmitMetadata, MessageType, SessionPatchMetadata, SessionPriorityClass,
-    FRAME_SUBMIT_METADATA_LEN, SESSION_PATCH_METADATA_LEN,
+    CommonHeader, FrameSubmitMetadata, HeaderFlags, MessageType, SessionPatchMetadata,
+    SessionPriorityClass, FRAME_SUBMIT_METADATA_LEN, SESSION_PATCH_METADATA_LEN,
 };
 use nnrp_runtime::{
-    FramedTransport, NnrpClient, NnrpClientConfig, NnrpClientSession, RuntimeError,
-    RuntimeFrameLimits, RuntimePacket, RuntimeTransportKind,
+    FramedTransport, NnrpClient, NnrpClientConfig, NnrpClientSession, NnrpSubmitHeaderContext,
+    NnrpSubmitRequest, RuntimeError, RuntimeFrameLimits, RuntimePacket, RuntimeTransportKind,
 };
 use serde::Deserialize;
 use wasm_bindgen::{prelude::*, JsCast};
@@ -522,12 +522,27 @@ impl BrowserClientRole {
     }
 
     #[wasm_bindgen(js_name = submitNoWait)]
-    pub fn submit_no_wait_promise(&self, frame_id: u32, payload: &[u8]) -> Promise {
+    pub fn submit_no_wait_promise(
+        &self,
+        frame_id: u32,
+        header_flags: u32,
+        view_id: u16,
+        route_id: u16,
+        trace_id: u64,
+        payload: &[u8],
+    ) -> Promise {
         let state = Rc::clone(&self.state);
         let payload = payload.to_vec();
         future_to_promise(async move {
             state
-                .submit_no_wait(frame_id, &payload)
+                .submit_no_wait(
+                    frame_id,
+                    header_flags,
+                    view_id,
+                    route_id,
+                    trace_id,
+                    &payload,
+                )
                 .await
                 .map(|frame_id| JsValue::from_f64(frame_id.into()))
         })
@@ -600,8 +615,22 @@ impl BrowserClientRole {
 }
 
 impl BrowserClientRole {
-    pub async fn submit_no_wait(&self, frame_id: u32, payload: &[u8]) -> Result<u32, JsValue> {
-        self.state.submit_no_wait(frame_id, payload).await
+    pub async fn submit_no_wait(
+        &self,
+        frame_id: u32,
+        header: NnrpSubmitHeaderContext,
+        payload: &[u8],
+    ) -> Result<u32, JsValue> {
+        self.state
+            .submit_no_wait(
+                frame_id,
+                header.flags.0,
+                header.view_id,
+                header.route_id,
+                header.trace_id,
+                payload,
+            )
+            .await
     }
 
     pub async fn send_runtime_frame(
@@ -636,22 +665,38 @@ impl BrowserClientRole {
 }
 
 impl BrowserClientRoleState {
-    async fn submit_no_wait(&self, frame_id: u32, payload: &[u8]) -> Result<u32, JsValue> {
+    async fn submit_no_wait(
+        &self,
+        frame_id: u32,
+        header_flags: u32,
+        view_id: u16,
+        route_id: u16,
+        trace_id: u64,
+        payload: &[u8],
+    ) -> Result<u32, JsValue> {
         if payload.len() < FRAME_SUBMIT_METADATA_LEN {
             return Err(js_error("FRAME_SUBMIT payload is truncated"));
         }
         let metadata = FrameSubmitMetadata::parse(&payload[..FRAME_SUBMIT_METADATA_LEN])
             .map_err(js_nnrp_error)?;
+        let header = NnrpSubmitHeaderContext {
+            flags: HeaderFlags(header_flags),
+            view_id,
+            route_id,
+            trace_id,
+        };
         self.session
             .lock()
             .await
             .as_mut()
             .ok_or_else(closed_role_error)?
-            .submit_with_frame_id(
+            .submit_nowait(NnrpSubmitRequest {
+                operation_id: metadata.operation_id,
                 frame_id,
+                header,
                 metadata,
-                payload[FRAME_SUBMIT_METADATA_LEN..].to_vec(),
-            )
+                body: payload[FRAME_SUBMIT_METADATA_LEN..].to_vec(),
+            })
             .await
             .map_err(js_runtime_error)
     }

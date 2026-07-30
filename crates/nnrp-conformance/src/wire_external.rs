@@ -196,7 +196,7 @@ async fn run_cancel_abort_client(
     let session_id = session.session_id();
     let operation_id = 101;
     let frame_id = session
-        .submit_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
+        .submit_encoded_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
         .await?;
     observed.push(
         WireExternalDirection::SuiteToTarget,
@@ -283,7 +283,7 @@ async fn run_capability_route_cache_client(
     let session_id = session.session_id();
     let operation_id = 401;
     let frame_id = session
-        .submit_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
+        .submit_encoded_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
         .await?;
     observed.push(
         WireExternalDirection::SuiteToTarget,
@@ -453,7 +453,7 @@ async fn run_priority_deadline_proxy(
         let mut upstream = upstream_endpoint.connect().await?.open_session().await?;
         let submit = downstream.receive_submit().await?;
         let upstream_frame_id = upstream
-            .submit_nowait(token_submit(submit.operation_id), submit.body)
+            .submit_encoded_nowait(token_submit(submit.operation_id), submit.body)
             .await?;
         upstream.update_priority(submit.operation_id, 10, 0).await?;
         upstream.expire_at(submit.operation_id, 1).await?;
@@ -490,7 +490,7 @@ async fn run_priority_deadline_proxy(
         let mut session = front_client.open_session().await?;
         let operation_id = 201;
         let frame_id = session
-            .submit_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
+            .submit_encoded_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
             .await?;
         let drop_reason = match session.await_event().await? {
             NnrpClientEvent::ResultDropReason { metadata, .. } => metadata,
@@ -586,8 +586,8 @@ fn token_submit(operation_id: u64) -> FrameSubmitMetadata {
         tile_index_bytes: 0,
         operation_id,
         submit_mode: SubmitMode::Inline,
-        budget_policy: 0,
-        loss_tolerance_policy: 0,
+        budget_policy: nnrp_core::BudgetPolicy::NONE,
+        loss_tolerance_policy: nnrp_core::LossTolerancePolicy::Strict,
         object_ref_mask: 0,
         dependency_frame_id: 0,
         payload_kind_bitmap: PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),
@@ -988,7 +988,7 @@ mod tests {
         let mut session = endpoint.connect().await?.open_session().await?;
         let operation_id = 301;
         session
-            .submit_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
+            .submit_encoded_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
             .await?;
         match session.await_event().await? {
             NnrpClientEvent::Progress { body, .. } if body == PROGRESS_BODY => {}

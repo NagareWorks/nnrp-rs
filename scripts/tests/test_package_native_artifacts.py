@@ -128,6 +128,17 @@ not_an_nnrp_export T 00000004 00000004
             self.assertIn(f"{scope}={library}", command)
         self.assertTrue(run.call_args.kwargs["check"])
 
+    def test_skip_build_rejects_multiple_transport_scopes(self):
+        package = load_package_script()
+
+        with self.assertRaisesRegex(SystemExit, "requires exactly one"):
+            package.validate_transport_build_selection(["tcp", "quic"], True)
+
+    def test_skip_build_accepts_one_transport_scope(self):
+        package = load_package_script()
+
+        package.validate_transport_build_selection(["tcp"], True)
+
 
 if __name__ == "__main__":
     unittest.main()

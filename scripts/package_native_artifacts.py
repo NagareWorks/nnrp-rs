@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PROTOCOL_VERSION = "NNRP/1"
-FFI_ABI_VERSION = "4.1.1"
+FFI_ABI_VERSION = "4.3.0"
 EXPECTED_EXPORTS = [
     "nnrp_current_protocol_version",
     "nnrp_runtime_capabilities",
@@ -474,6 +474,7 @@ def main() -> None:
 
     release = not args.debug
     transport_scopes = args.transport_scope or ["tcp", "quic", "ipc", "websocket"]
+    validate_transport_build_selection(transport_scopes, args.skip_build)
     packaged_libraries = {}
     for transport_scope in transport_scopes:
         if not args.skip_build:
@@ -501,6 +502,14 @@ def main() -> None:
         and set(transport_scopes) == set(TRANSPORT_SCOPES)
     ):
         verify_library_isolation(packaged_libraries)
+
+
+def validate_transport_build_selection(transport_scopes: list[str], skip_build: bool) -> None:
+    if skip_build and len(transport_scopes) != 1:
+        raise SystemExit(
+            "--skip-build requires exactly one --transport-scope because transport-scoped "
+            "builds share the same Cargo output path"
+        )
 
 
 if __name__ == "__main__":

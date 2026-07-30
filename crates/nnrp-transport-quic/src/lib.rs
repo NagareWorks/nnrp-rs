@@ -549,7 +549,9 @@ mod tests {
         let client =
             QuicProvider::connect_addr(addr, endpoint_config, NnrpClientConfig::default()).await?;
         let mut session = client.open_session().await?;
-        let frame_id = session.submit(token_submit(), b"prompt".to_vec()).await?;
+        let frame_id = session
+            .submit_encoded(token_submit(), b"prompt".to_vec())
+            .await?;
         let result = session.await_result().await?;
         assert_eq!(result.frame_id, frame_id);
         assert_eq!(result.body, b"delta".to_vec());
@@ -695,8 +697,8 @@ mod tests {
             tile_index_bytes: 0,
             operation_id: 1,
             submit_mode: SubmitMode::Inline,
-            budget_policy: 0,
-            loss_tolerance_policy: 0,
+            budget_policy: nnrp_core::BudgetPolicy::NONE,
+            loss_tolerance_policy: nnrp_core::LossTolerancePolicy::Strict,
             object_ref_mask: 0,
             dependency_frame_id: 0,
             payload_kind_bitmap: PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),

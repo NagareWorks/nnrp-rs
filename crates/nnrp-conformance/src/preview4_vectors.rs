@@ -6,13 +6,13 @@ use nnrp_core::{
     CacheInvalidateScope, CacheMissMetadata, CacheMissReason, CacheReferenceMetadata,
     CacheReuseScope, CapabilityMetadata, ControlRequestMetadata, ErrorScope, MemoryLocationHint,
     MessageType, ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata,
-    ObjectReleaseMetadata, ObjectReleaseReason, OwnershipHint, PartialResultMetadata,
+    ObjectReleaseMetadata, ObjectReleaseReason, OwnershipHint, PartialResultMetadata, PayloadKind,
     PressureMetadata, ProgressMetadata, RecoverableErrorMetadata, ResultDropReasonMetadata,
     RouteHintMetadata, RuntimeObjectKind, RuntimeRole, SchedulingMetadata, SupersedeMetadata,
-    TraceContextMetadata, CACHE_REFERENCE, CONTROL_BUDGET_UPDATE, CONTROL_CANCEL_ABORT,
-    CONTROL_CAPABILITY_COSTS, CONTROL_CREDIT_BACKPRESSURE, CONTROL_DEADLINE_EXPIRE,
-    CONTROL_DEGRADE_PROFILE, CONTROL_PRIORITY_UPDATE, CONTROL_PROGRESS_PARTIAL,
-    CONTROL_RECOVERABLE_ERROR, CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED,
+    TraceContextMetadata, TypedPayloadDescriptor, CACHE_REFERENCE, CONTROL_BUDGET_UPDATE,
+    CONTROL_CANCEL_ABORT, CONTROL_CAPABILITY_COSTS, CONTROL_CREDIT_BACKPRESSURE,
+    CONTROL_DEADLINE_EXPIRE, CONTROL_DEGRADE_PROFILE, CONTROL_PRIORITY_UPDATE,
+    CONTROL_PROGRESS_PARTIAL, CONTROL_RECOVERABLE_ERROR, CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED,
     CONTROL_REQUEST_FLAG_HARD_ABORT_ALLOWED, CONTROL_RESULT_DROP_REASON,
     CONTROL_ROUTE_EXECUTION_HINT, CONTROL_SUPERSEDE, CONTROL_TRACE_CONTEXT, OBJECT_COST,
     OBJECT_DELTA, OBJECT_LIFECYCLE, OBJECT_OWNERSHIP, RECOVERABLE_ERROR_FLAGS_KNOWN_MASK,
@@ -31,6 +31,7 @@ pub const PREVIEW4_PROTOCOL_VERSION: &str = "nnrp-1-preview4";
 pub fn preview4_public_case_ids() -> &'static [&'static str] {
     &[
         "l0.header.fixed_shape.golden",
+        "l0.typed_payload.descriptor.current.golden",
         "l1.control.cancel-abort",
         "l1.control.priority-deadline",
         "l1.control.progress-backpressure",
@@ -47,6 +48,7 @@ pub fn preview4_public_case_ids() -> &'static [&'static str] {
 
 pub fn preview4_capability_tokens() -> &'static [&'static str] {
     &[
+        "payload.typed",
         CONTROL_CANCEL_ABORT,
         CONTROL_SUPERSEDE,
         CONTROL_PRIORITY_UPDATE,
@@ -73,6 +75,9 @@ pub fn execute_preview4_public_case(case_id: &str) -> Option<Result<(), String>>
         "l0.header.fixed_shape.golden" => {
             return execute_nnrp1_baseline_case(case_id);
         }
+        "l0.typed_payload.descriptor.current.golden" => {
+            current_typed_payload_descriptor_golden_validation()
+        }
         "l1.control.cancel-abort" => control_cancel_abort_public_validation(),
         "l1.control.priority-deadline" => control_priority_deadline_public_validation(),
         "l1.control.progress-backpressure" => control_progress_pressure_validation(),
@@ -87,6 +92,32 @@ pub fn execute_preview4_public_case(case_id: &str) -> Option<Result<(), String>>
         _ => return None,
     };
     Some(result)
+}
+
+fn current_typed_payload_descriptor_golden_validation() -> Result<(), String> {
+    const EXPECTED: [u8; 24] = [
+        0x02, 0x00, 0x02, 0x02, 0x01, 0x10, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
+        0x00, 0x08, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00,
+    ];
+    let descriptor = TypedPayloadDescriptor {
+        profile_id: 2,
+        payload_kind: PayloadKind::TokenChunk,
+        descriptor_flags: 0x02,
+        schema_id: 0x1001,
+        schema_version: 3,
+        stream_semantics: 2,
+        offset: 8,
+        length: 24,
+    };
+    let encoded = descriptor.to_bytes().map_err(to_string)?;
+    if encoded != EXPECTED {
+        return Err("current typed payload descriptor golden bytes changed".to_string());
+    }
+    let parsed = TypedPayloadDescriptor::parse(&encoded).map_err(to_string)?;
+    if parsed != descriptor {
+        return Err("current typed payload descriptor roundtrip changed".to_string());
+    }
+    Ok(())
 }
 
 pub fn preview4_fixture_manifest() -> Value {

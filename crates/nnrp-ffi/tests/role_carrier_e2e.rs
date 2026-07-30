@@ -108,8 +108,8 @@ fn token_submit(operation_id: u64) -> FrameSubmitMetadata {
         tile_index_bytes: 0,
         operation_id,
         submit_mode: SubmitMode::Inline,
-        budget_policy: 0,
-        loss_tolerance_policy: 0,
+        budget_policy: nnrp_core::BudgetPolicy::NONE,
+        loss_tolerance_policy: nnrp_core::LossTolerancePolicy::Strict,
         object_ref_mask: 0,
         dependency_frame_id: 0,
         payload_kind_bitmap: PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),
@@ -195,7 +195,10 @@ unsafe fn assert_runtime_event(
     expected_operation: Option<NnrpHandle>,
     payload: &[u8],
 ) {
-    assert_eq!(event.message_type, message_type as u32);
+    assert_eq!(event.header.present, 1);
+    assert_eq!(event.header.version_major, 1);
+    assert_eq!(event.header.wire_format, 0);
+    assert_eq!(event.header.message_type, message_type as u8);
     assert_eq!(
         event.kind,
         if message_type == MessageType::ResultDropReason {
@@ -749,6 +752,10 @@ unsafe fn submit_role_operation(
                 session: client_session,
                 operation_id,
                 frame_id,
+                header_flags: 0,
+                view_id: 0,
+                route_id: 0,
+                trace_id: 0,
                 payload: view(&payload),
             },
             &mut client_operation,
@@ -757,7 +764,7 @@ unsafe fn submit_role_operation(
     );
     let server_event = poll_server_event(server_session);
     assert_eq!(server_event.kind, NnrpEventKind::SubmitAccepted as u32);
-    assert_eq!(server_event.frame_id, frame_id);
+    assert_eq!(server_event.header.frame_id, frame_id);
     assert_eq!(
         slice::from_raw_parts(server_event.payload.ptr, server_event.payload.len),
         payload
@@ -977,6 +984,10 @@ unsafe fn assert_role_handshake(
         session: client_session,
         operation_id: id_base + 6,
         frame_id: 42,
+        header_flags: 0,
+        view_id: 0,
+        route_id: 0,
+        trace_id: 0,
         payload: view(&submit_payload),
     };
     assert_eq!(
@@ -1141,7 +1152,7 @@ unsafe fn assert_role_handshake(
     let server_event = server_events[0];
     assert_eq!(server_event_count, 1);
     assert_eq!(server_event.kind, NnrpEventKind::SubmitAccepted as u32);
-    assert_eq!(server_event.frame_id, 42);
+    assert_eq!(server_event.header.frame_id, 42);
     assert_ne!(server_event.operation.id, submit_request.operation_id);
     assert_ne!(server_event.operation, client_operation);
     assert_eq!(
@@ -1311,7 +1322,7 @@ unsafe fn assert_role_handshake(
         nnrp_runtime_frame_send(NnrpRuntimeFrameSendRequest {
             handle: server_event.operation,
             message_type: nnrp_core::MessageType::PartialResult as u32,
-            frame_id: server_event.frame_id,
+            frame_id: server_event.header.frame_id,
             payload: view(&partial_payload),
         }),
         NnrpFfiStatus::ok()
@@ -1330,7 +1341,7 @@ unsafe fn assert_role_handshake(
     assert_eq!(partial_event_count, 1);
     assert_eq!(partial_event.kind, NnrpEventKind::RuntimeFrame as u32);
     assert_eq!(partial_event.operation, client_operation);
-    assert_eq!(partial_event.frame_id, submit_request.frame_id);
+    assert_eq!(partial_event.header.frame_id, submit_request.frame_id);
     assert_eq!(
         slice::from_raw_parts(partial_event.payload.ptr, partial_event.payload.len),
         partial_payload
@@ -1450,7 +1461,7 @@ unsafe fn assert_role_handshake(
     assert_eq!(client_event_count, 1);
     assert_eq!(client_event.kind, NnrpEventKind::ResultPushed as u32);
     assert_eq!(client_event.operation, client_operation);
-    assert_eq!(client_event.frame_id, 42);
+    assert_eq!(client_event.header.frame_id, 42);
     assert_eq!(
         slice::from_raw_parts(client_event.payload.ptr, client_event.payload.len),
         result_payload
@@ -1495,11 +1506,11 @@ unsafe fn assert_role_handshake(
     let frame_cancel_event = poll_server_event(server_session);
     assert_eq!(frame_cancel_event.kind, NnrpEventKind::Control as u32);
     assert_eq!(
-        frame_cancel_event.message_type,
-        MessageType::FrameCancel as u32
+        frame_cancel_event.header.message_type,
+        MessageType::FrameCancel as u8
     );
     assert_eq!(frame_cancel_event.operation, server_frame_cancel_operation);
-    assert_eq!(frame_cancel_event.frame_id, frame_cancel_id);
+    assert_eq!(frame_cancel_event.header.frame_id, frame_cancel_id);
     assert_eq!(frame_cancel_event.payload.len, 0);
 
     let drop_operation_id = id_base + 30;
@@ -1527,7 +1538,10 @@ unsafe fn assert_role_handshake(
     let client_close = thread::spawn(move || nnrp_client_close(client_session));
     let close_event = poll_server_event(server_session);
     assert_eq!(close_event.kind, NnrpEventKind::SessionClosed as u32);
-    assert_eq!(close_event.message_type, MessageType::SessionClose as u32);
+    assert_eq!(
+        close_event.header.message_type,
+        MessageType::SessionClose as u8
+    );
     assert_eq!(
         nnrp_buffer_release(close_event.payload_owner),
         NnrpFfiStatus::ok()
