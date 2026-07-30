@@ -2,14 +2,14 @@ use std::time::Instant;
 
 use nnrp_core::{
     CacheMissMetadata, CacheMissReason, CacheReferenceMetadata, CacheReuseScope,
-    CapabilityMetadata, FrameSubmitMetadata, InputProfile, MessageType, PartialResultMetadata,
-    PayloadKindBitmap, PressureMetadata, ProgressMetadata, ResultClass, ResultDropReasonMetadata,
-    ResultPushMetadata, RouteHintMetadata, SubmitMode, TileIndexMode, TraceContextMetadata,
-    RESULT_DROP_REASON_DEADLINE_EXPIRED, STANDARD_PROFILE_TOKEN,
+    CapabilityMetadata, MessageType, PartialResultMetadata, PayloadKindBitmap, PressureMetadata,
+    ProgressMetadata, ResultClass, ResultDropReasonMetadata, ResultPushMetadata, RouteHintMetadata,
+    TraceContextMetadata, RESULT_DROP_REASON_DEADLINE_EXPIRED, STANDARD_PROFILE_TOKEN,
 };
 use nnrp_runtime::{
     FramedListener, NnrpResult, NnrpRuntimeEvent, NnrpRuntimeEventMetadata, NnrpRuntimeEventTail,
-    NnrpServer, RuntimeError,
+    NnrpServer, NnrpSubmitHeaderContext, NnrpSubmitIdentity, NnrpSubmitPolicy, NnrpSubmitRequest,
+    NnrpTokenChunk, NnrpTokenSubmitInput, RuntimeError,
 };
 use nnrp_transport_quic::{
     QuicClientEndpointConfig, QuicFramedListener, QuicProvider, QuicServerEndpointConfig,
@@ -198,8 +198,9 @@ async fn run_cancel_abort_client(
     let mut session = endpoint.connect().await?.open_session().await?;
     let session_id = session.session_id();
     let operation_id = 101;
+    let request = token_submit(operation_id)?;
     let frame_id = session
-        .submit_encoded_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
+        .submit_encoded_nowait(request.metadata, request.body)
         .await?;
     observed.push(
         WireExternalDirection::SuiteToTarget,
@@ -289,8 +290,9 @@ async fn run_capability_route_cache_client(
     let mut session = endpoint.connect().await?.open_session().await?;
     let session_id = session.session_id();
     let operation_id = 401;
+    let request = token_submit(operation_id)?;
     let frame_id = session
-        .submit_encoded_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
+        .submit_encoded_nowait(request.metadata, request.body)
         .await?;
     observed.push(
         WireExternalDirection::SuiteToTarget,
@@ -472,7 +474,7 @@ async fn run_priority_deadline_proxy(
         let mut upstream = upstream_endpoint.connect().await?.open_session().await?;
         let submit = downstream.receive_submit().await?;
         let upstream_frame_id = upstream
-            .submit_encoded_nowait(token_submit(submit.operation_id), submit.body)
+            .submit_encoded_nowait(submit.metadata, submit.body)
             .await?;
         upstream.update_priority(submit.operation_id, 10, 0).await?;
         upstream.expire_at(submit.operation_id, 1).await?;
@@ -512,8 +514,9 @@ async fn run_priority_deadline_proxy(
         .await?;
         let mut session = front_client.open_session().await?;
         let operation_id = 201;
+        let request = token_submit(operation_id)?;
         let frame_id = session
-            .submit_encoded_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
+            .submit_encoded_nowait(request.metadata, request.body)
             .await?;
         let drop_reason = match session.await_event().await? {
             NnrpRuntimeEvent {
@@ -594,32 +597,20 @@ fn report(
     }
 }
 
-fn token_submit(operation_id: u64) -> FrameSubmitMetadata {
-    FrameSubmitMetadata {
-        src_width: 0,
-        src_height: 0,
-        tile_width: 0,
-        tile_height: 0,
-        tile_count: 0,
-        section_count: 0,
-        frame_class: 0,
-        input_profile: InputProfile::Unspecified,
-        tile_index_mode: TileIndexMode::DenseRange,
-        latency_budget_ms: 25,
-        target_fps_x100: 0,
-        retry_of_frame: 0,
-        tile_base_id: 0,
-        camera_bytes: 0,
-        tile_index_bytes: 0,
-        operation_id,
-        submit_mode: SubmitMode::Inline,
-        budget_policy: nnrp_core::BudgetPolicy::NONE,
-        loss_tolerance_policy: nnrp_core::LossTolerancePolicy::Strict,
-        object_ref_mask: 0,
-        dependency_frame_id: 0,
-        payload_kind_bitmap: PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),
-        payload_frame_count: 1,
-    }
+fn token_submit(operation_id: u64) -> Result<NnrpSubmitRequest, RuntimeError> {
+    Ok(NnrpSubmitRequest::token(NnrpTokenSubmitInput {
+        identity: NnrpSubmitIdentity {
+            operation_id,
+            frame_id: 1,
+            header: NnrpSubmitHeaderContext::default(),
+        },
+        policy: NnrpSubmitPolicy {
+            latency_budget_ms: 25,
+            loss_tolerance_policy: nnrp_core::LossTolerancePolicy::Strict,
+            ..NnrpSubmitPolicy::default()
+        },
+        chunks: vec![NnrpTokenChunk::partial(REQUEST_BODY)],
+    })?)
 }
 
 fn token_result() -> ResultPushMetadata {
@@ -781,7 +772,7 @@ mod tests {
         cache_miss, cancel_drop_reason, cancel_trace, canonical_response_body,
         run_wire_external_case, token_result, token_submit, WireExternalCase, WireExternalMode,
         WireExternalTerminal, CACHE_BODY, CAPABILITY_BODY, PARTIAL_BODY, PROGRESS_BODY,
-        REQUEST_BODY, RESPONSE_BODY, ROUTE_BODY, TRACE_BODY,
+        RESPONSE_BODY, ROUTE_BODY, TRACE_BODY,
     };
     use crate::wire_endpoint::{ReferenceTransport, WireEndpointSecurity, WireReferenceEndpoint};
 
@@ -1035,8 +1026,9 @@ mod tests {
     async fn progress_target(endpoint: WireReferenceEndpoint) -> Result<(), RuntimeError> {
         let mut session = endpoint.connect().await?.open_session().await?;
         let operation_id = 301;
+        let request = token_submit(operation_id)?;
         session
-            .submit_encoded_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
+            .submit_encoded_nowait(request.metadata, request.body)
             .await?;
         match session.await_event().await? {
             NnrpRuntimeEvent {
