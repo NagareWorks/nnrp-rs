@@ -543,7 +543,7 @@ mod tests {
     };
     use nnrp_runtime::{
         ClientProviderRoute, ClientProviderRoutes, NnrpClientOptions, NnrpClientProvider,
-        NnrpResult, NnrpRuntimeEventMetadata, NnrpRuntimeEventTail,
+        NnrpRuntimeEventMetadata, NnrpRuntimeEventTail,
     };
     use nnrp_transport_provider::RemoteTransportSupport;
     use std::sync::Arc;
@@ -604,8 +604,11 @@ mod tests {
         session
             .submit_encoded(token_submit(), b"hello".to_vec())
             .await?;
-        let NnrpResult { body, .. } = session.await_result().await?;
-        assert_eq!(body, b"ws-ok");
+        let result = session.await_result().await?;
+        assert_eq!(
+            result.event.tail,
+            nnrp_runtime::NnrpRuntimeEventTail::Body(b"ws-ok".to_vec())
+        );
 
         server_task
             .await

@@ -553,8 +553,11 @@ mod tests {
             .submit_encoded(token_submit(), b"prompt".to_vec())
             .await?;
         let result = session.await_result().await?;
-        assert_eq!(result.frame_id, frame_id);
-        assert_eq!(result.body, b"delta".to_vec());
+        assert_eq!(result.event.header.frame_id, frame_id);
+        assert_eq!(
+            result.event.tail,
+            nnrp_runtime::NnrpRuntimeEventTail::Body(b"delta".to_vec())
+        );
         session.close().await?;
         server_task.await.expect("server task should join")?;
         Ok(())

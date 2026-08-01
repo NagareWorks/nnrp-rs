@@ -10,11 +10,11 @@ use nnrp_core::{
     ControlRequestMetadata, FlowUpdateMetadata, FrameSubmitMetadata, InFlightPolicy, MessageType,
     ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata, ObjectReleaseMetadata,
     PartialResultMetadata, PressureMetadata, ProgressMetadata, RecoverableErrorMetadata,
-    ResultDropReasonMetadata, ResultHintMetadata, ResultPushMetadata, RetryAfterMetadata,
-    RouteHintMetadata, SchedulingMetadata, SessionCloseAckMetadata, SessionCloseMetadata,
-    SessionCloseReason, SessionMigrateAckMetadata, SessionMigrateMetadata, SessionOpenAckMetadata,
-    SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchMetadata, SessionPriorityClass,
-    SessionStatus, SupersedeMetadata, TraceContextMetadata, TransportId,
+    ResultDropReasonMetadata, ResultHintMetadata, ResultPushMetadata, ResultTerminalState,
+    RetryAfterMetadata, RouteHintMetadata, SchedulingMetadata, SessionCloseAckMetadata,
+    SessionCloseMetadata, SessionCloseReason, SessionMigrateAckMetadata, SessionMigrateMetadata,
+    SessionOpenAckMetadata, SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchMetadata,
+    SessionPriorityClass, SessionStatus, SupersedeMetadata, TraceContextMetadata, TransportId,
     CACHE_INVALIDATE_METADATA_LEN, CACHE_MISS_METADATA_LEN, CACHE_REFERENCE_METADATA_LEN,
     CAPABILITY_METADATA_LEN, CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED,
     CONTROL_REQUEST_FLAG_HARD_ABORT_ALLOWED, CONTROL_REQUEST_METADATA_LEN,
@@ -111,9 +111,9 @@ pub struct NnrpClientSession {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NnrpResult {
-    pub frame_id: u32,
-    pub metadata: ResultPushMetadata,
-    pub body: Vec<u8>,
+    pub operation_id: u64,
+    pub terminal_state: ResultTerminalState,
+    pub event: NnrpRuntimeEvent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,13 +141,6 @@ pub(crate) enum NnrpClientEvent {
         body: Vec<u8>,
     },
     Budget(BudgetMetadata),
-    ResultDrop {
-        frame_id: u32,
-    },
-    ResultDropReason {
-        metadata: ResultDropReasonMetadata,
-        body: Vec<u8>,
-    },
     FlowUpdate(FlowUpdateMetadata),
     Backpressure(PressureMetadata),
     CreditUpdate(PressureMetadata),
@@ -532,17 +525,10 @@ impl NnrpClientSession {
     }
 
     pub async fn await_result(&mut self) -> Result<NnrpResult, RuntimeError> {
-        let event = self.await_event().await?;
-        match (event.metadata, event.tail) {
-            (NnrpRuntimeEventMetadata::ResultPush(metadata), NnrpRuntimeEventTail::Body(body)) => {
-                Ok(NnrpResult {
-                    frame_id: event.header.frame_id,
-                    metadata,
-                    body,
-                })
-            }
+        match self.await_client_event_packet().await?.0 {
+            NnrpClientEvent::Result(result) => Ok(result),
             _ => Err(RuntimeError::UnexpectedMessage(
-                "client expected RESULT_PUSH but received another runtime event",
+                "client expected a terminal result but received another runtime event",
             )),
         }
     }
@@ -554,14 +540,19 @@ impl NnrpClientSession {
     pub async fn await_event_packet(
         &mut self,
     ) -> Result<(NnrpRuntimeEvent, RuntimePacket), RuntimeError> {
-        if let Some((event, packet)) = self.pending_events.pop_front() {
-            let header = RuntimeFrameHeader::from(&packet.header);
-            return Ok((NnrpRuntimeEvent::from_client(header, event), packet));
-        }
-        let packet = self.transport.read_packet().await?;
-        let (event, packet) = self.decode_event_packet(packet)?;
+        let (event, packet) = self.await_client_event_packet().await?;
         let header = RuntimeFrameHeader::from(&packet.header);
         Ok((NnrpRuntimeEvent::from_client(header, event), packet))
+    }
+
+    async fn await_client_event_packet(
+        &mut self,
+    ) -> Result<(NnrpClientEvent, RuntimePacket), RuntimeError> {
+        if let Some((event, packet)) = self.pending_events.pop_front() {
+            return Ok((event, packet));
+        }
+        let packet = self.transport.read_packet().await?;
+        self.decode_event_packet(packet)
     }
 
     pub async fn await_event_packet_batch(
@@ -612,20 +603,30 @@ impl NnrpClientSession {
                     ));
                 }
                 let metadata = ResultPushMetadata::parse(&packet.metadata)?;
-                self.complete_operation_by_frame(packet.header.frame_id)?;
+                let operation_id = self.complete_operation_by_frame(packet.header.frame_id)?;
                 Ok(NnrpClientEvent::Result(NnrpResult {
-                    frame_id: packet.header.frame_id,
-                    metadata,
-                    body: packet.body,
+                    operation_id,
+                    terminal_state: ResultTerminalState::Success,
+                    event: NnrpRuntimeEvent {
+                        header: RuntimeFrameHeader::from(&packet.header),
+                        metadata: NnrpRuntimeEventMetadata::ResultPush(metadata),
+                        tail: NnrpRuntimeEventTail::Body(packet.body),
+                    },
                 }))
             }
             MessageType::ResultDrop => {
                 self.require_session_packet(&packet, "client received drop for another session")?;
                 validate_result_drop_header(&packet.header)?;
-                self.complete_operation_by_frame(packet.header.frame_id)?;
-                Ok(NnrpClientEvent::ResultDrop {
-                    frame_id: packet.header.frame_id,
-                })
+                let operation_id = self.complete_operation_by_frame(packet.header.frame_id)?;
+                Ok(NnrpClientEvent::Result(NnrpResult {
+                    operation_id,
+                    terminal_state: ResultTerminalState::Dropped,
+                    event: NnrpRuntimeEvent {
+                        header: RuntimeFrameHeader::from(&packet.header),
+                        metadata: NnrpRuntimeEventMetadata::None,
+                        tail: NnrpRuntimeEventTail::None,
+                    },
+                }))
             }
             MessageType::ResultDropReason => {
                 self.require_session_packet(
@@ -645,10 +646,15 @@ impl NnrpClientSession {
                     "client received RESULT_DROP_REASON body length mismatch",
                 )?;
                 self.complete_operation(metadata.operation_id, packet.header.frame_id)?;
-                Ok(NnrpClientEvent::ResultDropReason {
-                    metadata,
-                    body: packet.body,
-                })
+                Ok(NnrpClientEvent::Result(NnrpResult {
+                    operation_id: metadata.operation_id,
+                    terminal_state: ResultTerminalState::Dropped,
+                    event: NnrpRuntimeEvent {
+                        header: RuntimeFrameHeader::from(&packet.header),
+                        metadata: NnrpRuntimeEventMetadata::ResultDropReason(metadata),
+                        tail: NnrpRuntimeEventTail::Diagnostic(packet.body),
+                    },
+                }))
             }
             MessageType::PartialResult => {
                 self.require_session_packet(
@@ -1127,7 +1133,7 @@ impl NnrpClientSession {
         Ok(())
     }
 
-    fn complete_operation_by_frame(&mut self, frame_id: u32) -> Result<(), RuntimeError> {
+    fn complete_operation_by_frame(&mut self, frame_id: u32) -> Result<u64, RuntimeError> {
         let operation_id =
             self.frame_operations
                 .remove(&frame_id)
@@ -1135,7 +1141,7 @@ impl NnrpClientSession {
                     "client terminal event references an unknown frame",
                 ))?;
         self.operation_frames.remove(&operation_id);
-        Ok(())
+        Ok(operation_id)
     }
 
     fn complete_operation(&mut self, operation_id: u64, frame_id: u32) -> Result<(), RuntimeError> {

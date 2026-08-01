@@ -536,7 +536,9 @@ async fn tcp_session_smoke() -> Result<(), RuntimeError> {
         .submit_encoded(token_submit(1), b"prompt".to_vec())
         .await?;
     let result = session.await_result().await?;
-    if result.frame_id != frame_id || result.body != b"delta" {
+    if result.event.header.frame_id != frame_id
+        || result.event.tail != nnrp_runtime::NnrpRuntimeEventTail::Body(b"delta".to_vec())
+    {
         return Err(RuntimeError::UnexpectedMessage(
             "TCP smoke result did not preserve frame id and body",
         ));
@@ -571,7 +573,9 @@ async fn quic_session_smoke() -> Result<(), RuntimeError> {
         .submit_encoded(token_submit(1), b"prompt".to_vec())
         .await?;
     let result = session.await_result().await?;
-    if result.frame_id != frame_id || result.body != b"delta" {
+    if result.event.header.frame_id != frame_id
+        || result.event.tail != nnrp_runtime::NnrpRuntimeEventTail::Body(b"delta".to_vec())
+    {
         return Err(RuntimeError::UnexpectedMessage(
             "QUIC smoke result did not preserve frame id and body",
         ));

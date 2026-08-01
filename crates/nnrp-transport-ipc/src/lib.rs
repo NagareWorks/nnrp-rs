@@ -706,7 +706,7 @@ mod tests {
         ResultPushMetadata, SubmitMode, TileIndexMode, STANDARD_PROFILE_TOKEN,
     };
     #[cfg(unix)]
-    use nnrp_runtime::{NnrpResult, NnrpRuntimeEventMetadata, NnrpRuntimeEventTail};
+    use nnrp_runtime::{NnrpRuntimeEventMetadata, NnrpRuntimeEventTail};
     use nnrp_transport_provider::RemoteTransportSupport;
     #[cfg(unix)]
     use tokio::time::{timeout, Duration};
@@ -776,8 +776,11 @@ mod tests {
         session
             .submit_encoded(token_submit(), b"hello".to_vec())
             .await?;
-        let NnrpResult { body, .. } = session.await_result().await?;
-        assert_eq!(body, b"ipc-ok");
+        let result = session.await_result().await?;
+        assert_eq!(
+            result.event.tail,
+            nnrp_runtime::NnrpRuntimeEventTail::Body(b"ipc-ok".to_vec())
+        );
 
         server_task
             .await

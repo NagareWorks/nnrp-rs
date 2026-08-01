@@ -12,7 +12,9 @@ use nnrp_core::{
     ResultPushMetadata, RuntimeObjectKind, RuntimeRole, SchedulingMetadata, SubmitMode,
     TileIndexMode, STANDARD_PROFILE_TOKEN,
 };
-use nnrp_runtime::{NnrpClient, NnrpClientConfig, NnrpResult, NnrpServerConfig, RuntimeError};
+use nnrp_runtime::{
+    NnrpClient, NnrpClientConfig, NnrpRuntimeEventTail, NnrpServerConfig, RuntimeError,
+};
 use nnrp_transport_ipc::{IpcEndpoint, IpcProvider};
 use nnrp_transport_websocket::{WebSocketEndpoint, WebSocketProvider};
 use serde_json::json;
@@ -291,7 +293,13 @@ async fn bench_ipc_loopback(iterations: u64) -> Result<BenchCase, Box<dyn Error>
         session
             .submit_encoded(token_submit(operation_id), b"hello".to_vec())
             .await?;
-        let NnrpResult { body, .. } = session.await_result().await?;
+        let result = session.await_result().await?;
+        let NnrpRuntimeEventTail::Body(body) = result.event.tail else {
+            return Err(RuntimeError::UnexpectedMessage(
+                "benchmark client expected RESULT_PUSH body",
+            )
+            .into());
+        };
         black_box(body);
     }
     server_task
@@ -326,7 +334,13 @@ async fn bench_websocket_loopback(iterations: u64) -> Result<BenchCase, Box<dyn 
         session
             .submit_encoded(token_submit(operation_id), b"hello".to_vec())
             .await?;
-        let NnrpResult { body, .. } = session.await_result().await?;
+        let result = session.await_result().await?;
+        let NnrpRuntimeEventTail::Body(body) = result.event.tail else {
+            return Err(RuntimeError::UnexpectedMessage(
+                "benchmark client expected RESULT_PUSH body",
+            )
+            .into());
+        };
         black_box(body);
     }
     server_task

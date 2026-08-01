@@ -7,8 +7,8 @@ use nnrp_core::{
     TraceContextMetadata, RESULT_DROP_REASON_DEADLINE_EXPIRED, STANDARD_PROFILE_TOKEN,
 };
 use nnrp_runtime::{
-    FramedListener, NnrpResult, NnrpRuntimeEvent, NnrpRuntimeEventMetadata, NnrpRuntimeEventTail,
-    NnrpServer, NnrpSubmitHeaderContext, NnrpSubmitIdentity, NnrpSubmitPolicy, NnrpSubmitRequest,
+    FramedListener, NnrpRuntimeEvent, NnrpRuntimeEventMetadata, NnrpRuntimeEventTail, NnrpServer,
+    NnrpSubmitHeaderContext, NnrpSubmitIdentity, NnrpSubmitPolicy, NnrpSubmitRequest,
     NnrpTokenChunk, NnrpTokenSubmitInput, RuntimeError,
 };
 use nnrp_transport_quic::{
@@ -358,16 +358,12 @@ async fn run_capability_route_cache_client(
             ));
         }
     };
-    let result = match session.await_event().await? {
+    let (result_frame_id, result_body) = match session.await_event().await? {
         NnrpRuntimeEvent {
             header,
-            metadata: NnrpRuntimeEventMetadata::ResultPush(metadata),
+            metadata: NnrpRuntimeEventMetadata::ResultPush(_),
             tail: NnrpRuntimeEventTail::Body(body),
-        } => NnrpResult {
-            frame_id: header.frame_id,
-            metadata,
-            body,
-        },
+        } => (header.frame_id, body),
         _ => {
             return Err(RuntimeError::UnexpectedMessage(
                 "capability/cache scenario expected RESULT_PUSH",
@@ -377,9 +373,9 @@ async fn run_capability_route_cache_client(
     observed.push(
         WireExternalDirection::TargetToSuite,
         WireExternalFrame::ResultPush,
-        json!({ "session_id": session_id, "frame_id": result.frame_id }),
+        json!({ "session_id": session_id, "frame_id": result_frame_id }),
     );
-    if miss != cache_miss() || result.body != RESPONSE_BODY {
+    if miss != cache_miss() || result_body != RESPONSE_BODY {
         return Err(RuntimeError::UnexpectedMessage(
             "capability/cache scenario received unexpected target data",
         ));

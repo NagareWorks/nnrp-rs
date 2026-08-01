@@ -7,17 +7,17 @@ use nnrp_core::{
     InputProfile, MemoryLocationHint, MessageType, ObjectDeltaMetadata, ObjectDescriptorMetadata,
     ObjectReferenceMetadata, ObjectReleaseMetadata, ObjectReleaseReason, OperationState,
     OwnershipHint, PartialResultMetadata, PayloadKindBitmap, PressureMetadata, ProgressMetadata,
-    ResultClass, ResultDropReasonMetadata, ResultPushMetadata, RetryAfterMetadata,
-    RouteHintMetadata, RuntimeObjectKind, RuntimeRole, SchedulingMetadata, SchemaRegistry,
-    SessionCloseMetadata, SessionCloseReason, SessionMigrateAckMetadata, SessionOpenAckMetadata,
-    SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata,
-    SessionPatchRejectReason, SessionPriorityClass, SessionStatus, SubmitMode, SupersedeMetadata,
-    TileIndexMode, TraceContextMetadata, TransportId, TransportProbeAckMetadata,
-    TransportProbeMetadata, FLOW_UPDATE_FLAG_CREDIT_VALID, FRAME_SUBMIT_METADATA_LEN,
-    RESULT_DROP_REASON_DEADLINE_EXPIRED, RESULT_PUSH_METADATA_LEN, RETRY_AFTER_METADATA_LEN,
-    SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE, SESSION_OPEN_ACK_METADATA_LEN,
-    SESSION_OPEN_METADATA_LEN, STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID,
-    TOKEN_DELTA_SCHEMA_VERSION,
+    ResultClass, ResultDropReasonMetadata, ResultPushMetadata, ResultTerminalState,
+    RetryAfterMetadata, RouteHintMetadata, RuntimeObjectKind, RuntimeRole, SchedulingMetadata,
+    SchemaRegistry, SessionCloseMetadata, SessionCloseReason, SessionMigrateAckMetadata,
+    SessionOpenAckMetadata, SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchAckStatus,
+    SessionPatchMetadata, SessionPatchRejectReason, SessionPriorityClass, SessionStatus,
+    SubmitMode, SupersedeMetadata, TileIndexMode, TraceContextMetadata, TransportId,
+    TransportProbeAckMetadata, TransportProbeMetadata, FLOW_UPDATE_FLAG_CREDIT_VALID,
+    FRAME_SUBMIT_METADATA_LEN, RESULT_DROP_REASON_DEADLINE_EXPIRED, RESULT_PUSH_METADATA_LEN,
+    RETRY_AFTER_METADATA_LEN, SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE,
+    SESSION_OPEN_ACK_METADATA_LEN, SESSION_OPEN_METADATA_LEN, STANDARD_PROFILE_TOKEN,
+    TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
 };
 use nnrp_runtime::{
     BoxedFramedTransport, FramedListener, FramedTransport, NnrpClient, NnrpClientConfig,
@@ -225,9 +225,17 @@ async fn tcp_loopback_submits_frame_receives_result_and_closes() -> Result<(), R
     assert_eq!(frame_id, 1);
 
     let result = session.await_result().await?;
-    assert_eq!(result.frame_id, frame_id);
-    assert_eq!(result.metadata.status_code, 200);
-    assert_eq!(result.body, b"delta".to_vec());
+    assert_eq!(result.operation_id, 101);
+    assert_eq!(result.terminal_state, ResultTerminalState::Success);
+    assert_eq!(result.event.header.frame_id, frame_id);
+    assert_eq!(
+        result.event.metadata,
+        NnrpRuntimeEventMetadata::ResultPush(token_result())
+    );
+    assert_eq!(
+        result.event.tail,
+        NnrpRuntimeEventTail::Body(b"delta".to_vec())
+    );
     session.close().await?;
     server_task.await.expect("server task should join")?;
     Ok(())
@@ -287,8 +295,8 @@ async fn tcp_loopback_preserves_explicit_frame_ids_and_advances_allocator(
             .await?,
         43
     );
-    assert_eq!(session.await_result().await?.frame_id, 42);
-    assert_eq!(session.await_result().await?.frame_id, 43);
+    assert_eq!(session.await_result().await?.event.header.frame_id, 42);
+    assert_eq!(session.await_result().await?.event.header.frame_id, 43);
     assert!(matches!(
         session
             .submit_encoded_with_frame_id(44, token_submit(4_200), b"completed-operation".to_vec())
@@ -1269,7 +1277,7 @@ async fn client_malformed_result_preserves_operation_correlation() -> Result<(),
     };
     let mut session = scripted_client_session_packets(vec![malformed, valid]).await?;
     assert!(session.await_result().await.is_err());
-    assert_eq!(session.await_result().await?.frame_id, 1);
+    assert_eq!(session.await_result().await?.event.header.frame_id, 1);
     session.close_transport().await
 }
 
@@ -1312,10 +1320,12 @@ async fn client_result_and_patch_helpers_reject_control_mismatches() -> Result<(
         RuntimePacket::new(header, Vec::new(), Vec::new())?
     };
     let mut session = scripted_client_session(drop_packet).await?;
-    assert!(matches!(
-        session.await_result().await,
-        Err(RuntimeError::UnexpectedMessage(_))
-    ));
+    let result = session.await_result().await?;
+    assert_eq!(result.operation_id, 1);
+    assert_eq!(result.terminal_state, ResultTerminalState::Dropped);
+    assert_eq!(result.event.header.message_type, MessageType::ResultDrop);
+    assert_eq!(result.event.metadata, NnrpRuntimeEventMetadata::None);
+    assert_eq!(result.event.tail, NnrpRuntimeEventTail::None);
     session.close_transport().await?;
 
     let flow_packet = {
@@ -1364,12 +1374,6 @@ async fn client_result_and_patch_helpers_reject_control_mismatches() -> Result<(
 async fn client_result_helper_rejects_preview4_control_non_result_events(
 ) -> Result<(), RuntimeError> {
     for packet in [
-        control_event_packet(
-            MessageType::ResultDropReason,
-            1,
-            drop_reason(1).to_bytes()?.to_vec(),
-            Vec::new(),
-        )?,
         control_event_packet(
             MessageType::PartialResult,
             1,
@@ -1863,12 +1867,17 @@ async fn client_preview4_result_drop_reason_preserves_diagnostic_body() -> Resul
         b"drop".to_vec(),
     )?)
     .await?;
-    match session.await_event().await? {
+    let result = session.await_result().await?;
+    assert_eq!(result.operation_id, 1);
+    assert_eq!(result.terminal_state, ResultTerminalState::Dropped);
+    match result.event {
         NnrpRuntimeEvent {
+            header,
             metadata: NnrpRuntimeEventMetadata::ResultDropReason(actual),
             tail: NnrpRuntimeEventTail::Diagnostic(body),
-            ..
         } => {
+            assert_eq!(header.message_type, MessageType::ResultDropReason);
+            assert_eq!(header.frame_id, 1);
             assert_eq!(actual, metadata);
             assert_eq!(body, b"drop");
         }

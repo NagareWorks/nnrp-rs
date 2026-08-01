@@ -132,11 +132,12 @@ impl NnrpRuntimeEvent {
     }
 
     pub(crate) fn from_client(header: RuntimeFrameHeader, event: NnrpClientEvent) -> Self {
+        if let NnrpClientEvent::Result(result) = event {
+            debug_assert_eq!(header, result.event.header);
+            return result.event;
+        }
         let (metadata, tail) = match event {
-            NnrpClientEvent::Result(result) => (
-                NnrpRuntimeEventMetadata::ResultPush(result.metadata),
-                NnrpRuntimeEventTail::Body(result.body),
-            ),
+            NnrpClientEvent::Result(_) => unreachable!("terminal result handled above"),
             NnrpClientEvent::PartialResult { metadata, body } => (
                 NnrpRuntimeEventMetadata::PartialResult(metadata),
                 NnrpRuntimeEventTail::Body(body),
@@ -160,13 +161,6 @@ impl NnrpRuntimeEvent {
             NnrpClientEvent::Budget(metadata) => (
                 NnrpRuntimeEventMetadata::Budget(metadata),
                 NnrpRuntimeEventTail::None,
-            ),
-            NnrpClientEvent::ResultDrop { .. } => {
-                (NnrpRuntimeEventMetadata::None, NnrpRuntimeEventTail::None)
-            }
-            NnrpClientEvent::ResultDropReason { metadata, body } => (
-                NnrpRuntimeEventMetadata::ResultDropReason(metadata),
-                NnrpRuntimeEventTail::Diagnostic(body),
             ),
             NnrpClientEvent::FlowUpdate(metadata) => (
                 NnrpRuntimeEventMetadata::FlowUpdate(metadata),
