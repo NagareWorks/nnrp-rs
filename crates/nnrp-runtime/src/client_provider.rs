@@ -33,6 +33,22 @@ pub struct NnrpClientOptions {
     pub session: NnrpClientConfig,
 }
 
+impl NnrpClientOptions {
+    pub fn new(
+        endpoint: NnrpEndpoint,
+        provider_routes: ClientProviderRoutes,
+        transport_policy: TransportPolicy,
+        session_defaults: NnrpClientConfig,
+    ) -> Self {
+        Self {
+            endpoint,
+            provider_routes,
+            transport_policy,
+            session: session_defaults,
+        }
+    }
+}
+
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg(target_arch = "wasm32")]
@@ -560,12 +576,12 @@ mod tests {
     async fn one_provider_connects_once_without_probe() {
         let provider = Arc::new(TestProvider::new(TransportId::Tcp));
         let client = crate::NnrpClient::connect(
-            NnrpClientOptions {
-                endpoint: endpoint(),
-                provider_routes: ClientProviderRoutes::new(),
-                transport_policy: TransportPolicy::Auto,
-                session: NnrpClientConfig::default(),
-            },
+            NnrpClientOptions::new(
+                endpoint(),
+                ClientProviderRoutes::new(),
+                TransportPolicy::Auto,
+                NnrpClientConfig::default(),
+            ),
             vec![provider.clone() as Arc<dyn NnrpClientProvider>],
         )
         .await
@@ -573,7 +589,11 @@ mod tests {
 
         assert_eq!(*provider.connects.lock().unwrap(), 1);
         assert_eq!(
-            client.transport_selection().unwrap().selected.transport_id,
+            client
+                .transport_selection()
+                .unwrap()
+                .selected_provider()
+                .transport_id,
             TransportId::Tcp
         );
     }
