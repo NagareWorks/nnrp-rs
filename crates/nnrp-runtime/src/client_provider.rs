@@ -11,9 +11,9 @@ use nnrp_core::{
 };
 use nnrp_transport_provider::{
     select_transport, select_transport_with_probe, summarize_provider_probe, ProbeSample,
-    ProbeState, RemoteTransportSupport, TransportCandidateReadiness, TransportProbeObservation,
+    ProbeState, TransportCandidateReadiness, TransportProbeObservation,
     TransportProviderDescriptor, TransportProviderKind, TransportRejectionReason,
-    TransportSelection, TransportSelectionError,
+    TransportSelection, TransportSelectionError, TransportSelectionOptions,
 };
 
 use crate::{
@@ -30,7 +30,7 @@ pub struct NnrpClientOptions {
     pub endpoint: NnrpEndpoint,
     pub provider_routes: ClientProviderRoutes,
     pub transport_policy: TransportPolicy,
-    pub session: NnrpClientConfig,
+    pub session_defaults: NnrpClientConfig,
 }
 
 impl NnrpClientOptions {
@@ -44,7 +44,7 @@ impl NnrpClientOptions {
             endpoint,
             provider_routes,
             transport_policy,
-            session: session_defaults,
+            session_defaults,
         }
     }
 }
@@ -114,42 +114,44 @@ where
             .unwrap_or_else(|failure| failure)
         })
         .collect::<Vec<_>>();
-    let remote =
-        RemoteTransportSupport::new(descriptors.iter().map(|descriptor| descriptor.transport_id));
+    let mut selection_options = TransportSelectionOptions {
+        peer_supported_transports: descriptors
+            .iter()
+            .map(|descriptor| descriptor.transport_id)
+            .collect(),
+        policy: options.transport_policy,
+        requested_max_frame_bytes: Some(RuntimeFrameLimits::DEFAULT_MAX_PACKET_BYTES as u64),
+        candidate_readiness: readiness,
+        probe_observations: Vec::new(),
+    };
 
-    let initial = select_transport(
-        &descriptors,
-        &remote,
-        options.transport_policy,
-        Some(RuntimeFrameLimits::DEFAULT_MAX_PACKET_BYTES as u64),
-        &readiness,
-    );
+    let initial = select_transport(&descriptors, &selection_options);
     let selection = match initial {
         Ok(selection) => selection,
         Err(error) if requires_probe(&error) => {
             let observations = probe_candidates(&providers, &resolved, &error).await;
-            select_transport_with_probe(
-                &descriptors,
-                &remote,
-                options.transport_policy,
-                Some(RuntimeFrameLimits::DEFAULT_MAX_PACKET_BYTES as u64),
-                &readiness,
-                &observations,
-            )?
+            selection_options.probe_observations = observations;
+            select_transport_with_probe(&descriptors, &selection_options)?
         }
         Err(error) => return Err(error.into()),
     };
 
     let provider = providers
         .iter()
-        .find(|provider| provider.descriptor().metadata.id == selection.selected.metadata.id)
+        .find(|provider| {
+            provider.descriptor().metadata.id == selection.selected_provider.metadata.id
+        })
         .ok_or_else(|| {
-            RuntimeError::SelectedProviderUnavailable(selection.selected.metadata.id.clone())
+            RuntimeError::SelectedProviderUnavailable(
+                selection.selected_provider.metadata.id.clone(),
+            )
         })?;
     let route = resolved
-        .get(&selection.selected.metadata.id)
+        .get(&selection.selected_provider.metadata.id)
         .ok_or_else(|| {
-            RuntimeError::SelectedProviderUnavailable(selection.selected.metadata.id.clone())
+            RuntimeError::SelectedProviderUnavailable(
+                selection.selected_provider.metadata.id.clone(),
+            )
         })?;
     let transport = provider
         .connect(
@@ -158,7 +160,7 @@ where
             RuntimeFrameLimits::default(),
         )
         .await?;
-    Ok((transport, options.session, selection))
+    Ok((transport, options.session_defaults, selection))
 }
 
 fn reject_duplicate_transports(
@@ -326,7 +328,7 @@ fn requires_probe(error: &TransportSelectionError) -> bool {
     let candidates = match error {
         TransportSelectionError::InvalidEvidence { .. } => return false,
         TransportSelectionError::ForcedTransportUnavailable { candidates, .. }
-        | TransportSelectionError::NoViableTransport { candidates } => candidates,
+        | TransportSelectionError::NoViableTransport { candidates, .. } => candidates,
     };
     candidates
         .iter()
@@ -345,7 +347,7 @@ async fn probe_candidates(
     let candidates = match error {
         TransportSelectionError::InvalidEvidence { .. } => return Vec::new(),
         TransportSelectionError::ForcedTransportUnavailable { candidates, .. }
-        | TransportSelectionError::NoViableTransport { candidates } => candidates,
+        | TransportSelectionError::NoViableTransport { candidates, .. } => candidates,
     };
     let mut observations = Vec::new();
     for candidate in candidates
@@ -611,7 +613,7 @@ mod tests {
                 endpoint: endpoint(),
                 provider_routes: routes,
                 transport_policy: TransportPolicy::Auto,
-                session: NnrpClientConfig::default(),
+                session_defaults: NnrpClientConfig::default(),
             },
             vec![
                 tcp.clone() as Arc<dyn NnrpClientProvider>,
@@ -644,7 +646,7 @@ mod tests {
                 endpoint: "nnrps://runtime.example:4433/session".parse().unwrap(),
                 provider_routes: routes,
                 transport_policy: TransportPolicy::Auto,
-                session: NnrpClientConfig::default(),
+                session_defaults: NnrpClientConfig::default(),
             },
             Vec::<Arc<dyn NnrpClientProvider>>::new(),
         )
@@ -653,6 +655,7 @@ mod tests {
 
         let RuntimeError::TransportSelection(TransportSelectionError::NoViableTransport {
             candidates,
+            ..
         }) = error
         else {
             panic!("unexpected route selection error")
@@ -672,7 +675,7 @@ mod tests {
                 endpoint: endpoint(),
                 provider_routes: ClientProviderRoutes::new(),
                 transport_policy: TransportPolicy::Auto,
-                session: NnrpClientConfig::default(),
+                session_defaults: NnrpClientConfig::default(),
             },
             vec![
                 first as Arc<dyn NnrpClientProvider>,
@@ -697,7 +700,7 @@ mod tests {
                 endpoint: endpoint(),
                 provider_routes: ClientProviderRoutes::new(),
                 transport_policy: TransportPolicy::Auto,
-                session: NnrpClientConfig::default(),
+                session_defaults: NnrpClientConfig::default(),
             },
             vec![
                 first as Arc<dyn NnrpClientProvider>,

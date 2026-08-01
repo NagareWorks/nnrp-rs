@@ -47,7 +47,7 @@ async fn official_client_providers_probe_and_adopt_one_real_carrier() {
                 ClientProviderRoute::at(ipc_endpoint.to_string().parse().unwrap()),
             )]),
             transport_policy: TransportPolicy::Auto,
-            session: NnrpClientConfig::default(),
+            session_defaults: NnrpClientConfig::default(),
         },
         [
             Arc::new(TcpProvider) as Arc<dyn NnrpClientProvider>,
@@ -65,7 +65,7 @@ async fn official_client_providers_probe_and_adopt_one_real_carrier() {
 
     let client_session = client.open_session().await.unwrap();
     assert_ne!(client_session.session_id(), 0);
-    let selected_server_session = match selection.selected.transport_id {
+    let selected_server_session = match selection.selected_provider.transport_id {
         TransportId::Tcp => {
             ipc_task.abort();
             tcp_task.await.unwrap()
@@ -99,7 +99,7 @@ async fn logical_server_accepts_real_tcp_and_ipc_provider_sessions() {
                 ),
             ]),
             transport_policy: TransportPolicy::Auto,
-            session: NnrpServerConfig::default(),
+            session_defaults: NnrpServerConfig::default(),
         },
         [
             Arc::new(TcpProvider) as Arc<dyn NnrpServerProvider>,
@@ -191,7 +191,7 @@ async fn logical_server_uses_route_local_security_for_tcp_quic_and_websocket() {
                     },
                 )]),
                 transport_policy: case.policy,
-                session: NnrpServerConfig::default(),
+                session_defaults: NnrpServerConfig::default(),
             },
             [case.server_provider],
         )
@@ -223,7 +223,7 @@ async fn logical_server_uses_route_local_security_for_tcp_quic_and_websocket() {
                     },
                 )]),
                 transport_policy: case.policy,
-                session,
+                session_defaults: session,
             },
             [case.client_provider],
         )
@@ -273,15 +273,17 @@ async fn client_route_validation_preserves_frozen_rejection_precedence() {
                 },
             )]),
             transport_policy: TransportPolicy::Auto,
-            session: NnrpClientConfig::default(),
+            session_defaults: NnrpClientConfig::default(),
         },
         [Arc::new(TcpProvider) as Arc<dyn NnrpClientProvider>],
     )
     .await
     .unwrap_err();
 
-    let RuntimeError::TransportSelection(TransportSelectionError::NoViableTransport { candidates }) =
-        error
+    let RuntimeError::TransportSelection(TransportSelectionError::NoViableTransport {
+        candidates,
+        ..
+    }) = error
     else {
         panic!("unexpected route validation error: {error}");
     };
@@ -308,7 +310,7 @@ async fn server_route_validation_preserves_frozen_rejection_precedence() {
                 },
             )]),
             transport_policy: TransportPolicy::Auto,
-            session: NnrpServerConfig::default(),
+            session_defaults: NnrpServerConfig::default(),
         },
         [Arc::new(TcpProvider) as Arc<dyn NnrpServerProvider>],
     )
@@ -344,7 +346,7 @@ async fn open_forced_session(
                 ClientProviderRoute::at(provider_endpoint),
             )]),
             transport_policy,
-            session,
+            session_defaults: session,
         },
         [provider],
     )

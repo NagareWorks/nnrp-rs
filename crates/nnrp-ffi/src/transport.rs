@@ -422,6 +422,7 @@ fn status_from_runtime_error(error: RuntimeError) -> NnrpFfiStatus {
         | RuntimeError::ServerListenerSetClosed => {
             transport_status(NnrpFfiStatusCode::InvalidState, 105)
         }
+        RuntimeError::ServerAcceptTimeout => transport_status(NnrpFfiStatusCode::WouldBlock, 1),
         RuntimeError::Io(_) | RuntimeError::FrameIdOverflow | RuntimeError::Internal(_) => {
             transport_status(NnrpFfiStatusCode::InternalError, 106)
         }
@@ -2138,7 +2139,9 @@ mod tests {
             RuntimeError::UnexpectedMessage("test"),
             RuntimeError::TransportSelection(
                 nnrp_transport_provider::TransportSelectionError::NoViableTransport {
+                    policy: nnrp_core::TransportPolicy::Auto,
                     candidates: Vec::new(),
+                    diagnostic: None,
                 },
             ),
             RuntimeError::SelectedProviderUnavailable("missing".to_owned()),

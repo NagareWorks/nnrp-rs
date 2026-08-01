@@ -14,7 +14,7 @@ pub struct NnrpServerOptions {
     pub endpoint: NnrpEndpoint,
     pub provider_routes: ServerProviderRoutes,
     pub transport_policy: TransportPolicy,
-    pub session: NnrpServerConfig,
+    pub session_defaults: NnrpServerConfig,
 }
 
 impl NnrpServerOptions {
@@ -28,7 +28,7 @@ impl NnrpServerOptions {
             endpoint,
             provider_routes,
             transport_policy,
-            session: session_defaults,
+            session_defaults,
         }
     }
 }

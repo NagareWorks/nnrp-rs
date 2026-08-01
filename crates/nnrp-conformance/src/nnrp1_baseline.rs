@@ -13,9 +13,9 @@ use nnrp_core::{
 use nnrp_core::{ClientHelloMetadata, ResultHintReason, TransportPolicy};
 use nnrp_runtime::{NnrpClient, NnrpClientConfig, NnrpServerConfig, RuntimeError};
 use nnrp_transport_provider::{
-    select_transport_with_probe, summarize_provider_probe, ProbeSample, RemoteTransportSupport,
+    select_transport_with_probe, summarize_provider_probe, ProbeSample,
     TransportCandidateReadiness, TransportProbeObservation, TransportProviderDescriptor,
-    TransportProviderKind,
+    TransportProviderKind, TransportSelectionOptions,
 };
 use nnrp_transport_quic::{QuicClientEndpointConfig, QuicProvider, QuicServerEndpointConfig};
 use nnrp_transport_tcp::TcpProvider;
@@ -386,7 +386,6 @@ fn l3_transport_probe_selection() -> Result<(), String> {
             TransportProviderKind::NativeDynamic,
         ),
     ];
-    let remote = RemoteTransportSupport::new([TransportId::Tcp, TransportId::Quic]);
     let samples = [
         ProbeSample::success(
             TransportId::Tcp,
@@ -409,14 +408,16 @@ fn l3_transport_probe_selection() -> Result<(), String> {
     let observations = transport_observations(&providers, &samples);
     let selection = select_transport_with_probe(
         &providers,
-        &remote,
-        TransportPolicy::Auto,
-        None,
-        &readiness,
-        &observations,
+        &TransportSelectionOptions {
+            peer_supported_transports: vec![TransportId::Tcp, TransportId::Quic],
+            policy: TransportPolicy::Auto,
+            requested_max_frame_bytes: None,
+            candidate_readiness: readiness.clone(),
+            probe_observations: observations,
+        },
     )
     .map_err(|error| error.to_string())?;
-    if selection.selected.transport_id != TransportId::Quic {
+    if selection.selected_provider.transport_id != TransportId::Quic {
         return Err("transport probe did not prefer the lower-latency QUIC sample".to_string());
     }
 
@@ -438,14 +439,16 @@ fn l3_transport_probe_selection() -> Result<(), String> {
     ];
     let fallback = select_transport_with_probe(
         &providers,
-        &remote,
-        TransportPolicy::PreferQuic,
-        None,
-        &readiness,
-        &transport_observations(&providers, &fallback_samples),
+        &TransportSelectionOptions {
+            peer_supported_transports: vec![TransportId::Tcp, TransportId::Quic],
+            policy: TransportPolicy::PreferQuic,
+            requested_max_frame_bytes: None,
+            candidate_readiness: readiness,
+            probe_observations: transport_observations(&providers, &fallback_samples),
+        },
     )
     .map_err(|error| error.to_string())?;
-    if fallback.selected.transport_id != TransportId::Tcp {
+    if fallback.selected_provider.transport_id != TransportId::Tcp {
         return Err("transport probe did not fall back to TCP after QUIC failure".to_string());
     }
     Ok(())

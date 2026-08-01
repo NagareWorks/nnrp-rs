@@ -1,3 +1,4 @@
+import copy
 import importlib.util
 import json
 from pathlib import Path
@@ -19,8 +20,10 @@ def load_checker():
 
 
 def frozen_contract():
+    checker = load_checker()
     return {
         "contractVersion": 8,
+        "apiDomains": {name: {} for name in checker.EXPECTED_API_DOMAINS},
         "types": {
             "OperationLifecycleEvent": {
                 "fields": [
@@ -53,13 +56,16 @@ def frozen_contract():
                     {"name": "event", "type": "TerminalEvent", "required": True},
                 ]
             },
+            "RuntimeEventMetadata": {
+                "variants": checker.EXPECTED_RUNTIME_EVENT_METADATA_VARIANTS.copy(),
+            },
         },
+        "roleMethodMessages": [
+            {"messageType": name}
+            for name in sorted(checker.EXPECTED_ROLE_METHOD_MESSAGES)
+        ],
         "languageProjections": {
-            "rust": {
-                "operationLifecycleEvent": "nnrp_runtime::OperationLifecycleEvent",
-                "terminalEvent": "nnrp_runtime::NnrpTerminalEvent",
-                "result": "nnrp_runtime::NnrpResult",
-            }
+            "rust": copy.deepcopy(checker.EXPECTED_RUST_PROJECTIONS),
         },
     }
 
@@ -92,8 +98,68 @@ class SdkApiContractTests(unittest.TestCase):
     def test_rejects_rust_projection_drift(self):
         contract = frozen_contract()
         contract["languageProjections"]["rust"]["terminalEvent"] = "LegacyEvent"
-        with self.assertRaisesRegex(SystemExit, "Rust NnrpTerminalEvent projection drifted"):
+        with self.assertRaisesRegex(SystemExit, "Rust SDK projection map drifted"):
             self.check(contract)
+
+    def test_rejects_missing_api_domain(self):
+        contract = frozen_contract()
+        del contract["apiDomains"]["roles"]
+        with self.assertRaisesRegex(SystemExit, "SDK API domain set drifted"):
+            self.check(contract)
+
+    def test_rejects_missing_api_domains_object(self):
+        contract = frozen_contract()
+        del contract["apiDomains"]
+        with self.assertRaisesRegex(SystemExit, "SDK API domains must be an object"):
+            self.check(contract)
+
+    def test_rejects_runtime_event_variant_drift(self):
+        contract = frozen_contract()
+        contract["types"]["RuntimeEventMetadata"]["variants"].append("cache_ack")
+        with self.assertRaisesRegex(
+            SystemExit, "RuntimeEventMetadata closed variant set drifted"
+        ):
+            self.check(contract)
+
+    def test_rejects_role_method_message_drift(self):
+        contract = frozen_contract()
+        contract["roleMethodMessages"] = [
+            entry
+            for entry in contract["roleMethodMessages"]
+            if entry["messageType"] != "cache_ack"
+        ]
+        with self.assertRaisesRegex(SystemExit, "dedicated role-method message set drifted"):
+            self.check(contract)
+
+    def test_rejects_missing_role_method_messages(self):
+        contract = frozen_contract()
+        del contract["roleMethodMessages"]
+        with self.assertRaisesRegex(
+            SystemExit, "SDK role-method messages must be an array"
+        ):
+            self.check(contract)
+
+    def test_rejects_malformed_role_method_message(self):
+        contract = frozen_contract()
+        contract["roleMethodMessages"][0] = {}
+        with self.assertRaisesRegex(SystemExit, "must declare a non-empty messageType"):
+            self.check(contract)
+
+    def test_rejects_duplicate_role_method_message(self):
+        contract = frozen_contract()
+        contract["roleMethodMessages"].append(
+            copy.deepcopy(contract["roleMethodMessages"][0])
+        )
+        with self.assertRaisesRegex(SystemExit, "message types must be unique"):
+            self.check(contract)
+
+    def test_frozen_contract_deep_copies_projection_collections(self):
+        first = frozen_contract()
+        first["languageProjections"]["rust"]["clientRoles"].append("LegacyClient")
+        second = frozen_contract()
+        self.assertNotIn(
+            "LegacyClient", second["languageProjections"]["rust"]["clientRoles"]
+        )
 
 
 if __name__ == "__main__":

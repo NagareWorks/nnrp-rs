@@ -17,6 +17,7 @@ pub use event::{
     NnrpRuntimeEvent, NnrpRuntimeEventMetadata, NnrpRuntimeEventTail, NnrpTerminalEvent,
     OperationLifecycleEvent,
 };
+pub use nnrp_core::{CacheLeaseResult, CachePolicyOptions};
 pub use packet::{RuntimeFrameHeader, RuntimePacket};
 pub use pressure::RuntimePressureState;
 pub use route::{
@@ -26,8 +27,8 @@ pub use route::{
 };
 pub use server::{
     AllowAllServerPolicy, NnrpCancel, NnrpMigration, NnrpPressureUpdate, NnrpRuntimeControl,
-    NnrpSchedulingUpdate, NnrpServer, NnrpServerConfig, NnrpServerPolicy, NnrpServerSession,
-    NnrpSubmit,
+    NnrpSchedulingUpdate, NnrpServer, NnrpServerAcceptOptions, NnrpServerConfig, NnrpServerPolicy,
+    NnrpServerPolicyDecision, NnrpServerSession, NnrpSubmit,
 };
 pub use server_provider::{BoundServerProvider, NnrpServerOptions, NnrpServerProvider};
 pub use submit::{

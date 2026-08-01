@@ -707,7 +707,6 @@ mod tests {
     };
     #[cfg(unix)]
     use nnrp_runtime::{NnrpRuntimeEventMetadata, NnrpRuntimeEventTail};
-    use nnrp_transport_provider::RemoteTransportSupport;
     #[cfg(unix)]
     use tokio::time::{timeout, Duration};
 
@@ -741,15 +740,20 @@ mod tests {
         assert_eq!(registry.providers()[0].name, IpcProvider::NAME);
         assert_eq!(registry.providers()[0].transport_id, TransportId::Ipc);
 
-        let remote = RemoteTransportSupport::new([TransportId::Ipc]);
         let readiness = [nnrp_transport_provider::TransportCandidateReadiness::ready(
             TransportId::Ipc,
             registry.providers()[0].metadata.id.clone(),
         )];
         let selection = registry
-            .select(&remote, TransportPolicy::ForceIpc, None, &readiness)
+            .select(&nnrp_transport_provider::TransportSelectionOptions {
+                peer_supported_transports: vec![TransportId::Ipc],
+                policy: TransportPolicy::ForceIpc,
+                requested_max_frame_bytes: None,
+                candidate_readiness: readiness.to_vec(),
+                probe_observations: Vec::new(),
+            })
             .expect("ipc provider should satisfy force ipc");
-        assert_eq!(selection.selected.name, IpcProvider::NAME);
+        assert_eq!(selection.selected_provider.name, IpcProvider::NAME);
     }
 
     #[cfg(unix)]
