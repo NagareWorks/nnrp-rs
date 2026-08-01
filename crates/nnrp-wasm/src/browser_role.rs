@@ -405,9 +405,15 @@ impl FramedTransport for HostWebSocketTransport {
 
 #[wasm_bindgen(js_name = BrowserClientEventPacket)]
 pub struct BrowserClientEventPacket {
+    version_major: u8,
+    wire_format: u8,
     message_type: u8,
+    flags: u32,
     session_id: u32,
     frame_id: u32,
+    view_id: u16,
+    route_id: u16,
+    trace_id: u64,
     metadata: Vec<u8>,
     body: Vec<u8>,
 }
@@ -415,9 +421,15 @@ pub struct BrowserClientEventPacket {
 impl From<RuntimePacket> for BrowserClientEventPacket {
     fn from(packet: RuntimePacket) -> Self {
         Self {
+            version_major: packet.header.version_major,
+            wire_format: packet.header.wire_format as u8,
             message_type: packet.header.message_type as u8,
+            flags: packet.header.flags.0,
             session_id: packet.header.session_id,
             frame_id: packet.header.frame_id,
+            view_id: packet.header.view_id,
+            route_id: packet.header.route_id,
+            trace_id: packet.header.trace_id,
             metadata: packet.metadata,
             body: packet.body,
         }
@@ -471,9 +483,24 @@ impl BrowserClientEventBatch {
 
 #[wasm_bindgen(js_class = BrowserClientEventPacket)]
 impl BrowserClientEventPacket {
+    #[wasm_bindgen(getter, js_name = versionMajor)]
+    pub fn version_major(&self) -> u8 {
+        self.version_major
+    }
+
+    #[wasm_bindgen(getter, js_name = wireFormat)]
+    pub fn wire_format(&self) -> u8 {
+        self.wire_format
+    }
+
     #[wasm_bindgen(getter, js_name = messageType)]
     pub fn message_type(&self) -> u8 {
         self.message_type
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn flags(&self) -> u32 {
+        self.flags
     }
 
     #[wasm_bindgen(getter, js_name = sessionId)]
@@ -484,6 +511,21 @@ impl BrowserClientEventPacket {
     #[wasm_bindgen(getter, js_name = frameId)]
     pub fn frame_id(&self) -> u32 {
         self.frame_id
+    }
+
+    #[wasm_bindgen(getter, js_name = viewId)]
+    pub fn view_id(&self) -> u16 {
+        self.view_id
+    }
+
+    #[wasm_bindgen(getter, js_name = routeId)]
+    pub fn route_id(&self) -> u16 {
+        self.route_id
+    }
+
+    #[wasm_bindgen(getter, js_name = traceId)]
+    pub fn trace_id(&self) -> u64 {
+        self.trace_id
     }
 
     #[wasm_bindgen(getter)]

@@ -75,10 +75,16 @@ export class BrowserClientEventPacket {
   free(): void;
   [Symbol.dispose](): void;
   readonly body: Uint8Array;
+  readonly flags: number;
   readonly frameId: number;
   readonly messageType: number;
   readonly metadata: Uint8Array;
+  readonly routeId: number;
   readonly sessionId: number;
+  readonly traceId: bigint;
+  readonly versionMajor: number;
+  readonly viewId: number;
+  readonly wireFormat: number;
 }
 
 export class BrowserClientEventBatch {

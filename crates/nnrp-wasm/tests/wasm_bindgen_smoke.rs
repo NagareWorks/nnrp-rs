@@ -403,8 +403,15 @@ async fn browser_role_routes_control_and_patch_while_event_receive_is_pending() 
     cancel_result.expect("cancel should write while receive remains pending");
     assert!(*cancel_observed.borrow());
     let event = event.expect("pending receive should finish after cancel is written");
+    assert_eq!(event.version_major(), 1);
+    assert_eq!(event.wire_format(), 0);
     assert_eq!(event.message_type(), MessageType::Progress as u8);
+    assert_eq!(event.flags(), 0);
+    assert_eq!(event.session_id(), 7);
     assert_eq!(event.frame_id(), 9);
+    assert_eq!(event.view_id(), 0);
+    assert_eq!(event.route_id(), 0);
+    assert_eq!(event.trace_id(), 0);
 
     let patch = SessionPatchMetadata {
         profile_id: STANDARD_PROFILE_TOKEN,
