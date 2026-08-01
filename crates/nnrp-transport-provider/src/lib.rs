@@ -501,6 +501,12 @@ pub struct TransportSelection {
     pub candidates: Vec<TransportCandidateDiagnostic>,
 }
 
+impl TransportSelection {
+    pub fn selected_provider(&self) -> &TransportProviderDescriptor {
+        &self.selected
+    }
+}
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum TransportSelectionError {
     #[error("invalid transport selection evidence: {diagnostic}")]
@@ -514,6 +520,16 @@ pub enum TransportSelectionError {
     NoViableTransport {
         candidates: Vec<TransportCandidateDiagnostic>,
     },
+}
+
+impl TransportSelectionError {
+    pub fn candidates(&self) -> Option<&[TransportCandidateDiagnostic]> {
+        match self {
+            Self::InvalidEvidence { .. } => None,
+            Self::ForcedTransportUnavailable { candidates, .. }
+            | Self::NoViableTransport { candidates } => Some(candidates),
+        }
+    }
 }
 
 pub fn select_transport(
@@ -1321,7 +1337,7 @@ mod tests {
             .select(&remote, TransportPolicy::Auto, None, &readiness)
             .expect("one eligible provider should be selected directly");
 
-        assert_eq!(selection.selected.transport_id, TransportId::Tcp);
+        assert_eq!(selection.selected_provider().transport_id, TransportId::Tcp);
         assert_eq!(selection.candidates[0].selection_rank, Some(0));
         assert_eq!(selection.candidates[0].probe_state, ProbeState::NotRun);
         assert_eq!(
@@ -1339,14 +1355,22 @@ mod tests {
         let error = registry
             .select(&remote, TransportPolicy::Auto, None, &readiness)
             .expect_err("multiple providers must not use a private static score");
-        let TransportSelectionError::NoViableTransport { candidates } = error else {
-            panic!("unexpected forced error")
-        };
+        assert!(matches!(
+            &error,
+            TransportSelectionError::NoViableTransport { .. }
+        ));
+        let candidates = error.candidates().expect("selection evidence is required");
         assert_eq!(candidates.len(), 2);
         assert!(candidates.iter().all(|candidate| {
             candidate.probe_state == ProbeState::Missing
                 && candidate.rejection_reason == Some(TransportRejectionReason::ProbeMissing)
         }));
+
+        assert!(TransportSelectionError::InvalidEvidence {
+            diagnostic: "invalid".into(),
+        }
+        .candidates()
+        .is_none());
     }
 
     #[test]
