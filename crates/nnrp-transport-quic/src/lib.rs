@@ -553,9 +553,13 @@ mod tests {
             .submit_encoded(token_submit(), b"prompt".to_vec())
             .await?;
         let result = session.await_result().await?;
-        assert_eq!(result.event.header.frame_id, frame_id);
+        let event = result
+            .event
+            .as_runtime()
+            .expect("wire result must retain its runtime event");
+        assert_eq!(event.header.frame_id, frame_id);
         assert_eq!(
-            result.event.tail,
+            event.tail,
             nnrp_runtime::NnrpRuntimeEventTail::Body(b"delta".to_vec())
         );
         session.close().await?;

@@ -606,7 +606,11 @@ mod tests {
             .await?;
         let result = session.await_result().await?;
         assert_eq!(
-            result.event.tail,
+            result
+                .event
+                .as_runtime()
+                .expect("wire result must retain its runtime event")
+                .tail,
             nnrp_runtime::NnrpRuntimeEventTail::Body(b"ws-ok".to_vec())
         );
 

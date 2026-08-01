@@ -2,7 +2,7 @@
 
 This audit binds the Preview4 machine contract to the Rust runtime and downstream SDK release
 surface. The canonical contract is
-`nnrp-doc/docs/public/contracts/nnrp-1-preview4-sdk-api.json` at contract version 4.
+`nnrp-doc/docs/public/contracts/nnrp-1-preview4-sdk-api.json` at contract version 8.
 
 ## Runtime Event Envelope
 
@@ -12,12 +12,19 @@ surface. The canonical contract is
 | Closed metadata union | `nnrp_runtime::NnrpRuntimeEventMetadata` | client/server loopbacks and external wire conformance |
 | Closed owned tail union | `nnrp_runtime::NnrpRuntimeEventTail` | object delta, diagnostic, partial, result, and cache cases |
 | One role-neutral event | `nnrp_runtime::NnrpRuntimeEvent` | client, server, transport, FFI, and WASM tests |
-| Lifecycle events remain separate | native event `header.present` contract | downstream binding architecture tests |
+| Headerless lifecycle event | `nnrp_runtime::OperationLifecycleEvent` | public terminal-result contract tests |
+| Closed terminal evidence union | `nnrp_runtime::NnrpTerminalEvent` | runtime and lifecycle variant tests |
+| Correlated terminal result | `nnrp_runtime::NnrpResult` | runtime decoder and public API tests |
 
 Private `NnrpClientEvent` and `NnrpServerEvent` values are decoder implementation details. Public
 Rust APIs and host bindings consume only the role-neutral event envelope. The FFI transports one
 complete encoded metadata-plus-tail payload and the full header in one coarse poll result; it does
 not add per-field or per-frame boundary calls.
+
+`NnrpResult.event` is a closed `Runtime | Lifecycle` union. Wire results retain the complete
+`NnrpRuntimeEvent`; local completion, cancellation, supersession, and failure retain the exact
+`OperationLifecycleEvent`. A non-terminal lifecycle state cannot construct a result, and no local
+state is converted into a zero-filled `RuntimeFrameHeader`.
 
 ## Coordinated Baseline
 

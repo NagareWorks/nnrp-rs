@@ -13,7 +13,10 @@ pub mod transport;
 pub use client::{NnrpClient, NnrpClientConfig, NnrpClientSession, NnrpResult};
 pub use client_provider::{NnrpClientOptions, NnrpClientProvider};
 pub use error::RuntimeError;
-pub use event::{NnrpRuntimeEvent, NnrpRuntimeEventMetadata, NnrpRuntimeEventTail};
+pub use event::{
+    NnrpRuntimeEvent, NnrpRuntimeEventMetadata, NnrpRuntimeEventTail, NnrpTerminalEvent,
+    OperationLifecycleEvent,
+};
 pub use packet::{RuntimeFrameHeader, RuntimePacket};
 pub use pressure::RuntimePressureState;
 pub use route::{

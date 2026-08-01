@@ -143,11 +143,23 @@ jobs:
           path: nnrp-conformance-action
           fetch-depth: 1
 
+      - name: Checkout frozen SDK API contract
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ github.repository_owner }}/nnrp-doc
+          path: nnrp-doc-contract
+          fetch-depth: 1
+
       - name: Format check
         run: cargo fmt --all --check
 
       - name: Release surface sync check
         run: python scripts/check_release_surface_sync.py
+
+      - name: SDK API contract parity
+        run: >-
+          python scripts/check_sdk_api_contract.py
+          --contract nnrp-doc-contract/docs/public/contracts/nnrp-1-preview4-sdk-api.json
 
       - name: Release helper tests
         run: python -m unittest discover -s scripts/tests -p "test_*.py"

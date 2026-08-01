@@ -22,8 +22,8 @@ use nnrp_core::{
 use nnrp_runtime::{
     BoxedFramedTransport, FramedListener, FramedTransport, NnrpClient, NnrpClientConfig,
     NnrpRuntimeEvent, NnrpRuntimeEventMetadata, NnrpRuntimeEventTail, NnrpServer, NnrpServerConfig,
-    NnrpServerPolicy, RuntimeError, RuntimeFrameLimits, RuntimePacket, RuntimeTransportKind,
-    TcpFramedListener, TcpTransport,
+    NnrpServerPolicy, NnrpTerminalEvent, RuntimeError, RuntimeFrameLimits, RuntimePacket,
+    RuntimeTransportKind, TcpFramedListener, TcpTransport,
 };
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -227,15 +227,16 @@ async fn tcp_loopback_submits_frame_receives_result_and_closes() -> Result<(), R
     let result = session.await_result().await?;
     assert_eq!(result.operation_id, 101);
     assert_eq!(result.terminal_state, ResultTerminalState::Success);
-    assert_eq!(result.event.header.frame_id, frame_id);
+    let event = result
+        .event
+        .as_runtime()
+        .expect("wire result must retain its runtime event");
+    assert_eq!(event.header.frame_id, frame_id);
     assert_eq!(
-        result.event.metadata,
+        event.metadata,
         NnrpRuntimeEventMetadata::ResultPush(token_result())
     );
-    assert_eq!(
-        result.event.tail,
-        NnrpRuntimeEventTail::Body(b"delta".to_vec())
-    );
+    assert_eq!(event.tail, NnrpRuntimeEventTail::Body(b"delta".to_vec()));
     session.close().await?;
     server_task.await.expect("server task should join")?;
     Ok(())
@@ -295,8 +296,28 @@ async fn tcp_loopback_preserves_explicit_frame_ids_and_advances_allocator(
             .await?,
         43
     );
-    assert_eq!(session.await_result().await?.event.header.frame_id, 42);
-    assert_eq!(session.await_result().await?.event.header.frame_id, 43);
+    assert_eq!(
+        session
+            .await_result()
+            .await?
+            .event
+            .as_runtime()
+            .expect("wire result must retain its runtime event")
+            .header
+            .frame_id,
+        42
+    );
+    assert_eq!(
+        session
+            .await_result()
+            .await?
+            .event
+            .as_runtime()
+            .expect("wire result must retain its runtime event")
+            .header
+            .frame_id,
+        43
+    );
     assert!(matches!(
         session
             .submit_encoded_with_frame_id(44, token_submit(4_200), b"completed-operation".to_vec())
@@ -1277,7 +1298,17 @@ async fn client_malformed_result_preserves_operation_correlation() -> Result<(),
     };
     let mut session = scripted_client_session_packets(vec![malformed, valid]).await?;
     assert!(session.await_result().await.is_err());
-    assert_eq!(session.await_result().await?.event.header.frame_id, 1);
+    assert_eq!(
+        session
+            .await_result()
+            .await?
+            .event
+            .as_runtime()
+            .expect("wire result must retain its runtime event")
+            .header
+            .frame_id,
+        1
+    );
     session.close_transport().await
 }
 
@@ -1323,9 +1354,13 @@ async fn client_result_and_patch_helpers_reject_control_mismatches() -> Result<(
     let result = session.await_result().await?;
     assert_eq!(result.operation_id, 1);
     assert_eq!(result.terminal_state, ResultTerminalState::Dropped);
-    assert_eq!(result.event.header.message_type, MessageType::ResultDrop);
-    assert_eq!(result.event.metadata, NnrpRuntimeEventMetadata::None);
-    assert_eq!(result.event.tail, NnrpRuntimeEventTail::None);
+    let event = result
+        .event
+        .as_runtime()
+        .expect("wire result must retain its runtime event");
+    assert_eq!(event.header.message_type, MessageType::ResultDrop);
+    assert_eq!(event.metadata, NnrpRuntimeEventMetadata::None);
+    assert_eq!(event.tail, NnrpRuntimeEventTail::None);
     session.close_transport().await?;
 
     let flow_packet = {
@@ -1871,11 +1906,11 @@ async fn client_preview4_result_drop_reason_preserves_diagnostic_body() -> Resul
     assert_eq!(result.operation_id, 1);
     assert_eq!(result.terminal_state, ResultTerminalState::Dropped);
     match result.event {
-        NnrpRuntimeEvent {
+        NnrpTerminalEvent::Runtime(NnrpRuntimeEvent {
             header,
             metadata: NnrpRuntimeEventMetadata::ResultDropReason(actual),
             tail: NnrpRuntimeEventTail::Diagnostic(body),
-        } => {
+        }) => {
             assert_eq!(header.message_type, MessageType::ResultDropReason);
             assert_eq!(header.frame_id, 1);
             assert_eq!(actual, metadata);

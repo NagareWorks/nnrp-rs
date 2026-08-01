@@ -1323,9 +1323,17 @@ async fn run_reference_proxy_client(
 fn expect_result_push(
     result: NnrpResult,
 ) -> Result<(u32, ResultPushMetadata, Vec<u8>), RuntimeError> {
-    match (result.event.metadata, result.event.tail) {
+    let event = match result.event {
+        nnrp_runtime::NnrpTerminalEvent::Runtime(event) => event,
+        nnrp_runtime::NnrpTerminalEvent::Lifecycle(_) => {
+            return Err(RuntimeError::UnexpectedMessage(
+                "wire reference received local lifecycle terminal evidence",
+            ));
+        }
+    };
+    match (event.metadata, event.tail) {
         (NnrpRuntimeEventMetadata::ResultPush(metadata), NnrpRuntimeEventTail::Body(body)) => {
-            Ok((result.event.header.frame_id, metadata, body))
+            Ok((event.header.frame_id, metadata, body))
         }
         _ => Err(RuntimeError::UnexpectedMessage(
             "wire reference expected RESULT_PUSH terminal event",

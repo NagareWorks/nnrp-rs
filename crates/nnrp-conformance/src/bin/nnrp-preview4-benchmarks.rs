@@ -294,7 +294,13 @@ async fn bench_ipc_loopback(iterations: u64) -> Result<BenchCase, Box<dyn Error>
             .submit_encoded(token_submit(operation_id), b"hello".to_vec())
             .await?;
         let result = session.await_result().await?;
-        let NnrpRuntimeEventTail::Body(body) = result.event.tail else {
+        let Some(event) = result.event.as_runtime() else {
+            return Err(RuntimeError::UnexpectedMessage(
+                "benchmark client expected wire terminal evidence",
+            )
+            .into());
+        };
+        let NnrpRuntimeEventTail::Body(body) = &event.tail else {
             return Err(RuntimeError::UnexpectedMessage(
                 "benchmark client expected RESULT_PUSH body",
             )
@@ -335,7 +341,13 @@ async fn bench_websocket_loopback(iterations: u64) -> Result<BenchCase, Box<dyn 
             .submit_encoded(token_submit(operation_id), b"hello".to_vec())
             .await?;
         let result = session.await_result().await?;
-        let NnrpRuntimeEventTail::Body(body) = result.event.tail else {
+        let Some(event) = result.event.as_runtime() else {
+            return Err(RuntimeError::UnexpectedMessage(
+                "benchmark client expected wire terminal evidence",
+            )
+            .into());
+        };
+        let NnrpRuntimeEventTail::Body(body) = &event.tail else {
             return Err(RuntimeError::UnexpectedMessage(
                 "benchmark client expected RESULT_PUSH body",
             )

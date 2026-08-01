@@ -35,8 +35,8 @@ use crate::TcpTransport;
 use crate::{
     client_provider::{connect_client, NnrpClientOptions, NnrpClientProvider},
     BoxedFramedTransport, FramedTransport, NnrpRuntimeEvent, NnrpRuntimeEventMetadata,
-    NnrpRuntimeEventTail, NnrpSubmitRequest, RuntimeError, RuntimeFrameHeader, RuntimePacket,
-    RuntimePressureState,
+    NnrpRuntimeEventTail, NnrpSubmitRequest, NnrpTerminalEvent, OperationLifecycleEvent,
+    RuntimeError, RuntimeFrameHeader, RuntimePacket, RuntimePressureState,
 };
 use nnrp_transport_provider::TransportSelection;
 use std::sync::Arc;
@@ -113,7 +113,62 @@ pub struct NnrpClientSession {
 pub struct NnrpResult {
     pub operation_id: u64,
     pub terminal_state: ResultTerminalState,
-    pub event: NnrpRuntimeEvent,
+    pub event: NnrpTerminalEvent,
+}
+
+impl NnrpResult {
+    pub fn from_runtime(operation_id: u64, event: NnrpRuntimeEvent) -> Result<Self, RuntimeError> {
+        if operation_id == 0 {
+            return Err(RuntimeError::UnexpectedMessage(
+                "terminal result requires a non-zero operation id",
+            ));
+        }
+        let terminal_state = match (&event.header.message_type, &event.metadata, &event.tail) {
+            (
+                MessageType::ResultPush,
+                NnrpRuntimeEventMetadata::ResultPush(_),
+                NnrpRuntimeEventTail::Body(_),
+            ) => ResultTerminalState::Success,
+            (
+                MessageType::ResultDrop,
+                NnrpRuntimeEventMetadata::None,
+                NnrpRuntimeEventTail::None,
+            ) => ResultTerminalState::Dropped,
+            (
+                MessageType::ResultDropReason,
+                NnrpRuntimeEventMetadata::ResultDropReason(_),
+                NnrpRuntimeEventTail::Diagnostic(_),
+            ) => ResultTerminalState::Dropped,
+            _ => {
+                return Err(RuntimeError::UnexpectedMessage(
+                    "runtime terminal evidence does not match a terminal result message",
+                ));
+            }
+        };
+        Ok(Self {
+            operation_id,
+            terminal_state,
+            event: NnrpTerminalEvent::Runtime(event),
+        })
+    }
+
+    pub fn from_lifecycle(event: OperationLifecycleEvent) -> Result<Self, RuntimeError> {
+        if event.operation_id == 0 {
+            return Err(RuntimeError::UnexpectedMessage(
+                "terminal result requires a non-zero operation id",
+            ));
+        }
+        let terminal_state = ResultTerminalState::from_operation_state(event.state).ok_or(
+            RuntimeError::UnexpectedMessage(
+                "operation lifecycle event does not establish a terminal result",
+            ),
+        )?;
+        Ok(Self {
+            operation_id: event.operation_id,
+            terminal_state,
+            event: NnrpTerminalEvent::Lifecycle(event),
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -604,29 +659,27 @@ impl NnrpClientSession {
                 }
                 let metadata = ResultPushMetadata::parse(&packet.metadata)?;
                 let operation_id = self.complete_operation_by_frame(packet.header.frame_id)?;
-                Ok(NnrpClientEvent::Result(NnrpResult {
+                Ok(NnrpClientEvent::Result(NnrpResult::from_runtime(
                     operation_id,
-                    terminal_state: ResultTerminalState::Success,
-                    event: NnrpRuntimeEvent {
+                    NnrpRuntimeEvent {
                         header: RuntimeFrameHeader::from(&packet.header),
                         metadata: NnrpRuntimeEventMetadata::ResultPush(metadata),
                         tail: NnrpRuntimeEventTail::Body(packet.body),
                     },
-                }))
+                )?))
             }
             MessageType::ResultDrop => {
                 self.require_session_packet(&packet, "client received drop for another session")?;
                 validate_result_drop_header(&packet.header)?;
                 let operation_id = self.complete_operation_by_frame(packet.header.frame_id)?;
-                Ok(NnrpClientEvent::Result(NnrpResult {
+                Ok(NnrpClientEvent::Result(NnrpResult::from_runtime(
                     operation_id,
-                    terminal_state: ResultTerminalState::Dropped,
-                    event: NnrpRuntimeEvent {
+                    NnrpRuntimeEvent {
                         header: RuntimeFrameHeader::from(&packet.header),
                         metadata: NnrpRuntimeEventMetadata::None,
                         tail: NnrpRuntimeEventTail::None,
                     },
-                }))
+                )?))
             }
             MessageType::ResultDropReason => {
                 self.require_session_packet(
@@ -646,15 +699,14 @@ impl NnrpClientSession {
                     "client received RESULT_DROP_REASON body length mismatch",
                 )?;
                 self.complete_operation(metadata.operation_id, packet.header.frame_id)?;
-                Ok(NnrpClientEvent::Result(NnrpResult {
-                    operation_id: metadata.operation_id,
-                    terminal_state: ResultTerminalState::Dropped,
-                    event: NnrpRuntimeEvent {
+                Ok(NnrpClientEvent::Result(NnrpResult::from_runtime(
+                    metadata.operation_id,
+                    NnrpRuntimeEvent {
                         header: RuntimeFrameHeader::from(&packet.header),
                         metadata: NnrpRuntimeEventMetadata::ResultDropReason(metadata),
                         tail: NnrpRuntimeEventTail::Diagnostic(packet.body),
                     },
-                }))
+                )?))
             }
             MessageType::PartialResult => {
                 self.require_session_packet(
@@ -1948,5 +2000,98 @@ mod config_tests {
         assert!(!config.allow_resume);
         assert_eq!(config.resume_token_bytes, 0);
         assert!(config.cache_hints.is_empty());
+    }
+
+    #[test]
+    fn lifecycle_terminal_results_preserve_exact_state_mapping() {
+        for (state, terminal_state) in [
+            (
+                nnrp_core::OperationState::Completed,
+                ResultTerminalState::Success,
+            ),
+            (
+                nnrp_core::OperationState::Cancelled,
+                ResultTerminalState::Cancelled,
+            ),
+            (
+                nnrp_core::OperationState::Superseded,
+                ResultTerminalState::Dropped,
+            ),
+            (
+                nnrp_core::OperationState::Failed,
+                ResultTerminalState::Error,
+            ),
+        ] {
+            let lifecycle = OperationLifecycleEvent::new(41, state).unwrap();
+            let result = NnrpResult::from_lifecycle(lifecycle).unwrap();
+
+            assert_eq!(result.operation_id, 41);
+            assert_eq!(result.terminal_state, terminal_state);
+            assert_eq!(result.event.as_lifecycle(), Some(&lifecycle));
+            assert!(result.event.as_runtime().is_none());
+        }
+    }
+
+    #[test]
+    fn nonterminal_lifecycle_states_cannot_become_results() {
+        for state in [
+            nnrp_core::OperationState::Accepted,
+            nnrp_core::OperationState::Running,
+            nnrp_core::OperationState::Partial,
+            nnrp_core::OperationState::WaitingTool,
+        ] {
+            let lifecycle = OperationLifecycleEvent::new(42, state).unwrap();
+            assert!(matches!(
+                NnrpResult::from_lifecycle(lifecycle),
+                Err(RuntimeError::UnexpectedMessage(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn terminal_evidence_rejects_zero_operation_ids_and_nonterminal_wire_events() {
+        assert!(OperationLifecycleEvent::new(0, nnrp_core::OperationState::Failed).is_err());
+        assert!(matches!(
+            NnrpResult::from_lifecycle(OperationLifecycleEvent {
+                operation_id: 0,
+                state: nnrp_core::OperationState::Failed,
+            }),
+            Err(RuntimeError::UnexpectedMessage(_))
+        ));
+
+        let header = RuntimeFrameHeader::from(CommonHeader::new(MessageType::Progress, 0, 0));
+        assert!(matches!(
+            NnrpResult::from_runtime(
+                43,
+                NnrpRuntimeEvent {
+                    header,
+                    metadata: NnrpRuntimeEventMetadata::None,
+                    tail: NnrpRuntimeEventTail::None,
+                },
+            ),
+            Err(RuntimeError::UnexpectedMessage(_))
+        ));
+    }
+
+    #[test]
+    fn runtime_terminal_result_retains_the_complete_wire_event() {
+        let mut header = CommonHeader::new(MessageType::ResultDrop, 0, 0);
+        header.session_id = 7;
+        header.frame_id = 9;
+        header.view_id = 11;
+        header.route_id = 13;
+        header.trace_id = 17;
+        let event = NnrpRuntimeEvent {
+            header: RuntimeFrameHeader::from(header),
+            metadata: NnrpRuntimeEventMetadata::None,
+            tail: NnrpRuntimeEventTail::None,
+        };
+
+        let result = NnrpResult::from_runtime(44, event.clone()).unwrap();
+
+        assert_eq!(result.operation_id, 44);
+        assert_eq!(result.terminal_state, ResultTerminalState::Dropped);
+        assert_eq!(result.event, NnrpTerminalEvent::Runtime(event));
+        assert!(result.event.as_lifecycle().is_none());
     }
 }

@@ -2,10 +2,10 @@ use nnrp_core::{
     BudgetMetadata, CacheInvalidateMetadata, CacheMissMetadata, CacheReferenceMetadata,
     CapabilityMetadata, ControlRequestMetadata, FlowUpdateMetadata, FrameSubmitMetadata, NnrpError,
     ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata, ObjectReleaseMetadata,
-    PartialResultMetadata, PressureMetadata, ProgressMetadata, RecoverableErrorMetadata,
-    ResultDropReasonMetadata, ResultHintMetadata, ResultPushMetadata, RetryAfterMetadata,
-    RouteHintMetadata, SchedulingMetadata, SessionCloseMetadata, SupersedeMetadata,
-    TraceContextMetadata,
+    OperationState, PartialResultMetadata, PressureMetadata, ProgressMetadata,
+    RecoverableErrorMetadata, ResultDropReasonMetadata, ResultHintMetadata, ResultPushMetadata,
+    RetryAfterMetadata, RouteHintMetadata, SchedulingMetadata, SessionCloseMetadata,
+    SupersedeMetadata, TraceContextMetadata,
 };
 
 use crate::{client::NnrpClientEvent, server::NnrpServerEvent, RuntimeFrameHeader};
@@ -124,6 +124,48 @@ pub struct NnrpRuntimeEvent {
     pub tail: NnrpRuntimeEventTail,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OperationLifecycleEvent {
+    pub operation_id: u64,
+    pub state: OperationState,
+}
+
+impl OperationLifecycleEvent {
+    pub fn new(operation_id: u64, state: OperationState) -> Result<Self, NnrpError> {
+        if operation_id == 0 {
+            return Err(NnrpError::InvalidOperationRelationship {
+                rule: "operation lifecycle event requires a non-zero operation_id",
+            });
+        }
+        Ok(Self {
+            operation_id,
+            state,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NnrpTerminalEvent {
+    Runtime(NnrpRuntimeEvent),
+    Lifecycle(OperationLifecycleEvent),
+}
+
+impl NnrpTerminalEvent {
+    pub fn as_runtime(&self) -> Option<&NnrpRuntimeEvent> {
+        match self {
+            Self::Runtime(event) => Some(event),
+            Self::Lifecycle(_) => None,
+        }
+    }
+
+    pub fn as_lifecycle(&self) -> Option<&OperationLifecycleEvent> {
+        match self {
+            Self::Runtime(_) => None,
+            Self::Lifecycle(event) => Some(event),
+        }
+    }
+}
+
 impl NnrpRuntimeEvent {
     pub fn into_payload(self) -> Result<Vec<u8>, NnrpError> {
         let mut payload = self.metadata.to_bytes()?;
@@ -133,8 +175,15 @@ impl NnrpRuntimeEvent {
 
     pub(crate) fn from_client(header: RuntimeFrameHeader, event: NnrpClientEvent) -> Self {
         if let NnrpClientEvent::Result(result) = event {
-            debug_assert_eq!(header, result.event.header);
-            return result.event;
+            return match result.event {
+                NnrpTerminalEvent::Runtime(event) => {
+                    debug_assert_eq!(header, event.header);
+                    event
+                }
+                NnrpTerminalEvent::Lifecycle(_) => {
+                    unreachable!("packet decoder cannot produce a local lifecycle result")
+                }
+            };
         }
         let (metadata, tail) = match event {
             NnrpClientEvent::Result(_) => unreachable!("terminal result handled above"),
