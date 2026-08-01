@@ -242,36 +242,16 @@ impl TransportProviderRegistry {
 
     pub fn select(
         &self,
-        remote: &RemoteTransportSupport,
-        policy: TransportPolicy,
-        requested_max_frame_bytes: Option<u64>,
-        readiness: &[TransportCandidateReadiness],
+        options: &TransportSelectionOptions,
     ) -> Result<TransportSelection, TransportSelectionError> {
-        select_transport(
-            self.providers(),
-            remote,
-            policy,
-            requested_max_frame_bytes,
-            readiness,
-        )
+        select_transport(self.providers(), options)
     }
 
     pub fn select_with_probe(
         &self,
-        remote: &RemoteTransportSupport,
-        policy: TransportPolicy,
-        requested_max_frame_bytes: Option<u64>,
-        readiness: &[TransportCandidateReadiness],
-        observations: &[TransportProbeObservation],
+        options: &TransportSelectionOptions,
     ) -> Result<TransportSelection, TransportSelectionError> {
-        select_transport_with_probe(
-            self.providers(),
-            remote,
-            policy,
-            requested_max_frame_bytes,
-            readiness,
-            observations,
-        )
+        select_transport_with_probe(self.providers(), options)
     }
 }
 
@@ -439,6 +419,27 @@ pub struct TransportProbeObservation {
     pub diagnostic: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransportSelectionOptions {
+    pub peer_supported_transports: Vec<TransportId>,
+    pub policy: TransportPolicy,
+    pub requested_max_frame_bytes: Option<u64>,
+    pub candidate_readiness: Vec<TransportCandidateReadiness>,
+    pub probe_observations: Vec<TransportProbeObservation>,
+}
+
+impl Default for TransportSelectionOptions {
+    fn default() -> Self {
+        Self {
+            peer_supported_transports: Vec::new(),
+            policy: TransportPolicy::Auto,
+            requested_max_frame_bytes: None,
+            candidate_readiness: Vec::new(),
+            probe_observations: Vec::new(),
+        }
+    }
+}
+
 impl TransportProbeObservation {
     pub fn succeeded(
         transport_id: TransportId,
@@ -497,60 +498,108 @@ pub struct TransportCandidateDiagnostic {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransportSelection {
-    pub selected: TransportProviderDescriptor,
+    pub selected_provider: TransportProviderDescriptor,
     pub candidates: Vec<TransportCandidateDiagnostic>,
+    pub policy: TransportPolicy,
+    pub diagnostic: Option<String>,
 }
 
 impl TransportSelection {
     pub fn selected_provider(&self) -> &TransportProviderDescriptor {
-        &self.selected
+        &self.selected_provider
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportSelectionErrorCode {
+    InvalidEvidence,
+    ForcedTransportUnavailable,
+    NoViableTransport,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum TransportSelectionError {
     #[error("invalid transport selection evidence: {diagnostic}")]
-    InvalidEvidence { diagnostic: String },
+    InvalidEvidence {
+        policy: Option<TransportPolicy>,
+        candidates: Vec<TransportCandidateDiagnostic>,
+        diagnostic: String,
+    },
     #[error("forced transport is not available: {transport_id:?}")]
     ForcedTransportUnavailable {
+        policy: TransportPolicy,
         transport_id: TransportId,
         candidates: Vec<TransportCandidateDiagnostic>,
+        diagnostic: Option<String>,
     },
     #[error("no viable transport provider after applying policy and remote support")]
     NoViableTransport {
+        policy: TransportPolicy,
         candidates: Vec<TransportCandidateDiagnostic>,
+        diagnostic: Option<String>,
     },
 }
 
 impl TransportSelectionError {
-    pub fn candidates(&self) -> Option<&[TransportCandidateDiagnostic]> {
+    pub fn code(&self) -> TransportSelectionErrorCode {
         match self {
-            Self::InvalidEvidence { .. } => None,
-            Self::ForcedTransportUnavailable { candidates, .. }
-            | Self::NoViableTransport { candidates } => Some(candidates),
+            Self::InvalidEvidence { .. } => TransportSelectionErrorCode::InvalidEvidence,
+            Self::ForcedTransportUnavailable { .. } => {
+                TransportSelectionErrorCode::ForcedTransportUnavailable
+            }
+            Self::NoViableTransport { .. } => TransportSelectionErrorCode::NoViableTransport,
+        }
+    }
+
+    pub fn policy(&self) -> Option<TransportPolicy> {
+        match self {
+            Self::InvalidEvidence { policy, .. } => *policy,
+            Self::ForcedTransportUnavailable { policy, .. }
+            | Self::NoViableTransport { policy, .. } => Some(*policy),
+        }
+    }
+
+    pub fn transport_id(&self) -> Option<TransportId> {
+        match self {
+            Self::ForcedTransportUnavailable { transport_id, .. } => Some(*transport_id),
+            Self::InvalidEvidence { .. } | Self::NoViableTransport { .. } => None,
+        }
+    }
+
+    pub fn candidates(&self) -> &[TransportCandidateDiagnostic] {
+        match self {
+            Self::InvalidEvidence { candidates, .. }
+            | Self::ForcedTransportUnavailable { candidates, .. }
+            | Self::NoViableTransport { candidates, .. } => candidates,
+        }
+    }
+
+    pub fn diagnostic(&self) -> Option<&str> {
+        match self {
+            Self::InvalidEvidence { diagnostic, .. } => Some(diagnostic),
+            Self::ForcedTransportUnavailable { diagnostic, .. }
+            | Self::NoViableTransport { diagnostic, .. } => diagnostic.as_deref(),
         }
     }
 }
 
 pub fn select_transport(
     providers: &[TransportProviderDescriptor],
-    remote: &RemoteTransportSupport,
-    policy: TransportPolicy,
-    requested_max_frame_bytes: Option<u64>,
-    readiness: &[TransportCandidateReadiness],
+    options: &TransportSelectionOptions,
 ) -> Result<TransportSelection, TransportSelectionError> {
-    validate_selection_evidence(providers, readiness, &[])?;
+    let remote = RemoteTransportSupport::new(options.peer_supported_transports.iter().copied());
+    validate_selection_evidence(providers, &options.candidate_readiness, &[])?;
     let mut candidates = evaluate_candidates(
         providers,
-        remote,
-        policy,
-        requested_max_frame_bytes,
-        readiness,
+        &remote,
+        options.policy,
+        options.requested_max_frame_bytes,
+        &options.candidate_readiness,
     );
     let eligible = eligible_indices(&candidates);
 
     if eligible.len() == 1 {
-        return direct_selection(candidates, eligible[0]);
+        return direct_selection(candidates, eligible[0], options.policy);
     }
 
     if eligible.len() > 1 {
@@ -561,34 +610,35 @@ pub fn select_transport(
         }
     }
 
-    selection_error(policy, ordered_diagnostics(candidates))
+    selection_error(options.policy, ordered_diagnostics(candidates))
 }
 
 pub fn select_transport_with_probe(
     providers: &[TransportProviderDescriptor],
-    remote: &RemoteTransportSupport,
-    policy: TransportPolicy,
-    requested_max_frame_bytes: Option<u64>,
-    readiness: &[TransportCandidateReadiness],
-    observations: &[TransportProbeObservation],
+    options: &TransportSelectionOptions,
 ) -> Result<TransportSelection, TransportSelectionError> {
-    validate_selection_evidence(providers, readiness, observations)?;
+    let remote = RemoteTransportSupport::new(options.peer_supported_transports.iter().copied());
+    validate_selection_evidence(
+        providers,
+        &options.candidate_readiness,
+        &options.probe_observations,
+    )?;
     let mut candidates = evaluate_candidates(
         providers,
-        remote,
-        policy,
-        requested_max_frame_bytes,
-        readiness,
+        &remote,
+        options.policy,
+        options.requested_max_frame_bytes,
+        &options.candidate_readiness,
     );
     let eligible = eligible_indices(&candidates);
 
     if eligible.len() == 1 {
-        return direct_selection(candidates, eligible[0]);
+        return direct_selection(candidates, eligible[0], options.policy);
     }
 
     for index in eligible {
         let provider = &candidates[index].descriptor;
-        let observation = matching_probe_observation(provider, observations);
+        let observation = matching_probe_observation(provider, &options.probe_observations);
         let candidate = &mut candidates[index].diagnostic;
         match observation {
             Some(observation) if observation.state == ProbeState::Succeeded => {
@@ -615,8 +665,9 @@ pub fn select_transport_with_probe(
             (candidate.diagnostic.probe_state == ProbeState::Succeeded).then_some(index)
         })
         .collect::<Vec<_>>();
-    successful
-        .sort_by(|left, right| compare_candidates(&candidates[*left], &candidates[*right], policy));
+    successful.sort_by(|left, right| {
+        compare_candidates(&candidates[*left], &candidates[*right], options.policy)
+    });
 
     for (rank, index) in successful.iter().copied().enumerate() {
         candidates[index].diagnostic.selection_rank = Some(rank as u32);
@@ -624,13 +675,15 @@ pub fn select_transport_with_probe(
 
     match successful.first().copied() {
         Some(selected_index) => {
-            let selected = candidates[selected_index].descriptor.clone();
+            let selected_provider = candidates[selected_index].descriptor.clone();
             Ok(TransportSelection {
-                selected,
+                selected_provider,
                 candidates: ordered_diagnostics(candidates),
+                policy: options.policy,
+                diagnostic: None,
             })
         }
-        None => selection_error(policy, ordered_diagnostics(candidates)),
+        None => selection_error(options.policy, ordered_diagnostics(candidates)),
     }
 }
 
@@ -665,6 +718,8 @@ fn validate_provider_registration(
 
 fn invalid_evidence(diagnostic: impl Into<String>) -> TransportSelectionError {
     TransportSelectionError::InvalidEvidence {
+        policy: None,
+        candidates: Vec::new(),
         diagnostic: diagnostic.into(),
     }
 }
@@ -990,12 +1045,15 @@ fn eligible_indices(candidates: &[EvaluatedCandidate]) -> Vec<usize> {
 fn direct_selection(
     mut candidates: Vec<EvaluatedCandidate>,
     selected_index: usize,
+    policy: TransportPolicy,
 ) -> Result<TransportSelection, TransportSelectionError> {
     candidates[selected_index].diagnostic.selection_rank = Some(0);
-    let selected = candidates[selected_index].descriptor.clone();
+    let selected_provider = candidates[selected_index].descriptor.clone();
     Ok(TransportSelection {
-        selected,
+        selected_provider,
         candidates: ordered_diagnostics(candidates),
+        policy,
+        diagnostic: None,
     })
 }
 
@@ -1128,10 +1186,16 @@ fn selection_error<T>(
 ) -> Result<T, TransportSelectionError> {
     match forced_transport(policy) {
         Some(transport_id) => Err(TransportSelectionError::ForcedTransportUnavailable {
+            policy,
             transport_id,
             candidates,
+            diagnostic: None,
         }),
-        None => Err(TransportSelectionError::NoViableTransport { candidates }),
+        None => Err(TransportSelectionError::NoViableTransport {
+            policy,
+            candidates,
+            diagnostic: None,
+        }),
     }
 }
 
@@ -1150,6 +1214,61 @@ fn is_selectable_transport(transport_id: TransportId) -> bool {
 mod tests {
     use super::*;
     use std::fs;
+
+    fn select_transport(
+        providers: &[TransportProviderDescriptor],
+        remote: &RemoteTransportSupport,
+        policy: TransportPolicy,
+        requested_max_frame_bytes: Option<u64>,
+        readiness: &[TransportCandidateReadiness],
+    ) -> Result<TransportSelection, TransportSelectionError> {
+        super::select_transport(
+            providers,
+            &TransportSelectionOptions {
+                peer_supported_transports: remote.supported.clone(),
+                policy,
+                requested_max_frame_bytes,
+                candidate_readiness: readiness.to_vec(),
+                probe_observations: Vec::new(),
+            },
+        )
+    }
+
+    fn select_transport_with_probe(
+        providers: &[TransportProviderDescriptor],
+        remote: &RemoteTransportSupport,
+        policy: TransportPolicy,
+        requested_max_frame_bytes: Option<u64>,
+        readiness: &[TransportCandidateReadiness],
+        observations: &[TransportProbeObservation],
+    ) -> Result<TransportSelection, TransportSelectionError> {
+        super::select_transport_with_probe(
+            providers,
+            &TransportSelectionOptions {
+                peer_supported_transports: remote.supported.clone(),
+                policy,
+                requested_max_frame_bytes,
+                candidate_readiness: readiness.to_vec(),
+                probe_observations: observations.to_vec(),
+            },
+        )
+    }
+
+    fn select_registry(
+        registry: &TransportProviderRegistry,
+        remote: &RemoteTransportSupport,
+        policy: TransportPolicy,
+        requested_max_frame_bytes: Option<u64>,
+        readiness: &[TransportCandidateReadiness],
+    ) -> Result<TransportSelection, TransportSelectionError> {
+        registry.select(&TransportSelectionOptions {
+            peer_supported_transports: remote.supported.clone(),
+            policy,
+            requested_max_frame_bytes,
+            candidate_readiness: readiness.to_vec(),
+            probe_observations: Vec::new(),
+        })
+    }
 
     fn ready(providers: &[TransportProviderDescriptor]) -> Vec<TransportCandidateReadiness> {
         providers
@@ -1333,11 +1452,13 @@ mod tests {
         let remote = RemoteTransportSupport::new([TransportId::Tcp]);
         let readiness = ready(registry.providers());
 
-        let selection = registry
-            .select(&remote, TransportPolicy::Auto, None, &readiness)
-            .expect("one eligible provider should be selected directly");
+        let selection =
+            select_registry(&registry, &remote, TransportPolicy::Auto, None, &readiness)
+                .expect("one eligible provider should be selected directly");
 
         assert_eq!(selection.selected_provider().transport_id, TransportId::Tcp);
+        assert_eq!(selection.policy, TransportPolicy::Auto);
+        assert_eq!(selection.diagnostic, None);
         assert_eq!(selection.candidates[0].selection_rank, Some(0));
         assert_eq!(selection.candidates[0].probe_state, ProbeState::NotRun);
         assert_eq!(
@@ -1352,25 +1473,41 @@ mod tests {
         let remote = RemoteTransportSupport::new([TransportId::Tcp, TransportId::Quic]);
         let readiness = ready(registry.providers());
 
-        let error = registry
-            .select(&remote, TransportPolicy::Auto, None, &readiness)
+        let error = select_registry(&registry, &remote, TransportPolicy::Auto, None, &readiness)
             .expect_err("multiple providers must not use a private static score");
         assert!(matches!(
             &error,
             TransportSelectionError::NoViableTransport { .. }
         ));
-        let candidates = error.candidates().expect("selection evidence is required");
+        let candidates = error.candidates();
+        assert_eq!(error.code(), TransportSelectionErrorCode::NoViableTransport);
+        assert_eq!(error.policy(), Some(TransportPolicy::Auto));
+        assert_eq!(error.transport_id(), None);
+        assert_eq!(error.diagnostic(), None);
+        let TransportSelectionError::NoViableTransport {
+            policy, diagnostic, ..
+        } = &error
+        else {
+            panic!("unexpected forced error")
+        };
+        assert_eq!(*policy, TransportPolicy::Auto);
+        assert_eq!(*diagnostic, None);
         assert_eq!(candidates.len(), 2);
         assert!(candidates.iter().all(|candidate| {
             candidate.probe_state == ProbeState::Missing
                 && candidate.rejection_reason == Some(TransportRejectionReason::ProbeMissing)
         }));
 
-        assert!(TransportSelectionError::InvalidEvidence {
+        let invalid = TransportSelectionError::InvalidEvidence {
+            policy: None,
+            candidates: Vec::new(),
             diagnostic: "invalid".into(),
-        }
-        .candidates()
-        .is_none());
+        };
+        assert_eq!(invalid.code(), TransportSelectionErrorCode::InvalidEvidence);
+        assert_eq!(invalid.policy(), None);
+        assert_eq!(invalid.transport_id(), None);
+        assert!(invalid.candidates().is_empty());
+        assert_eq!(invalid.diagnostic(), Some("invalid"));
     }
 
     #[test]
@@ -1394,7 +1531,7 @@ mod tests {
             std::slice::from_ref(&unresolved),
         )
         .expect_err("an unresolved route is ineligible");
-        let TransportSelectionError::NoViableTransport { candidates } = error else {
+        let TransportSelectionError::NoViableTransport { candidates, .. } = error else {
             panic!("unexpected forced error")
         };
         assert_eq!(
@@ -1419,7 +1556,7 @@ mod tests {
             &[security],
         )
         .expect_err("an insecure route is ineligible");
-        let TransportSelectionError::NoViableTransport { candidates } = error else {
+        let TransportSelectionError::NoViableTransport { candidates, .. } = error else {
             panic!("unexpected forced error")
         };
         assert_eq!(
@@ -1436,7 +1573,7 @@ mod tests {
             std::slice::from_ref(&unresolved),
         )
         .expect_err("frame limits take precedence over route readiness");
-        let TransportSelectionError::NoViableTransport { candidates } = error else {
+        let TransportSelectionError::NoViableTransport { candidates, .. } = error else {
             panic!("unexpected forced error")
         };
         assert_eq!(
@@ -1696,7 +1833,7 @@ mod tests {
         )
         .expect("both probes succeeded");
 
-        assert_eq!(selection.selected.transport_id, TransportId::Tcp);
+        assert_eq!(selection.selected_provider.transport_id, TransportId::Tcp);
         assert_eq!(selection.candidates[0].selection_rank, Some(0));
         assert_eq!(selection.candidates[1].selection_rank, Some(1));
     }
@@ -1731,7 +1868,7 @@ mod tests {
             &observations,
         )
         .expect("cost should be comparable");
-        assert_eq!(by_cost.selected.transport_id, TransportId::Quic);
+        assert_eq!(by_cost.selected_provider.transport_id, TransportId::Quic);
 
         tcp.metadata.cost.model_id = 8;
         let providers = [tcp, quic];
@@ -1746,7 +1883,10 @@ mod tests {
             &observations,
         )
         .expect("different cost models defer to explicit preference");
-        assert_eq!(by_preference.selected.transport_id, TransportId::Tcp);
+        assert_eq!(
+            by_preference.selected_provider.transport_id,
+            TransportId::Tcp
+        );
     }
 
     #[test]
@@ -1798,7 +1938,7 @@ mod tests {
             &observations,
         )
         .expect_err("both providers exceed the requested frame size");
-        let TransportSelectionError::NoViableTransport { candidates } = error else {
+        let TransportSelectionError::NoViableTransport { candidates, .. } = error else {
             panic!("unexpected forced error")
         };
         assert!(candidates.iter().all(|candidate| {
@@ -1825,7 +1965,7 @@ mod tests {
             &observations,
         )
         .expect_err("failed and missing probes leave no candidate");
-        let TransportSelectionError::NoViableTransport { candidates } = error else {
+        let TransportSelectionError::NoViableTransport { candidates, .. } = error else {
             panic!("unexpected forced error")
         };
         assert!(candidates.iter().any(|candidate| {
@@ -1842,12 +1982,25 @@ mod tests {
         let remote = RemoteTransportSupport::new([TransportId::Tcp]);
         let readiness = ready(registry.providers());
 
-        let error = registry
-            .select(&remote, TransportPolicy::ForceQuic, None, &readiness)
-            .expect_err("forced quic is unavailable remotely");
+        let error = select_registry(
+            &registry,
+            &remote,
+            TransportPolicy::ForceQuic,
+            None,
+            &readiness,
+        )
+        .expect_err("forced quic is unavailable remotely");
+        assert_eq!(
+            error.code(),
+            TransportSelectionErrorCode::ForcedTransportUnavailable
+        );
+        assert_eq!(error.policy(), Some(TransportPolicy::ForceQuic));
+        assert_eq!(error.transport_id(), Some(TransportId::Quic));
+        assert_eq!(error.candidates().len(), 2);
         let TransportSelectionError::ForcedTransportUnavailable {
             transport_id,
             candidates,
+            ..
         } = error
         else {
             panic!("unexpected non-forced error")

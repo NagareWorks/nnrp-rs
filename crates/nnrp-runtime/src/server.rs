@@ -9,24 +9,30 @@ use std::sync::{
 use std::task::Poll;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use futures_util::{future::poll_fn, lock::Mutex as AsyncMutex};
+use async_trait::async_trait;
+use futures_timer::Delay;
+use futures_util::{
+    future::{poll_fn, select, Either},
+    lock::Mutex as AsyncMutex,
+};
 use nnrp_core::{
     validate_control_request_semantics, validate_partial_result_semantics,
     validate_pressure_semantics, validate_profile_assignment, validate_progress_semantics,
     validate_result_drop_header, validate_result_drop_reason_semantics,
     validate_scheduling_semantics, validate_trace_context_semantics, BudgetMetadata,
-    CacheInvalidateMetadata, CacheMissMetadata, CacheObjectId, CacheObjectKind,
-    CacheReferenceMetadata, CapabilityMetadata, CommonHeader, ConnectionLifecycle,
-    ControlRequestMetadata, FlowUpdateMetadata, FrameSubmitMetadata, MessageType,
-    ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata, ObjectReleaseMetadata,
-    OperationCancelRequest, OperationDescriptor, OperationRegistry, PartialResultMetadata,
-    PressureMetadata, ProgressMetadata, RecoverableErrorMetadata, ResultDropReasonMetadata,
-    ResultHintMetadata, ResultPushMetadata, RetryAfterMetadata, RouteHintMetadata, RuntimeRole,
-    SchedulingMetadata, SchemaRegistry, SessionCloseAckMetadata, SessionCloseMetadata,
-    SessionCloseStatus, SessionMigrateAckMetadata, SessionMigrateMetadata, SessionOpenAckMetadata,
-    SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchMetadata, SessionStatus,
-    SupersedeMetadata, TraceContextMetadata, TransportProbeAckMetadata, TransportProbeMetadata,
-    BUDGET_METADATA_LEN, CACHE_INVALIDATE_METADATA_LEN, CACHE_MISS_METADATA_LEN,
+    CacheAckMetadata, CacheInvalidateMetadata, CacheMissMetadata, CacheObjectId, CacheObjectKind,
+    CachePutMetadata, CacheReferenceMetadata, CapabilityMetadata, CommonHeader,
+    ConnectionLifecycle, ControlRequestMetadata, FlowUpdateMetadata, FrameSubmitMetadata,
+    MessageType, ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata,
+    ObjectReleaseMetadata, OperationCancelRequest, OperationDescriptor, OperationRegistry,
+    PartialResultMetadata, PressureMetadata, ProgressMetadata, RecoverableErrorMetadata,
+    ResultDropReasonMetadata, ResultHintMetadata, ResultPushMetadata, RetryAfterMetadata,
+    RouteHintMetadata, RuntimeRole, SchedulingMetadata, SchemaRegistry, SessionCloseAckMetadata,
+    SessionCloseMetadata, SessionCloseStatus, SessionMigrateAckMetadata, SessionMigrateMetadata,
+    SessionOpenAckMetadata, SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchMetadata,
+    SessionStatus, SupersedeMetadata, TraceContextMetadata, TransportProbeAckMetadata,
+    TransportProbeMetadata, BUDGET_METADATA_LEN, CACHE_ACK_METADATA_LEN,
+    CACHE_INVALIDATE_METADATA_LEN, CACHE_MISS_METADATA_LEN, CACHE_PUT_METADATA_LEN,
     CACHE_REFERENCE_METADATA_LEN, CAPABILITY_METADATA_LEN, CONTROL_REQUEST_METADATA_LEN,
     FLOW_UPDATE_METADATA_LEN, FRAME_SUBMIT_METADATA_LEN, OBJECT_DELTA_METADATA_LEN,
     OBJECT_DESCRIPTOR_METADATA_LEN, OBJECT_REFERENCE_METADATA_LEN, OBJECT_RELEASE_METADATA_LEN,
@@ -67,6 +73,36 @@ pub struct NnrpServerConfig {
     pub application_policy: Arc<dyn NnrpServerPolicy>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NnrpServerAcceptOptions {
+    pub timeout_ms: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NnrpServerPolicyDecision {
+    pub accepted: bool,
+    pub session_error_code: u32,
+    pub diagnostic: Option<String>,
+}
+
+impl NnrpServerPolicyDecision {
+    pub fn accept() -> Self {
+        Self {
+            accepted: true,
+            session_error_code: SESSION_ERROR_NONE,
+            diagnostic: None,
+        }
+    }
+
+    pub fn reject(session_error_code: u32, diagnostic: impl Into<String>) -> Self {
+        Self {
+            accepted: false,
+            session_error_code,
+            diagnostic: Some(diagnostic.into()),
+        }
+    }
+}
+
 impl fmt::Debug for NnrpServerConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -86,16 +122,20 @@ impl fmt::Debug for NnrpServerConfig {
     }
 }
 
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait NnrpServerPolicy: Send + Sync {
-    fn validate_session_open(&self, open: &SessionOpenMetadata) -> Result<(), u32>;
+    async fn evaluate(&self, open: &SessionOpenMetadata) -> NnrpServerPolicyDecision;
 }
 
 #[derive(Debug, Default)]
 pub struct AllowAllServerPolicy;
 
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl NnrpServerPolicy for AllowAllServerPolicy {
-    fn validate_session_open(&self, _open: &SessionOpenMetadata) -> Result<(), u32> {
-        Ok(())
+    async fn evaluate(&self, _open: &SessionOpenMetadata) -> NnrpServerPolicyDecision {
+        NnrpServerPolicyDecision::accept()
     }
 }
 
@@ -155,7 +195,7 @@ impl NnrpServerConfig {
         self
     }
 
-    fn validate_client_open(&self, open: &SessionOpenMetadata) -> Result<(), u32> {
+    async fn validate_client_open(&self, open: &SessionOpenMetadata) -> Result<(), u32> {
         if !self.supported_profiles.contains(&open.profile_id)
             || validate_profile_assignment(open.profile_id).is_err()
         {
@@ -174,7 +214,10 @@ impl NnrpServerConfig {
             return Err(SESSION_ERROR_LIMIT_REACHED);
         }
 
-        self.application_policy.validate_session_open(open)?;
+        let decision = self.application_policy.evaluate(open).await;
+        if !decision.accepted {
+            return Err(decision.session_error_code);
+        }
 
         Ok(())
     }
@@ -339,7 +382,10 @@ impl NnrpServer {
         I: IntoIterator<Item = Arc<dyn NnrpServerProvider>>,
     {
         let listeners = bind_server(&options, providers).await?;
-        Ok(Self::from_bound_listeners(listeners, options.session))
+        Ok(Self::from_bound_listeners(
+            listeners,
+            options.session_defaults,
+        ))
     }
 
     #[cfg(all(feature = "native-tcp", not(target_arch = "wasm32")))]
@@ -435,6 +481,29 @@ impl NnrpServer {
     }
 
     pub async fn accept(&self) -> Result<NnrpServerSession, RuntimeError> {
+        self.accept_with_options(NnrpServerAcceptOptions::default())
+            .await
+    }
+
+    pub async fn accept_with_options(
+        &self,
+        options: NnrpServerAcceptOptions,
+    ) -> Result<NnrpServerSession, RuntimeError> {
+        if options.timeout_ms == 0 {
+            return self.accept_inner().await;
+        }
+
+        let accept = Box::pin(self.accept_inner());
+        let timeout = Box::pin(Delay::new(std::time::Duration::from_millis(
+            options.timeout_ms as u64,
+        )));
+        match select(accept, timeout).await {
+            Either::Left((result, _)) => result,
+            Either::Right(((), _)) => Err(RuntimeError::ServerAcceptTimeout),
+        }
+    }
+
+    async fn accept_inner(&self) -> Result<NnrpServerSession, RuntimeError> {
         let (active_transport_id, mut transport) = {
             let mut listeners = self.listeners.lock().await;
             let Some(active) = listeners.as_ref() else {
@@ -471,7 +540,7 @@ impl NnrpServer {
 
         let open = SessionOpenMetadata::parse(&packet.metadata)?;
         nnrp_core::validate_session_recovery_request(&open)?;
-        let ack = self.accept_ack(&open);
+        let ack = self.accept_ack(&open).await;
         let mut ack_bytes = vec![0u8; SESSION_OPEN_ACK_METADATA_LEN];
         ack.write(&mut ack_bytes)?;
 
@@ -526,8 +595,8 @@ impl NnrpServer {
         })
     }
 
-    fn accept_ack(&self, open: &SessionOpenMetadata) -> SessionOpenAckMetadata {
-        let validation_error = self.config.validate_client_open(open).err();
+    async fn accept_ack(&self, open: &SessionOpenMetadata) -> SessionOpenAckMetadata {
+        let validation_error = self.config.validate_client_open(open).await.err();
         let resume_attempt = open.resume_token_bytes > 0;
         let existing_session = self
             .session_registry()
@@ -1655,6 +1724,121 @@ impl NnrpServerSession {
                 body,
             )?)
             .await
+    }
+
+    pub async fn send_cache_put(
+        &mut self,
+        metadata: CachePutMetadata,
+        body: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        require_body_len(
+            body.len(),
+            metadata.object_bytes as usize,
+            "server CACHE_PUT body length mismatch",
+        )?;
+        let mut header = CommonHeader::new(
+            MessageType::CachePut,
+            CACHE_PUT_METADATA_LEN as u32,
+            body.len() as u32,
+        );
+        header.session_id = self.session_id;
+        self.transport
+            .write_packet(&RuntimePacket::new(
+                header,
+                metadata.to_bytes()?.to_vec(),
+                body,
+            )?)
+            .await
+    }
+
+    pub async fn send_cache_ack(&mut self, metadata: CacheAckMetadata) -> Result<(), RuntimeError> {
+        let mut header = CommonHeader::new(MessageType::CacheAck, CACHE_ACK_METADATA_LEN as u32, 0);
+        header.session_id = self.session_id;
+        self.transport
+            .write_packet(&RuntimePacket::new(
+                header,
+                metadata.to_bytes()?.to_vec(),
+                Vec::new(),
+            )?)
+            .await
+    }
+
+    pub async fn receive_cache_put(&mut self) -> Result<(CachePutMetadata, Vec<u8>), RuntimeError> {
+        let packet = self.transport.read_packet().await?;
+        self.require_session_packet(&packet, "server received cache put for another session")?;
+        if packet.header.message_type != MessageType::CachePut
+            || packet.metadata.len() != CACHE_PUT_METADATA_LEN
+        {
+            return Err(RuntimeError::UnexpectedMessage(
+                "server expected a well-formed CACHE_PUT",
+            ));
+        }
+        let metadata = CachePutMetadata::parse(&packet.metadata)?;
+        require_body_len(
+            packet.body.len(),
+            metadata.object_bytes as usize,
+            "server received CACHE_PUT body length mismatch",
+        )?;
+        Ok((metadata, packet.body))
+    }
+
+    pub async fn receive_cache_ack(&mut self) -> Result<CacheAckMetadata, RuntimeError> {
+        let packet = self.transport.read_packet().await?;
+        self.require_session_packet(&packet, "server received cache ack for another session")?;
+        if packet.header.message_type != MessageType::CacheAck
+            || packet.metadata.len() != CACHE_ACK_METADATA_LEN
+            || !packet.body.is_empty()
+        {
+            return Err(RuntimeError::UnexpectedMessage(
+                "server expected a well-formed CACHE_ACK",
+            ));
+        }
+        Ok(CacheAckMetadata::parse(&packet.metadata)?)
+    }
+
+    pub async fn send_ping(&mut self) -> Result<(), RuntimeError> {
+        self.write_empty_role_message(MessageType::Ping).await
+    }
+
+    pub async fn send_pong(&mut self) -> Result<(), RuntimeError> {
+        self.write_empty_role_message(MessageType::Pong).await
+    }
+
+    pub async fn receive_ping(&mut self) -> Result<(), RuntimeError> {
+        self.receive_empty_role_message(MessageType::Ping, "server expected PING")
+            .await
+    }
+
+    pub async fn receive_pong(&mut self) -> Result<(), RuntimeError> {
+        self.receive_empty_role_message(MessageType::Pong, "server expected PONG")
+            .await
+    }
+
+    async fn write_empty_role_message(
+        &mut self,
+        message_type: MessageType,
+    ) -> Result<(), RuntimeError> {
+        let mut header = CommonHeader::new(message_type, 0, 0);
+        header.session_id = self.session_id;
+        self.transport
+            .write_packet(&RuntimePacket::new(header, Vec::new(), Vec::new())?)
+            .await
+    }
+
+    async fn receive_empty_role_message(
+        &mut self,
+        expected: MessageType,
+        error: &'static str,
+    ) -> Result<(), RuntimeError> {
+        let packet = self.transport.read_packet().await?;
+        self.require_session_packet(&packet, error)?;
+        if packet.header.message_type != expected
+            || !packet.metadata.is_empty()
+            || !packet.body.is_empty()
+        {
+            return Err(RuntimeError::UnexpectedMessage(error));
+        }
+        Ok(())
     }
 
     pub async fn send_cache_reference(

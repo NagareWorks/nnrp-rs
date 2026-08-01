@@ -1,29 +1,32 @@
+use async_trait::async_trait;
 use nnrp_core::NnrpError;
 use nnrp_core::{
-    BackpressureLevel, BudgetMetadata, CacheInvalidateMetadata, CacheInvalidateScope,
-    CacheMissMetadata, CacheMissReason, CacheObjectId, CacheObjectKind, CacheReferenceMetadata,
-    CacheReuseScope, CapabilityMetadata, CommonHeader, ControlRequestMetadata, FlowScopeKind,
-    FlowUpdateMetadata, FlowUpdateReason, FrameSubmitMetadata, HeaderFlags, InFlightPolicy,
-    InputProfile, MemoryLocationHint, MessageType, ObjectDeltaMetadata, ObjectDescriptorMetadata,
-    ObjectReferenceMetadata, ObjectReleaseMetadata, ObjectReleaseReason, OperationState,
-    OwnershipHint, PartialResultMetadata, PayloadKindBitmap, PressureMetadata, ProgressMetadata,
-    ResultClass, ResultDropReasonMetadata, ResultPushMetadata, ResultTerminalState,
-    RetryAfterMetadata, RouteHintMetadata, RuntimeObjectKind, RuntimeRole, SchedulingMetadata,
-    SchemaRegistry, SessionCloseMetadata, SessionCloseReason, SessionMigrateAckMetadata,
-    SessionOpenAckMetadata, SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchAckStatus,
-    SessionPatchMetadata, SessionPatchRejectReason, SessionPriorityClass, SessionStatus,
-    SubmitMode, SupersedeMetadata, TileIndexMode, TraceContextMetadata, TransportId,
-    TransportProbeAckMetadata, TransportProbeMetadata, FLOW_UPDATE_FLAG_CREDIT_VALID,
-    FRAME_SUBMIT_METADATA_LEN, RESULT_DROP_REASON_DEADLINE_EXPIRED, RESULT_PUSH_METADATA_LEN,
-    RETRY_AFTER_METADATA_LEN, SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE,
-    SESSION_OPEN_ACK_METADATA_LEN, SESSION_OPEN_METADATA_LEN, STANDARD_PROFILE_TOKEN,
-    TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
+    BackpressureLevel, BudgetMetadata, CacheAckMetadata, CacheAckStatus, CacheInvalidateMetadata,
+    CacheInvalidateScope, CacheMissMetadata, CacheMissReason, CacheObjectId, CacheObjectKind,
+    CachePutMetadata, CacheReferenceMetadata, CacheReuseScope, CapabilityMetadata, CommonHeader,
+    ControlRequestMetadata, FlowScopeKind, FlowUpdateMetadata, FlowUpdateReason,
+    FrameSubmitMetadata, HeaderFlags, InFlightPolicy, InputProfile, MemoryLocationHint,
+    MessageType, ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata,
+    ObjectReleaseMetadata, ObjectReleaseReason, OperationState, OwnershipHint,
+    PartialResultMetadata, PayloadKindBitmap, PressureMetadata, ProgressMetadata, ResultClass,
+    ResultDropReasonMetadata, ResultPushMetadata, ResultTerminalState, RetryAfterMetadata,
+    RouteHintMetadata, RuntimeObjectKind, RuntimeRole, SchedulingMetadata, SchemaRegistry,
+    SessionCloseMetadata, SessionCloseReason, SessionMigrateAckMetadata, SessionOpenAckMetadata,
+    SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata,
+    SessionPatchRejectReason, SessionPriorityClass, SessionStatus, SubmitMode, SupersedeMetadata,
+    TileIndexMode, TraceContextMetadata, TransportId, TransportProbeAckMetadata,
+    TransportProbeMetadata, FLOW_UPDATE_FLAG_CREDIT_VALID, FRAME_SUBMIT_METADATA_LEN,
+    RESULT_DROP_REASON_DEADLINE_EXPIRED, RESULT_PUSH_METADATA_LEN, RETRY_AFTER_METADATA_LEN,
+    SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE, SESSION_OPEN_ACK_METADATA_LEN,
+    SESSION_OPEN_METADATA_LEN, STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID,
+    TOKEN_DELTA_SCHEMA_VERSION,
 };
 use nnrp_runtime::{
     BoxedFramedTransport, FramedListener, FramedTransport, NnrpClient, NnrpClientConfig,
-    NnrpRuntimeEvent, NnrpRuntimeEventMetadata, NnrpRuntimeEventTail, NnrpServer, NnrpServerConfig,
-    NnrpServerPolicy, NnrpTerminalEvent, RuntimeError, RuntimeFrameLimits, RuntimePacket,
-    RuntimeTransportKind, TcpFramedListener, TcpTransport,
+    NnrpRuntimeEvent, NnrpRuntimeEventMetadata, NnrpRuntimeEventTail, NnrpServer,
+    NnrpServerAcceptOptions, NnrpServerConfig, NnrpServerPolicy, NnrpServerPolicyDecision,
+    NnrpTerminalEvent, RuntimeError, RuntimeFrameLimits, RuntimePacket, RuntimeTransportKind,
+    TcpFramedListener, TcpTransport,
 };
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -700,6 +703,19 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
         let submit = session.receive_submit().await?;
         let operation_id = submit.operation_id;
 
+        session.send_ping().await?;
+        session.receive_pong().await?;
+        session.receive_ping().await?;
+        session.send_pong().await?;
+        session
+            .send_cache_put(cache_put(), b"blob".to_vec())
+            .await?;
+        assert_eq!(session.receive_cache_ack().await?, cache_ack());
+        let (metadata, body) = session.receive_cache_put().await?;
+        assert_eq!(metadata, cache_put());
+        assert_eq!(body, b"blob".to_vec());
+        session.send_cache_ack(cache_ack()).await?;
+
         session
             .send_capability(
                 MessageType::CapabilityNegotiation,
@@ -748,6 +764,19 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
     let frame_id = session
         .submit_encoded_nowait(token_submit(operation_id), b"prompt".to_vec())
         .await?;
+
+    session.receive_ping().await?;
+    session.send_pong().await?;
+    session.send_ping().await?;
+    session.receive_pong().await?;
+    let (metadata, body) = session.receive_cache_put().await?;
+    assert_eq!(metadata, cache_put());
+    assert_eq!(body, b"blob".to_vec());
+    session.send_cache_ack(cache_ack()).await?;
+    session
+        .send_cache_put(cache_put(), b"blob".to_vec())
+        .await?;
+    assert_eq!(session.receive_cache_ack().await?, cache_ack());
 
     match session.await_event().await? {
         NnrpRuntimeEvent {
@@ -2906,14 +2935,31 @@ impl FramedListener for ScriptedListener {
 
 struct RequireSessionTag(u64);
 
+#[async_trait]
 impl NnrpServerPolicy for RequireSessionTag {
-    fn validate_session_open(&self, open: &SessionOpenMetadata) -> Result<(), u32> {
+    async fn evaluate(&self, open: &SessionOpenMetadata) -> NnrpServerPolicyDecision {
         if open.client_session_tag == self.0 {
-            Ok(())
+            NnrpServerPolicyDecision::accept()
         } else {
-            Err(nnrp_core::SESSION_ERROR_LIMIT_REACHED)
+            NnrpServerPolicyDecision::reject(
+                nnrp_core::SESSION_ERROR_LIMIT_REACHED,
+                "client session tag rejected",
+            )
         }
     }
+}
+
+#[tokio::test]
+async fn server_accept_options_enforce_only_the_local_wait_timeout() -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    assert!(matches!(
+        server
+            .accept_with_options(NnrpServerAcceptOptions { timeout_ms: 1 })
+            .await,
+        Err(RuntimeError::ServerAcceptTimeout)
+    ));
+    assert!(!server.is_listener_set_closed());
+    Ok(())
 }
 
 async fn scripted_client_session(
@@ -3526,6 +3572,31 @@ fn object_release(
         source_role: RuntimeRole::Server,
         flags: 0,
         diagnostic_bytes,
+    }
+}
+
+fn cache_put() -> CachePutMetadata {
+    CachePutMetadata {
+        cache_namespace: 42,
+        cache_key_hi: 0x1234,
+        cache_key_lo: 0x5678,
+        object_kind: CacheObjectKind::ToolSchema,
+        ttl_ms: 1_000,
+        object_bytes: 4,
+        codec_bitmap: 0,
+        flags: 0,
+    }
+}
+
+fn cache_ack() -> CacheAckMetadata {
+    CacheAckMetadata {
+        cache_namespace: 42,
+        cache_key_hi: 0x1234,
+        cache_key_lo: 0x5678,
+        status: CacheAckStatus::Accepted,
+        accepted_ttl_ms: 1_000,
+        max_object_bytes: 4_096,
+        detail_code: 0,
     }
 }
 

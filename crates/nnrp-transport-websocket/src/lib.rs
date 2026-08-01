@@ -545,7 +545,6 @@ mod tests {
         ClientProviderRoute, ClientProviderRoutes, NnrpClientOptions, NnrpClientProvider,
         NnrpRuntimeEventMetadata, NnrpRuntimeEventTail,
     };
-    use nnrp_transport_provider::RemoteTransportSupport;
     use std::sync::Arc;
     use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
@@ -575,15 +574,20 @@ mod tests {
         assert_eq!(registry.providers()[0].name, WebSocketProvider::NAME);
         assert_eq!(registry.providers()[0].transport_id, TransportId::WebSocket);
 
-        let remote = RemoteTransportSupport::new([TransportId::WebSocket]);
         let readiness = [nnrp_transport_provider::TransportCandidateReadiness::ready(
             TransportId::WebSocket,
             registry.providers()[0].metadata.id.clone(),
         )];
         let selection = registry
-            .select(&remote, TransportPolicy::ForceWebSocket, None, &readiness)
+            .select(&nnrp_transport_provider::TransportSelectionOptions {
+                peer_supported_transports: vec![TransportId::WebSocket],
+                policy: TransportPolicy::ForceWebSocket,
+                requested_max_frame_bytes: None,
+                candidate_readiness: readiness.to_vec(),
+                probe_observations: Vec::new(),
+            })
             .expect("websocket provider should satisfy force websocket");
-        assert_eq!(selection.selected.name, WebSocketProvider::NAME);
+        assert_eq!(selection.selected_provider.name, WebSocketProvider::NAME);
     }
 
     #[tokio::test]
@@ -633,13 +637,17 @@ mod tests {
                     ClientProviderRoute::at(provider_endpoint.parse().unwrap()),
                 )]),
                 transport_policy: TransportPolicy::Auto,
-                session: NnrpClientConfig::default(),
+                session_defaults: NnrpClientConfig::default(),
             },
             [Arc::new(WebSocketProvider) as Arc<dyn NnrpClientProvider>],
         )
         .await?;
         assert_eq!(
-            client.transport_selection().unwrap().selected.transport_id,
+            client
+                .transport_selection()
+                .unwrap()
+                .selected_provider
+                .transport_id,
             TransportId::WebSocket
         );
         let client_session = client.open_session().await?;

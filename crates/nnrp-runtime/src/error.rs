@@ -40,6 +40,9 @@ pub enum RuntimeError {
     #[error("no server provider listener remains available")]
     ServerListenerSetClosed,
 
+    #[error("server accept timed out")]
+    ServerAcceptTimeout,
+
     #[error("selected client provider is unavailable: {0}")]
     SelectedProviderUnavailable(String),
 

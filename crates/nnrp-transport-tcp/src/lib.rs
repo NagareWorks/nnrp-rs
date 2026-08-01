@@ -283,7 +283,6 @@ mod tests {
         ClientProviderRoute, ClientProviderRoutes, NnrpClient, NnrpClientConfig, NnrpClientOptions,
         NnrpServer, NnrpServerConfig, RuntimePacket,
     };
-    use nnrp_transport_provider::RemoteTransportSupport;
     use std::sync::Arc;
 
     #[test]
@@ -301,15 +300,20 @@ mod tests {
         let registry = TransportProviderRegistry::new()
             .with_provider(TcpProvider::descriptor())
             .expect("tcp provider should register");
-        let remote = RemoteTransportSupport::new([TransportId::Tcp]);
         let readiness = [nnrp_transport_provider::TransportCandidateReadiness::ready(
             TransportId::Tcp,
             TcpProvider::descriptor().metadata.id,
         )];
         let selection = registry
-            .select(&remote, TransportPolicy::ForceTcp, None, &readiness)
+            .select(&nnrp_transport_provider::TransportSelectionOptions {
+                peer_supported_transports: vec![TransportId::Tcp],
+                policy: TransportPolicy::ForceTcp,
+                requested_max_frame_bytes: None,
+                candidate_readiness: readiness.to_vec(),
+                probe_observations: Vec::new(),
+            })
             .expect("tcp provider should satisfy force tcp");
-        assert_eq!(selection.selected.name, TcpProvider::NAME);
+        assert_eq!(selection.selected_provider.name, TcpProvider::NAME);
     }
 
     #[tokio::test]
@@ -410,14 +414,18 @@ mod tests {
                     },
                 )]),
                 transport_policy: TransportPolicy::Auto,
-                session: NnrpClientConfig::default(),
+                session_defaults: NnrpClientConfig::default(),
             },
             [Arc::new(TcpProvider) as Arc<dyn NnrpClientProvider>],
         )
         .await
         .unwrap();
         assert_eq!(
-            client.transport_selection().unwrap().selected.transport_id,
+            client
+                .transport_selection()
+                .unwrap()
+                .selected_provider
+                .transport_id,
             TransportId::Tcp
         );
         let client_session = client.open_session().await.unwrap();

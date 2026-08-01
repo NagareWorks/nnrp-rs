@@ -482,7 +482,6 @@ mod tests {
         ClientProviderRoute, ClientProviderRoutes, ClientTransportSecurity, NnrpClientOptions,
         NnrpClientProvider, RuntimePacket, RuntimeTransportKind,
     };
-    use nnrp_transport_provider::RemoteTransportSupport;
 
     #[test]
     fn quic_provider_registers_available_backend_descriptor() {
@@ -509,17 +508,22 @@ mod tests {
                 TransportProviderKind::NativeDynamic,
             ))
             .expect("quic provider should register");
-        let remote = RemoteTransportSupport::new([TransportId::Quic]);
         let readiness = [nnrp_transport_provider::TransportCandidateReadiness::ready(
             TransportId::Quic,
             registry.providers()[0].metadata.id.clone(),
         )];
         let selection = registry
-            .select(&remote, TransportPolicy::ForceQuic, None, &readiness)
+            .select(&nnrp_transport_provider::TransportSelectionOptions {
+                peer_supported_transports: vec![TransportId::Quic],
+                policy: TransportPolicy::ForceQuic,
+                requested_max_frame_bytes: None,
+                candidate_readiness: readiness.to_vec(),
+                probe_observations: Vec::new(),
+            })
             .expect("available quic backend should satisfy force quic");
 
-        assert_eq!(selection.selected.transport_id, TransportId::Quic);
-        assert_eq!(selection.selected.name, "quic-custom");
+        assert_eq!(selection.selected_provider.transport_id, TransportId::Quic);
+        assert_eq!(selection.selected_provider.name, "quic-custom");
     }
 
     #[tokio::test]
@@ -590,13 +594,17 @@ mod tests {
                     },
                 )]),
                 transport_policy: TransportPolicy::Auto,
-                session: NnrpClientConfig::default(),
+                session_defaults: NnrpClientConfig::default(),
             },
             [Arc::new(QuicProvider) as Arc<dyn NnrpClientProvider>],
         )
         .await?;
         assert_eq!(
-            client.transport_selection().unwrap().selected.transport_id,
+            client
+                .transport_selection()
+                .unwrap()
+                .selected_provider
+                .transport_id,
             TransportId::Quic
         );
         let client_session = client.open_session().await?;

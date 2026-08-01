@@ -17,8 +17,10 @@ pub mod version;
 
 pub use cache::{
     validate_cache_dependencies, CacheAckMetadata, CacheAckStatus, CacheDependency,
-    CacheDependencyState, CacheInvalidateMetadata, CacheInvalidateScope, CacheLease,
-    CacheLeaseOwnerScope, CacheObjectId, CacheObjectKind, CachePutMetadata, CacheValidationFailure,
+    CacheDependencyInvalidation, CacheDependencyState, CacheInvalidateMetadata,
+    CacheInvalidateScope, CacheInvalidation, CacheInvalidationReason, CacheLease,
+    CacheLeaseOutcome, CacheLeaseOwnerScope, CacheLeaseResult, CacheObjectId, CacheObjectKind,
+    CacheObjectVersion, CachePolicyOptions, CachePutMetadata, CacheValidationFailure,
     CACHE_ACK_METADATA_LEN, CACHE_INVALIDATE_METADATA_LEN, CACHE_PUT_FLAGS_KNOWN_MASK,
     CACHE_PUT_METADATA_LEN,
 };

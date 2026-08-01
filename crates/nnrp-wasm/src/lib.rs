@@ -10,10 +10,10 @@ use nnrp_core::{
 };
 use nnrp_transport_provider::{
     select_transport_with_probe, summarize_provider_probe, ProbeMetrics, ProbeSample, ProbeState,
-    ProviderCost, ProviderLimitation, ProviderLimits, RemoteTransportSupport,
-    TransportCandidateDiagnostic, TransportCandidateReadiness, TransportProbeObservation,
-    TransportProviderDescriptor, TransportProviderKind, TransportProviderMetadata,
-    TransportRejectionReason,
+    ProviderCost, ProviderLimitation, ProviderLimits, TransportCandidateDiagnostic,
+    TransportCandidateReadiness, TransportProbeObservation, TransportProviderDescriptor,
+    TransportProviderKind, TransportProviderMetadata, TransportRejectionReason,
+    TransportSelectionOptions,
 };
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -53,7 +53,7 @@ pub fn select_transport_with_probe_json(
     observations_json: &str,
 ) -> Result<String, JsValue> {
     let providers = parse_providers(providers_json)?;
-    let remote = RemoteTransportSupport::new(parse_transport_ids(remote_transports_json)?);
+    let peer_supported_transports = parse_transport_ids(remote_transports_json)?;
     let policy = parse_policy(policy)?;
     let requested_max_frame_bytes = requested_max_frame_bytes
         .as_deref()
@@ -63,11 +63,13 @@ pub fn select_transport_with_probe_json(
     let observations = parse_probe_observations(observations_json)?;
     let selection = select_transport_with_probe(
         &providers,
-        &remote,
-        policy,
-        requested_max_frame_bytes,
-        &readiness,
-        &observations,
+        &TransportSelectionOptions {
+            peer_supported_transports,
+            policy,
+            requested_max_frame_bytes,
+            candidate_readiness: readiness,
+            probe_observations: observations,
+        },
     )
     .map_err(|error| js_error(&error.to_string()))?;
 
@@ -1373,7 +1375,7 @@ struct WasmTransportSelection {
 impl From<nnrp_transport_provider::TransportSelection> for WasmTransportSelection {
     fn from(value: nnrp_transport_provider::TransportSelection) -> Self {
         Self {
-            selected: value.selected.into(),
+            selected: value.selected_provider.into(),
             candidates: value.candidates.into_iter().map(Into::into).collect(),
         }
     }
