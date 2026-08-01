@@ -928,7 +928,7 @@ async fn runtime_configs_are_transport_neutral_and_preserve_session_state(
     let server_config = NnrpServerConfig::default()
         .with_supported_profiles(vec![STANDARD_PROFILE_TOKEN])
         .with_supported_cache_objects(vec![CacheObjectKind::PromptSegment])
-        .with_schema_registry(SchemaRegistry::with_standard_preview3_profiles())
+        .with_schema_registry(SchemaRegistry::standard())
         .with_cache_limits(1, 1024);
     let debug_text = format!("{server_config:?}");
     assert!(debug_text.contains("NnrpServerConfig"));
@@ -3720,8 +3720,9 @@ fn session_open() -> SessionOpenMetadata {
 }
 
 fn open_ack(open: &SessionOpenMetadata) -> SessionOpenAckMetadata {
+    let session_id = open.requested_session_id.max(1);
     SessionOpenAckMetadata {
-        session_id: open.requested_session_id,
+        session_id,
         accepted_profile_id: open.profile_id,
         accepted_priority_class: open.priority_class,
         session_status: SessionStatus::Opened,
@@ -3733,7 +3734,7 @@ fn open_ack(open: &SessionOpenMetadata) -> SessionOpenAckMetadata {
         resume_window_ms: 120_000,
         resume_token_bytes: 0,
         session_extension_bytes: 0,
-        server_session_tag: open.client_session_tag,
+        server_session_tag: session_id as u64,
         route_scope_id: 0,
         session_error_code: SESSION_ERROR_NONE,
         session_flags_ack: 0,

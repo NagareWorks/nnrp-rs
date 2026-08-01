@@ -61,7 +61,7 @@ pub struct NnrpClientConfig {
 impl Default for NnrpClientConfig {
     fn default() -> Self {
         Self {
-            requested_session_id: 1,
+            requested_session_id: 0,
             profile_id: STANDARD_PROFILE_TOKEN,
             schema_id: TOKEN_DELTA_SCHEMA_ID,
             schema_version: TOKEN_DELTA_SCHEMA_VERSION,
@@ -1920,5 +1920,27 @@ impl fmt::Debug for NnrpClientSession {
             .field("transport", &self.transport.transport_kind())
             .field("lifecycle", &self.lifecycle)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    #[test]
+    fn default_session_options_match_the_frozen_sdk_contract() {
+        let config = NnrpClientConfig::default();
+
+        assert_eq!(config.requested_session_id, 0);
+        assert_eq!(config.profile_id, STANDARD_PROFILE_TOKEN);
+        assert_eq!(config.schema_id, TOKEN_DELTA_SCHEMA_ID);
+        assert_eq!(config.schema_version, TOKEN_DELTA_SCHEMA_VERSION);
+        assert_eq!(config.priority_class, SessionPriorityClass::Balanced);
+        assert_eq!(config.default_deadline_ms, 500);
+        assert_eq!(config.max_in_flight_operations, 4);
+        assert_eq!(config.lease_ttl_hint_ms, 30_000);
+        assert!(!config.allow_resume);
+        assert_eq!(config.resume_token_bytes, 0);
+        assert!(config.cache_hints.is_empty());
     }
 }

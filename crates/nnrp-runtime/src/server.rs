@@ -56,7 +56,7 @@ use crate::{
 pub struct NnrpServerConfig {
     pub supported_profiles: Vec<u16>,
     pub supported_cache_objects: Vec<CacheObjectKind>,
-    pub max_cache_objects: usize,
+    pub max_cache_objects: u64,
     pub max_cache_object_bytes: u32,
     pub schema_registry: SchemaRegistry,
     pub resume_token_bytes: u32,
@@ -106,7 +106,7 @@ impl Default for NnrpServerConfig {
             supported_cache_objects: Vec::new(),
             max_cache_objects: 0,
             max_cache_object_bytes: 0,
-            schema_registry: SchemaRegistry::with_standard_preview3_profiles(),
+            schema_registry: SchemaRegistry::standard(),
             resume_token_bytes: 24,
             max_in_flight_operations: 4,
             granted_operation_credit: 2,
@@ -131,7 +131,7 @@ impl NnrpServerConfig {
         self
     }
 
-    pub fn with_cache_limits(mut self, max_objects: usize, max_object_bytes: u32) -> Self {
+    pub fn with_cache_limits(mut self, max_objects: u64, max_object_bytes: u32) -> Self {
         self.max_cache_objects = max_objects;
         self.max_cache_object_bytes = max_object_bytes;
         self
@@ -164,7 +164,7 @@ impl NnrpServerConfig {
 
         if self
             .schema_registry
-            .get(open.schema_id, open.schema_version)
+            .lookup(open.schema_id, open.schema_version)
             .is_none()
         {
             return Err(SESSION_ERROR_SCHEMA_UNSUPPORTED);
@@ -201,7 +201,7 @@ pub struct NnrpServerSession {
     operation_frames: BTreeMap<u64, u32>,
     pressure: RuntimePressureState,
     cache_objects: Vec<CacheObjectId>,
-    max_cache_objects: usize,
+    max_cache_objects: u64,
     sessions: SharedSessionRegistry,
     pending_close: Option<SessionCloseMetadata>,
 }
@@ -1987,7 +1987,8 @@ impl NnrpServerSession {
         if self.cache_objects.contains(&object_id) {
             return Ok(());
         }
-        if self.max_cache_objects != 0 && self.cache_objects.len() >= self.max_cache_objects {
+        if self.max_cache_objects != 0 && self.cache_objects.len() as u64 >= self.max_cache_objects
+        {
             return Err(RuntimeError::UnexpectedMessage(
                 "server cache object limit reached",
             ));
@@ -2247,6 +2248,31 @@ mod accept_tests {
     use crate::RuntimeTransportKind;
 
     struct ReadyListener(RuntimeTransportKind);
+
+    #[test]
+    fn default_session_options_match_the_frozen_sdk_contract() {
+        let config = NnrpServerConfig::default();
+
+        assert_eq!(
+            config.supported_profiles,
+            vec![nnrp_core::STANDARD_PROFILE_TOKEN]
+        );
+        assert!(config.supported_cache_objects.is_empty());
+        assert_eq!(config.max_cache_objects, 0);
+        assert_eq!(config.max_cache_object_bytes, 0);
+        assert!(config
+            .schema_registry
+            .lookup(
+                nnrp_core::TOKEN_DELTA_SCHEMA_ID,
+                nnrp_core::TOKEN_DELTA_SCHEMA_VERSION
+            )
+            .is_some());
+        assert_eq!(config.resume_token_bytes, 24);
+        assert_eq!(config.max_in_flight_operations, 4);
+        assert_eq!(config.granted_operation_credit, 2);
+        assert_eq!(config.lease_ttl_ms, 30_000);
+        assert_eq!(config.resume_window_ms, 120_000);
+    }
 
     #[async_trait]
     impl FramedListener for ReadyListener {

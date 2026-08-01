@@ -170,7 +170,7 @@ impl SchemaRegistry {
         Self::default()
     }
 
-    pub fn with_standard_preview3_profiles() -> Self {
+    pub fn standard() -> Self {
         let mut registry = Self::new();
         registry
             .install(token_delta_schema_descriptor())
@@ -207,8 +207,12 @@ impl SchemaRegistry {
         }
     }
 
-    pub fn get(&self, schema_id: u32, schema_version: u32) -> Option<&SchemaDescriptorHeader> {
+    pub fn lookup(&self, schema_id: u32, schema_version: u32) -> Option<&SchemaDescriptorHeader> {
         self.entries.get(&(schema_id, schema_version))
+    }
+
+    pub fn snapshot(&self) -> Vec<SchemaDescriptorHeader> {
+        self.entries.values().copied().collect()
     }
 
     pub fn invalidate(
@@ -222,7 +226,7 @@ impl SchemaRegistry {
             .ok_or(SchemaRegistryFailure::VersionUnknown)
     }
 
-    pub fn validate_descriptor_binding(
+    pub fn validate_binding(
         &self,
         descriptor: &TypedPayloadDescriptor,
     ) -> Result<(), SchemaRegistryFailure> {
@@ -240,7 +244,7 @@ impl SchemaRegistry {
             return Err(SchemaRegistryFailure::Unknown);
         }
 
-        let Some(schema) = self.get(descriptor.schema_id, descriptor.schema_version) else {
+        let Some(schema) = self.lookup(descriptor.schema_id, descriptor.schema_version) else {
             if self
                 .entries
                 .keys()
@@ -466,7 +470,7 @@ mod tests {
 
         let newer = schema_descriptor(0x20, 2, PROFILE_TENSOR, 0x22);
         assert_eq!(registry.install(newer), Ok(SchemaRegistryAction::Updated));
-        assert_eq!(registry.get(0x20, 2), Some(&newer));
+        assert_eq!(registry.lookup(0x20, 2), Some(&newer));
         assert_eq!(
             registry.invalidate(0x20, 2),
             Ok(SchemaRegistryAction::Invalidated)
@@ -485,16 +489,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            registry.validate_descriptor_binding(&typed_descriptor(PROFILE_UNSPECIFIED, 0, 0, 0)),
+            registry.validate_binding(&typed_descriptor(PROFILE_UNSPECIFIED, 0, 0, 0)),
             Ok(())
         );
         assert_eq!(
-            registry.validate_descriptor_binding(&typed_descriptor(
-                PROFILE_UNSPECIFIED,
-                0x30,
-                1,
-                0
-            )),
+            registry.validate_binding(&typed_descriptor(PROFILE_UNSPECIFIED, 0x30, 1, 0)),
             Err(SchemaRegistryFailure::Incompatible)
         );
         assert_eq!(
@@ -503,26 +502,26 @@ mod tests {
         );
 
         assert_eq!(
-            registry.validate_descriptor_binding(&typed_descriptor(PROFILE_TENSOR, 0x30, 1, 0)),
+            registry.validate_binding(&typed_descriptor(PROFILE_TENSOR, 0x30, 1, 0)),
             Ok(())
         );
         assert_eq!(
-            registry.validate_descriptor_binding(&typed_descriptor(PROFILE_TOKEN, 0x30, 1, 0)),
+            registry.validate_binding(&typed_descriptor(PROFILE_TOKEN, 0x30, 1, 0)),
             Err(SchemaRegistryFailure::Incompatible)
         );
         assert_eq!(
-            registry.validate_descriptor_binding(&typed_descriptor(PROFILE_TENSOR, 0x30, 2, 0)),
+            registry.validate_binding(&typed_descriptor(PROFILE_TENSOR, 0x30, 2, 0)),
             Err(SchemaRegistryFailure::VersionUnknown)
         );
         assert_eq!(
-            registry.validate_descriptor_binding(&typed_descriptor(PROFILE_TENSOR, 0x31, 1, 0)),
+            registry.validate_binding(&typed_descriptor(PROFILE_TENSOR, 0x31, 1, 0)),
             Err(SchemaRegistryFailure::Unknown)
         );
     }
 
     #[test]
-    fn schema_registry_exposes_standard_preview3_token_profile() {
-        let registry = SchemaRegistry::with_standard_preview3_profiles();
+    fn schema_registry_exposes_standard_token_profile_and_snapshot() {
+        let registry = SchemaRegistry::standard();
         let descriptor = token_delta_schema_descriptor();
 
         assert_eq!(descriptor.schema_id, TOKEN_DELTA_SCHEMA_ID);
@@ -533,7 +532,7 @@ mod tests {
             STREAM_SEMANTICS_TOKEN_DELTA
         );
         assert_eq!(
-            registry.validate_descriptor_binding(&typed_descriptor(
+            registry.validate_binding(&typed_descriptor(
                 PROFILE_TOKEN,
                 TOKEN_DELTA_SCHEMA_ID,
                 TOKEN_DELTA_SCHEMA_VERSION,
@@ -541,6 +540,7 @@ mod tests {
             )),
             Ok(())
         );
+        assert_eq!(registry.snapshot(), vec![descriptor]);
     }
 
     #[test]

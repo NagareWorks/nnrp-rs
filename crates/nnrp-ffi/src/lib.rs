@@ -4003,7 +4003,7 @@ unsafe fn nnrp_schema_registry_create_impl(out_registry: *mut NnrpHandle) -> Nnr
     if let Err(status) = store.insert(
         handle,
         NnrpFfiResource::SchemaRegistry {
-            registry: SchemaRegistry::with_standard_preview3_profiles(),
+            registry: SchemaRegistry::standard(),
         },
     ) {
         return status;
@@ -4069,7 +4069,7 @@ unsafe fn nnrp_schema_registry_lookup_impl(
     let store = handle_store();
     match store.get(registry, NnrpHandleKind::SchemaRegistry) {
         Ok(NnrpFfiResource::SchemaRegistry { registry }) => {
-            match registry.get(schema_id, schema_version) {
+            match registry.lookup(schema_id, schema_version) {
                 Some(descriptor) => {
                     *out_descriptor = (*descriptor).into();
                     NnrpFfiStatus::ok()
@@ -4136,7 +4136,7 @@ unsafe fn nnrp_schema_registry_validate_binding_impl(
     let store = handle_store();
     match store.get(registry, NnrpHandleKind::SchemaRegistry) {
         Ok(NnrpFfiResource::SchemaRegistry { registry }) => registry
-            .validate_descriptor_binding(&descriptor)
+            .validate_binding(&descriptor)
             .map(|_| NnrpFfiStatus::ok())
             .unwrap_or_else(schema_registry_failure_status),
         Ok(_) => NnrpFfiStatus::invalid_handle(NnrpHandleKind::SchemaRegistry as u32),
@@ -4332,7 +4332,7 @@ unsafe fn typed_payload_validate_binding_impl(
         Err(status) => return status,
     };
     registry
-        .validate_descriptor_binding(&core_descriptor)
+        .validate_binding(&core_descriptor)
         .map(|_| NnrpFfiStatus::ok())
         .unwrap_or_else(schema_registry_failure_status)
 }
