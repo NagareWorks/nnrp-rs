@@ -24,11 +24,11 @@ use nnrp_core::{
     ResultDropReasonMetadata, ResultHintMetadata, RetryAfterMetadata, RouteHintMetadata,
     RuntimeObjectKind, RuntimeRole, SchedulingMetadata, SchemaDescriptorHeader, SchemaRegistry,
     SchemaRegistryAction, SchemaRegistryFailure, SessionMigrateAckMetadata, SessionMigrateMetadata,
-    SessionOpenAckMetadata, SessionOpenMetadata,
+    SessionOpenAckMetadata, SessionOpenMetadata, SessionPriorityClass,
     SessionRecoveryOutcome as CoreSessionRecoveryOutcome, SupersedeMetadata, TraceContextMetadata,
     TransportId, TypedPayloadDescriptor, OBJECT_DELTA_METADATA_LEN, SESSION_ERROR_NONE,
     SESSION_ERROR_PROFILE_UNSUPPORTED, SESSION_ERROR_RESUME_REJECTED,
-    SESSION_ERROR_SCHEMA_UNSUPPORTED, SESSION_FLAG_ALLOW_RESUME,
+    SESSION_ERROR_SCHEMA_UNSUPPORTED,
 };
 #[cfg(not(test))]
 use nnrp_core::{
@@ -36,15 +36,16 @@ use nnrp_core::{
 };
 #[cfg(not(test))]
 use nnrp_runtime::{
-    BoxedFramedTransport, NnrpClient, NnrpClientConfig, NnrpClientSession, NnrpRuntimeEvent,
-    NnrpServer, NnrpServerConfig, NnrpServerSession, RuntimeTransportKind,
+    NnrpClient, NnrpClientConfig, NnrpClientSession, NnrpRuntimeEvent, NnrpServer,
+    NnrpServerConfig, NnrpServerPolicy, NnrpServerPolicyDecision as RuntimeServerPolicyDecision,
+    NnrpServerSession, RuntimeTransportKind,
 };
+use nnrp_runtime::{NnrpSessionRecoveryTicket, RuntimeError, RuntimeFrameHeader};
 #[cfg(not(test))]
 use nnrp_runtime::{
     NnrpSubmitHeaderContext as RuntimeSubmitHeaderContext,
     NnrpSubmitRequest as RuntimeSubmitRequest,
 };
-use nnrp_runtime::{RuntimeError, RuntimeFrameHeader};
 #[cfg(not(test))]
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -58,7 +59,7 @@ pub use transport::*;
 use sdk_version::{SDK_MAJOR, SDK_MINOR, SDK_PATCH, SDK_PREVIEW, SDK_REVISION};
 
 pub const NNRP_FFI_ABI_MAJOR: u16 = 4;
-pub const NNRP_FFI_ABI_MINOR: u16 = 3;
+pub const NNRP_FFI_ABI_MINOR: u16 = 4;
 pub const NNRP_FFI_ABI_PATCH: u16 = 0;
 
 pub const NNRP_TRANSPORT_SLOT_QUIC: u32 = 0x0000_0001;
@@ -514,7 +515,7 @@ enum NnrpFfiResource {
 #[cfg(not(test))]
 enum NnrpFfiConnectionRuntime {
     Client {
-        carrier: Option<BoxedFramedTransport>,
+        client: Arc<NnrpClient>,
     },
     Server(Arc<NnrpServer>),
     #[cfg(feature = "benchmark-ffi")]
@@ -1052,6 +1053,96 @@ pub(crate) fn invalidate_all_ffi_handles() {
 pub struct NnrpBufferView {
     pub ptr: *const u8,
     pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpU16Slice {
+    pub ptr: *const u16,
+    pub len: usize,
+}
+
+impl NnrpU16Slice {
+    pub const fn empty() -> Self {
+        Self {
+            ptr: core::ptr::null(),
+            len: 0,
+        }
+    }
+
+    pub fn validate(self) -> Result<(), NnrpFfiStatus> {
+        if self.len > 0 && self.ptr.is_null() {
+            return Err(NnrpFfiStatus::invalid_argument(172));
+        }
+        Ok(())
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpU32Slice {
+    pub ptr: *const u32,
+    pub len: usize,
+}
+
+impl NnrpU32Slice {
+    pub const fn empty() -> Self {
+        Self {
+            ptr: core::ptr::null(),
+            len: 0,
+        }
+    }
+
+    pub fn validate(self) -> Result<(), NnrpFfiStatus> {
+        if self.len > 0 && self.ptr.is_null() {
+            return Err(NnrpFfiStatus::invalid_argument(173));
+        }
+        Ok(())
+    }
+}
+
+pub type NnrpServerPolicyCallback = Option<
+    unsafe extern "C" fn(
+        user_data: *mut c_void,
+        session_open_metadata: NnrpBufferView,
+        out_decision: *mut NnrpServerPolicyDecision,
+    ) -> u32,
+>;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct NnrpServerPolicySink {
+    pub user_data: *mut c_void,
+    pub evaluate: NnrpServerPolicyCallback,
+}
+
+impl NnrpServerPolicySink {
+    pub const fn allow_all() -> Self {
+        Self {
+            user_data: core::ptr::null_mut(),
+            evaluate: None,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpServerPolicyDecision {
+    pub accepted: u8,
+    pub reserved0: [u8; 3],
+    pub session_error_code: u32,
+    pub diagnostic: NnrpBufferView,
+}
+
+impl NnrpServerPolicyDecision {
+    pub const fn accept() -> Self {
+        Self {
+            accepted: 1,
+            reserved0: [0; 3],
+            session_error_code: SESSION_ERROR_NONE,
+            diagnostic: NnrpBufferView::empty(),
+        }
+    }
 }
 
 impl NnrpBufferView {
@@ -2029,13 +2120,8 @@ impl From<NnrpRetryAfterDescriptor> for RetryAfterMetadata {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NnrpSessionResumeRequest {
-    pub connection: NnrpHandle,
-    pub requested_session_id: u32,
-    pub generation: u32,
-    pub profile_id: u16,
-    pub schema_id: u32,
-    pub schema_version: u32,
-    pub resume_token_bytes: u32,
+    pub open: NnrpSessionOpenRequest,
+    pub recovery_ticket: NnrpBufferView,
 }
 
 impl From<TypedPayloadDescriptor> for NnrpTypedPayloadDescriptor {
@@ -2311,12 +2397,111 @@ pub struct NnrpClientConnectRequest {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub struct NnrpServerBindRequest {
     pub server_id: u64,
     pub generation: u32,
     pub reserved0: u32,
     pub transport_listener: NnrpHandle,
+    pub supported_profiles: NnrpU16Slice,
+    pub supported_cache_objects: NnrpU32Slice,
+    pub max_cache_objects: u64,
+    pub max_cache_object_bytes: u32,
+    pub resume_token_bytes: u32,
+    pub max_in_flight_operations: u16,
+    pub granted_operation_credit: u16,
+    pub lease_ttl_ms: u32,
+    pub resume_window_ms: u32,
+    pub schema_registry: NnrpHandle,
+    pub application_policy: NnrpServerPolicySink,
+}
+
+impl NnrpServerBindRequest {
+    fn validate(self) -> Result<(), NnrpFfiStatus> {
+        if self.server_id == 0
+            || self.generation == 0
+            || self.reserved0 != 0
+            || self.supported_profiles.len == 0
+            || self.max_in_flight_operations == 0
+            || self.granted_operation_credit > self.max_in_flight_operations
+        {
+            return Err(NnrpFfiStatus::invalid_argument(175));
+        }
+        self.supported_profiles.validate()?;
+        self.supported_cache_objects.validate()
+    }
+
+    #[cfg(not(test))]
+    unsafe fn to_server_config(self) -> Result<NnrpServerConfig, NnrpFfiStatus> {
+        self.validate()?;
+        let supported_profiles = ffi_read_u16_slice(self.supported_profiles).to_vec();
+        let supported_cache_objects = ffi_read_u32_slice(self.supported_cache_objects)
+            .iter()
+            .copied()
+            .map(CacheObjectKind::try_from_u32)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| NnrpFfiStatus::from_core_error(&error))?;
+        let schema_registry = if self.schema_registry.kind == NnrpHandleKind::Invalid as u32 {
+            SchemaRegistry::standard()
+        } else {
+            let store = handle_store();
+            match store.get(self.schema_registry, NnrpHandleKind::SchemaRegistry) {
+                Ok(NnrpFfiResource::SchemaRegistry { registry }) => registry.clone(),
+                Ok(_) => {
+                    return Err(NnrpFfiStatus::invalid_handle(
+                        NnrpHandleKind::SchemaRegistry as u32,
+                    ))
+                }
+                Err(status) => return Err(status),
+            }
+        };
+        let mut config = NnrpServerConfig {
+            supported_profiles,
+            supported_cache_objects,
+            max_cache_objects: self.max_cache_objects,
+            max_cache_object_bytes: self.max_cache_object_bytes,
+            schema_registry,
+            resume_token_bytes: self.resume_token_bytes,
+            max_in_flight_operations: self.max_in_flight_operations,
+            granted_operation_credit: self.granted_operation_credit,
+            lease_ttl_ms: self.lease_ttl_ms,
+            resume_window_ms: self.resume_window_ms,
+            ..NnrpServerConfig::default()
+        };
+        if let Some(evaluate) = self.application_policy.evaluate {
+            config.application_policy = Arc::new(NnrpFfiServerPolicy {
+                user_data: self.application_policy.user_data as usize,
+                evaluate,
+            });
+        }
+        Ok(config)
+    }
+}
+
+impl Default for NnrpServerBindRequest {
+    fn default() -> Self {
+        static DEFAULT_PROFILES: [u16; 1] = [nnrp_core::STANDARD_PROFILE_TOKEN];
+        Self {
+            server_id: 1,
+            generation: 1,
+            reserved0: 0,
+            transport_listener: NnrpHandle::invalid(),
+            supported_profiles: NnrpU16Slice {
+                ptr: DEFAULT_PROFILES.as_ptr(),
+                len: DEFAULT_PROFILES.len(),
+            },
+            supported_cache_objects: NnrpU32Slice::empty(),
+            max_cache_objects: 0,
+            max_cache_object_bytes: 0,
+            resume_token_bytes: 24,
+            max_in_flight_operations: 4,
+            granted_operation_credit: 2,
+            lease_ttl_ms: 30_000,
+            resume_window_ms: 120_000,
+            schema_registry: NnrpHandle::invalid(),
+            application_policy: NnrpServerPolicySink::allow_all(),
+        }
+    }
 }
 
 #[repr(C)]
@@ -2326,8 +2511,143 @@ pub struct NnrpSessionOpenRequest {
     pub requested_session_id: u32,
     pub generation: u32,
     pub profile_id: u16,
+    pub priority_class: u8,
+    pub allow_resume: u8,
     pub schema_id: u32,
     pub schema_version: u32,
+    pub default_deadline_ms: u32,
+    pub max_in_flight_operations: u16,
+    pub reserved0: u16,
+    pub lease_ttl_hint_ms: u32,
+    pub resume_token_bytes: u32,
+    pub cache_hints: NnrpU32Slice,
+}
+
+impl NnrpSessionOpenRequest {
+    fn validate(self) -> Result<(), NnrpFfiStatus> {
+        if self.generation == 0
+            || self.allow_resume > 1
+            || self.reserved0 != 0
+            || self.max_in_flight_operations == 0
+            || (self.allow_resume == 0 && self.resume_token_bytes != 0)
+        {
+            return Err(NnrpFfiStatus::invalid_argument(174));
+        }
+        self.cache_hints.validate()
+    }
+
+    #[cfg(not(test))]
+    unsafe fn to_client_config(self) -> Result<NnrpClientConfig, NnrpFfiStatus> {
+        self.validate()?;
+        let priority_class = SessionPriorityClass::try_from_u8(self.priority_class)
+            .map_err(|error| NnrpFfiStatus::from_core_error(&error))?;
+        let cache_hints = ffi_read_u32_slice(self.cache_hints)
+            .iter()
+            .copied()
+            .map(CacheObjectKind::try_from_u32)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| NnrpFfiStatus::from_core_error(&error))?;
+        Ok(NnrpClientConfig {
+            requested_session_id: self.requested_session_id,
+            profile_id: self.profile_id,
+            schema_id: self.schema_id,
+            schema_version: self.schema_version,
+            priority_class,
+            default_deadline_ms: self.default_deadline_ms,
+            max_in_flight_operations: self.max_in_flight_operations,
+            lease_ttl_hint_ms: self.lease_ttl_hint_ms,
+            allow_resume: self.allow_resume != 0,
+            resume_token_bytes: self.resume_token_bytes,
+            cache_hints,
+        })
+    }
+}
+
+impl Default for NnrpSessionOpenRequest {
+    fn default() -> Self {
+        Self {
+            connection: NnrpHandle::invalid(),
+            requested_session_id: 0,
+            generation: 1,
+            profile_id: nnrp_core::STANDARD_PROFILE_TOKEN,
+            priority_class: SessionPriorityClass::Balanced as u8,
+            allow_resume: 0,
+            schema_id: nnrp_core::TOKEN_DELTA_SCHEMA_ID,
+            schema_version: nnrp_core::TOKEN_DELTA_SCHEMA_VERSION,
+            default_deadline_ms: 500,
+            max_in_flight_operations: 4,
+            reserved0: 0,
+            lease_ttl_hint_ms: 30_000,
+            resume_token_bytes: 0,
+            cache_hints: NnrpU32Slice::empty(),
+        }
+    }
+}
+
+#[cfg(not(test))]
+#[derive(Clone)]
+struct NnrpFfiServerPolicy {
+    user_data: usize,
+    evaluate:
+        unsafe extern "C" fn(*mut c_void, NnrpBufferView, *mut NnrpServerPolicyDecision) -> u32,
+}
+
+#[cfg(not(test))]
+impl core::fmt::Debug for NnrpFfiServerPolicy {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("NnrpFfiServerPolicy")
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(not(test))]
+#[async_trait::async_trait]
+impl NnrpServerPolicy for NnrpFfiServerPolicy {
+    async fn evaluate(&self, open: &SessionOpenMetadata) -> RuntimeServerPolicyDecision {
+        let metadata = match open.to_bytes() {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                return RuntimeServerPolicyDecision::reject(
+                    SESSION_ERROR_PROFILE_UNSUPPORTED,
+                    format!("failed to encode session policy input: {error}"),
+                );
+            }
+        };
+        let mut decision = NnrpServerPolicyDecision::accept();
+        let callback_status = unsafe {
+            (self.evaluate)(
+                self.user_data as *mut c_void,
+                NnrpBufferView {
+                    ptr: metadata.as_ptr(),
+                    len: metadata.len(),
+                },
+                &mut decision,
+            )
+        };
+        if callback_status != NnrpFfiStatusCode::Ok as u32 {
+            return RuntimeServerPolicyDecision::reject(
+                SESSION_ERROR_PROFILE_UNSUPPORTED,
+                format!("server policy callback failed with status {callback_status}"),
+            );
+        }
+        if decision.reserved0 != [0; 3]
+            || decision.accepted > 1
+            || decision.diagnostic.validate().is_err()
+        {
+            return RuntimeServerPolicyDecision::reject(
+                SESSION_ERROR_PROFILE_UNSUPPORTED,
+                "server policy callback returned an invalid decision",
+            );
+        }
+        let diagnostic = unsafe { ffi_read_slice(decision.diagnostic) };
+        let diagnostic = String::from_utf8_lossy(diagnostic).into_owned();
+        if decision.accepted != 0 {
+            RuntimeServerPolicyDecision::accept()
+        } else {
+            RuntimeServerPolicyDecision::reject(decision.session_error_code, diagnostic)
+        }
+    }
 }
 
 #[repr(C)]
@@ -2668,6 +2988,15 @@ pub unsafe extern "C" fn nnrp_client_connect(
             Err(status) => return status,
         };
         let transport_id = runtime_transport_id(carrier.transport_kind());
+        let client = match transport::run_role_async(
+            async move {
+                NnrpClient::from_boxed_transport(carrier, NnrpClientConfig::default()).map(Arc::new)
+            },
+            0,
+        ) {
+            Ok(client) => client,
+            Err(status) => return status,
+        };
 
         let handle = NnrpHandle::new(
             NnrpHandleKind::Connection,
@@ -2680,9 +3009,7 @@ pub unsafe extern "C" fn nnrp_client_connect(
             NnrpFfiResource::Connection {
                 transport_id,
                 role: NnrpFfiConnectionRole::Client,
-                runtime: NnrpFfiConnectionRuntime::Client {
-                    carrier: Some(carrier),
-                },
+                runtime: NnrpFfiConnectionRuntime::Client { client },
             },
         ) {
             return status;
@@ -2745,8 +3072,11 @@ pub unsafe extern "C" fn nnrp_client_open_session(
 ) -> NnrpFfiStatus {
     #[cfg(test)]
     {
-        if out_session.is_null() || request.requested_session_id == 0 || request.generation == 0 {
+        if out_session.is_null() {
             return NnrpFfiStatus::invalid_argument(11);
+        }
+        if let Err(status) = request.validate() {
+            return status;
         }
         let mut store = handle_store();
         match store.get_connection_role(request.connection) {
@@ -2757,11 +3087,12 @@ pub unsafe extern "C" fn nnrp_client_open_session(
             Err(status) => return status,
         }
 
-        let handle = NnrpHandle::new(
-            NnrpHandleKind::Session,
-            request.requested_session_id as u64,
-            request.generation,
-        );
+        let session_id = if request.requested_session_id == 0 {
+            next_handle_id(&mut store, NnrpHandleKind::Session)
+        } else {
+            request.requested_session_id as u64
+        };
+        let handle = NnrpHandle::new(NnrpHandleKind::Session, session_id, request.generation);
         if let Err(status) = store.insert(
             handle,
             NnrpFfiResource::Session {
@@ -2786,22 +3117,21 @@ pub unsafe extern "C" fn nnrp_client_open_session(
 
     #[cfg(not(test))]
     {
-        if out_session.is_null() || request.requested_session_id == 0 || request.generation == 0 {
+        if out_session.is_null() {
             return NnrpFfiStatus::invalid_argument(11);
         }
-        let (transport_id, carrier) = {
-            let mut store = handle_store();
-            match store.get_mut(request.connection, NnrpHandleKind::Connection) {
+        let config = match request.to_client_config() {
+            Ok(config) => config,
+            Err(status) => return status,
+        };
+        let client = {
+            let store = handle_store();
+            match store.get(request.connection, NnrpHandleKind::Connection) {
                 Ok(NnrpFfiResource::Connection {
-                    transport_id,
                     role: NnrpFfiConnectionRole::Client,
-                    runtime: NnrpFfiConnectionRuntime::Client { carrier },
-                }) => {
-                    let Some(carrier) = carrier.take() else {
-                        return NnrpFfiStatus::invalid_state(11);
-                    };
-                    (*transport_id, carrier)
-                }
+                    runtime: NnrpFfiConnectionRuntime::Client { client },
+                    ..
+                }) => Arc::clone(client),
                 Ok(_) => {
                     return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Connection as u32);
                 }
@@ -2809,23 +3139,10 @@ pub unsafe extern "C" fn nnrp_client_open_session(
             }
         };
 
-        let transport_kind = carrier.transport_kind();
-        if runtime_transport_id(transport_kind) != transport_id {
-            return NnrpFfiStatus::invalid_state(12);
-        }
-        let config = NnrpClientConfig {
-            requested_session_id: request.requested_session_id,
-            profile_id: request.profile_id,
-            schema_id: request.schema_id,
-            schema_version: request.schema_version,
-            ..NnrpClientConfig::default()
-        };
-        let client = match NnrpClient::from_boxed_transport(carrier, config) {
-            Ok(client) => client,
-            Err(error) => return transport::role_status_from_runtime_error(error),
-        };
-        let session = match transport::run_role_async(async move { client.open_session().await }, 0)
-        {
+        let session = match transport::run_role_async(
+            async move { client.open_session_with(config).await },
+            0,
+        ) {
             Ok(session) => session,
             Err(status) => return status,
         };
@@ -2869,51 +3186,161 @@ unsafe fn nnrp_client_resume_session_impl(
     out_session: *mut NnrpHandle,
     out_outcome: *mut NnrpSessionRecoveryOutcome,
 ) -> NnrpFfiStatus {
-    if out_session.is_null()
-        || out_outcome.is_null()
-        || request.requested_session_id == 0
-        || request.generation == 0
-        || request.resume_token_bytes == 0
-    {
+    let mut open_request = request.open;
+    if out_session.is_null() || out_outcome.is_null() {
         return NnrpFfiStatus::invalid_argument(39);
     }
-
-    let open = SessionOpenMetadata {
-        requested_session_id: request.requested_session_id,
-        profile_id: request.profile_id,
-        priority_class: nnrp_core::SessionPriorityClass::Balanced,
-        session_flags: SESSION_FLAG_ALLOW_RESUME,
-        schema_id: request.schema_id,
-        schema_version: request.schema_version,
-        default_deadline_ms: 0,
-        max_in_flight_operations: 1,
-        lease_ttl_hint_ms: 0,
-        resume_token_bytes: request.resume_token_bytes,
-        auth_bytes: 0,
-        session_extension_bytes: 0,
-        client_session_tag: request.requested_session_id as u64,
-    };
-    if let Err(error) = validate_session_recovery_request(&open) {
-        return NnrpFfiStatus::from_core_error(&error);
-    }
-
-    let session_request = NnrpSessionOpenRequest {
-        connection: request.connection,
-        requested_session_id: request.requested_session_id,
-        generation: request.generation,
-        profile_id: request.profile_id,
-        schema_id: request.schema_id,
-        schema_version: request.schema_version,
-    };
-    let status = nnrp_client_open_session(session_request, out_session);
-    if status.status_code != NnrpFfiStatusCode::Ok as u32 {
+    if let Err(status) = request.recovery_ticket.validate() {
         return status;
     }
-    *out_outcome = NnrpSessionRecoveryOutcome {
-        outcome_code: NNRP_SESSION_RECOVERY_OUTCOME_RESUMED,
-        resume_window_ms: 0,
-    };
-    NnrpFfiStatus::ok()
+    let ticket =
+        match NnrpSessionRecoveryTicket::from_bytes(ffi_read_slice(request.recovery_ticket)) {
+            Ok(ticket) => ticket,
+            Err(_) => return NnrpFfiStatus::invalid_argument(175),
+        };
+    open_request.requested_session_id = ticket.session_id();
+    open_request.allow_resume = 1;
+    if let Err(status) = open_request.validate() {
+        return status;
+    }
+
+    #[cfg(test)]
+    {
+        let status = nnrp_client_open_session(open_request, out_session);
+        if status.status_code != NnrpFfiStatusCode::Ok as u32 {
+            return status;
+        }
+        *out_outcome = NnrpSessionRecoveryOutcome {
+            outcome_code: NNRP_SESSION_RECOVERY_OUTCOME_RESUMED,
+            resume_window_ms: ticket.resume_window_ms(),
+        };
+        NnrpFfiStatus::ok()
+    }
+
+    #[cfg(not(test))]
+    {
+        let config = match open_request.to_client_config() {
+            Ok(config) => config,
+            Err(status) => return status,
+        };
+        let client = {
+            let store = handle_store();
+            match store.get(open_request.connection, NnrpHandleKind::Connection) {
+                Ok(NnrpFfiResource::Connection {
+                    role: NnrpFfiConnectionRole::Client,
+                    runtime: NnrpFfiConnectionRuntime::Client { client },
+                    ..
+                }) => Arc::clone(client),
+                Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Connection as u32),
+                Err(status) => return status,
+            }
+        };
+        let session = match transport::run_role_async(
+            async move { client.resume_session_with(ticket, config).await },
+            0,
+        ) {
+            Ok(session) => session,
+            Err(status) => return status,
+        };
+        let resume_window_ms = session
+            .recovery_ticket()
+            .map(|ticket| ticket.resume_window_ms())
+            .unwrap_or(0);
+        let handle = NnrpHandle::new(
+            NnrpHandleKind::Session,
+            session.session_id() as u64,
+            open_request.generation,
+        );
+        let mut store = handle_store();
+        if let Err(status) = store.insert(
+            handle,
+            NnrpFfiResource::Session {
+                connection: open_request.connection,
+                profile_id: open_request.profile_id,
+                schema_id: open_request.schema_id,
+                schema_version: open_request.schema_version,
+                runtime: NnrpFfiSessionRuntime::Client(Arc::new(AsyncMutex::new(session))),
+            },
+        ) {
+            return status;
+        }
+        *out_session = handle;
+        *out_outcome = NnrpSessionRecoveryOutcome {
+            outcome_code: NNRP_SESSION_RECOVERY_OUTCOME_RESUMED,
+            resume_window_ms,
+        };
+        NnrpFfiStatus::ok()
+    }
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `out_buffer` and `out_ticket` must point to writable values. The returned
+/// view remains valid until the caller releases `out_buffer` with
+/// `nnrp_buffer_release`.
+#[rustfmt::skip]
+pub unsafe extern "C" fn nnrp_client_session_recovery_ticket(session: NnrpHandle, out_buffer: *mut NnrpHandle, out_ticket: *mut NnrpBufferView) -> NnrpFfiStatus {
+    nnrp_client_session_recovery_ticket_impl(session, out_buffer, out_ticket)
+}
+
+unsafe fn nnrp_client_session_recovery_ticket_impl(
+    session: NnrpHandle,
+    out_buffer: *mut NnrpHandle,
+    out_ticket: *mut NnrpBufferView,
+) -> NnrpFfiStatus {
+    if out_buffer.is_null() || out_ticket.is_null() {
+        return NnrpFfiStatus::invalid_argument(176);
+    }
+
+    #[cfg(test)]
+    {
+        let store = handle_store();
+        if !matches!(
+            store.get(session, NnrpHandleKind::Session),
+            Ok(NnrpFfiResource::Session { .. })
+        ) {
+            return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32);
+        }
+        NnrpFfiStatus::invalid_state(176)
+    }
+
+    #[cfg(not(test))]
+    {
+        let runtime = {
+            let store = handle_store();
+            match store.get(session, NnrpHandleKind::Session) {
+                Ok(NnrpFfiResource::Session {
+                    runtime: NnrpFfiSessionRuntime::Client(runtime),
+                    ..
+                }) => Arc::clone(runtime),
+                Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32),
+                Err(status) => return status,
+            }
+        };
+        let encoded = match transport::run_role_async(
+            async move {
+                let session = runtime.lock().await;
+                session
+                    .recovery_ticket()
+                    .map(|ticket| ticket.to_bytes())
+                    .ok_or(RuntimeError::InvalidRecoveryTicket(
+                        "session did not negotiate recovery",
+                    ))
+            },
+            0,
+        ) {
+            Ok(encoded) => encoded,
+            Err(status) => return status,
+        };
+        let (buffer, view) = match store_owned_buffer(encoded) {
+            Ok(value) => value,
+            Err(status) => return status,
+        };
+        *out_buffer = buffer;
+        *out_ticket = view;
+        NnrpFfiStatus::ok()
+    }
 }
 
 #[no_mangle]
@@ -5235,6 +5662,24 @@ unsafe fn ffi_read_slice<'a>(view: NnrpBufferView) -> &'a [u8] {
     }
 }
 
+#[cfg(not(test))]
+unsafe fn ffi_read_u16_slice<'a>(view: NnrpU16Slice) -> &'a [u16] {
+    if view.len == 0 {
+        &[]
+    } else {
+        core::slice::from_raw_parts(view.ptr, view.len)
+    }
+}
+
+#[cfg(not(test))]
+unsafe fn ffi_read_u32_slice<'a>(view: NnrpU32Slice) -> &'a [u32] {
+    if view.len == 0 {
+        &[]
+    } else {
+        core::slice::from_raw_parts(view.ptr, view.len)
+    }
+}
+
 unsafe fn ffi_write_slice<'a>(view: NnrpBufferViewMut) -> &'a mut [u8] {
     if view.len == 0 {
         &mut []
@@ -5887,12 +6332,11 @@ pub unsafe extern "C" fn nnrp_server_bind(
 ) -> NnrpFfiStatus {
     #[cfg(test)]
     {
-        if out_server.is_null()
-            || request.server_id == 0
-            || request.generation == 0
-            || request.reserved0 != 0
-        {
+        if out_server.is_null() {
             return NnrpFfiStatus::invalid_argument(18);
+        }
+        if let Err(status) = request.validate() {
+            return status;
         }
         let transport_id = match test_transport_id(
             request.transport_listener,
@@ -5933,20 +6377,20 @@ pub unsafe extern "C" fn nnrp_server_bind(
 
     #[cfg(not(test))]
     {
-        if out_server.is_null()
-            || request.server_id == 0
-            || request.generation == 0
-            || request.reserved0 != 0
-        {
+        if out_server.is_null() {
             return NnrpFfiStatus::invalid_argument(18);
         }
+        let config = match request.to_server_config() {
+            Ok(config) => config,
+            Err(status) => return status,
+        };
         let listener = match transport::role_listener(request.transport_listener) {
             Ok(listener) => listener,
             Err(status) => return status,
         };
         let transport_kind = listener.transport_kind();
         let transport_id = runtime_transport_id(transport_kind);
-        let server = match NnrpServer::from_boxed_listener(listener, NnrpServerConfig::default()) {
+        let server = match NnrpServer::from_boxed_listener(listener, config) {
             Ok(server) => Arc::new(server),
             Err(error) => return transport::role_status_from_runtime_error(error),
         };
@@ -7326,6 +7770,87 @@ mod tests {
     use super::*;
     use core::ptr;
 
+    #[test]
+    fn role_configuration_slices_reject_nonempty_null_views() {
+        assert_eq!(NnrpU16Slice::empty().validate(), Ok(()));
+        assert_eq!(NnrpU32Slice::empty().validate(), Ok(()));
+        assert_eq!(
+            NnrpU16Slice {
+                ptr: ptr::null(),
+                len: 1,
+            }
+            .validate(),
+            Err(NnrpFfiStatus::invalid_argument(172))
+        );
+        assert_eq!(
+            NnrpU32Slice {
+                ptr: ptr::null(),
+                len: 1,
+            }
+            .validate(),
+            Err(NnrpFfiStatus::invalid_argument(173))
+        );
+    }
+
+    #[test]
+    fn recovery_ffi_rejects_invalid_ticket_and_output_boundaries() {
+        let mut session = NnrpHandle::invalid();
+        let mut outcome = NnrpSessionRecoveryOutcome {
+            outcome_code: 0,
+            resume_window_ms: 0,
+        };
+        let invalid_ticket = NnrpSessionResumeRequest {
+            open: NnrpSessionOpenRequest::default(),
+            recovery_ticket: NnrpBufferView {
+                ptr: ptr::null(),
+                len: 1,
+            },
+        };
+        assert_eq!(
+            unsafe { nnrp_client_resume_session_impl(invalid_ticket, &mut session, &mut outcome) },
+            NnrpFfiStatus::invalid_argument(1)
+        );
+
+        let ticket = recovery_ticket_bytes(42, 1_000);
+        let invalid_open = NnrpSessionResumeRequest {
+            open: NnrpSessionOpenRequest {
+                max_in_flight_operations: 0,
+                ..NnrpSessionOpenRequest::default()
+            },
+            recovery_ticket: NnrpBufferView {
+                ptr: ticket.as_ptr(),
+                len: ticket.len(),
+            },
+        };
+        assert_eq!(
+            unsafe { nnrp_client_resume_session_impl(invalid_open, &mut session, &mut outcome) },
+            NnrpFfiStatus::invalid_argument(174)
+        );
+
+        let mut buffer = NnrpHandle::invalid();
+        let mut view = NnrpBufferView::empty();
+        assert_eq!(
+            unsafe {
+                nnrp_client_session_recovery_ticket_impl(
+                    NnrpHandle::invalid(),
+                    ptr::null_mut(),
+                    &mut view,
+                )
+            },
+            NnrpFfiStatus::invalid_argument(176)
+        );
+        assert_eq!(
+            unsafe {
+                nnrp_client_session_recovery_ticket_impl(
+                    NnrpHandle::invalid(),
+                    &mut buffer,
+                    &mut view,
+                )
+            },
+            NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32)
+        );
+    }
+
     fn flow_update_payload() -> Vec<u8> {
         FlowUpdateMetadata {
             scope_kind: nnrp_core::FlowScopeKind::Session,
@@ -7389,6 +7914,20 @@ mod tests {
         }
     }
 
+    fn recovery_ticket_bytes(session_id: u32, resume_window_ms: u32) -> Vec<u8> {
+        let token = [0xa5u8; 16];
+        let mut encoded = Vec::with_capacity(28 + token.len());
+        encoded.extend_from_slice(b"NRTK");
+        encoded.extend_from_slice(&1u16.to_le_bytes());
+        encoded.extend_from_slice(&0u16.to_le_bytes());
+        encoded.extend_from_slice(&session_id.to_le_bytes());
+        encoded.extend_from_slice(&(token.len() as u32).to_le_bytes());
+        encoded.extend_from_slice(&resume_window_ms.to_le_bytes());
+        encoded.extend_from_slice(&0u64.to_le_bytes());
+        encoded.extend_from_slice(&token);
+        encoded
+    }
+
     fn server_bind_request(
         server_id: u64,
         generation: u32,
@@ -7402,6 +7941,7 @@ mod tests {
                 NnrpHandleKind::TransportListener,
                 transport_id,
             ),
+            ..NnrpServerBindRequest::default()
         }
     }
 
@@ -8137,6 +8677,7 @@ mod tests {
                         profile_id: 2,
                         schema_id: 0x1001,
                         schema_version: 3,
+                        ..NnrpSessionOpenRequest::default()
                     },
                     &mut session
                 ),
@@ -8204,6 +8745,7 @@ mod tests {
                         profile_id: 2,
                         schema_id: 0x1001,
                         schema_version: 3,
+                        ..NnrpSessionOpenRequest::default()
                     },
                     &mut session
                 ),
@@ -8284,6 +8826,7 @@ mod tests {
                         profile_id: 2,
                         schema_id: 0x1001,
                         schema_version: 3,
+                        ..NnrpSessionOpenRequest::default()
                     },
                     &mut reopened_session
                 ),
@@ -8345,6 +8888,7 @@ mod tests {
                         profile_id: 2,
                         schema_id: 0x1001,
                         schema_version: 3,
+                        ..NnrpSessionOpenRequest::default()
                     },
                     &mut session
                 ),
@@ -8424,6 +8968,7 @@ mod tests {
                         profile_id: 2,
                         schema_id: 0x1001,
                         schema_version: 3,
+                        ..NnrpSessionOpenRequest::default()
                     },
                     &mut session
                 ),
@@ -8536,6 +9081,7 @@ mod tests {
                         profile_id: 2,
                         schema_id: 0x1001,
                         schema_version: 3,
+                        ..NnrpSessionOpenRequest::default()
                     },
                     &mut session
                 ),
@@ -8606,6 +9152,7 @@ mod tests {
                         profile_id: 2,
                         schema_id: 0x1001,
                         schema_version: 3,
+                        ..NnrpSessionOpenRequest::default()
                     },
                     &mut session
                 ),
@@ -9002,6 +9549,7 @@ mod tests {
                         profile_id: 2,
                         schema_id: 0x1001,
                         schema_version: 3,
+                        ..NnrpSessionOpenRequest::default()
                     },
                     &mut session
                 ),
@@ -9143,6 +9691,7 @@ mod tests {
                         profile_id: 2,
                         schema_id: 0x1001,
                         schema_version: 3,
+                        ..NnrpSessionOpenRequest::default()
                     },
                     &mut session
                 ),
@@ -9261,6 +9810,7 @@ mod tests {
                         profile_id: 2,
                         schema_id: 0x1001,
                         schema_version: 3,
+                        ..NnrpSessionOpenRequest::default()
                     },
                     &mut session
                 ),
@@ -9420,6 +9970,7 @@ mod tests {
                         profile_id: 2,
                         schema_id: 0x1001,
                         schema_version: 3,
+                        ..NnrpSessionOpenRequest::default()
                     },
                     &mut session
                 ),
@@ -9509,6 +10060,7 @@ mod tests {
                         profile_id: 2,
                         schema_id: 0x1001,
                         schema_version: 3,
+                        ..NnrpSessionOpenRequest::default()
                     },
                     &mut session
                 ),
@@ -9605,6 +10157,7 @@ mod tests {
                         profile_id: 2,
                         schema_id: 0x1001,
                         schema_version: 3,
+                        ..NnrpSessionOpenRequest::default()
                     },
                     &mut session
                 ),
@@ -10019,6 +10572,7 @@ mod tests {
                         profile_id: 2,
                         schema_id: 0x1001,
                         schema_version: 3,
+                        ..NnrpSessionOpenRequest::default()
                     },
                     &mut session
                 ),
@@ -11335,6 +11889,7 @@ mod tests {
                         profile_id: nnrp_core::PROFILE_TOKEN,
                         schema_id: nnrp_core::TOKEN_DELTA_SCHEMA_ID,
                         schema_version: nnrp_core::TOKEN_DELTA_SCHEMA_VERSION,
+                        ..NnrpSessionOpenRequest::default()
                     },
                     &mut session,
                 ),
@@ -11501,6 +12056,11 @@ mod tests {
     #[test]
     fn ffi_client_resume_session_opens_session_with_recovery_outcome() {
         unsafe {
+            let ticket = recovery_ticket_bytes(88, 120_000);
+            let ticket_view = NnrpBufferView {
+                ptr: ticket.as_ptr(),
+                len: ticket.len(),
+            };
             let mut connection = NnrpHandle::invalid();
             assert_eq!(
                 nnrp_client_connect(
@@ -11518,13 +12078,12 @@ mod tests {
             assert_eq!(
                 nnrp_client_resume_session(
                     NnrpSessionResumeRequest {
-                        connection,
-                        requested_session_id: 88,
-                        generation: 1,
-                        profile_id: nnrp_core::PROFILE_TOKEN,
-                        schema_id: nnrp_core::TOKEN_DELTA_SCHEMA_ID,
-                        schema_version: nnrp_core::TOKEN_DELTA_SCHEMA_VERSION,
-                        resume_token_bytes: 16,
+                        open: NnrpSessionOpenRequest {
+                            connection,
+                            resume_token_bytes: 16,
+                            ..NnrpSessionOpenRequest::default()
+                        },
+                        recovery_ticket: ticket_view,
                     },
                     &mut session,
                     &mut outcome,
@@ -11534,34 +12093,39 @@ mod tests {
             assert_eq!(session.kind, NnrpHandleKind::Session as u32);
             assert_eq!(session.id, 88);
             assert_eq!(outcome.outcome_code, NNRP_SESSION_RECOVERY_OUTCOME_RESUMED);
+            assert_eq!(outcome.resume_window_ms, 120_000);
 
+            let malformed_ticket = [0u8; 28];
             assert_eq!(
                 nnrp_client_resume_session(
                     NnrpSessionResumeRequest {
-                        connection,
-                        requested_session_id: 0,
-                        generation: 1,
-                        profile_id: nnrp_core::PROFILE_TOKEN,
-                        schema_id: nnrp_core::TOKEN_DELTA_SCHEMA_ID,
-                        schema_version: nnrp_core::TOKEN_DELTA_SCHEMA_VERSION,
-                        resume_token_bytes: 16,
+                        open: NnrpSessionOpenRequest {
+                            connection,
+                            resume_token_bytes: 16,
+                            ..NnrpSessionOpenRequest::default()
+                        },
+                        recovery_ticket: NnrpBufferView {
+                            ptr: malformed_ticket.as_ptr(),
+                            len: malformed_ticket.len(),
+                        },
                     },
                     &mut session,
                     &mut outcome,
                 ),
-                NnrpFfiStatus::invalid_argument(39)
+                NnrpFfiStatus::invalid_argument(175)
             );
 
             assert_eq!(
                 nnrp_client_resume_session(
                     NnrpSessionResumeRequest {
-                        connection,
-                        requested_session_id: 90,
-                        generation: 1,
-                        profile_id: nnrp_core::PROFILE_TOKEN,
-                        schema_id: nnrp_core::TOKEN_DELTA_SCHEMA_ID,
-                        schema_version: nnrp_core::TOKEN_DELTA_SCHEMA_VERSION,
-                        resume_token_bytes: 16,
+                        open: NnrpSessionOpenRequest {
+                            connection,
+                            requested_session_id: 90,
+                            allow_resume: 1,
+                            resume_token_bytes: 16,
+                            ..NnrpSessionOpenRequest::default()
+                        },
+                        recovery_ticket: ticket_view,
                     },
                     core::ptr::null_mut(),
                     &mut outcome,
@@ -11571,13 +12135,14 @@ mod tests {
             assert_eq!(
                 nnrp_client_resume_session(
                     NnrpSessionResumeRequest {
-                        connection: NnrpHandle::invalid(),
-                        requested_session_id: 90,
-                        generation: 1,
-                        profile_id: nnrp_core::PROFILE_TOKEN,
-                        schema_id: nnrp_core::TOKEN_DELTA_SCHEMA_ID,
-                        schema_version: nnrp_core::TOKEN_DELTA_SCHEMA_VERSION,
-                        resume_token_bytes: 16,
+                        open: NnrpSessionOpenRequest {
+                            connection: NnrpHandle::invalid(),
+                            requested_session_id: 90,
+                            allow_resume: 1,
+                            resume_token_bytes: 16,
+                            ..NnrpSessionOpenRequest::default()
+                        },
+                        recovery_ticket: ticket_view,
                     },
                     &mut session,
                     &mut outcome,
@@ -11608,6 +12173,7 @@ mod tests {
                         profile_id: nnrp_core::PROFILE_TOKEN,
                         schema_id: nnrp_core::TOKEN_DELTA_SCHEMA_ID,
                         schema_version: nnrp_core::TOKEN_DELTA_SCHEMA_VERSION,
+                        ..NnrpSessionOpenRequest::default()
                     },
                     &mut session,
                 ),
@@ -12325,6 +12891,7 @@ mod tests {
                         profile_id: 2,
                         schema_id: 0x1001,
                         schema_version: 3,
+                        ..NnrpSessionOpenRequest::default()
                     },
                     &mut session,
                 ),
@@ -12425,6 +12992,7 @@ mod tests {
                         profile_id: 2,
                         schema_id: 0x1001,
                         schema_version: 4,
+                        ..NnrpSessionOpenRequest::default()
                     },
                     &mut session,
                 ),
@@ -12510,6 +13078,7 @@ mod tests {
                         profile_id: 2,
                         schema_id: 0x1001,
                         schema_version: 4,
+                        ..NnrpSessionOpenRequest::default()
                     },
                     &mut client_session,
                 ),
@@ -12728,6 +13297,7 @@ mod tests {
                         profile_id: 2,
                         schema_id: 0x1001,
                         schema_version: 4,
+                        ..NnrpSessionOpenRequest::default()
                     },
                     &mut session,
                 ),
@@ -13447,6 +14017,7 @@ mod tests {
                         profile_id: 2,
                         schema_id: 0x1001,
                         schema_version: 3,
+                        ..NnrpSessionOpenRequest::default()
                     },
                     &mut session,
                 ),
@@ -13501,6 +14072,7 @@ mod tests {
                         profile_id: 2,
                         schema_id: 0x1001,
                         schema_version: 3,
+                        ..NnrpSessionOpenRequest::default()
                     },
                     &mut session
                 ),
@@ -13531,6 +14103,7 @@ mod tests {
                         profile_id: 2,
                         schema_id: 0x1001,
                         schema_version: 3,
+                        ..NnrpSessionOpenRequest::default()
                     },
                     &mut session
                 ),
@@ -13546,6 +14119,7 @@ mod tests {
                         profile_id: 2,
                         schema_id: 0x1001,
                         schema_version: 3,
+                        ..NnrpSessionOpenRequest::default()
                     },
                     &mut session
                 ),
@@ -13791,6 +14365,9 @@ mod tests {
             transport_open_max_packet,
             transport_open_reserved,
             adoption_size,
+            server_bind_size,
+            session_open_size,
+            session_resume_size,
             server_accept_size,
             server_accept_session,
             server_accept_generation,
@@ -13798,9 +14375,15 @@ mod tests {
             poll_result_size,
             poll_result_event,
         ) = match (core::mem::size_of::<usize>(), core::mem::align_of::<u64>()) {
-            (8, 8) => (24, 8, 64, 24, 48, 60, 40, 40, 24, 32, 36, 224, 24),
-            (4, 8) => (24, 8, 56, 16, 40, 52, 40, 40, 24, 32, 36, 216, 24),
-            (4, 4) => (20, 4, 52, 16, 36, 48, 36, 36, 20, 28, 32, 184, 20),
+            (8, 8) => (
+                24, 8, 64, 24, 48, 60, 40, 144, 80, 96, 40, 24, 32, 36, 224, 24,
+            ),
+            (4, 8) => (
+                24, 8, 56, 16, 40, 52, 40, 120, 72, 80, 40, 24, 32, 36, 216, 24,
+            ),
+            (4, 4) => (
+                20, 4, 52, 16, 36, 48, 36, 108, 64, 72, 36, 20, 28, 32, 184, 20,
+            ),
             layout => panic!("unsupported FFI ABI layout: {layout:?}"),
         };
 
@@ -13839,11 +14422,40 @@ mod tests {
             core::mem::offset_of!(NnrpClientConnectRequest, transport_connection),
             16
         );
-        assert_eq!(core::mem::size_of::<NnrpServerBindRequest>(), adoption_size);
+        assert_eq!(
+            core::mem::size_of::<NnrpServerBindRequest>(),
+            server_bind_size
+        );
         assert_eq!(core::mem::offset_of!(NnrpServerBindRequest, reserved0), 12);
         assert_eq!(
             core::mem::offset_of!(NnrpServerBindRequest, transport_listener),
             16
+        );
+        assert_eq!(
+            core::mem::size_of::<NnrpSessionOpenRequest>(),
+            session_open_size
+        );
+        assert_eq!(core::mem::offset_of!(NnrpSessionOpenRequest, connection), 0);
+        assert_eq!(
+            core::mem::offset_of!(NnrpSessionOpenRequest, requested_session_id),
+            handle_size
+        );
+        assert_eq!(
+            core::mem::offset_of!(NnrpSessionOpenRequest, cache_hints),
+            if core::mem::size_of::<usize>() == 8 {
+                64
+            } else {
+                56
+            }
+        );
+        assert_eq!(
+            core::mem::size_of::<NnrpSessionResumeRequest>(),
+            session_resume_size
+        );
+        assert_eq!(core::mem::offset_of!(NnrpSessionResumeRequest, open), 0);
+        assert_eq!(
+            core::mem::offset_of!(NnrpSessionResumeRequest, recovery_ticket),
+            session_open_size
         );
 
         assert_eq!(

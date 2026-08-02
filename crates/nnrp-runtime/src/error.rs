@@ -64,6 +64,12 @@ pub enum RuntimeError {
     #[error("unexpected runtime message: {0}")]
     UnexpectedMessage(&'static str),
 
+    #[error("invalid session recovery ticket: {0}")]
+    InvalidRecoveryTicket(&'static str),
+
+    #[error("session open rejected with code {code}: {diagnostic}")]
+    SessionRejected { code: u32, diagnostic: String },
+
     #[error("runtime internal error: {0}")]
     Internal(&'static str),
 }

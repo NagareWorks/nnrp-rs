@@ -7,38 +7,41 @@ use nnrp_core::{
     validate_result_drop_reason_semantics, validate_scheduling_semantics,
     validate_trace_context_semantics, BudgetMetadata, CacheAckMetadata, CacheInvalidateMetadata,
     CacheMissMetadata, CacheObjectKind, CachePutMetadata, CacheReferenceMetadata,
-    CapabilityMetadata, CommonHeader, ConnectionLifecycle, ControlRequestMetadata,
-    FlowUpdateMetadata, FrameSubmitMetadata, InFlightPolicy, MessageType, ObjectDeltaMetadata,
-    ObjectDescriptorMetadata, ObjectReferenceMetadata, ObjectReleaseMetadata,
+    CapabilityMetadata, ClientHelloMetadata, CommonHeader, ConnectionLifecycle,
+    ControlRequestMetadata, FlowUpdateMetadata, FrameSubmitMetadata, InFlightPolicy, MessageType,
+    ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata, ObjectReleaseMetadata,
     PartialResultMetadata, PressureMetadata, ProgressMetadata, RecoverableErrorMetadata,
     ResultDropReasonMetadata, ResultHintMetadata, ResultPushMetadata, ResultTerminalState,
-    RetryAfterMetadata, RouteHintMetadata, SchedulingMetadata, SessionCloseAckMetadata,
-    SessionCloseMetadata, SessionCloseReason, SessionMigrateAckMetadata, SessionMigrateMetadata,
-    SessionOpenAckMetadata, SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchMetadata,
-    SessionPriorityClass, SessionStatus, SupersedeMetadata, TraceContextMetadata, TransportId,
-    CACHE_ACK_METADATA_LEN, CACHE_INVALIDATE_METADATA_LEN, CACHE_MISS_METADATA_LEN,
-    CACHE_PUT_METADATA_LEN, CACHE_REFERENCE_METADATA_LEN, CAPABILITY_METADATA_LEN,
-    CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED, CONTROL_REQUEST_FLAG_HARD_ABORT_ALLOWED,
-    CONTROL_REQUEST_METADATA_LEN, FRAME_SUBMIT_METADATA_LEN, OBJECT_DELTA_METADATA_LEN,
-    OBJECT_DESCRIPTOR_METADATA_LEN, OBJECT_REFERENCE_METADATA_LEN, OBJECT_RELEASE_METADATA_LEN,
-    PARTIAL_RESULT_METADATA_LEN, PRESSURE_METADATA_LEN, PROGRESS_METADATA_LEN,
-    RECOVERABLE_ERROR_METADATA_LEN, RESULT_DROP_REASON_METADATA_LEN, RESULT_HINT_METADATA_LEN,
-    RESULT_PUSH_METADATA_LEN, RETRY_AFTER_METADATA_LEN, ROUTE_HINT_METADATA_LEN,
-    SCHEDULING_FLAG_DISCARD_STALE, SCHEDULING_FLAG_EMIT_DROP_REASON, SCHEDULING_METADATA_LEN,
-    SESSION_CLOSE_ACK_METADATA_LEN, SESSION_CLOSE_METADATA_LEN, SESSION_ERROR_NONE,
-    SESSION_MIGRATE_ACK_METADATA_LEN, SESSION_MIGRATE_METADATA_LEN, SESSION_OPEN_METADATA_LEN,
-    SESSION_PATCH_ACK_METADATA_LEN, SESSION_PATCH_METADATA_LEN, STANDARD_PROFILE_TOKEN,
-    TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION, TRACE_CONTEXT_METADATA_LEN,
+    RetryAfterMetadata, RouteHintMetadata, SchedulingMetadata, ServerHelloAckMetadata,
+    SessionCloseAckMetadata, SessionCloseMetadata, SessionCloseReason, SessionMigrateAckMetadata,
+    SessionMigrateMetadata, SessionOpenAckMetadata, SessionOpenMetadata, SessionPatchAckMetadata,
+    SessionPatchMetadata, SessionPriorityClass, SessionStatus, SupersedeMetadata,
+    TraceContextMetadata, TransportId, CACHE_ACK_METADATA_LEN, CACHE_INVALIDATE_METADATA_LEN,
+    CACHE_MISS_METADATA_LEN, CACHE_PUT_METADATA_LEN, CACHE_REFERENCE_METADATA_LEN,
+    CAPABILITY_METADATA_LEN, CLIENT_HELLO_METADATA_LEN, CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED,
+    CONTROL_REQUEST_FLAG_HARD_ABORT_ALLOWED, CONTROL_REQUEST_METADATA_LEN,
+    FRAME_SUBMIT_METADATA_LEN, OBJECT_DELTA_METADATA_LEN, OBJECT_DESCRIPTOR_METADATA_LEN,
+    OBJECT_REFERENCE_METADATA_LEN, OBJECT_RELEASE_METADATA_LEN, PARTIAL_RESULT_METADATA_LEN,
+    PRESSURE_METADATA_LEN, PROGRESS_METADATA_LEN, RECOVERABLE_ERROR_METADATA_LEN,
+    RESULT_DROP_REASON_METADATA_LEN, RESULT_HINT_METADATA_LEN, RESULT_PUSH_METADATA_LEN,
+    RETRY_AFTER_METADATA_LEN, ROUTE_HINT_METADATA_LEN, SCHEDULING_FLAG_DISCARD_STALE,
+    SCHEDULING_FLAG_EMIT_DROP_REASON, SCHEDULING_METADATA_LEN, SESSION_CLOSE_ACK_METADATA_LEN,
+    SESSION_CLOSE_METADATA_LEN, SESSION_ERROR_NONE, SESSION_MIGRATE_ACK_METADATA_LEN,
+    SESSION_MIGRATE_METADATA_LEN, SESSION_OPEN_METADATA_LEN, SESSION_PATCH_ACK_METADATA_LEN,
+    SESSION_PATCH_METADATA_LEN, STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID,
+    TOKEN_DELTA_SCHEMA_VERSION, TRACE_CONTEXT_METADATA_LEN,
 };
 
 #[cfg(all(feature = "native-tcp", not(target_arch = "wasm32")))]
 use crate::TcpTransport;
 use crate::{
     client_provider::{connect_client, NnrpClientOptions, NnrpClientProvider},
+    multiplex::MultiplexedConnection,
     BoxedFramedTransport, FramedTransport, NnrpRuntimeEvent, NnrpRuntimeEventMetadata,
     NnrpRuntimeEventTail, NnrpSubmitRequest, NnrpTerminalEvent, OperationLifecycleEvent,
     RuntimeError, RuntimeFrameHeader, RuntimePacket, RuntimePressureState,
 };
+use futures_util::lock::Mutex as AsyncMutex;
 use nnrp_transport_provider::TransportSelection;
 use std::sync::Arc;
 
@@ -91,9 +94,11 @@ impl NnrpClientConfig {
 }
 
 pub struct NnrpClient {
-    transport: BoxedFramedTransport,
+    connection: MultiplexedConnection,
     config: NnrpClientConfig,
-    lifecycle: ConnectionLifecycle,
+    lifecycle: AsyncMutex<ConnectionLifecycle>,
+    hello: AsyncMutex<Option<ClientHelloMetadata>>,
+    open_lock: AsyncMutex<()>,
     transport_selection: Option<TransportSelection>,
 }
 
@@ -108,6 +113,131 @@ pub struct NnrpClientSession {
     lifecycle: ConnectionLifecycle,
     pressure: RuntimePressureState,
     pending_events: VecDeque<(NnrpClientEvent, RuntimePacket)>,
+    recovery_ticket: Option<NnrpSessionRecoveryTicket>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NnrpSessionRecoveryTicket {
+    session_id: u32,
+    resume_token: Vec<u8>,
+    resume_from_operation_id: Option<u64>,
+    resume_window_ms: u32,
+}
+
+impl NnrpSessionRecoveryTicket {
+    const MAGIC: [u8; 4] = *b"NRTK";
+    const VERSION: u16 = 1;
+    const FIXED_PREFIX_BYTES: usize = 28;
+    const FLAG_RESUME_FROM_OPERATION_ID_PRESENT: u16 = 1;
+
+    pub fn session_id(&self) -> u32 {
+        self.session_id
+    }
+
+    pub fn resume_from_operation_id(&self) -> Option<u64> {
+        self.resume_from_operation_id
+    }
+
+    pub fn resume_window_ms(&self) -> u32 {
+        self.resume_window_ms
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let flags = if self.resume_from_operation_id.is_some() {
+            Self::FLAG_RESUME_FROM_OPERATION_ID_PRESENT
+        } else {
+            0
+        };
+        let token_len = u32::try_from(self.resume_token.len())
+            .expect("runtime-issued recovery tokens always fit the wire length");
+        let mut encoded = Vec::with_capacity(Self::FIXED_PREFIX_BYTES + self.resume_token.len());
+        encoded.extend_from_slice(&Self::MAGIC);
+        encoded.extend_from_slice(&Self::VERSION.to_le_bytes());
+        encoded.extend_from_slice(&flags.to_le_bytes());
+        encoded.extend_from_slice(&self.session_id.to_le_bytes());
+        encoded.extend_from_slice(&token_len.to_le_bytes());
+        encoded.extend_from_slice(&self.resume_window_ms.to_le_bytes());
+        encoded.extend_from_slice(&self.resume_from_operation_id.unwrap_or(0).to_le_bytes());
+        encoded.extend_from_slice(&self.resume_token);
+        encoded
+    }
+
+    pub fn from_bytes(encoded: &[u8]) -> Result<Self, RuntimeError> {
+        if encoded.len() < Self::FIXED_PREFIX_BYTES {
+            return Err(RuntimeError::InvalidRecoveryTicket("ticket is truncated"));
+        }
+        if encoded[..4] != Self::MAGIC {
+            return Err(RuntimeError::InvalidRecoveryTicket(
+                "magic does not match NRTK",
+            ));
+        }
+        let version = read_ticket_u16(encoded, 4);
+        if version != Self::VERSION {
+            return Err(RuntimeError::InvalidRecoveryTicket(
+                "version is unsupported",
+            ));
+        }
+        let flags = read_ticket_u16(encoded, 6);
+        if flags & !Self::FLAG_RESUME_FROM_OPERATION_ID_PRESENT != 0 {
+            return Err(RuntimeError::InvalidRecoveryTicket(
+                "reserved flags are non-zero",
+            ));
+        }
+        let session_id = read_ticket_u32(encoded, 8);
+        if session_id == 0 {
+            return Err(RuntimeError::InvalidRecoveryTicket("session id is zero"));
+        }
+        let token_len = usize::try_from(read_ticket_u32(encoded, 12))
+            .map_err(|_| RuntimeError::InvalidRecoveryTicket("token length is invalid"))?;
+        if token_len == 0 {
+            return Err(RuntimeError::InvalidRecoveryTicket("resume token is empty"));
+        }
+        let expected_len = Self::FIXED_PREFIX_BYTES.checked_add(token_len).ok_or(
+            RuntimeError::InvalidRecoveryTicket("ticket length overflows"),
+        )?;
+        if encoded.len() != expected_len {
+            return Err(RuntimeError::InvalidRecoveryTicket(
+                "ticket has truncated or trailing token bytes",
+            ));
+        }
+        let resume_window_ms = read_ticket_u32(encoded, 16);
+        let resume_from_operation_id = (flags & Self::FLAG_RESUME_FROM_OPERATION_ID_PRESENT != 0)
+            .then(|| read_ticket_u64(encoded, 20));
+        Ok(Self {
+            session_id,
+            resume_token: encoded[Self::FIXED_PREFIX_BYTES..].to_vec(),
+            resume_from_operation_id,
+            resume_window_ms,
+        })
+    }
+
+    pub(crate) fn resume_token(&self) -> &[u8] {
+        &self.resume_token
+    }
+}
+
+fn read_ticket_u16(encoded: &[u8], offset: usize) -> u16 {
+    u16::from_le_bytes(
+        encoded[offset..offset + 2]
+            .try_into()
+            .expect("ticket prefix checked"),
+    )
+}
+
+fn read_ticket_u32(encoded: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(
+        encoded[offset..offset + 4]
+            .try_into()
+            .expect("ticket prefix checked"),
+    )
+}
+
+fn read_ticket_u64(encoded: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes(
+        encoded[offset..offset + 8]
+            .try_into()
+            .expect("ticket prefix checked"),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -259,9 +389,11 @@ impl NnrpClient {
     {
         let (transport, config, selection) = connect_client(options, providers).await?;
         Ok(Self {
-            transport,
+            connection: MultiplexedConnection::start(transport),
             config,
-            lifecycle: ConnectionLifecycle::new(),
+            lifecycle: AsyncMutex::new(ConnectionLifecycle::new()),
+            hello: AsyncMutex::new(None),
+            open_lock: AsyncMutex::new(()),
             transport_selection: Some(selection),
         })
     }
@@ -299,15 +431,56 @@ impl NnrpClient {
         config: NnrpClientConfig,
     ) -> Result<Self, RuntimeError> {
         Ok(Self {
-            transport,
+            connection: MultiplexedConnection::start(transport),
             config,
-            lifecycle: ConnectionLifecycle::new(),
+            lifecycle: AsyncMutex::new(ConnectionLifecycle::new()),
+            hello: AsyncMutex::new(None),
+            open_lock: AsyncMutex::new(()),
             transport_selection: None,
         })
     }
 
-    pub async fn open_session(mut self) -> Result<NnrpClientSession, RuntimeError> {
-        let metadata = self.session_open_metadata();
+    pub async fn open_session(&self) -> Result<NnrpClientSession, RuntimeError> {
+        self.open_session_with(self.config.clone()).await
+    }
+
+    pub async fn open_session_with(
+        &self,
+        config: NnrpClientConfig,
+    ) -> Result<NnrpClientSession, RuntimeError> {
+        self.open_session_inner(config, None).await
+    }
+
+    pub async fn resume_session(
+        &self,
+        ticket: NnrpSessionRecoveryTicket,
+    ) -> Result<NnrpClientSession, RuntimeError> {
+        self.resume_session_with(ticket, self.config.clone()).await
+    }
+
+    pub async fn resume_session_with(
+        &self,
+        ticket: NnrpSessionRecoveryTicket,
+        mut config: NnrpClientConfig,
+    ) -> Result<NnrpClientSession, RuntimeError> {
+        config.requested_session_id = ticket.session_id;
+        config.allow_resume = true;
+        self.open_session_inner(config, Some(ticket)).await
+    }
+
+    async fn open_session_inner(
+        &self,
+        config: NnrpClientConfig,
+        resume_ticket: Option<NnrpSessionRecoveryTicket>,
+    ) -> Result<NnrpClientSession, RuntimeError> {
+        let _open_guard = self.open_lock.lock().await;
+        self.ensure_hello(&config).await?;
+
+        let resume_token = resume_ticket
+            .as_ref()
+            .map(NnrpSessionRecoveryTicket::resume_token)
+            .unwrap_or_default();
+        let metadata = Self::session_open_metadata(&config, resume_token.len())?;
         let mut metadata_bytes = vec![0u8; SESSION_OPEN_METADATA_LEN];
         metadata.write(&mut metadata_bytes)?;
 
@@ -316,11 +489,15 @@ impl NnrpClient {
             SESSION_OPEN_METADATA_LEN as u32,
             0,
         );
-        self.transport
-            .write_packet(&RuntimePacket::new(header, metadata_bytes, Vec::new())?)
+        self.connection
+            .write_packet(RuntimePacket::new(
+                header,
+                metadata_bytes,
+                resume_token.to_vec(),
+            )?)
             .await?;
 
-        let ack_packet = self.transport.read_packet().await?;
+        let ack_packet = self.connection.read_control_packet().await?;
         if ack_packet.header.message_type != MessageType::SessionOpenAck {
             return Err(RuntimeError::UnexpectedMessage(
                 "client expected SESSION_OPEN_ACK",
@@ -329,15 +506,60 @@ impl NnrpClient {
 
         let ack = SessionOpenAckMetadata::parse(&ack_packet.metadata)?;
         nnrp_core::validate_session_recovery_ack(&metadata, &ack)?;
+        let expected_body_len = usize::try_from(ack.resume_token_bytes)
+            .ok()
+            .and_then(|token| {
+                usize::try_from(ack.session_extension_bytes)
+                    .ok()
+                    .and_then(|extension| token.checked_add(extension))
+            })
+            .ok_or(RuntimeError::UnexpectedMessage(
+                "SESSION_OPEN_ACK body length overflows",
+            ))?;
+        if ack_packet.body.len() != expected_body_len {
+            return Err(RuntimeError::UnexpectedMessage(
+                "SESSION_OPEN_ACK body length does not match token and extension lengths",
+            ));
+        }
         if !matches!(
             ack.session_status,
             SessionStatus::Opened | SessionStatus::Resumed
         ) {
+            return Err(RuntimeError::SessionRejected {
+                code: ack.session_error_code,
+                diagnostic: String::from_utf8_lossy(&ack_packet.body).into_owned(),
+            });
+        }
+        if ack.session_extension_bytes != 0 {
             return Err(RuntimeError::UnexpectedMessage(
-                "client session open was not accepted",
+                "accepted SESSION_OPEN_ACK has an unsupported extension body",
             ));
         }
-        self.lifecycle.apply_session_open_ack(&ack)?;
+        if ack.resume_token_bytes > 0
+            && config.resume_token_bytes > 0
+            && ack.resume_token_bytes > config.resume_token_bytes
+        {
+            return Err(RuntimeError::UnexpectedMessage(
+                "SESSION_OPEN_ACK resume token exceeds client capacity",
+            ));
+        }
+        let recovery_ticket = if ack.resume_token_bytes > 0 {
+            Some(NnrpSessionRecoveryTicket {
+                session_id: ack.session_id,
+                resume_token: ack_packet.body,
+                resume_from_operation_id: resume_ticket
+                    .and_then(|ticket| ticket.resume_from_operation_id),
+                resume_window_ms: ack.resume_window_ms,
+            })
+        } else {
+            None
+        };
+        let lifecycle = {
+            let mut lifecycle = self.lifecycle.lock().await;
+            lifecycle.apply_session_open_ack(&ack)?;
+            lifecycle.clone()
+        };
+        let transport = self.connection.register_session(ack.session_id).await?;
 
         Ok(NnrpClientSession {
             session_id: ack.session_id,
@@ -346,39 +568,139 @@ impl NnrpClient {
             frame_operations: BTreeMap::new(),
             seen_operation_ids: BTreeSet::new(),
             last_operation_id: 0,
-            transport: self.transport,
-            lifecycle: self.lifecycle,
+            transport: Box::new(transport),
+            lifecycle,
             pressure: RuntimePressureState::default(),
             pending_events: VecDeque::new(),
+            recovery_ticket,
         })
     }
 
-    fn session_open_metadata(&self) -> SessionOpenMetadata {
-        SessionOpenMetadata {
-            requested_session_id: self.config.requested_session_id,
-            profile_id: self.config.profile_id,
-            priority_class: self.config.priority_class,
-            session_flags: if self.config.allow_resume {
+    async fn ensure_hello(&self, config: &NnrpClientConfig) -> Result<(), RuntimeError> {
+        let cache_object_bitmap = cache_object_bitmap(&config.cache_hints)?;
+        let mut hello = self.hello.lock().await;
+        if let Some(existing) = *hello {
+            if cache_object_bitmap & !existing.cache_object_bitmap != 0 {
+                return Err(RuntimeError::UnexpectedMessage(
+                    "session cache hints exceed the established CLIENT_HELLO capability",
+                ));
+            }
+            return Ok(());
+        }
+
+        let metadata = ClientHelloMetadata {
+            min_version_major: nnrp_core::CURRENT_VERSION_MAJOR,
+            max_version_major: nnrp_core::CURRENT_VERSION_MAJOR,
+            supported_wire_format_bitmap: 1u16 << nnrp_core::CURRENT_WIRE_FORMAT,
+            supported_profile_bitmap: 0x0000_0003,
+            supported_payload_kind_bitmap: nnrp_core::PayloadKindBitmap::TENSOR
+                | nnrp_core::PayloadKindBitmap::TOKEN_CHUNK
+                | nnrp_core::PayloadKindBitmap::STRUCTURED_EVENT
+                | nnrp_core::PayloadKindBitmap::TOOL_DELTA
+                | nnrp_core::PayloadKindBitmap::OPAQUE_BYTES,
+            supported_codec_bitmap: 0,
+            supported_compression_bitmap: 0,
+            supported_dtype_bitmap: 0,
+            supported_layout_bitmap: 0,
+            cache_digest_bitmap: 0,
+            cache_object_bitmap,
+            cache_namespace_count: 0,
+            max_lane_count: 1,
+            max_cache_entries: 0,
+            max_cache_bytes: 0,
+            target_cadence_x100: 0,
+            latency_budget_ms: config.default_deadline_ms.min(u16::MAX as u32) as u16,
+            quality_tier: 0,
+            degrade_policy: 0,
+            requested_session_id: config.requested_session_id,
+            auth_bytes: 0,
+            control_extension_bytes: 0,
+        };
+        let header = CommonHeader::new(
+            MessageType::ClientHello,
+            CLIENT_HELLO_METADATA_LEN as u32,
+            0,
+        );
+        self.connection
+            .write_packet(RuntimePacket::new(
+                header,
+                metadata.to_bytes()?.to_vec(),
+                Vec::new(),
+            )?)
+            .await?;
+        let packet = self.connection.read_control_packet().await?;
+        if packet.header.message_type != MessageType::ServerHelloAck {
+            return Err(RuntimeError::UnexpectedMessage(
+                "client expected SERVER_HELLO_ACK",
+            ));
+        }
+        if !packet.body.is_empty() {
+            return Err(RuntimeError::UnexpectedMessage(
+                "SERVER_HELLO_ACK body must be empty without extensions",
+            ));
+        }
+        let ack = ServerHelloAckMetadata::parse(&packet.metadata)?;
+        ack.validate_against_client_hello(&metadata)?;
+        *hello = Some(metadata);
+        Ok(())
+    }
+
+    fn session_open_metadata(
+        config: &NnrpClientConfig,
+        resume_token_bytes: usize,
+    ) -> Result<SessionOpenMetadata, RuntimeError> {
+        let resume_token_bytes = u32::try_from(resume_token_bytes).map_err(|_| {
+            RuntimeError::UnexpectedMessage("session resume token exceeds wire length")
+        })?;
+        Ok(SessionOpenMetadata {
+            requested_session_id: config.requested_session_id,
+            profile_id: config.profile_id,
+            priority_class: config.priority_class,
+            session_flags: if config.allow_resume {
                 nnrp_core::SESSION_FLAG_ALLOW_RESUME
             } else {
                 0
             },
-            schema_id: self.config.schema_id,
-            schema_version: self.config.schema_version,
-            default_deadline_ms: self.config.default_deadline_ms,
-            max_in_flight_operations: self.config.max_in_flight_operations,
-            lease_ttl_hint_ms: self.config.lease_ttl_hint_ms,
-            resume_token_bytes: self.config.resume_token_bytes,
+            schema_id: config.schema_id,
+            schema_version: config.schema_version,
+            default_deadline_ms: config.default_deadline_ms,
+            max_in_flight_operations: config.max_in_flight_operations,
+            lease_ttl_hint_ms: config.lease_ttl_hint_ms,
+            resume_token_bytes,
             auth_bytes: 0,
             session_extension_bytes: 0,
-            client_session_tag: self.config.requested_session_id as u64,
-        }
+            client_session_tag: config.requested_session_id as u64,
+        })
     }
+}
+
+fn cache_object_bitmap(cache_hints: &[CacheObjectKind]) -> Result<u16, RuntimeError> {
+    cache_hints.iter().try_fold(0u16, |bitmap, kind| {
+        let bit = (*kind as u32)
+            .checked_sub(1)
+            .ok_or(RuntimeError::UnexpectedMessage(
+                "cache object kind cannot map to CLIENT_HELLO bitmap",
+            ))?;
+        let mask = 1u16
+            .checked_shl(bit)
+            .ok_or(RuntimeError::UnexpectedMessage(
+                "cache object kind exceeds CLIENT_HELLO bitmap",
+            ))?;
+        Ok(bitmap | mask)
+    })
 }
 
 impl NnrpClientSession {
     pub fn session_id(&self) -> u32 {
         self.session_id
+    }
+
+    pub fn recovery_ticket(&self) -> Option<NnrpSessionRecoveryTicket> {
+        self.recovery_ticket.clone().map(|mut ticket| {
+            ticket.resume_from_operation_id =
+                (self.last_operation_id != 0).then_some(self.last_operation_id);
+            ticket
+        })
     }
 
     pub fn lifecycle(&self) -> &ConnectionLifecycle {
@@ -2072,7 +2394,7 @@ impl fmt::Debug for NnrpClient {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("NnrpClient")
-            .field("transport", &self.transport.transport_kind())
+            .field("transport", &self.connection.transport_kind())
             .field("config", &self.config)
             .field("lifecycle", &self.lifecycle)
             .finish()
@@ -2110,6 +2432,72 @@ mod config_tests {
         assert!(!config.allow_resume);
         assert_eq!(config.resume_token_bytes, 0);
         assert!(config.cache_hints.is_empty());
+    }
+
+    #[test]
+    fn recovery_ticket_uses_the_canonical_nrtk_envelope() {
+        let ticket = NnrpSessionRecoveryTicket {
+            session_id: 0x1122_3344,
+            resume_token: vec![0xaa, 0xbb, 0xcc],
+            resume_from_operation_id: Some(0x0102_0304_0506_0708),
+            resume_window_ms: 90_000,
+        };
+
+        let encoded = ticket.to_bytes();
+
+        assert_eq!(&encoded[..4], b"NRTK");
+        assert_eq!(read_ticket_u16(&encoded, 4), 1);
+        assert_eq!(read_ticket_u16(&encoded, 6), 1);
+        assert_eq!(read_ticket_u32(&encoded, 8), 0x1122_3344);
+        assert_eq!(read_ticket_u32(&encoded, 12), 3);
+        assert_eq!(read_ticket_u32(&encoded, 16), 90_000);
+        assert_eq!(read_ticket_u64(&encoded, 20), 0x0102_0304_0506_0708);
+        assert_eq!(&encoded[28..], &[0xaa, 0xbb, 0xcc]);
+        assert_eq!(
+            NnrpSessionRecoveryTicket::from_bytes(&encoded).unwrap(),
+            ticket
+        );
+    }
+
+    #[test]
+    fn recovery_ticket_rejects_every_noncanonical_envelope_shape() {
+        let ticket = NnrpSessionRecoveryTicket {
+            session_id: 7,
+            resume_token: vec![1, 2, 3],
+            resume_from_operation_id: None,
+            resume_window_ms: 120_000,
+        };
+        let canonical = ticket.to_bytes();
+        let mut invalid = Vec::new();
+
+        invalid.push(canonical[..27].to_vec());
+        let mut wrong_magic = canonical.clone();
+        wrong_magic[0] = b'X';
+        invalid.push(wrong_magic);
+        let mut wrong_version = canonical.clone();
+        wrong_version[4..6].copy_from_slice(&2u16.to_le_bytes());
+        invalid.push(wrong_version);
+        let mut reserved_flags = canonical.clone();
+        reserved_flags[6..8].copy_from_slice(&2u16.to_le_bytes());
+        invalid.push(reserved_flags);
+        let mut zero_session = canonical.clone();
+        zero_session[8..12].fill(0);
+        invalid.push(zero_session);
+        let mut empty_token = canonical.clone();
+        empty_token[12..16].fill(0);
+        empty_token.truncate(28);
+        invalid.push(empty_token);
+        invalid.push(canonical[..canonical.len() - 1].to_vec());
+        let mut trailing = canonical.clone();
+        trailing.push(0);
+        invalid.push(trailing);
+
+        for encoded in invalid {
+            assert!(matches!(
+                NnrpSessionRecoveryTicket::from_bytes(&encoded),
+                Err(RuntimeError::InvalidRecoveryTicket(_))
+            ));
+        }
     }
 
     #[test]

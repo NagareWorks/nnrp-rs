@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PROTOCOL_VERSION = "NNRP/1"
-FFI_ABI_VERSION = "4.3.0"
+FFI_ABI_VERSION = "4.4.0"
 EXPECTED_EXPORTS = [
     "nnrp_current_protocol_version",
     "nnrp_runtime_capabilities",
@@ -28,6 +28,8 @@ EXPECTED_EXPORTS = [
     "nnrp_client_connect",
     "nnrp_session_open",
     "nnrp_client_open_session",
+    "nnrp_client_resume_session",
+    "nnrp_client_session_recovery_ticket",
     "nnrp_submit",
     "nnrp_client_submit",
     "nnrp_session_close",
@@ -178,11 +180,20 @@ def build_library(release: bool, target: str | None, transport_scope: str) -> No
     subprocess.run(command, cwd=ROOT, check=True)
 
 
+def cargo_target_root() -> Path:
+    configured = os.environ.get("CARGO_TARGET_DIR")
+    if configured is None:
+        return ROOT / "target"
+    target_root = Path(configured)
+    return target_root if target_root.is_absolute() else ROOT / target_root
+
+
 def locate_library(os_name: str, library_kind: str, release: bool, target: str | None) -> Path:
+    target_root = cargo_target_root()
     if target:
-        profile_dir = ROOT / "target" / target / ("release" if release else "debug")
+        profile_dir = target_root / target / ("release" if release else "debug")
     else:
-        profile_dir = ROOT / "target" / ("release" if release else "debug")
+        profile_dir = target_root / ("release" if release else "debug")
     library = profile_dir / expected_library_name(os_name, library_kind)
     if not library.is_file():
         raise SystemExit(f"expected native library was not found: {library}")

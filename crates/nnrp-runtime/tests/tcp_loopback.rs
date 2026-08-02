@@ -3,23 +3,24 @@ use nnrp_core::NnrpError;
 use nnrp_core::{
     BackpressureLevel, BudgetMetadata, CacheAckMetadata, CacheAckStatus, CacheInvalidateMetadata,
     CacheInvalidateScope, CacheMissMetadata, CacheMissReason, CacheObjectId, CacheObjectKind,
-    CachePutMetadata, CacheReferenceMetadata, CacheReuseScope, CapabilityMetadata, CommonHeader,
-    ControlRequestMetadata, FlowScopeKind, FlowUpdateMetadata, FlowUpdateReason,
-    FrameSubmitMetadata, HeaderFlags, InFlightPolicy, InputProfile, MemoryLocationHint,
-    MessageType, ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata,
-    ObjectReleaseMetadata, ObjectReleaseReason, OperationState, OwnershipHint,
-    PartialResultMetadata, PayloadKindBitmap, PressureMetadata, ProgressMetadata, ResultClass,
-    ResultDropReasonMetadata, ResultPushMetadata, ResultTerminalState, RetryAfterMetadata,
-    RouteHintMetadata, RuntimeObjectKind, RuntimeRole, SchedulingMetadata, SchemaRegistry,
-    SessionCloseMetadata, SessionCloseReason, SessionMigrateAckMetadata, SessionOpenAckMetadata,
-    SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata,
-    SessionPatchRejectReason, SessionPriorityClass, SessionStatus, SubmitMode, SupersedeMetadata,
-    TileIndexMode, TraceContextMetadata, TransportId, TransportProbeAckMetadata,
-    TransportProbeMetadata, FLOW_UPDATE_FLAG_CREDIT_VALID, FRAME_SUBMIT_METADATA_LEN,
+    CachePutMetadata, CacheReferenceMetadata, CacheReuseScope, CapabilityMetadata,
+    ClientHelloMetadata, CommonHeader, ControlRequestMetadata, FlowScopeKind, FlowUpdateMetadata,
+    FlowUpdateReason, FrameSubmitMetadata, HeaderFlags, InFlightPolicy, InputProfile,
+    MemoryLocationHint, MessageType, ObjectDeltaMetadata, ObjectDescriptorMetadata,
+    ObjectReferenceMetadata, ObjectReleaseMetadata, ObjectReleaseReason, OperationState,
+    OwnershipHint, PartialResultMetadata, PayloadKindBitmap, PressureMetadata, ProgressMetadata,
+    ResultClass, ResultDropReasonMetadata, ResultPushMetadata, ResultTerminalState,
+    RetryAfterMetadata, RouteHintMetadata, RuntimeObjectKind, RuntimeRole, SchedulingMetadata,
+    SchemaRegistry, ServerHelloAckMetadata, SessionCloseMetadata, SessionCloseReason,
+    SessionMigrateAckMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
+    SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata, SessionPatchRejectReason,
+    SessionPriorityClass, SessionStatus, SubmitMode, SupersedeMetadata, TileIndexMode,
+    TraceContextMetadata, TransportId, TransportProbeAckMetadata, TransportProbeMetadata,
+    CLIENT_HELLO_METADATA_LEN, FLOW_UPDATE_FLAG_CREDIT_VALID, FRAME_SUBMIT_METADATA_LEN,
     RESULT_DROP_REASON_DEADLINE_EXPIRED, RESULT_PUSH_METADATA_LEN, RETRY_AFTER_METADATA_LEN,
-    SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE, SESSION_OPEN_ACK_METADATA_LEN,
-    SESSION_OPEN_METADATA_LEN, STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID,
-    TOKEN_DELTA_SCHEMA_VERSION,
+    SERVER_HELLO_ACK_METADATA_LEN, SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE,
+    SESSION_OPEN_ACK_METADATA_LEN, SESSION_OPEN_METADATA_LEN, STANDARD_PROFILE_TOKEN,
+    TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
 };
 use nnrp_runtime::{
     BoxedFramedTransport, FramedListener, FramedTransport, NnrpClient, NnrpClientConfig,
@@ -695,7 +696,13 @@ async fn tcp_loopback_preserves_partial_result_order_with_interleaving() -> Resu
 
 #[tokio::test]
 async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), RuntimeError> {
-    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let server = NnrpServer::bind_tcp(
+        "127.0.0.1:0",
+        NnrpServerConfig::default()
+            .with_supported_cache_objects(vec![CacheObjectKind::ToolSchema])
+            .with_cache_limits(16, 4_096),
+    )
+    .await?;
     let addr = server.local_addr()?;
 
     let server_task = tokio::spawn(async move {
@@ -758,7 +765,11 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
         session.close().await
     });
 
-    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let client = NnrpClient::connect_tcp(
+        addr,
+        NnrpClientConfig::default().with_cache_hints(vec![CacheObjectKind::ToolSchema]),
+    )
+    .await?;
     let mut session = client.open_session().await?;
     let operation_id = 3_003;
     let frame_id = session
@@ -1035,10 +1046,11 @@ async fn server_rejects_unsupported_profile_before_session_install() -> Result<(
     let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
     let addr = server.local_addr()?;
     let server_task = tokio::spawn(async move {
-        assert!(matches!(
-            server.accept().await,
-            Err(RuntimeError::UnexpectedMessage(_))
-        ));
+        let mut session = server.accept().await?;
+        assert_eq!(session.client_open().profile_id, STANDARD_PROFILE_TOKEN);
+        let close = session.receive_close().await?;
+        session.ack_close(&close).await?;
+        session.close().await
     });
 
     let config = NnrpClientConfig {
@@ -1048,34 +1060,18 @@ async fn server_rejects_unsupported_profile_before_session_install() -> Result<(
     let client = NnrpClient::connect_tcp(addr, config).await?;
     assert!(matches!(
         client.open_session().await,
-        Err(RuntimeError::UnexpectedMessage(_))
+        Err(RuntimeError::SessionRejected { .. })
     ));
-    server_task.await.expect("server task should join");
+    drop(client);
+
+    let accepted_client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    accepted_client.open_session().await?.close().await?;
+    server_task.await.expect("server task should join")?;
     Ok(())
 }
 
 #[tokio::test]
 async fn server_policy_hook_accepts_and_rejects_session_open() -> Result<(), RuntimeError> {
-    let server = NnrpServer::bind_tcp(
-        "127.0.0.1:0",
-        NnrpServerConfig::default().with_application_policy(RequireSessionTag(7)),
-    )
-    .await?;
-    let addr = server.local_addr()?;
-    let server_task = tokio::spawn(async move {
-        assert!(matches!(
-            server.accept().await,
-            Err(RuntimeError::UnexpectedMessage(_))
-        ));
-    });
-
-    let rejected_client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
-    assert!(matches!(
-        rejected_client.open_session().await,
-        Err(RuntimeError::UnexpectedMessage(_))
-    ));
-    server_task.await.expect("reject server task should join");
-
     let server = NnrpServer::bind_tcp(
         "127.0.0.1:0",
         NnrpServerConfig::default().with_application_policy(RequireSessionTag(7)),
@@ -1089,6 +1085,13 @@ async fn server_policy_hook_accepts_and_rejects_session_open() -> Result<(), Run
         session.ack_close(&close).await?;
         session.close().await
     });
+
+    let rejected_client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    assert!(matches!(
+        rejected_client.open_session().await,
+        Err(RuntimeError::SessionRejected { .. })
+    ));
+    drop(rejected_client);
 
     let accepted_client = NnrpClient::connect_tcp(
         addr,
@@ -1104,6 +1107,36 @@ async fn server_policy_hook_accepts_and_rejects_session_open() -> Result<(), Run
 }
 
 #[tokio::test]
+async fn one_carrier_multiplexes_multiple_independent_sessions() -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+    let server_task = tokio::spawn(async move {
+        let mut first = server.accept().await?;
+        let mut second = server.accept().await?;
+        assert_ne!(first.session_id(), second.session_id());
+        assert_eq!(server.session_count()?, 2);
+
+        let first_close = first.receive_close().await?;
+        first.ack_close(&first_close).await?;
+        first.close().await?;
+        let second_close = second.receive_close().await?;
+        second.ack_close(&second_close).await?;
+        second.close().await?;
+        assert_eq!(server.session_count()?, 0);
+        Ok::<_, RuntimeError>(())
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let first = client.open_session().await?;
+    let second = client.open_session().await?;
+    assert_ne!(first.session_id(), second.session_id());
+    first.close().await?;
+    second.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn server_registry_tracks_resume_enabled_sessions() -> Result<(), RuntimeError> {
     let server = NnrpServer::bind_tcp(
         "127.0.0.1:0",
@@ -1113,7 +1146,7 @@ async fn server_registry_tracks_resume_enabled_sessions() -> Result<(), RuntimeE
     let addr = server.local_addr()?;
 
     let server_task = tokio::spawn(async move {
-        let mut first = server.accept().await?;
+        let first = server.accept().await?;
         assert_eq!(server.session_count()?, 1);
         assert_eq!(first.session_id(), 77);
 
@@ -1126,35 +1159,33 @@ async fn server_registry_tracks_resume_enabled_sessions() -> Result<(), RuntimeE
         resumed.ack_close(&close).await?;
         resumed.close().await?;
         assert_eq!(server.session_count()?, 0);
-
-        let close = first.receive_close().await?;
-        first.ack_close(&close).await?;
-        first.close().await
+        drop(first);
+        Ok::<_, RuntimeError>(())
     });
 
     let initial_config = NnrpClientConfig {
         requested_session_id: 77,
         ..Default::default()
     }
-    .with_resume(0);
-    let initial = NnrpClient::connect_tcp(addr, initial_config)
-        .await?
-        .open_session()
-        .await?;
+    .with_resume(24);
+    let initial_client = NnrpClient::connect_tcp(addr, initial_config).await?;
+    let initial = initial_client.open_session().await?;
+    let ticket = initial
+        .recovery_ticket()
+        .expect("resume-enabled session must expose a recovery ticket");
+    initial.close_transport().await?;
+    drop(initial_client);
+    tokio::time::sleep(Duration::from_millis(10)).await;
 
     let resume_config = NnrpClientConfig {
-        requested_session_id: 77,
         ..Default::default()
     }
     .with_resume(24);
-    let resumed = NnrpClient::connect_tcp(addr, resume_config)
-        .await?
-        .open_session()
-        .await?;
+    let resume_client = NnrpClient::connect_tcp(addr, resume_config).await?;
+    let resumed = resume_client.resume_session(ticket).await?;
     assert_eq!(resumed.session_id(), 77);
 
     resumed.close().await?;
-    initial.close().await?;
     server_task.await.expect("server task should join")?;
     Ok(())
 }
@@ -1289,7 +1320,7 @@ async fn client_result_reader_rejects_wrong_session_and_metadata_shape() -> Resu
     let mut session = scripted_client_session(wrong_session).await?;
     assert!(matches!(
         session.await_result().await,
-        Err(RuntimeError::UnexpectedMessage(_))
+        Err(RuntimeError::TransportClosed { .. })
     ));
     session.close_transport().await?;
 
@@ -1583,10 +1614,17 @@ async fn client_preview4_control_event_reader_rejects_malformed_packets() -> Res
         )?,
     ] {
         let mut session = scripted_client_session(packet).await?;
-        assert!(matches!(
-            session.await_event().await,
-            Err(RuntimeError::UnexpectedMessage(_))
-        ));
+        let error = session
+            .await_event()
+            .await
+            .expect_err("malformed control event must be rejected");
+        assert!(
+            matches!(
+                error,
+                RuntimeError::UnexpectedMessage(_) | RuntimeError::TransportClosed { .. }
+            ),
+            "unexpected malformed control error: {error:?}"
+        );
         session.close_transport().await?;
     }
     Ok(())
@@ -1849,7 +1887,9 @@ async fn server_preview4_event_reader_rejects_malformed_packets() -> Result<(), 
         let error = server_await_event_error(packet).await;
         assert!(matches!(
             error,
-            RuntimeError::UnexpectedMessage(_) | RuntimeError::Protocol(_)
+            RuntimeError::UnexpectedMessage(_)
+                | RuntimeError::Protocol(_)
+                | RuntimeError::TransportClosed { .. }
         ));
     }
     Ok(())
@@ -2052,10 +2092,17 @@ async fn client_preview4_event_reader_rejects_malformed_object_cache_packets(
         )?,
     ] {
         let mut session = scripted_client_session(packet).await?;
-        assert!(matches!(
-            session.await_event().await,
-            Err(RuntimeError::UnexpectedMessage(_))
-        ));
+        let error = session
+            .await_event()
+            .await
+            .expect_err("malformed object/cache event must be rejected");
+        assert!(
+            matches!(
+                error,
+                RuntimeError::UnexpectedMessage(_) | RuntimeError::TransportClosed { .. }
+            ),
+            "unexpected malformed object/cache error: {error:?}"
+        );
         session.close_transport().await?;
     }
     Ok(())
@@ -2244,7 +2291,9 @@ async fn server_preview4_control_readers_and_senders_reject_mismatches() -> Resu
     ] {
         assert!(matches!(
             err,
-            RuntimeError::UnexpectedMessage(_) | RuntimeError::Protocol(_)
+            RuntimeError::UnexpectedMessage(_)
+                | RuntimeError::Protocol(_)
+                | RuntimeError::TransportClosed { .. }
         ));
     }
     Ok(())
@@ -2319,7 +2368,7 @@ async fn client_migration_rejects_wrong_ack_session_shape_and_cursor() -> Result
     };
     assert!(matches!(
         client_migrate_error(wrong_session).await,
-        RuntimeError::UnexpectedMessage(_)
+        RuntimeError::TransportClosed { .. }
     ));
 
     let malformed = {
@@ -2369,7 +2418,7 @@ async fn server_submit_reader_rejects_wrong_message_and_session() -> Result<(), 
         RuntimePacket::new(header, vec![0; SESSION_OPEN_METADATA_LEN], Vec::new())?
     };
     let err = server_receive_submit_error(wrong_session).await;
-    assert!(matches!(err, RuntimeError::UnexpectedMessage(_)));
+    assert!(matches!(err, RuntimeError::TransportClosed { .. }));
 
     let malformed = {
         let mut header = CommonHeader::new(MessageType::FrameSubmit, 1, 0);
@@ -2405,7 +2454,7 @@ async fn server_close_reader_rejects_wrong_message_and_session() -> Result<(), R
         RuntimePacket::new(header, close_request().to_bytes()?.to_vec(), Vec::new())?
     };
     let err = server_receive_close_error(wrong_session).await;
-    assert!(matches!(err, RuntimeError::UnexpectedMessage(_)));
+    assert!(matches!(err, RuntimeError::TransportClosed { .. }));
     Ok(())
 }
 
@@ -2428,7 +2477,7 @@ async fn server_cancel_and_patch_readers_reject_malformed_packets() -> Result<()
     };
     assert!(matches!(
         server_receive_cancel_error(cancel_wrong_session).await,
-        RuntimeError::UnexpectedMessage(_)
+        RuntimeError::TransportClosed { .. }
     ));
 
     let cancel_malformed = {
@@ -2462,7 +2511,7 @@ async fn server_cancel_and_patch_readers_reject_malformed_packets() -> Result<()
     };
     assert!(matches!(
         server_receive_patch_error(patch_wrong_session).await,
-        RuntimeError::UnexpectedMessage(_)
+        RuntimeError::TransportClosed { .. }
     ));
 
     let patch_malformed = {
@@ -2500,7 +2549,7 @@ async fn server_migration_reader_rejects_wrong_session_and_shape() -> Result<(),
     };
     assert!(matches!(
         server_receive_migrate_error(wrong_session).await,
-        RuntimeError::UnexpectedMessage(_)
+        RuntimeError::TransportClosed { .. }
     ));
 
     let malformed = {
@@ -2571,7 +2620,7 @@ async fn client_accepts_custom_quic_transport_slot() -> Result<(), RuntimeError>
     );
     ack_header.session_id = ack.session_id;
     let writes = Arc::new(Mutex::new(Vec::new()));
-    let transport = ScriptedTransport::new(
+    let transport = scripted_client_transport(
         RuntimeTransportKind::Quic,
         vec![RuntimePacket::new(
             ack_header,
@@ -2579,7 +2628,7 @@ async fn client_accepts_custom_quic_transport_slot() -> Result<(), RuntimeError>
             Vec::new(),
         )?],
         Arc::clone(&writes),
-    );
+    )?;
 
     let client = NnrpClient::from_transport(transport, config)?;
     let client_debug = format!("{client:?}");
@@ -2599,8 +2648,9 @@ async fn client_accepts_custom_quic_transport_slot() -> Result<(), RuntimeError>
     session.close_transport().await?;
 
     let writes = writes.lock().expect("writes should lock");
-    assert_eq!(writes.len(), 1);
-    assert_eq!(writes[0].header.message_type, MessageType::SessionOpen);
+    assert_eq!(writes.len(), 2);
+    assert_eq!(writes[0].header.message_type, MessageType::ClientHello);
+    assert_eq!(writes[1].header.message_type, MessageType::SessionOpen);
     Ok(())
 }
 
@@ -2618,11 +2668,10 @@ async fn server_accepts_custom_quic_listener_slot() -> Result<(), RuntimeError> 
         RuntimeTransportKind::Quic,
         ScriptedTransport::new(
             RuntimeTransportKind::Quic,
-            vec![RuntimePacket::new(
-                open_header,
-                open.to_bytes()?.to_vec(),
-                Vec::new(),
-            )?],
+            vec![
+                client_hello_packet()?,
+                RuntimePacket::new(open_header, open.to_bytes()?.to_vec(), Vec::new())?,
+            ],
             Arc::clone(&writes),
         ),
     );
@@ -2641,9 +2690,10 @@ async fn server_accepts_custom_quic_listener_slot() -> Result<(), RuntimeError> 
     session.close().await?;
 
     let writes = writes.lock().expect("writes should lock");
-    assert_eq!(writes.len(), 1);
-    assert_eq!(writes[0].header.message_type, MessageType::SessionOpenAck);
-    assert_eq!(writes[0].header.session_id, open.requested_session_id);
+    assert_eq!(writes.len(), 2);
+    assert_eq!(writes[0].header.message_type, MessageType::ServerHelloAck);
+    assert_eq!(writes[1].header.message_type, MessageType::SessionOpenAck);
+    assert_eq!(writes[1].header.session_id, open.requested_session_id);
     Ok(())
 }
 
@@ -2715,7 +2765,7 @@ async fn client_event_packet_batch_drains_only_buffered_validated_events(
     result_header.frame_id = 1;
 
     let writes = Arc::new(Mutex::new(Vec::new()));
-    let transport = ScriptedTransport::new(
+    let transport = scripted_client_transport(
         RuntimeTransportKind::Tcp,
         vec![
             RuntimePacket::new(ack_header, ack.to_bytes()?.to_vec(), Vec::new())?,
@@ -2727,7 +2777,7 @@ async fn client_event_packet_batch_drains_only_buffered_validated_events(
             )?,
         ],
         writes,
-    );
+    )?;
     let client = NnrpClient::from_transport(transport, NnrpClientConfig::default())?;
     let mut session = client.open_session().await?;
     session
@@ -2810,7 +2860,7 @@ async fn client_patch_bounds_interleaved_event_buffer() -> Result<(), RuntimeErr
     )?);
 
     let writes = Arc::new(Mutex::new(Vec::new()));
-    let transport = ScriptedTransport::new(RuntimeTransportKind::Tcp, packets, writes);
+    let transport = scripted_client_transport(RuntimeTransportKind::Tcp, packets, writes)?;
     let client = NnrpClient::from_transport(transport, NnrpClientConfig::default())?;
     let mut session = client.open_session().await?;
     assert!(matches!(
@@ -2879,10 +2929,10 @@ impl FramedTransport for ScriptedTransport {
     }
 
     async fn read_packet(&mut self) -> Result<RuntimePacket, RuntimeError> {
-        self.try_read_packet()?
-            .ok_or(RuntimeError::UnexpectedMessage(
-                "scripted transport is empty",
-            ))
+        match self.try_read_packet()? {
+            Some(packet) => Ok(packet),
+            None => std::future::pending().await,
+        }
     }
 
     async fn write_packet(&mut self, packet: &RuntimePacket) -> Result<(), RuntimeError> {
@@ -2923,13 +2973,11 @@ impl FramedListener for ScriptedListener {
     }
 
     async fn accept(&self) -> Result<BoxedFramedTransport, RuntimeError> {
-        self.transport
-            .lock()
-            .expect("transport should lock")
-            .take()
-            .ok_or(RuntimeError::UnexpectedMessage(
-                "scripted listener has no transport",
-            ))
+        let transport = self.transport.lock().expect("transport should lock").take();
+        match transport {
+            Some(transport) => Ok(transport),
+            None => std::future::pending().await,
+        }
     }
 }
 
@@ -2986,6 +3034,7 @@ async fn scripted_client_session_packets(
     let server_task = tokio::spawn(async move {
         let (stream, _) = listener.accept().await?;
         let mut transport = TcpTransport::new(stream);
+        accept_scripted_client_hello(&mut transport).await?;
         let open_packet = transport.read_packet().await?;
         let open = SessionOpenMetadata::parse(&open_packet.metadata)?;
         let ack = open_ack(&open);
@@ -3037,6 +3086,7 @@ async fn client_patch_error(packet: RuntimePacket) -> RuntimeError {
     let server_task = tokio::spawn(async move {
         let (stream, _) = listener.accept().await?;
         let mut transport = TcpTransport::new(stream);
+        accept_scripted_client_hello(&mut transport).await?;
         let open_packet = transport.read_packet().await?;
         let open = SessionOpenMetadata::parse(&open_packet.metadata)?;
         let ack = open_ack(&open);
@@ -3083,6 +3133,7 @@ async fn client_migrate_error(packet: RuntimePacket) -> RuntimeError {
     let server_task = tokio::spawn(async move {
         let (stream, _) = listener.accept().await?;
         let mut transport = TcpTransport::new(stream);
+        accept_scripted_client_hello(&mut transport).await?;
         let open_packet = transport.read_packet().await?;
         let open = SessionOpenMetadata::parse(&open_packet.metadata)?;
         let ack = open_ack(&open);
@@ -3255,21 +3306,9 @@ where
     let mut transport = TcpTransport::connect(addr)
         .await
         .expect("client should connect");
-    let open = session_open();
-    let mut open_header = CommonHeader::new(
-        MessageType::SessionOpen,
-        SESSION_OPEN_METADATA_LEN as u32,
-        0,
-    );
-    open_header.session_id = 0;
-    transport
-        .write_packet(
-            &RuntimePacket::new(open_header, open.to_bytes().unwrap().to_vec(), Vec::new())
-                .expect("open packet should build"),
-        )
+    open_scripted_server_session(&mut transport)
         .await
-        .expect("open should write");
-    let _ack = transport.read_packet().await.expect("ack should read");
+        .expect("scripted session should open");
     transport
         .write_packet(&packet)
         .await
@@ -3302,20 +3341,9 @@ where
     let mut transport = TcpTransport::connect(addr)
         .await
         .expect("client should connect");
-    let open = session_open();
-    let open_header = CommonHeader::new(
-        MessageType::SessionOpen,
-        SESSION_OPEN_METADATA_LEN as u32,
-        0,
-    );
-    transport
-        .write_packet(
-            &RuntimePacket::new(open_header, open.to_bytes().unwrap().to_vec(), Vec::new())
-                .expect("open packet should build"),
-        )
+    open_scripted_server_session(&mut transport)
         .await
-        .expect("open should write");
-    let _ack = transport.read_packet().await.expect("ack should read");
+        .expect("scripted session should open");
 
     let mut submit_header = CommonHeader::new(
         MessageType::FrameSubmit,
@@ -3832,6 +3860,158 @@ fn session_open() -> SessionOpenMetadata {
         session_extension_bytes: 0,
         client_session_tag: 1,
     }
+}
+
+fn client_hello() -> ClientHelloMetadata {
+    ClientHelloMetadata {
+        min_version_major: nnrp_core::CURRENT_VERSION_MAJOR,
+        max_version_major: nnrp_core::CURRENT_VERSION_MAJOR,
+        supported_wire_format_bitmap: 1u16 << nnrp_core::CURRENT_WIRE_FORMAT,
+        supported_profile_bitmap: 0x0000_0003,
+        supported_payload_kind_bitmap: nnrp_core::PayloadKindBitmap::TENSOR
+            | nnrp_core::PayloadKindBitmap::TOKEN_CHUNK
+            | nnrp_core::PayloadKindBitmap::STRUCTURED_EVENT
+            | nnrp_core::PayloadKindBitmap::TOOL_DELTA
+            | nnrp_core::PayloadKindBitmap::OPAQUE_BYTES,
+        supported_codec_bitmap: 0,
+        supported_compression_bitmap: 0,
+        supported_dtype_bitmap: 0,
+        supported_layout_bitmap: 0,
+        cache_digest_bitmap: 0,
+        cache_object_bitmap: 0,
+        cache_namespace_count: 0,
+        max_lane_count: 1,
+        max_cache_entries: 0,
+        max_cache_bytes: 0,
+        target_cadence_x100: 0,
+        latency_budget_ms: 500,
+        quality_tier: 0,
+        degrade_policy: 0,
+        requested_session_id: 0,
+        auth_bytes: 0,
+        control_extension_bytes: 0,
+    }
+}
+
+fn server_hello_ack(hello: &ClientHelloMetadata) -> ServerHelloAckMetadata {
+    ServerHelloAckMetadata {
+        selected_version_major: nnrp_core::CURRENT_VERSION_MAJOR,
+        selected_wire_format: nnrp_core::CURRENT_WIRE_FORMAT,
+        auth_status: 0,
+        session_id: 0,
+        accepted_profile_bitmap: hello.supported_profile_bitmap,
+        accepted_payload_kind_bitmap: hello.supported_payload_kind_bitmap,
+        accepted_codec_bitmap: hello.supported_codec_bitmap,
+        accepted_compression_bitmap: hello.supported_compression_bitmap,
+        accepted_dtype_bitmap: hello.supported_dtype_bitmap,
+        accepted_layout_bitmap: hello.supported_layout_bitmap,
+        cache_digest_bitmap: hello.cache_digest_bitmap as u32,
+        cache_object_bitmap: hello.cache_object_bitmap as u32,
+        max_cache_entries: hello.max_cache_entries,
+        max_cache_bytes: hello.max_cache_bytes,
+        max_lane_count: hello.max_lane_count.max(1),
+        max_concurrent_frames: 4,
+        target_cadence_x100: hello.target_cadence_x100,
+        latency_budget_ms: hello.latency_budget_ms,
+        quality_tier: hello.quality_tier,
+        degrade_policy: hello.degrade_policy,
+        max_body_bytes: RuntimeFrameLimits::DEFAULT_MAX_PACKET_BYTES as u32,
+        token_ttl_ms: 120_000,
+        retry_after_ms: 0,
+        control_extension_bytes: 0,
+        server_flags: 0,
+    }
+}
+
+fn client_hello_packet() -> Result<RuntimePacket, RuntimeError> {
+    let hello = client_hello();
+    Ok(RuntimePacket::new(
+        CommonHeader::new(
+            MessageType::ClientHello,
+            CLIENT_HELLO_METADATA_LEN as u32,
+            0,
+        ),
+        hello.to_bytes()?.to_vec(),
+        Vec::new(),
+    )?)
+}
+
+fn server_hello_ack_packet() -> Result<RuntimePacket, RuntimeError> {
+    let ack = server_hello_ack(&client_hello());
+    Ok(RuntimePacket::new(
+        CommonHeader::new(
+            MessageType::ServerHelloAck,
+            SERVER_HELLO_ACK_METADATA_LEN as u32,
+            0,
+        ),
+        ack.to_bytes()?.to_vec(),
+        Vec::new(),
+    )?)
+}
+
+fn scripted_client_transport(
+    kind: RuntimeTransportKind,
+    reads: impl Into<Vec<RuntimePacket>>,
+    writes: Arc<Mutex<Vec<RuntimePacket>>>,
+) -> Result<ScriptedTransport, RuntimeError> {
+    let mut packets = vec![server_hello_ack_packet()?];
+    packets.extend(reads.into());
+    Ok(ScriptedTransport::new(kind, packets, writes))
+}
+
+async fn accept_scripted_client_hello(transport: &mut TcpTransport) -> Result<(), RuntimeError> {
+    let packet = transport.read_packet().await?;
+    if packet.header.message_type != MessageType::ClientHello {
+        return Err(RuntimeError::UnexpectedMessage(
+            "scripted server expected CLIENT_HELLO",
+        ));
+    }
+    let hello = ClientHelloMetadata::parse(&packet.metadata)?;
+    transport
+        .write_packet(&server_hello_ack_packet_for(&hello)?)
+        .await
+}
+
+fn server_hello_ack_packet_for(hello: &ClientHelloMetadata) -> Result<RuntimePacket, RuntimeError> {
+    let ack = server_hello_ack(hello);
+    Ok(RuntimePacket::new(
+        CommonHeader::new(
+            MessageType::ServerHelloAck,
+            SERVER_HELLO_ACK_METADATA_LEN as u32,
+            0,
+        ),
+        ack.to_bytes()?.to_vec(),
+        Vec::new(),
+    )?)
+}
+
+async fn open_scripted_server_session(transport: &mut TcpTransport) -> Result<(), RuntimeError> {
+    transport.write_packet(&client_hello_packet()?).await?;
+    let hello_ack = transport.read_packet().await?;
+    if hello_ack.header.message_type != MessageType::ServerHelloAck {
+        return Err(RuntimeError::UnexpectedMessage(
+            "scripted client expected SERVER_HELLO_ACK",
+        ));
+    }
+    let open = session_open();
+    transport
+        .write_packet(&RuntimePacket::new(
+            CommonHeader::new(
+                MessageType::SessionOpen,
+                SESSION_OPEN_METADATA_LEN as u32,
+                0,
+            ),
+            open.to_bytes()?.to_vec(),
+            Vec::new(),
+        )?)
+        .await?;
+    let ack = transport.read_packet().await?;
+    if ack.header.message_type != MessageType::SessionOpenAck {
+        return Err(RuntimeError::UnexpectedMessage(
+            "scripted client expected SESSION_OPEN_ACK",
+        ));
+    }
+    Ok(())
 }
 
 fn open_ack(open: &SessionOpenMetadata) -> SessionOpenAckMetadata {

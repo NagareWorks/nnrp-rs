@@ -22,7 +22,7 @@ def load_checker():
 def frozen_contract():
     checker = load_checker()
     return {
-        "contractVersion": 8,
+        "contractVersion": checker.EXPECTED_CONTRACT_VERSION,
         "apiDomains": {name: {} for name in checker.EXPECTED_API_DOMAINS},
         "types": {
             "OperationLifecycleEvent": {
@@ -55,6 +55,68 @@ def frozen_contract():
                     },
                     {"name": "event", "type": "TerminalEvent", "required": True},
                 ]
+            },
+            "SessionRecoveryTicket": {
+                "fields": [
+                    {"name": "session_id", "type": "u32", "required": True},
+                    {"name": "resume_token", "type": "bytes", "required": True},
+                    {
+                        "name": "resume_from_operation_id",
+                        "type": "u64?",
+                        "required": False,
+                    },
+                    {
+                        "name": "resume_window_ms",
+                        "type": "u32",
+                        "required": True,
+                    },
+                ],
+                "opaqueEncoding": {
+                    "name": "NRTK",
+                    "version": 1,
+                    "byteOrder": "little-endian",
+                    "fixedPrefixBytes": 28,
+                    "fields": [
+                        {
+                            "name": "magic",
+                            "type": "bytes[4]",
+                            "offset": 0,
+                            "constant": "NRTK",
+                        },
+                        {
+                            "name": "version",
+                            "type": "u16",
+                            "offset": 4,
+                            "constant": 1,
+                        },
+                        {"name": "flags", "type": "u16", "offset": 6},
+                        {"name": "session_id", "type": "u32", "offset": 8},
+                        {
+                            "name": "resume_token_bytes",
+                            "type": "u32",
+                            "offset": 12,
+                        },
+                        {
+                            "name": "resume_window_ms",
+                            "type": "u32",
+                            "offset": 16,
+                        },
+                        {
+                            "name": "resume_from_operation_id",
+                            "type": "u64",
+                            "offset": 20,
+                        },
+                    ],
+                    "flags": {"resume_from_operation_id_present": 1},
+                    "reservedFlagsMask": 65_534,
+                    "tail": "resume_token[resume_token_bytes]",
+                    "validation": [
+                        "magic and version match exactly",
+                        "reserved flags are zero",
+                        "session_id and resume_token_bytes are non-zero",
+                        "the input ends exactly after resume_token",
+                    ],
+                },
             },
             "RuntimeEventMetadata": {
                 "variants": checker.EXPECTED_RUNTIME_EVENT_METADATA_VARIANTS.copy(),
@@ -93,6 +155,16 @@ class SdkApiContractTests(unittest.TestCase):
         contract = frozen_contract()
         contract["types"]["NnrpResult"]["fields"][2]["type"] = "RuntimeEvent"
         with self.assertRaisesRegex(SystemExit, "NnrpResult field contract drifted"):
+            self.check(contract)
+
+    def test_rejects_recovery_ticket_encoding_drift(self):
+        contract = frozen_contract()
+        contract["types"]["SessionRecoveryTicket"]["opaqueEncoding"][
+            "fixedPrefixBytes"
+        ] = 24
+        with self.assertRaisesRegex(
+            SystemExit, "SessionRecoveryTicket opaque encoding drifted"
+        ):
             self.check(contract)
 
     def test_rejects_rust_projection_drift(self):

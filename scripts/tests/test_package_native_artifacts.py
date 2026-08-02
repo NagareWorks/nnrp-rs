@@ -20,6 +20,20 @@ def load_package_script():
 
 
 class NativeExportVerificationTests(unittest.TestCase):
+    def test_cargo_target_root_honors_absolute_and_relative_environment_paths(self):
+        package = load_package_script()
+        absolute = Path(tempfile.gettempdir()) / "nnrp-cargo-target"
+
+        with mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": str(absolute)}):
+            self.assertEqual(package.cargo_target_root(), absolute)
+        with mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": "build/cargo-target"}):
+            self.assertEqual(
+                package.cargo_target_root(),
+                ROOT / "build" / "cargo-target",
+            )
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(package.cargo_target_root(), ROOT / "target")
+
     def test_static_exports_use_rust_llvm_nm(self):
         package = load_package_script()
         library = Path("libnnrp_ffi.a")

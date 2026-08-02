@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 
-EXPECTED_CONTRACT_VERSION = 8
+EXPECTED_CONTRACT_VERSION = 9
 EXPECTED_API_DOMAINS = {
     "submission",
     "runtimeEvents",
@@ -102,6 +102,9 @@ EXPECTED_RUST_PROJECTIONS = {
     "schemaRegistry": "nnrp_core::SchemaRegistry",
     "clientBootstrapOptions": "nnrp_runtime::NnrpClientOptions",
     "clientSessionOptions": "nnrp_runtime::NnrpClientConfig",
+    "sessionRecoveryTicket": "nnrp_runtime::NnrpSessionRecoveryTicket",
+    "sessionRecoveryTicketEncode": "NnrpSessionRecoveryTicket::to_bytes",
+    "sessionRecoveryTicketDecode": "NnrpSessionRecoveryTicket::from_bytes",
     "serverBootstrapOptions": "nnrp_runtime::NnrpServerOptions",
     "serverSessionOptions": "nnrp_runtime::NnrpServerConfig",
     "serverAcceptOptions": "nnrp_runtime::NnrpServerAcceptOptions",
@@ -144,6 +147,7 @@ def check_contract(contract_path: Path) -> None:
         "TerminalEvent",
         "NnrpResult",
         "RuntimeEventMetadata",
+        "SessionRecoveryTicket",
     }
     require(
         required_types.issubset(types),
@@ -190,6 +194,46 @@ def check_contract(contract_path: Path) -> None:
             ("event", "TerminalEvent", True),
         ],
         "NnrpResult field contract drifted",
+    )
+
+    recovery_ticket = types["SessionRecoveryTicket"]
+    require(
+        field_shape(recovery_ticket)
+        == [
+            ("session_id", "u32", True),
+            ("resume_token", "bytes", True),
+            ("resume_from_operation_id", "u64?", False),
+            ("resume_window_ms", "u32", True),
+        ],
+        "SessionRecoveryTicket field contract drifted",
+    )
+    require(
+        recovery_ticket.get("opaqueEncoding")
+        == {
+            "name": "NRTK",
+            "version": 1,
+            "byteOrder": "little-endian",
+            "fixedPrefixBytes": 28,
+            "fields": [
+                {"name": "magic", "type": "bytes[4]", "offset": 0, "constant": "NRTK"},
+                {"name": "version", "type": "u16", "offset": 4, "constant": 1},
+                {"name": "flags", "type": "u16", "offset": 6},
+                {"name": "session_id", "type": "u32", "offset": 8},
+                {"name": "resume_token_bytes", "type": "u32", "offset": 12},
+                {"name": "resume_window_ms", "type": "u32", "offset": 16},
+                {"name": "resume_from_operation_id", "type": "u64", "offset": 20},
+            ],
+            "flags": {"resume_from_operation_id_present": 1},
+            "reservedFlagsMask": 65_534,
+            "tail": "resume_token[resume_token_bytes]",
+            "validation": [
+                "magic and version match exactly",
+                "reserved flags are zero",
+                "session_id and resume_token_bytes are non-zero",
+                "the input ends exactly after resume_token",
+            ],
+        },
+        "SessionRecoveryTicket opaque encoding drifted",
     )
 
     api_domains = require_mapping(

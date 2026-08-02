@@ -852,10 +852,14 @@ impl BrowserClientRoleState {
         }
         let _receive_guard = self.receive_gate.lock().await;
         let mut session_slot = self.session.lock().await;
-        if let Some(mut session) = session_slot.take() {
-            session.close_in_place().await.map_err(js_runtime_error)?;
-        }
-        Ok(())
+        let session_result = if let Some(mut session) = session_slot.take() {
+            session.close_in_place().await
+        } else {
+            Ok(())
+        };
+        let carrier_result = self.carrier.close().await;
+        session_result.map_err(js_runtime_error)?;
+        carrier_result.map_err(js_runtime_error)
     }
 }
 

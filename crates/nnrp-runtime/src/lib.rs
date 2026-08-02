@@ -2,6 +2,7 @@ pub mod client;
 pub mod client_provider;
 pub mod error;
 pub mod event;
+mod multiplex;
 pub mod packet;
 pub mod pressure;
 pub mod route;
@@ -10,7 +11,9 @@ pub mod server_provider;
 pub mod submit;
 pub mod transport;
 
-pub use client::{NnrpClient, NnrpClientConfig, NnrpClientSession, NnrpResult};
+pub use client::{
+    NnrpClient, NnrpClientConfig, NnrpClientSession, NnrpResult, NnrpSessionRecoveryTicket,
+};
 pub use client_provider::{NnrpClientOptions, NnrpClientProvider};
 pub use error::RuntimeError;
 pub use event::{

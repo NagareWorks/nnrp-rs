@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -10,7 +11,6 @@ ROOT = Path(__file__).resolve().parents[1]
 PROTOCOL_VERSION = "NNRP/1"
 WASM_ABI_VERSION = "1.0.0"
 WASM_BINDGEN_VERSION = "0.2.122"
-WASM_BINDGEN_OUT = ROOT / "target" / "wasm-bindgen" / "browser"
 WASM_EXPORTS = [
     "nnrp_wasm_protocol_major",
     "nnrp_wasm_wire_format",
@@ -64,7 +64,18 @@ def declared_string_union(typescript: str, name: str) -> set[str]:
         raise SystemExit(f"missing TypeScript string union {name}")
     return set(re.findall(r'"([^"]+)"', match.group(1)))
 
+
+def cargo_target_root() -> Path:
+    configured = os.environ.get("CARGO_TARGET_DIR")
+    if configured is None:
+        return ROOT / "target"
+    target_root = Path(configured)
+    return target_root if target_root.is_absolute() else ROOT / target_root
+
+
 def build_wasm(transport_scope: str) -> None:
+    target_root = cargo_target_root()
+    wasm_bindgen_out = target_root / "wasm-bindgen" / "browser"
     subprocess.run(
         [
             "cargo",
@@ -81,21 +92,20 @@ def build_wasm(transport_scope: str) -> None:
         cwd=ROOT,
         check=True,
     )
-    if WASM_BINDGEN_OUT.exists():
-        shutil.rmtree(WASM_BINDGEN_OUT)
-    WASM_BINDGEN_OUT.mkdir(parents=True)
+    if wasm_bindgen_out.exists():
+        shutil.rmtree(wasm_bindgen_out)
+    wasm_bindgen_out.mkdir(parents=True)
     subprocess.run(
         [
             "wasm-bindgen",
             "--target",
             "web",
             "--out-dir",
-            str(WASM_BINDGEN_OUT),
+            str(wasm_bindgen_out),
             "--out-name",
             "nnrp_wasm",
             str(
-                ROOT
-                / "target"
+                target_root
                 / "wasm32-unknown-unknown"
                 / "release"
                 / "nnrp_wasm.wasm"
@@ -107,9 +117,10 @@ def build_wasm(transport_scope: str) -> None:
 
 
 def package_wasm(out_dir: Path, transport_scope: str) -> Path:
-    source_wasm = WASM_BINDGEN_OUT / "nnrp_wasm_bg.wasm"
-    source_glue = WASM_BINDGEN_OUT / "nnrp_wasm.js"
-    generated_dts = WASM_BINDGEN_OUT / "nnrp_wasm.d.ts"
+    wasm_bindgen_out = cargo_target_root() / "wasm-bindgen" / "browser"
+    source_wasm = wasm_bindgen_out / "nnrp_wasm_bg.wasm"
+    source_glue = wasm_bindgen_out / "nnrp_wasm.js"
+    generated_dts = wasm_bindgen_out / "nnrp_wasm.d.ts"
     source_dts = ROOT / "crates" / "nnrp-wasm" / "pkg" / "nnrp_wasm.d.ts"
     if not source_wasm.is_file():
         raise SystemExit(
