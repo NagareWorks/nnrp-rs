@@ -15,8 +15,8 @@ use futures_util::{
 use js_sys::{Array, Function, Promise, Uint32Array, Uint8Array};
 use nnrp_core::{
     CacheObjectKind, CommonHeader, FrameSubmitMetadata, HeaderFlags, MessageType,
-    SessionPatchMetadata, SessionPriorityClass, FRAME_SUBMIT_METADATA_LEN,
-    SESSION_PATCH_METADATA_LEN,
+    SessionOpenAckMetadata, SessionPatchMetadata, SessionPriorityClass, SessionStatus,
+    FRAME_SUBMIT_METADATA_LEN, SESSION_PATCH_METADATA_LEN,
 };
 use nnrp_runtime::{
     FramedTransport, NnrpClient, NnrpClientConfig, NnrpClientSession, NnrpSessionRecoveryTicket,
@@ -25,7 +25,7 @@ use nnrp_runtime::{
 };
 use serde::Deserialize;
 use wasm_bindgen::{prelude::*, JsCast};
-use wasm_bindgen_futures::{future_to_promise, JsFuture};
+use wasm_bindgen_futures::{future_to_promise, spawn_local, JsFuture};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -94,6 +94,7 @@ struct HostWebSocketCarrier {
     event_waiters: WaiterRegistry,
     event_generation: Cell<u64>,
     external_ingress: Cell<bool>,
+    receive_in_flight: Cell<bool>,
     closed: Cell<bool>,
 }
 
@@ -110,6 +111,7 @@ impl HostWebSocketCarrier {
             event_waiters: WaiterRegistry::new(),
             event_generation: Cell::new(0),
             external_ingress: Cell::new(false),
+            receive_in_flight: Cell::new(false),
             closed: Cell::new(false),
         }
     }
@@ -158,11 +160,33 @@ impl HostWebSocketCarrier {
                 ));
             }
             for packet in packets.iter() {
-                pending_packets.push_back(receive_packet_bytes(packet)?);
+                self.enqueue_packet(&mut pending_packets, receive_packet_bytes(packet)?)?;
             }
         } else {
-            pending_packets.push_back(receive_packet_bytes(value)?);
+            self.enqueue_packet(&mut pending_packets, receive_packet_bytes(value)?)?;
         }
+        Ok(())
+    }
+
+    fn enqueue_packet(
+        &self,
+        pending_packets: &mut VecDeque<Vec<u8>>,
+        packet: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        self.limits.validate_packet_len(packet.len())?;
+        if !self.external_ingress.get() {
+            let (header, metadata, _) = CommonHeader::parse_packet(&packet)?;
+            if header.message_type == MessageType::SessionOpenAck {
+                let ack = SessionOpenAckMetadata::parse(metadata)?;
+                if matches!(
+                    ack.session_status,
+                    SessionStatus::Opened | SessionStatus::Resumed
+                ) {
+                    self.enable_external_ingress();
+                }
+            }
+        }
+        pending_packets.push_back(packet);
         Ok(())
     }
 
@@ -221,9 +245,26 @@ impl HostWebSocketCarrier {
         EventWaiter::new(self, observed_generation).await
     }
 
-    async fn receive_for_handshake(&self) -> Result<(), RuntimeError> {
-        let value = await_callback(self.receive.call0(&JsValue::NULL)).await?;
-        self.ingest_receive_value(value)
+    async fn receive_for_handshake(self: &Rc<Self>) -> Result<(), RuntimeError> {
+        self.ensure_open()?;
+        if self.poll_ingress().is_none() && !self.receive_in_flight.replace(true) {
+            let receive = self.receive.clone();
+            let carrier = Rc::downgrade(self);
+            spawn_local(async move {
+                let result = await_callback(receive.call0(&JsValue::NULL)).await;
+                let Some(carrier) = carrier.upgrade() else {
+                    return;
+                };
+                let _receive_guard = ReceiveInFlightGuard::new(&carrier.receive_in_flight);
+                if carrier.closed.get() {
+                    return;
+                }
+                if let Err(error) = result.and_then(|value| carrier.ingest_receive_value(value)) {
+                    carrier.fail_receive(error.to_string());
+                }
+            });
+        }
+        self.wait_for_packet().await
     }
 
     async fn write_packet(&self, packet: &RuntimePacket) -> Result<(), RuntimeError> {
@@ -243,6 +284,22 @@ impl HostWebSocketCarrier {
         self.notify_event_waiters();
         await_callback(self.close.call0(&JsValue::NULL)).await?;
         Ok(())
+    }
+}
+
+struct ReceiveInFlightGuard<'a> {
+    receive_in_flight: &'a Cell<bool>,
+}
+
+impl<'a> ReceiveInFlightGuard<'a> {
+    fn new(receive_in_flight: &'a Cell<bool>) -> Self {
+        Self { receive_in_flight }
+    }
+}
+
+impl Drop for ReceiveInFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.receive_in_flight.set(false);
     }
 }
 
@@ -667,7 +724,6 @@ impl BrowserClientConnectionState {
                 .await
                 .map_err(js_runtime_error)?,
         };
-        self.carrier.enable_external_ingress();
         let session_id = session.session_id();
         let recovery_ticket = session.recovery_ticket();
         let state = Rc::new(BrowserClientRoleState {
