@@ -4,13 +4,14 @@ use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
 use js_sys::{Array, Function, Promise, Reflect, Uint8Array};
 use nnrp_core::{
-    BudgetMetadata, CommonHeader, ControlRequestMetadata, FrameSubmitMetadata, HeaderFlags,
-    InputProfile, MessageType, PayloadKindBitmap, ProgressMetadata, ResultClass,
-    ResultPushMetadata, RuntimeRole, SessionCloseAckMetadata, SessionCloseMetadata,
-    SessionCloseStatus, SessionOpenAckMetadata, SessionOpenMetadata, SessionPatchAckMetadata,
-    SessionPatchAckStatus, SessionPatchMetadata, SessionPatchRejectReason, SessionStatus,
-    SubmitMode, TileIndexMode, CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED, PROGRESS_METADATA_LEN,
-    RESULT_PUSH_METADATA_LEN, SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE,
+    BudgetMetadata, ClientHelloMetadata, CommonHeader, ControlRequestMetadata, FrameSubmitMetadata,
+    HeaderFlags, InputProfile, MessageType, PayloadKindBitmap, ProgressMetadata, ResultClass,
+    ResultPushMetadata, RuntimeRole, ServerHelloAckMetadata, SessionCloseAckMetadata,
+    SessionCloseMetadata, SessionCloseStatus, SessionOpenAckMetadata, SessionOpenMetadata,
+    SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata, SessionPatchRejectReason,
+    SessionStatus, SubmitMode, TileIndexMode, CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED,
+    CURRENT_VERSION_MAJOR, CURRENT_WIRE_FORMAT, PROGRESS_METADATA_LEN, RESULT_PUSH_METADATA_LEN,
+    SERVER_HELLO_ACK_METADATA_LEN, SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE,
     SESSION_OPEN_ACK_METADATA_LEN, SESSION_PATCH_ACK_METADATA_LEN, STANDARD_PROFILE_TOKEN,
     TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
 };
@@ -265,7 +266,7 @@ async fn browser_role_routes_control_and_patch_while_event_receive_is_pending() 
         let (header, metadata, _) = CommonHeader::parse_packet(&packet)
             .expect("concurrent browser carrier should receive a valid packet");
         match header.message_type {
-            MessageType::SessionOpen | MessageType::SessionClose => {
+            MessageType::ClientHello | MessageType::SessionOpen | MessageType::SessionClose => {
                 for response in browser_role_responses(&packet) {
                     send_responses.borrow_mut().push_back(response);
                 }
@@ -507,9 +508,14 @@ async fn ingest_scripted_responses(
     role: &BrowserClientRole,
     responses: &Rc<RefCell<VecDeque<Vec<u8>>>>,
 ) {
-    JsFuture::from(Promise::resolve(&JsValue::UNDEFINED))
-        .await
-        .expect("scripted carrier turn should complete");
+    for _ in 0..64 {
+        if !responses.borrow().is_empty() {
+            break;
+        }
+        JsFuture::from(Promise::resolve(&JsValue::UNDEFINED))
+            .await
+            .expect("scripted carrier turn should complete");
+    }
     let packets = Array::new();
     while let Some(packet) = responses.borrow_mut().pop_front() {
         packets.push(&Uint8Array::from(packet.as_slice()));
@@ -526,6 +532,48 @@ fn browser_role_responses(packet: &[u8]) -> Vec<Vec<u8>> {
     let (header, metadata, _) =
         CommonHeader::parse_packet(packet).expect("browser carrier should receive a valid packet");
     match header.message_type {
+        MessageType::ClientHello => {
+            let hello = ClientHelloMetadata::parse(metadata).expect("client hello should parse");
+            let ack = ServerHelloAckMetadata {
+                selected_version_major: CURRENT_VERSION_MAJOR,
+                selected_wire_format: CURRENT_WIRE_FORMAT,
+                auth_status: 0,
+                session_id: 0,
+                accepted_profile_bitmap: hello.supported_profile_bitmap,
+                accepted_payload_kind_bitmap: hello.supported_payload_kind_bitmap,
+                accepted_codec_bitmap: hello.supported_codec_bitmap,
+                accepted_compression_bitmap: hello.supported_compression_bitmap,
+                accepted_dtype_bitmap: hello.supported_dtype_bitmap,
+                accepted_layout_bitmap: hello.supported_layout_bitmap,
+                cache_digest_bitmap: hello.cache_digest_bitmap as u32,
+                cache_object_bitmap: 0,
+                max_cache_entries: 0,
+                max_cache_bytes: 0,
+                max_lane_count: hello.max_lane_count.max(1),
+                max_concurrent_frames: 4,
+                target_cadence_x100: hello.target_cadence_x100,
+                latency_budget_ms: hello.latency_budget_ms,
+                quality_tier: hello.quality_tier,
+                degrade_policy: hello.degrade_policy,
+                max_body_bytes: 64 * 1024 * 1024,
+                token_ttl_ms: 120_000,
+                retry_after_ms: 0,
+                control_extension_bytes: 0,
+                server_flags: 0,
+            };
+            ack.validate_against_client_hello(&hello)
+                .expect("server hello ack should match the browser client hello");
+            vec![response_packet(
+                MessageType::ServerHelloAck,
+                0,
+                0,
+                ack.to_bytes()
+                    .expect("server hello ack should encode")
+                    .to_vec(),
+                Vec::new(),
+                SERVER_HELLO_ACK_METADATA_LEN,
+            )]
+        }
         MessageType::SessionOpen => {
             let open = SessionOpenMetadata::parse(metadata).expect("session open should parse");
             let ack = SessionOpenAckMetadata {

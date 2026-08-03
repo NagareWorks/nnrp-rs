@@ -412,9 +412,16 @@ fn status_from_runtime_error(error: RuntimeError) -> NnrpFfiStatus {
         | RuntimeError::DuplicateServerTransportProvider(_)
         | RuntimeError::DuplicateClientProviderId(_)
         | RuntimeError::DuplicateServerProviderId(_)
-        | RuntimeError::ServerRouteRejected { .. } => {
+        | RuntimeError::ServerRouteRejected { .. }
+        | RuntimeError::InvalidRecoveryTicket(_) => {
             transport_status(NnrpFfiStatusCode::InvalidArgument, 104)
         }
+        RuntimeError::SessionRejected { code, .. } => NnrpFfiStatus {
+            status_code: NnrpFfiStatusCode::ProtocolError as u32,
+            error_family: crate::NnrpErrorFamily::Session as u32,
+            protocol_error_code: code,
+            detail_code: 108,
+        },
         RuntimeError::TransportClosed { .. }
         | RuntimeError::UnexpectedMessage(_)
         | RuntimeError::TransportSelection(_)

@@ -1115,6 +1115,34 @@ async fn reference_tcp_proxy_task(
     let mut target = TcpTransport::connect(target_addr).await?;
     let mut frames = ObservedFrameLog::new(started);
 
+    let hello = client.read_packet().await?;
+    if hello.header.message_type != MessageType::ClientHello {
+        return Err(RuntimeError::UnexpectedMessage(
+            "wire proxy expected CLIENT_HELLO before SESSION_OPEN",
+        ));
+    }
+    record_proxy_packet(&mut frames, "client->proxy", &hello);
+    target.write_packet(&hello).await?;
+    frames.push(
+        "proxy->target",
+        "FORWARD",
+        json!({ "forwarded_message_type": wire_message_name(hello.header.message_type) }),
+    );
+
+    let hello_ack = target.read_packet().await?;
+    if hello_ack.header.message_type != MessageType::ServerHelloAck {
+        return Err(RuntimeError::UnexpectedMessage(
+            "wire proxy expected SERVER_HELLO_ACK before SESSION_OPEN_ACK",
+        ));
+    }
+    record_proxy_packet(&mut frames, "target->proxy", &hello_ack);
+    client.write_packet(&hello_ack).await?;
+    frames.push(
+        "proxy->client",
+        "FORWARD",
+        json!({ "forwarded_message_type": wire_message_name(hello_ack.header.message_type) }),
+    );
+
     let open = client.read_packet().await?;
     record_proxy_packet(&mut frames, "client->proxy", &open);
     target.write_packet(&open).await?;

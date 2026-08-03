@@ -38,6 +38,18 @@ class NnrpBufferView(ctypes.Structure):
     _fields_ = [("ptr", ctypes.POINTER(ctypes.c_uint8)), ("len", ctypes.c_size_t)]
 
 
+class NnrpU16Slice(ctypes.Structure):
+    _fields_ = [("ptr", ctypes.POINTER(ctypes.c_uint16)), ("len", ctypes.c_size_t)]
+
+
+class NnrpU32Slice(ctypes.Structure):
+    _fields_ = [("ptr", ctypes.POINTER(ctypes.c_uint32)), ("len", ctypes.c_size_t)]
+
+
+class NnrpServerPolicySink(ctypes.Structure):
+    _fields_ = [("user_data", ctypes.c_void_p), ("evaluate", ctypes.c_void_p)]
+
+
 class NnrpFfiStatus(ctypes.Structure):
     _fields_ = [
         ("status_code", ctypes.c_uint32),
@@ -100,6 +112,17 @@ class NnrpServerBindRequest(ctypes.Structure):
         ("generation", ctypes.c_uint32),
         ("reserved0", ctypes.c_uint32),
         ("transport_listener", NnrpHandle),
+        ("supported_profiles", NnrpU16Slice),
+        ("supported_cache_objects", NnrpU32Slice),
+        ("max_cache_objects", ctypes.c_uint64),
+        ("max_cache_object_bytes", ctypes.c_uint32),
+        ("resume_token_bytes", ctypes.c_uint32),
+        ("max_in_flight_operations", ctypes.c_uint16),
+        ("granted_operation_credit", ctypes.c_uint16),
+        ("lease_ttl_ms", ctypes.c_uint32),
+        ("resume_window_ms", ctypes.c_uint32),
+        ("schema_registry", NnrpHandle),
+        ("application_policy", NnrpServerPolicySink),
     ]
 
 
@@ -109,8 +132,16 @@ class NnrpSessionOpenRequest(ctypes.Structure):
         ("requested_session_id", ctypes.c_uint32),
         ("generation", ctypes.c_uint32),
         ("profile_id", ctypes.c_uint16),
+        ("priority_class", ctypes.c_uint8),
+        ("allow_resume", ctypes.c_uint8),
         ("schema_id", ctypes.c_uint32),
         ("schema_version", ctypes.c_uint32),
+        ("default_deadline_ms", ctypes.c_uint32),
+        ("max_in_flight_operations", ctypes.c_uint16),
+        ("reserved0", ctypes.c_uint16),
+        ("lease_ttl_hint_ms", ctypes.c_uint32),
+        ("resume_token_bytes", ctypes.c_uint32),
+        ("cache_hints", NnrpU32Slice),
     ]
 
 
@@ -673,6 +704,14 @@ def run_smoke_test_at_endpoint(
 def run_role_smoke_test_at_endpoint(
     library_path: Path, scope: str, endpoint: bytes, secure: bool = False
 ) -> None:
+    if ctypes.sizeof(ctypes.c_void_p) == 8:
+        if ctypes.sizeof(NnrpServerBindRequest) != 144:
+            raise RuntimeError("Python server-bind layout does not match the 64-bit FFI ABI")
+        if ctypes.sizeof(NnrpSessionOpenRequest) != 80:
+            raise RuntimeError("Python session-open layout does not match the 64-bit FFI ABI")
+        if NnrpSessionOpenRequest.cache_hints.offset != 64:
+            raise RuntimeError("Python session-open cache_hints offset does not match the FFI ABI")
+
     library = ctypes.CDLL(str(library_path.resolve()))
     configure_library(library)
     transport_id = TRANSPORT_IDS[scope]
@@ -697,9 +736,27 @@ def run_role_smoke_test_at_endpoint(
     require_ok(library.nnrp_buffer_release(endpoint_buffer), "release role endpoint")
 
     server = invalid_handle()
+    supported_profiles_owner = (ctypes.c_uint16 * 1)(PROFILE_TOKEN)
     require_ok(
         library.nnrp_server_bind(
-            NnrpServerBindRequest(900_001, 1, 0, listener), ctypes.byref(server)
+            NnrpServerBindRequest(
+                900_001,
+                1,
+                0,
+                listener,
+                NnrpU16Slice(supported_profiles_owner, 1),
+                NnrpU32Slice(None, 0),
+                0,
+                0,
+                24,
+                4,
+                2,
+                30_000,
+                120_000,
+                invalid_handle(),
+                NnrpServerPolicySink(None, None),
+            ),
+            ctypes.byref(server),
         ),
         "server bind",
     )
@@ -749,8 +806,16 @@ def run_role_smoke_test_at_endpoint(
                 900_003,
                 1,
                 PROFILE_TOKEN,
+                0,
+                1,
                 TOKEN_DELTA_SCHEMA_ID,
                 TOKEN_DELTA_SCHEMA_VERSION,
+                500,
+                4,
+                0,
+                30_000,
+                24,
+                NnrpU32Slice(None, 0),
             ),
             ctypes.byref(client_session),
         ),

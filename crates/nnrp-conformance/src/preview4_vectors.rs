@@ -4,15 +4,16 @@ use nnrp_core::{
     validate_result_drop_reason_semantics, validate_scheduling_semantics,
     validate_trace_context_semantics, BudgetMetadata, CacheInvalidateMetadata,
     CacheInvalidateScope, CacheMissMetadata, CacheMissReason, CacheReferenceMetadata,
-    CacheReuseScope, CapabilityMetadata, ControlRequestMetadata, ErrorScope, MemoryLocationHint,
-    MessageType, ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata,
-    ObjectReleaseMetadata, ObjectReleaseReason, OwnershipHint, PartialResultMetadata, PayloadKind,
-    PressureMetadata, ProgressMetadata, RecoverableErrorMetadata, ResultDropReasonMetadata,
-    RouteHintMetadata, RuntimeObjectKind, RuntimeRole, SchedulingMetadata, SupersedeMetadata,
-    TraceContextMetadata, TypedPayloadDescriptor, CACHE_REFERENCE, CONTROL_BUDGET_UPDATE,
-    CONTROL_CANCEL_ABORT, CONTROL_CAPABILITY_COSTS, CONTROL_CREDIT_BACKPRESSURE,
-    CONTROL_DEADLINE_EXPIRE, CONTROL_DEGRADE_PROFILE, CONTROL_PRIORITY_UPDATE,
-    CONTROL_PROGRESS_PARTIAL, CONTROL_RECOVERABLE_ERROR, CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED,
+    CacheReuseScope, CapabilityMetadata, CommonHeader, ControlRequestMetadata, ErrorScope,
+    MemoryLocationHint, MessageType, ObjectDeltaMetadata, ObjectDescriptorMetadata,
+    ObjectReferenceMetadata, ObjectReleaseMetadata, ObjectReleaseReason, OwnershipHint,
+    PartialResultMetadata, PayloadKind, PressureMetadata, ProgressMetadata,
+    RecoverableErrorMetadata, ResultDropReasonMetadata, RouteHintMetadata, RuntimeObjectKind,
+    RuntimeRole, SchedulingMetadata, SupersedeMetadata, TraceContextMetadata,
+    TypedPayloadDescriptor, CACHE_REFERENCE, CONTROL_BUDGET_UPDATE, CONTROL_CANCEL_ABORT,
+    CONTROL_CAPABILITY_COSTS, CONTROL_CREDIT_BACKPRESSURE, CONTROL_DEADLINE_EXPIRE,
+    CONTROL_DEGRADE_PROFILE, CONTROL_PRIORITY_UPDATE, CONTROL_PROGRESS_PARTIAL,
+    CONTROL_RECOVERABLE_ERROR, CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED,
     CONTROL_REQUEST_FLAG_HARD_ABORT_ALLOWED, CONTROL_RESULT_DROP_REASON,
     CONTROL_ROUTE_EXECUTION_HINT, CONTROL_SUPERSEDE, CONTROL_TRACE_CONTEXT, OBJECT_COST,
     OBJECT_DELTA, OBJECT_LIFECYCLE, OBJECT_OWNERSHIP, RECOVERABLE_ERROR_FLAGS_KNOWN_MASK,
@@ -20,7 +21,6 @@ use nnrp_core::{
 };
 use serde_json::{json, Value};
 
-use crate::nnrp1_baseline::execute_nnrp1_baseline_case;
 use nnrp_core::object::{
     object_delta_packet_bytes, object_reference_packet_bytes, parse_object_delta_packet,
     parse_object_reference_packet,
@@ -72,9 +72,7 @@ pub fn preview4_capability_tokens() -> &'static [&'static str] {
 
 pub fn execute_preview4_public_case(case_id: &str) -> Option<Result<(), String>> {
     let result = match case_id {
-        "l0.header.fixed_shape.golden" => {
-            return execute_nnrp1_baseline_case(case_id);
-        }
+        "l0.header.fixed_shape.golden" => current_header_golden_validation(),
         "l0.typed_payload.descriptor.current.golden" => {
             current_typed_payload_descriptor_golden_validation()
         }
@@ -92,6 +90,19 @@ pub fn execute_preview4_public_case(case_id: &str) -> Option<Result<(), String>>
         _ => return None,
     };
     Some(result)
+}
+
+fn current_header_golden_validation() -> Result<(), String> {
+    const EXPECTED: [u8; 40] = [
+        0x4e, 0x4e, 0x52, 0x50, 0x01, 0x00, 0x10, 0x28, 0x21, 0x00, 0x00, 0x00, 0x30, 0x00, 0x00,
+        0x00, 0x00, 0x10, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x00, 0x00, 0x02, 0x00,
+        0x00, 0x00, 0x15, 0xcd, 0x5b, 0x07, 0x00, 0x00, 0x00, 0x00,
+    ];
+    let header = CommonHeader::parse(&EXPECTED).map_err(to_string)?;
+    if header.to_bytes().map_err(to_string)? != EXPECTED {
+        return Err("current common header golden bytes changed".to_string());
+    }
+    Ok(())
 }
 
 fn current_typed_payload_descriptor_golden_validation() -> Result<(), String> {

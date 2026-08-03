@@ -1,6 +1,8 @@
 use std::ptr;
 use std::slice;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
+use std::time::Duration;
 
 use nnrp_core::{
     BackpressureLevel, BudgetMetadata, CacheInvalidateMetadata, CacheInvalidateScope,
@@ -12,14 +14,15 @@ use nnrp_core::{
     ProgressMetadata, RecoverableErrorMetadata, ResultClass, ResultDropReasonMetadata,
     ResultHintBudgetPolicy, ResultHintCongestionState, ResultHintMetadata, ResultHintReason,
     ResultPushMetadata, RetryAfterMetadata, RouteHintMetadata, RuntimeObjectKind, RuntimeRole,
-    SchedulingMetadata, SubmitMode, SupersedeMetadata, TileIndexMode, TraceContextMetadata,
-    TransportId, FLOW_UPDATE_FLAG_CREDIT_VALID, PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID,
-    TOKEN_DELTA_SCHEMA_VERSION,
+    SchedulingMetadata, SessionOpenMetadata, SessionPriorityClass, SubmitMode, SupersedeMetadata,
+    TileIndexMode, TraceContextMetadata, TransportId, FLOW_UPDATE_FLAG_CREDIT_VALID, PROFILE_TOKEN,
+    SESSION_FLAG_ALLOW_RESUME, TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
 };
 use nnrp_ffi::{
     nnrp_buffer_release, nnrp_client_await_event, nnrp_client_await_events, nnrp_client_cancel,
-    nnrp_client_close, nnrp_client_connect, nnrp_client_open_session, nnrp_client_submit,
-    nnrp_connection_close, nnrp_runtime_frame_send, nnrp_server_accept, nnrp_server_accept_begin,
+    nnrp_client_close, nnrp_client_connect, nnrp_client_open_session, nnrp_client_resume_session,
+    nnrp_client_session_recovery_ticket, nnrp_client_submit, nnrp_connection_close,
+    nnrp_runtime_frame_send, nnrp_server_accept, nnrp_server_accept_begin,
     nnrp_server_accept_claim, nnrp_server_accept_release, nnrp_server_accept_wait,
     nnrp_server_await_events, nnrp_server_bind, nnrp_server_close, nnrp_server_send_partial_result,
     nnrp_server_send_result, NnrpBufferView, NnrpClientCancelRequest, NnrpClientConnectRequest,
@@ -27,10 +30,11 @@ use nnrp_ffi::{
     NnrpPollResult, NnrpRoleEventPollRequest, NnrpRuntimeFrameSendRequest,
     NnrpServerAcceptBeginRequest, NnrpServerAcceptClaimRequest, NnrpServerAcceptRequest,
     NnrpServerAcceptResult, NnrpServerAcceptWaitRequest, NnrpServerBindRequest,
-    NnrpServerSendPartialResultRequest, NnrpServerSendResultRequest, NnrpSessionOpenRequest,
-    NnrpSubmitRequest, NnrpTransportClientSecurityConfigRequest, NnrpTransportFrameBatch,
-    NnrpTransportOpenRequest, NnrpTransportReadBatchRequest,
-    NnrpTransportServerSecurityConfigRequest,
+    NnrpServerPolicyDecision, NnrpServerPolicySink, NnrpServerSendPartialResultRequest,
+    NnrpServerSendResultRequest, NnrpSessionOpenRequest, NnrpSessionRecoveryOutcome,
+    NnrpSessionResumeRequest, NnrpSubmitRequest, NnrpTransportClientSecurityConfigRequest,
+    NnrpTransportFrameBatch, NnrpTransportOpenRequest, NnrpTransportReadBatchRequest,
+    NnrpTransportServerSecurityConfigRequest, NnrpU16Slice, NNRP_SESSION_RECOVERY_OUTCOME_RESUMED,
 };
 
 unsafe extern "C" {
@@ -67,6 +71,32 @@ fn view(bytes: &[u8]) -> NnrpBufferView {
         ptr: bytes.as_ptr(),
         len: bytes.len(),
     }
+}
+
+unsafe extern "C" fn verify_session_policy(
+    user_data: *mut core::ffi::c_void,
+    metadata: NnrpBufferView,
+    out_decision: *mut NnrpServerPolicyDecision,
+) -> u32 {
+    if user_data.is_null() || out_decision.is_null() || metadata.ptr.is_null() {
+        return NnrpFfiStatusCode::InvalidArgument as u32;
+    }
+    let open = SessionOpenMetadata::parse(slice::from_raw_parts(metadata.ptr, metadata.len));
+    let matches = matches!(
+        open,
+        Ok(SessionOpenMetadata {
+            priority_class: SessionPriorityClass::Background,
+            session_flags: SESSION_FLAG_ALLOW_RESUME,
+            default_deadline_ms: 321,
+            max_in_flight_operations: 7,
+            lease_ttl_hint_ms: 45_000,
+            resume_token_bytes: 0,
+            ..
+        })
+    );
+    (*(user_data as *const AtomicBool)).store(matches, Ordering::SeqCst);
+    *out_decision = NnrpServerPolicyDecision::accept();
+    NnrpFfiStatusCode::Ok as u32
 }
 
 fn open_request(transport_id: TransportId, endpoint: &str) -> NnrpTransportOpenRequest {
@@ -785,6 +815,8 @@ unsafe fn assert_role_handshake(
     client_config: NnrpHandle,
     server_config: NnrpHandle,
 ) {
+    let policy_observed = AtomicBool::new(false);
+    let supported_profiles = [PROFILE_TOKEN];
     let mut listener = NnrpHandle::invalid();
     assert_eq!(
         nnrp_transport_listen(
@@ -818,6 +850,7 @@ unsafe fn assert_role_handshake(
                 generation: 1,
                 reserved0: 0,
                 transport_listener: foreign_listener,
+                ..NnrpServerBindRequest::default()
             },
             &mut rejected_server,
         ),
@@ -832,6 +865,19 @@ unsafe fn assert_role_handshake(
                 generation: 1,
                 reserved0: 0,
                 transport_listener: listener,
+                supported_profiles: NnrpU16Slice {
+                    ptr: supported_profiles.as_ptr(),
+                    len: supported_profiles.len(),
+                },
+                max_in_flight_operations: 7,
+                granted_operation_credit: 3,
+                lease_ttl_ms: 45_000,
+                resume_window_ms: 90_000,
+                application_policy: NnrpServerPolicySink {
+                    user_data: (&policy_observed as *const AtomicBool).cast_mut().cast(),
+                    evaluate: Some(verify_session_policy),
+                },
+                ..NnrpServerBindRequest::default()
             },
             &mut server,
         ),
@@ -941,8 +987,15 @@ unsafe fn assert_role_handshake(
                 requested_session_id: (id_base + 3) as u32,
                 generation: 1,
                 profile_id: PROFILE_TOKEN,
+                priority_class: SessionPriorityClass::Background as u8,
+                allow_resume: 1,
                 schema_id: TOKEN_DELTA_SCHEMA_ID,
                 schema_version: TOKEN_DELTA_SCHEMA_VERSION,
+                default_deadline_ms: 321,
+                max_in_flight_operations: 7,
+                lease_ttl_hint_ms: 45_000,
+                resume_token_bytes: 24,
+                ..NnrpSessionOpenRequest::default()
             },
             &mut client_session,
         ),
@@ -971,9 +1024,104 @@ unsafe fn assert_role_handshake(
         NnrpFfiStatus::ok()
     );
     let server_session = accepted.session;
+    assert!(policy_observed.load(Ordering::SeqCst));
     assert_eq!(accepted.active_transport_id, transport_id as u32);
     assert_ne!(client_session, NnrpHandle::invalid());
     assert_ne!(server_session, NnrpHandle::invalid());
+
+    let mut ticket_owner = NnrpHandle::invalid();
+    let mut ticket_view = NnrpBufferView::empty();
+    assert_eq!(
+        nnrp_client_session_recovery_ticket(client_session, &mut ticket_owner, &mut ticket_view,),
+        NnrpFfiStatus::ok()
+    );
+    let ticket = slice::from_raw_parts(ticket_view.ptr, ticket_view.len);
+    assert_eq!(&ticket[..4], b"NRTK");
+    assert_eq!(u16::from_le_bytes(ticket[4..6].try_into().unwrap()), 1);
+    assert_eq!(
+        u32::from_le_bytes(ticket[8..12].try_into().unwrap()),
+        (id_base + 3) as u32
+    );
+    assert_eq!(u32::from_le_bytes(ticket[12..16].try_into().unwrap()), 24);
+    assert_eq!(ticket.len(), 52);
+    assert_eq!(nnrp_buffer_release(ticket_owner), NnrpFfiStatus::ok());
+
+    let mut second_accept = NnrpHandle::invalid();
+    assert_eq!(
+        nnrp_server_accept_begin(
+            NnrpServerAcceptBeginRequest {
+                server,
+                accept_handle_id: id_base + 40,
+                generation: 1,
+                reserved0: 0,
+            },
+            &mut second_accept,
+        ),
+        NnrpFfiStatus::ok()
+    );
+    let mut second_client_session = NnrpHandle::invalid();
+    assert_eq!(
+        nnrp_client_open_session(
+            NnrpSessionOpenRequest {
+                connection: client,
+                requested_session_id: (id_base + 31) as u32,
+                generation: 1,
+                profile_id: PROFILE_TOKEN,
+                priority_class: SessionPriorityClass::Background as u8,
+                allow_resume: 1,
+                schema_id: TOKEN_DELTA_SCHEMA_ID,
+                schema_version: TOKEN_DELTA_SCHEMA_VERSION,
+                default_deadline_ms: 321,
+                max_in_flight_operations: 7,
+                lease_ttl_hint_ms: 45_000,
+                resume_token_bytes: 24,
+                ..NnrpSessionOpenRequest::default()
+            },
+            &mut second_client_session,
+        ),
+        NnrpFfiStatus::ok()
+    );
+    assert_eq!(
+        nnrp_server_accept_wait(NnrpServerAcceptWaitRequest {
+            accept: second_accept,
+            timeout_ms: 5_000,
+            flags: 0,
+        }),
+        NnrpFfiStatus::ok()
+    );
+    let mut second_accepted = NnrpServerAcceptResult::invalid();
+    assert_eq!(
+        nnrp_server_accept_claim(
+            NnrpServerAcceptClaimRequest {
+                accept: second_accept,
+                session_handle_id: id_base + 41,
+                generation: 1,
+                reserved0: 0,
+            },
+            &mut second_accepted,
+        ),
+        NnrpFfiStatus::ok()
+    );
+    assert_ne!(second_client_session, client_session);
+    assert_ne!(second_accepted.session, server_session);
+
+    let second_client_close = thread::spawn(move || nnrp_client_close(second_client_session));
+    let second_close_event = poll_server_event(second_accepted.session);
+    assert_eq!(second_close_event.kind, NnrpEventKind::SessionClosed as u32);
+    assert_eq!(
+        nnrp_buffer_release(second_close_event.payload_owner),
+        NnrpFfiStatus::ok()
+    );
+    assert_eq!(
+        nnrp_server_close(second_accepted.session),
+        NnrpFfiStatus::ok()
+    );
+    assert_eq!(
+        second_client_close
+            .join()
+            .expect("second client close thread joins"),
+        NnrpFfiStatus::ok()
+    );
 
     let submit_body = b"role-carrier-submit";
     let mut submit_payload = token_submit(id_base + 6)
@@ -1605,6 +1753,224 @@ fn tcp_role_runtime_adopts_carriers_and_completes_real_handshake() {
     }
 }
 
+#[test]
+fn tcp_role_runtime_resumes_with_an_opaque_recovery_ticket() {
+    unsafe {
+        let mut listener = NnrpHandle::invalid();
+        assert_eq!(
+            nnrp_transport_listen(
+                open_request(TransportId::Tcp, "tcp://127.0.0.1:0"),
+                &mut listener,
+            ),
+            NnrpFfiStatus::ok()
+        );
+        let mut endpoint_owner = NnrpHandle::invalid();
+        let mut endpoint_view = NnrpBufferView::empty();
+        assert_eq!(
+            nnrp_transport_listener_endpoint(listener, &mut endpoint_owner, &mut endpoint_view,),
+            NnrpFfiStatus::ok()
+        );
+        let endpoint =
+            String::from_utf8(slice::from_raw_parts(endpoint_view.ptr, endpoint_view.len).to_vec())
+                .expect("listener endpoint must be UTF-8");
+        assert_eq!(nnrp_buffer_release(endpoint_owner), NnrpFfiStatus::ok());
+
+        let mut server = NnrpHandle::invalid();
+        assert_eq!(
+            nnrp_server_bind(
+                NnrpServerBindRequest {
+                    server_id: 910_001,
+                    generation: 1,
+                    transport_listener: listener,
+                    resume_token_bytes: 24,
+                    resume_window_ms: 120_000,
+                    ..NnrpServerBindRequest::default()
+                },
+                &mut server,
+            ),
+            NnrpFfiStatus::ok()
+        );
+
+        let mut first_accept = NnrpHandle::invalid();
+        assert_eq!(
+            nnrp_server_accept_begin(
+                NnrpServerAcceptBeginRequest {
+                    server,
+                    accept_handle_id: 910_002,
+                    generation: 1,
+                    reserved0: 0,
+                },
+                &mut first_accept,
+            ),
+            NnrpFfiStatus::ok()
+        );
+        let mut first_transport = NnrpHandle::invalid();
+        assert_eq!(
+            nnrp_transport_connect(
+                open_request(TransportId::Tcp, &endpoint),
+                &mut first_transport,
+            ),
+            NnrpFfiStatus::ok()
+        );
+        let mut first_client = NnrpHandle::invalid();
+        assert_eq!(
+            nnrp_client_connect(
+                NnrpClientConnectRequest {
+                    connection_id: 910_003,
+                    generation: 1,
+                    reserved0: 0,
+                    transport_connection: first_transport,
+                },
+                &mut first_client,
+            ),
+            NnrpFfiStatus::ok()
+        );
+        let mut first_session = NnrpHandle::invalid();
+        assert_eq!(
+            nnrp_client_open_session(
+                NnrpSessionOpenRequest {
+                    connection: first_client,
+                    requested_session_id: 910_004,
+                    allow_resume: 1,
+                    resume_token_bytes: 24,
+                    ..NnrpSessionOpenRequest::default()
+                },
+                &mut first_session,
+            ),
+            NnrpFfiStatus::ok()
+        );
+        assert_eq!(
+            nnrp_server_accept_wait(NnrpServerAcceptWaitRequest {
+                accept: first_accept,
+                timeout_ms: 5_000,
+                flags: 0,
+            }),
+            NnrpFfiStatus::ok()
+        );
+        let mut first_accepted = NnrpServerAcceptResult::invalid();
+        assert_eq!(
+            nnrp_server_accept_claim(
+                NnrpServerAcceptClaimRequest {
+                    accept: first_accept,
+                    session_handle_id: 910_005,
+                    generation: 1,
+                    reserved0: 0,
+                },
+                &mut first_accepted,
+            ),
+            NnrpFfiStatus::ok()
+        );
+
+        let mut ticket_owner = NnrpHandle::invalid();
+        let mut ticket_view = NnrpBufferView::empty();
+        assert_eq!(
+            nnrp_client_session_recovery_ticket(first_session, &mut ticket_owner, &mut ticket_view,),
+            NnrpFfiStatus::ok()
+        );
+        let ticket = slice::from_raw_parts(ticket_view.ptr, ticket_view.len).to_vec();
+        assert_eq!(nnrp_buffer_release(ticket_owner), NnrpFfiStatus::ok());
+        assert_eq!(nnrp_connection_close(first_client), NnrpFfiStatus::ok());
+        thread::sleep(Duration::from_millis(50));
+
+        let mut resume_accept = NnrpHandle::invalid();
+        assert_eq!(
+            nnrp_server_accept_begin(
+                NnrpServerAcceptBeginRequest {
+                    server,
+                    accept_handle_id: 910_006,
+                    generation: 1,
+                    reserved0: 0,
+                },
+                &mut resume_accept,
+            ),
+            NnrpFfiStatus::ok()
+        );
+        let mut resume_transport = NnrpHandle::invalid();
+        assert_eq!(
+            nnrp_transport_connect(
+                open_request(TransportId::Tcp, &endpoint),
+                &mut resume_transport,
+            ),
+            NnrpFfiStatus::ok()
+        );
+        let mut resume_client = NnrpHandle::invalid();
+        assert_eq!(
+            nnrp_client_connect(
+                NnrpClientConnectRequest {
+                    connection_id: 910_007,
+                    generation: 1,
+                    reserved0: 0,
+                    transport_connection: resume_transport,
+                },
+                &mut resume_client,
+            ),
+            NnrpFfiStatus::ok()
+        );
+        let mut resumed_session = NnrpHandle::invalid();
+        let mut outcome = NnrpSessionRecoveryOutcome {
+            outcome_code: 0,
+            resume_window_ms: 0,
+        };
+        assert_eq!(
+            nnrp_client_resume_session(
+                NnrpSessionResumeRequest {
+                    open: NnrpSessionOpenRequest {
+                        connection: resume_client,
+                        allow_resume: 1,
+                        resume_token_bytes: 24,
+                        ..NnrpSessionOpenRequest::default()
+                    },
+                    recovery_ticket: view(&ticket),
+                },
+                &mut resumed_session,
+                &mut outcome,
+            ),
+            NnrpFfiStatus::ok()
+        );
+        assert_eq!(outcome.outcome_code, NNRP_SESSION_RECOVERY_OUTCOME_RESUMED);
+        assert_eq!(outcome.resume_window_ms, 120_000);
+        assert_eq!(
+            nnrp_server_accept_wait(NnrpServerAcceptWaitRequest {
+                accept: resume_accept,
+                timeout_ms: 5_000,
+                flags: 0,
+            }),
+            NnrpFfiStatus::ok()
+        );
+        let mut resumed_accepted = NnrpServerAcceptResult::invalid();
+        assert_eq!(
+            nnrp_server_accept_claim(
+                NnrpServerAcceptClaimRequest {
+                    accept: resume_accept,
+                    session_handle_id: 910_008,
+                    generation: 1,
+                    reserved0: 0,
+                },
+                &mut resumed_accepted,
+            ),
+            NnrpFfiStatus::ok()
+        );
+
+        let client_close = thread::spawn(move || nnrp_client_close(resumed_session));
+        let close_event = poll_server_event(resumed_accepted.session);
+        assert_eq!(close_event.kind, NnrpEventKind::SessionClosed as u32);
+        assert_eq!(
+            nnrp_buffer_release(close_event.payload_owner),
+            NnrpFfiStatus::ok()
+        );
+        assert_eq!(
+            nnrp_server_close(resumed_accepted.session),
+            NnrpFfiStatus::ok()
+        );
+        assert_eq!(
+            client_close.join().expect("resumed client close joins"),
+            NnrpFfiStatus::ok()
+        );
+        assert_eq!(nnrp_connection_close(resume_client), NnrpFfiStatus::ok());
+        assert_eq!(nnrp_connection_close(server), NnrpFfiStatus::ok());
+    }
+}
+
 #[cfg(feature = "transport-quic")]
 #[test]
 fn ffi_quic_transport_carries_role_runtime_over_secure_session() {
@@ -1670,14 +2036,15 @@ fn role_runtime_rejects_invalid_arguments_and_cross_role_handles() {
                 NnrpSessionOpenRequest {
                     connection: NnrpHandle::invalid(),
                     requested_session_id: 0,
-                    generation: 1,
+                    generation: 0,
                     profile_id: PROFILE_TOKEN,
                     schema_id: TOKEN_DELTA_SCHEMA_ID,
                     schema_version: TOKEN_DELTA_SCHEMA_VERSION,
+                    ..NnrpSessionOpenRequest::default()
                 },
                 &mut output,
             ),
-            NnrpFfiStatus::invalid_argument(11)
+            NnrpFfiStatus::invalid_argument(174)
         );
         assert_eq!(
             nnrp_server_bind(
@@ -1686,10 +2053,11 @@ fn role_runtime_rejects_invalid_arguments_and_cross_role_handles() {
                     generation: 1,
                     reserved0: 0,
                     transport_listener: NnrpHandle::invalid(),
+                    ..NnrpServerBindRequest::default()
                 },
                 &mut output,
             ),
-            NnrpFfiStatus::invalid_argument(18)
+            NnrpFfiStatus::invalid_argument(175)
         );
         assert_eq!(
             nnrp_server_accept(
@@ -1764,6 +2132,7 @@ fn role_runtime_rejects_invalid_arguments_and_cross_role_handles() {
                     generation: 1,
                     reserved0: 0,
                     transport_listener: listener,
+                    ..NnrpServerBindRequest::default()
                 },
                 &mut server,
             ),
@@ -1798,6 +2167,7 @@ fn role_runtime_rejects_invalid_arguments_and_cross_role_handles() {
             profile_id: PROFILE_TOKEN,
             schema_id: TOKEN_DELTA_SCHEMA_ID,
             schema_version: TOKEN_DELTA_SCHEMA_VERSION,
+            ..NnrpSessionOpenRequest::default()
         };
         assert_eq!(
             nnrp_client_open_session(session_request(server), &mut output),
