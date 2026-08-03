@@ -3,6 +3,8 @@ use std::collections::BTreeMap;
 #[cfg(any(test, feature = "benchmark-ffi"))]
 use std::collections::VecDeque;
 #[cfg(not(test))]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(not(test))]
 use std::sync::{Arc, Condvar};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 #[cfg(not(test))]
@@ -47,7 +49,7 @@ use nnrp_runtime::{
     NnrpSubmitRequest as RuntimeSubmitRequest,
 };
 #[cfg(not(test))]
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{oneshot, Mutex as AsyncMutex};
 
 mod transport;
 mod transport_exports;
@@ -1102,11 +1104,11 @@ impl NnrpU32Slice {
     }
 }
 
-pub type NnrpServerPolicyCallback = Option<
+pub type NnrpServerPolicyBeginCallback = Option<
     unsafe extern "C" fn(
         user_data: *mut c_void,
+        request_id: u64,
         session_open_metadata: NnrpBufferView,
-        out_decision: *mut NnrpServerPolicyDecision,
     ) -> u32,
 >;
 
@@ -1114,14 +1116,14 @@ pub type NnrpServerPolicyCallback = Option<
 #[derive(Debug, Clone, Copy)]
 pub struct NnrpServerPolicySink {
     pub user_data: *mut c_void,
-    pub evaluate: NnrpServerPolicyCallback,
+    pub begin: NnrpServerPolicyBeginCallback,
 }
 
 impl NnrpServerPolicySink {
     pub const fn allow_all() -> Self {
         Self {
             user_data: core::ptr::null_mut(),
-            evaluate: None,
+            begin: None,
         }
     }
 }
@@ -1144,6 +1146,13 @@ impl NnrpServerPolicyDecision {
             diagnostic: NnrpBufferView::empty(),
         }
     }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnrpServerPolicyCompleteRequest {
+    pub request_id: u64,
+    pub decision: NnrpServerPolicyDecision,
 }
 
 impl NnrpBufferView {
@@ -2469,10 +2478,10 @@ impl NnrpServerBindRequest {
             resume_window_ms: self.resume_window_ms,
             ..NnrpServerConfig::default()
         };
-        if let Some(evaluate) = self.application_policy.evaluate {
+        if let Some(begin) = self.application_policy.begin {
             config.application_policy = Arc::new(NnrpFfiServerPolicy {
                 user_data: self.application_policy.user_data as usize,
-                evaluate,
+                begin,
             });
         }
         Ok(config)
@@ -2592,8 +2601,55 @@ impl Default for NnrpSessionOpenRequest {
 #[derive(Clone)]
 struct NnrpFfiServerPolicy {
     user_data: usize,
-    evaluate:
-        unsafe extern "C" fn(*mut c_void, NnrpBufferView, *mut NnrpServerPolicyDecision) -> u32,
+    begin: unsafe extern "C" fn(*mut c_void, u64, NnrpBufferView) -> u32,
+}
+
+#[cfg(not(test))]
+static NEXT_SERVER_POLICY_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+#[cfg(not(test))]
+static SERVER_POLICY_REQUESTS: OnceLock<
+    Mutex<BTreeMap<u64, oneshot::Sender<RuntimeServerPolicyDecision>>>,
+> = OnceLock::new();
+
+#[cfg(not(test))]
+fn server_policy_requests(
+) -> MutexGuard<'static, BTreeMap<u64, oneshot::Sender<RuntimeServerPolicyDecision>>> {
+    SERVER_POLICY_REQUESTS
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .expect("FFI server policy request lock should not be poisoned")
+}
+
+#[cfg(not(test))]
+struct NnrpFfiServerPolicyRequestGuard {
+    request_id: u64,
+}
+
+#[cfg(not(test))]
+impl Drop for NnrpFfiServerPolicyRequestGuard {
+    fn drop(&mut self) {
+        server_policy_requests().remove(&self.request_id);
+    }
+}
+
+#[cfg(not(test))]
+fn register_server_policy_request() -> (
+    NnrpFfiServerPolicyRequestGuard,
+    oneshot::Receiver<RuntimeServerPolicyDecision>,
+) {
+    loop {
+        let request_id = NEXT_SERVER_POLICY_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+        if request_id == 0 {
+            continue;
+        }
+        let (sender, receiver) = oneshot::channel();
+        let mut requests = server_policy_requests();
+        if let std::collections::btree_map::Entry::Vacant(entry) = requests.entry(request_id) {
+            entry.insert(sender);
+            drop(requests);
+            return (NnrpFfiServerPolicyRequestGuard { request_id }, receiver);
+        }
+    }
 }
 
 #[cfg(not(test))]
@@ -2618,39 +2674,76 @@ impl NnrpServerPolicy for NnrpFfiServerPolicy {
                 );
             }
         };
-        let mut decision = NnrpServerPolicyDecision::accept();
+        let (request, decision) = register_server_policy_request();
         let callback_status = unsafe {
-            (self.evaluate)(
+            (self.begin)(
                 self.user_data as *mut c_void,
+                request.request_id,
                 NnrpBufferView {
                     ptr: metadata.as_ptr(),
                     len: metadata.len(),
                 },
-                &mut decision,
             )
         };
         if callback_status != NnrpFfiStatusCode::Ok as u32 {
             return RuntimeServerPolicyDecision::reject(
                 SESSION_ERROR_PROFILE_UNSUPPORTED,
-                format!("server policy callback failed with status {callback_status}"),
+                format!("server policy begin callback failed with status {callback_status}"),
             );
         }
-        if decision.reserved0 != [0; 3]
+        match decision.await {
+            Ok(decision) => decision,
+            Err(_) => RuntimeServerPolicyDecision::reject(
+                SESSION_ERROR_PROFILE_UNSUPPORTED,
+                "server policy request was cancelled before completion",
+            ),
+        }
+    }
+}
+
+#[no_mangle]
+/// Completes one asynchronous application admission decision started by
+/// [`NnrpServerPolicyBeginCallback`].
+///
+/// # Safety
+///
+/// When `decision.diagnostic.len` is non-zero, `decision.diagnostic.ptr` must
+/// address that many readable bytes for the duration of this call.
+pub unsafe extern "C" fn nnrp_server_policy_complete(
+    request: NnrpServerPolicyCompleteRequest,
+) -> NnrpFfiStatus {
+    #[cfg(not(test))]
+    {
+        let decision = request.decision;
+        if request.request_id == 0
+            || decision.reserved0 != [0; 3]
             || decision.accepted > 1
             || decision.diagnostic.validate().is_err()
+            || (decision.accepted != 0 && decision.session_error_code != SESSION_ERROR_NONE)
+            || (decision.accepted == 0 && decision.session_error_code == SESSION_ERROR_NONE)
         {
-            return RuntimeServerPolicyDecision::reject(
-                SESSION_ERROR_PROFILE_UNSUPPORTED,
-                "server policy callback returned an invalid decision",
-            );
+            return NnrpFfiStatus::invalid_argument(175);
         }
-        let diagnostic = unsafe { ffi_read_slice(decision.diagnostic) };
-        let diagnostic = String::from_utf8_lossy(diagnostic).into_owned();
-        if decision.accepted != 0 {
+        let runtime_decision = if decision.accepted != 0 {
             RuntimeServerPolicyDecision::accept()
         } else {
+            let diagnostic =
+                String::from_utf8_lossy(ffi_read_slice(decision.diagnostic)).into_owned();
             RuntimeServerPolicyDecision::reject(decision.session_error_code, diagnostic)
-        }
+        };
+        let Some(sender) = server_policy_requests().remove(&request.request_id) else {
+            return NnrpFfiStatus::invalid_state(176);
+        };
+        sender
+            .send(runtime_decision)
+            .map(|_| NnrpFfiStatus::ok())
+            .unwrap_or_else(|_| NnrpFfiStatus::invalid_state(177))
+    }
+
+    #[cfg(test)]
+    {
+        let _ = request;
+        NnrpFfiStatus::invalid_state(176)
     }
 }
 

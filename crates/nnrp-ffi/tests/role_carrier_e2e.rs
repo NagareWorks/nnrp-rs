@@ -1,6 +1,7 @@
 use std::ptr;
 use std::slice;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -24,16 +25,17 @@ use nnrp_ffi::{
     nnrp_client_session_recovery_ticket, nnrp_client_submit, nnrp_connection_close,
     nnrp_runtime_frame_send, nnrp_server_accept, nnrp_server_accept_begin,
     nnrp_server_accept_claim, nnrp_server_accept_release, nnrp_server_accept_wait,
-    nnrp_server_await_events, nnrp_server_bind, nnrp_server_close, nnrp_server_send_partial_result,
-    nnrp_server_send_result, NnrpBufferView, NnrpClientCancelRequest, NnrpClientConnectRequest,
-    NnrpEvent, NnrpEventKind, NnrpFfiStatus, NnrpFfiStatusCode, NnrpHandle, NnrpHandleKind,
-    NnrpPollResult, NnrpRoleEventPollRequest, NnrpRuntimeFrameSendRequest,
-    NnrpServerAcceptBeginRequest, NnrpServerAcceptClaimRequest, NnrpServerAcceptRequest,
-    NnrpServerAcceptResult, NnrpServerAcceptWaitRequest, NnrpServerBindRequest,
-    NnrpServerPolicyDecision, NnrpServerPolicySink, NnrpServerSendPartialResultRequest,
-    NnrpServerSendResultRequest, NnrpSessionOpenRequest, NnrpSessionRecoveryOutcome,
-    NnrpSessionResumeRequest, NnrpSubmitRequest, NnrpTransportClientSecurityConfigRequest,
-    NnrpTransportFrameBatch, NnrpTransportOpenRequest, NnrpTransportReadBatchRequest,
+    nnrp_server_await_events, nnrp_server_bind, nnrp_server_close, nnrp_server_policy_complete,
+    nnrp_server_send_partial_result, nnrp_server_send_result, NnrpBufferView,
+    NnrpClientCancelRequest, NnrpClientConnectRequest, NnrpEvent, NnrpEventKind, NnrpFfiStatus,
+    NnrpFfiStatusCode, NnrpHandle, NnrpHandleKind, NnrpPollResult, NnrpRoleEventPollRequest,
+    NnrpRuntimeFrameSendRequest, NnrpServerAcceptBeginRequest, NnrpServerAcceptClaimRequest,
+    NnrpServerAcceptRequest, NnrpServerAcceptResult, NnrpServerAcceptWaitRequest,
+    NnrpServerBindRequest, NnrpServerPolicyCompleteRequest, NnrpServerPolicyDecision,
+    NnrpServerPolicySink, NnrpServerSendPartialResultRequest, NnrpServerSendResultRequest,
+    NnrpSessionOpenRequest, NnrpSessionRecoveryOutcome, NnrpSessionResumeRequest,
+    NnrpSubmitRequest, NnrpTransportClientSecurityConfigRequest, NnrpTransportFrameBatch,
+    NnrpTransportOpenRequest, NnrpTransportReadBatchRequest,
     NnrpTransportServerSecurityConfigRequest, NnrpU16Slice, NNRP_SESSION_RECOVERY_OUTCOME_RESUMED,
 };
 
@@ -73,12 +75,17 @@ fn view(bytes: &[u8]) -> NnrpBufferView {
     }
 }
 
+struct PolicyTestContext {
+    observed: Arc<AtomicBool>,
+    completion: Mutex<Option<thread::JoinHandle<()>>>,
+}
+
 unsafe extern "C" fn verify_session_policy(
     user_data: *mut core::ffi::c_void,
+    request_id: u64,
     metadata: NnrpBufferView,
-    out_decision: *mut NnrpServerPolicyDecision,
 ) -> u32 {
-    if user_data.is_null() || out_decision.is_null() || metadata.ptr.is_null() {
+    if user_data.is_null() || request_id == 0 || metadata.ptr.is_null() {
         return NnrpFfiStatusCode::InvalidArgument as u32;
     }
     let open = SessionOpenMetadata::parse(slice::from_raw_parts(metadata.ptr, metadata.len));
@@ -94,9 +101,58 @@ unsafe extern "C" fn verify_session_policy(
             ..
         })
     );
-    (*(user_data as *const AtomicBool)).store(matches, Ordering::SeqCst);
-    *out_decision = NnrpServerPolicyDecision::accept();
+    let context = &*(user_data as *const PolicyTestContext);
+    let observed = Arc::clone(&context.observed);
+    let completion = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(5));
+        unsafe {
+            observed.store(matches, Ordering::SeqCst);
+            assert_eq!(
+                nnrp_server_policy_complete(NnrpServerPolicyCompleteRequest {
+                    request_id,
+                    decision: NnrpServerPolicyDecision::accept(),
+                }),
+                NnrpFfiStatus::ok()
+            );
+        }
+    });
+    *context
+        .completion
+        .lock()
+        .expect("policy completion lock should not be poisoned") = Some(completion);
     NnrpFfiStatusCode::Ok as u32
+}
+
+#[test]
+fn asynchronous_policy_completion_validates_identity_and_decision_shape() {
+    unsafe {
+        assert_eq!(
+            nnrp_server_policy_complete(NnrpServerPolicyCompleteRequest {
+                request_id: 0,
+                decision: NnrpServerPolicyDecision::accept(),
+            }),
+            NnrpFfiStatus::invalid_argument(175)
+        );
+        assert_eq!(
+            nnrp_server_policy_complete(NnrpServerPolicyCompleteRequest {
+                request_id: u64::MAX,
+                decision: NnrpServerPolicyDecision::accept(),
+            }),
+            NnrpFfiStatus::invalid_state(176)
+        );
+        assert_eq!(
+            nnrp_server_policy_complete(NnrpServerPolicyCompleteRequest {
+                request_id: u64::MAX - 1,
+                decision: NnrpServerPolicyDecision {
+                    accepted: 0,
+                    reserved0: [0; 3],
+                    session_error_code: 17,
+                    diagnostic: view(b"policy rejected"),
+                },
+            }),
+            NnrpFfiStatus::invalid_state(176)
+        );
+    }
 }
 
 fn open_request(transport_id: TransportId, endpoint: &str) -> NnrpTransportOpenRequest {
@@ -815,7 +871,10 @@ unsafe fn assert_role_handshake(
     client_config: NnrpHandle,
     server_config: NnrpHandle,
 ) {
-    let policy_observed = AtomicBool::new(false);
+    let policy_context = PolicyTestContext {
+        observed: Arc::new(AtomicBool::new(false)),
+        completion: Mutex::new(None),
+    };
     let supported_profiles = [PROFILE_TOKEN];
     let mut listener = NnrpHandle::invalid();
     assert_eq!(
@@ -874,8 +933,10 @@ unsafe fn assert_role_handshake(
                 lease_ttl_ms: 45_000,
                 resume_window_ms: 90_000,
                 application_policy: NnrpServerPolicySink {
-                    user_data: (&policy_observed as *const AtomicBool).cast_mut().cast(),
-                    evaluate: Some(verify_session_policy),
+                    user_data: (&policy_context as *const PolicyTestContext)
+                        .cast_mut()
+                        .cast(),
+                    begin: Some(verify_session_policy),
                 },
                 ..NnrpServerBindRequest::default()
             },
@@ -1025,7 +1086,15 @@ unsafe fn assert_role_handshake(
         NnrpFfiStatus::ok()
     );
     let server_session = accepted.session;
-    assert!(policy_observed.load(Ordering::SeqCst));
+    policy_context
+        .completion
+        .lock()
+        .expect("policy completion lock should not be poisoned")
+        .take()
+        .expect("policy callback should spawn one completion thread")
+        .join()
+        .expect("policy completion thread should not panic");
+    assert!(policy_context.observed.load(Ordering::SeqCst));
     assert_eq!(accepted.active_transport_id, transport_id as u32);
     assert_ne!(client_session, NnrpHandle::invalid());
     assert_ne!(server_session, NnrpHandle::invalid());
