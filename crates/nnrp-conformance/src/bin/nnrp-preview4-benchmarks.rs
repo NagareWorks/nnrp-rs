@@ -12,7 +12,9 @@ use nnrp_core::{
     ResultPushMetadata, RuntimeObjectKind, RuntimeRole, SchedulingMetadata, SubmitMode,
     TileIndexMode, STANDARD_PROFILE_TOKEN,
 };
-use nnrp_runtime::{NnrpClient, NnrpClientConfig, NnrpResult, NnrpServerConfig, RuntimeError};
+use nnrp_runtime::{
+    NnrpClient, NnrpClientConfig, NnrpRuntimeEventTail, NnrpServerConfig, RuntimeError,
+};
 use nnrp_transport_ipc::{IpcEndpoint, IpcProvider};
 use nnrp_transport_websocket::{WebSocketEndpoint, WebSocketProvider};
 use serde_json::json;
@@ -289,9 +291,21 @@ async fn bench_ipc_loopback(iterations: u64) -> Result<BenchCase, Box<dyn Error>
     let mut session = client.open_session().await?;
     for operation_id in 1..=iterations {
         session
-            .submit(token_submit(operation_id), b"hello".to_vec())
+            .submit_encoded(token_submit(operation_id), b"hello".to_vec())
             .await?;
-        let NnrpResult { body, .. } = session.await_result().await?;
+        let result = session.await_result().await?;
+        let Some(event) = result.event.as_runtime() else {
+            return Err(RuntimeError::UnexpectedMessage(
+                "benchmark client expected wire terminal evidence",
+            )
+            .into());
+        };
+        let NnrpRuntimeEventTail::Body(body) = &event.tail else {
+            return Err(RuntimeError::UnexpectedMessage(
+                "benchmark client expected RESULT_PUSH body",
+            )
+            .into());
+        };
         black_box(body);
     }
     server_task
@@ -324,9 +338,21 @@ async fn bench_websocket_loopback(iterations: u64) -> Result<BenchCase, Box<dyn 
     let mut session = client.open_session().await?;
     for operation_id in 1..=iterations {
         session
-            .submit(token_submit(operation_id), b"hello".to_vec())
+            .submit_encoded(token_submit(operation_id), b"hello".to_vec())
             .await?;
-        let NnrpResult { body, .. } = session.await_result().await?;
+        let result = session.await_result().await?;
+        let Some(event) = result.event.as_runtime() else {
+            return Err(RuntimeError::UnexpectedMessage(
+                "benchmark client expected wire terminal evidence",
+            )
+            .into());
+        };
+        let NnrpRuntimeEventTail::Body(body) = &event.tail else {
+            return Err(RuntimeError::UnexpectedMessage(
+                "benchmark client expected RESULT_PUSH body",
+            )
+            .into());
+        };
         black_box(body);
     }
     server_task
@@ -358,8 +384,8 @@ fn token_submit(operation_id: u64) -> FrameSubmitMetadata {
         tile_index_bytes: 0,
         operation_id,
         submit_mode: SubmitMode::Inline,
-        budget_policy: 0,
-        loss_tolerance_policy: 0,
+        budget_policy: nnrp_core::BudgetPolicy::NONE,
+        loss_tolerance_policy: nnrp_core::LossTolerancePolicy::Strict,
         object_ref_mask: 0,
         dependency_frame_id: 0,
         payload_kind_bitmap: PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),

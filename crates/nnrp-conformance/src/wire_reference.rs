@@ -7,8 +7,9 @@ use nnrp_core::{
     STANDARD_PROFILE_TOKEN,
 };
 use nnrp_runtime::{
-    FramedTransport, NnrpClient, NnrpClientConfig, NnrpClientEvent, NnrpServer, NnrpServerConfig,
-    RuntimeError, RuntimePacket, TcpTransport,
+    FramedTransport, NnrpClient, NnrpClientConfig, NnrpResult, NnrpRuntimeEvent,
+    NnrpRuntimeEventMetadata, NnrpRuntimeEventTail, NnrpServer, NnrpServerConfig, RuntimeError,
+    RuntimePacket, TcpTransport,
 };
 use nnrp_transport_ipc::{IpcEndpoint, IpcProvider};
 use nnrp_transport_quic::{QuicClientEndpointConfig, QuicProvider, QuicServerEndpointConfig};
@@ -523,10 +524,11 @@ async fn reference_server_task(server: NnrpServer) -> Result<(), RuntimeError> {
 async fn target_client_task(client: NnrpClient) -> Result<(), RuntimeError> {
     let mut session = client.open_session().await?;
     let frame_id = session
-        .submit(token_submit(1_001), REQUEST_BODY.to_vec())
+        .submit_encoded(token_submit(1_001), REQUEST_BODY.to_vec())
         .await?;
     let result = session.await_result().await?;
-    if result.frame_id != frame_id || result.body != RESPONSE_BODY {
+    let (result_frame_id, _, body) = expect_result_push(result)?;
+    if result_frame_id != frame_id || body != RESPONSE_BODY {
         return Err(RuntimeError::UnexpectedMessage(
             "wire reference target received unexpected response",
         ));
@@ -654,7 +656,7 @@ async fn run_reference_client(
     );
     let operation_id = 1_002;
     let frame_id = session
-        .submit(token_submit(operation_id), REQUEST_BODY.to_vec())
+        .submit_encoded(token_submit(operation_id), REQUEST_BODY.to_vec())
         .await?;
     frames.push(
         "suite->target",
@@ -667,17 +669,18 @@ async fn run_reference_client(
         }),
     );
     let result = session.await_result().await?;
+    let (result_frame_id, result_metadata, result_body) = expect_result_push(result)?;
     frames.push(
         "target->suite",
         "RESULT_PUSH",
         json!({
             "session_id": session_id,
-            "frame_id": result.frame_id,
-            "body_bytes": result.body.len(),
-            "status_code": result.metadata.status_code,
+            "frame_id": result_frame_id,
+            "body_bytes": result_body.len(),
+            "status_code": result_metadata.status_code,
         }),
     );
-    if result.body != RESPONSE_BODY {
+    if result_body != RESPONSE_BODY {
         return Err(RuntimeError::UnexpectedMessage(
             "wire reference client received unexpected response body",
         ));
@@ -805,7 +808,7 @@ async fn run_reference_scenario_client(
         WireReferenceScenario::CancelAbort => {
             let operation_id = 101;
             let frame_id = session
-                .submit_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
+                .submit_encoded_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
                 .await?;
             frames.push(
                 "suite->target",
@@ -842,7 +845,7 @@ async fn run_reference_scenario_client(
 
             let abort_operation_id = 102;
             let abort_frame_id = session
-                .submit_nowait(token_submit(abort_operation_id), b"abort-request".to_vec())
+                .submit_encoded_nowait(token_submit(abort_operation_id), b"abort-request".to_vec())
                 .await?;
             frames.push(
                 "suite->target",
@@ -892,7 +895,7 @@ async fn run_reference_scenario_client(
         WireReferenceScenario::PriorityDeadline => {
             let operation_id = 201;
             let frame_id = session
-                .submit_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
+                .submit_encoded_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
                 .await?;
             frames.push(
                 "suite->target",
@@ -928,21 +931,22 @@ async fn run_reference_scenario_client(
                 }),
             );
             let result = session.await_result().await?;
+            let (result_frame_id, result_metadata, result_body) = expect_result_push(result)?;
             frames.push(
                 "target->suite",
                 "RESULT_PUSH",
                 json!({
                     "session_id": session_id,
-                    "frame_id": result.frame_id,
-                    "body_bytes": result.body.len(),
-                    "status_code": result.metadata.status_code,
+                    "frame_id": result_frame_id,
+                    "body_bytes": result_body.len(),
+                    "status_code": result_metadata.status_code,
                 }),
             );
         }
         WireReferenceScenario::ProgressBackpressure => {
             let operation_id = 301;
             let frame_id = session
-                .submit_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
+                .submit_encoded_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
                 .await?;
             frames.push(
                 "suite->target",
@@ -996,21 +1000,22 @@ async fn run_reference_scenario_client(
                 }),
             );
             let result = session.await_result().await?;
+            let (result_frame_id, result_metadata, result_body) = expect_result_push(result)?;
             frames.push(
                 "target->suite",
                 "RESULT_PUSH",
                 json!({
                     "session_id": session_id,
-                    "frame_id": result.frame_id,
-                    "body_bytes": result.body.len(),
-                    "status_code": result.metadata.status_code,
+                    "frame_id": result_frame_id,
+                    "body_bytes": result_body.len(),
+                    "status_code": result_metadata.status_code,
                 }),
             );
         }
         WireReferenceScenario::CapabilityRouteCache => {
             let operation_id = 401;
             let frame_id = session
-                .submit_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
+                .submit_encoded_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
                 .await?;
             frames.push(
                 "suite->target",
@@ -1064,14 +1069,15 @@ async fn run_reference_scenario_client(
                 }),
             );
             let result = session.await_result().await?;
+            let (result_frame_id, result_metadata, result_body) = expect_result_push(result)?;
             frames.push(
                 "target->suite",
                 "RESULT_PUSH",
                 json!({
                     "session_id": session_id,
-                    "frame_id": result.frame_id,
-                    "body_bytes": result.body.len(),
-                    "status_code": result.metadata.status_code,
+                    "frame_id": result_frame_id,
+                    "body_bytes": result_body.len(),
+                    "status_code": result_metadata.status_code,
                 }),
             );
         }
@@ -1108,6 +1114,34 @@ async fn reference_tcp_proxy_task(
     let mut client = TcpTransport::new(client_stream);
     let mut target = TcpTransport::connect(target_addr).await?;
     let mut frames = ObservedFrameLog::new(started);
+
+    let hello = client.read_packet().await?;
+    if hello.header.message_type != MessageType::ClientHello {
+        return Err(RuntimeError::UnexpectedMessage(
+            "wire proxy expected CLIENT_HELLO before SESSION_OPEN",
+        ));
+    }
+    record_proxy_packet(&mut frames, "client->proxy", &hello);
+    target.write_packet(&hello).await?;
+    frames.push(
+        "proxy->target",
+        "FORWARD",
+        json!({ "forwarded_message_type": wire_message_name(hello.header.message_type) }),
+    );
+
+    let hello_ack = target.read_packet().await?;
+    if hello_ack.header.message_type != MessageType::ServerHelloAck {
+        return Err(RuntimeError::UnexpectedMessage(
+            "wire proxy expected SERVER_HELLO_ACK before SESSION_OPEN_ACK",
+        ));
+    }
+    record_proxy_packet(&mut frames, "target->proxy", &hello_ack);
+    client.write_packet(&hello_ack).await?;
+    frames.push(
+        "proxy->client",
+        "FORWARD",
+        json!({ "forwarded_message_type": wire_message_name(hello_ack.header.message_type) }),
+    );
 
     let open = client.read_packet().await?;
     record_proxy_packet(&mut frames, "client->proxy", &open);
@@ -1261,13 +1295,14 @@ async fn run_reference_proxy_client(
 ) -> Result<(), RuntimeError> {
     let mut session = client.open_session().await?;
     session
-        .submit_nowait(token_submit(1_301), REQUEST_BODY.to_vec())
+        .submit_encoded_nowait(token_submit(1_301), REQUEST_BODY.to_vec())
         .await?;
     match action {
         ReferenceProxyAction::InjectBackpressure => {
             expect_backpressure(session.await_event().await?)?;
             let result = session.await_result().await?;
-            if result.body != RESPONSE_BODY {
+            let (_, _, body) = expect_result_push(result)?;
+            if body != RESPONSE_BODY {
                 return Err(RuntimeError::UnexpectedMessage(
                     "wire proxy client received unexpected response body",
                 ));
@@ -1282,7 +1317,8 @@ async fn run_reference_proxy_client(
             }
             expect_progress(session.await_event().await?)?;
             let result = session.await_result().await?;
-            if result.body != RESPONSE_BODY {
+            let (_, _, body) = expect_result_push(result)?;
+            if body != RESPONSE_BODY {
                 return Err(RuntimeError::UnexpectedMessage(
                     "wire proxy perturbation client received unexpected response body",
                 ));
@@ -1301,7 +1337,8 @@ async fn run_reference_proxy_client(
         }
         ReferenceProxyAction::Forward | ReferenceProxyAction::DelayForward => {
             let result = session.await_result().await?;
-            if result.body != RESPONSE_BODY {
+            let (_, _, body) = expect_result_push(result)?;
+            if body != RESPONSE_BODY {
                 return Err(RuntimeError::UnexpectedMessage(
                     "wire proxy client received unexpected response body",
                 ));
@@ -1309,6 +1346,27 @@ async fn run_reference_proxy_client(
         }
     }
     session.close().await
+}
+
+fn expect_result_push(
+    result: NnrpResult,
+) -> Result<(u32, ResultPushMetadata, Vec<u8>), RuntimeError> {
+    let event = match result.event {
+        nnrp_runtime::NnrpTerminalEvent::Runtime(event) => event,
+        nnrp_runtime::NnrpTerminalEvent::Lifecycle(_) => {
+            return Err(RuntimeError::UnexpectedMessage(
+                "wire reference received local lifecycle terminal evidence",
+            ));
+        }
+    };
+    match (event.metadata, event.tail) {
+        (NnrpRuntimeEventMetadata::ResultPush(metadata), NnrpRuntimeEventTail::Body(body)) => {
+            Ok((event.header.frame_id, metadata, body))
+        }
+        _ => Err(RuntimeError::UnexpectedMessage(
+            "wire reference expected RESULT_PUSH terminal event",
+        )),
+    }
 }
 
 fn record_proxy_packet(frames: &mut ObservedFrameLog, direction: &str, packet: &RuntimePacket) {
@@ -1364,18 +1422,20 @@ fn wire_message_name(message_type: MessageType) -> &'static str {
     }
 }
 
-fn expect_backpressure(event: NnrpClientEvent) -> Result<PressureMetadata, RuntimeError> {
-    match event {
-        NnrpClientEvent::Backpressure(metadata) => Ok(metadata),
+fn expect_backpressure(event: NnrpRuntimeEvent) -> Result<PressureMetadata, RuntimeError> {
+    match (event.metadata, event.tail) {
+        (NnrpRuntimeEventMetadata::Pressure(metadata), NnrpRuntimeEventTail::None) => Ok(metadata),
         _ => Err(RuntimeError::UnexpectedMessage(
             "wire reference expected BACKPRESSURE event",
         )),
     }
 }
 
-fn expect_progress(event: NnrpClientEvent) -> Result<(ProgressMetadata, Vec<u8>), RuntimeError> {
-    match event {
-        NnrpClientEvent::Progress { metadata, body } => Ok((metadata, body)),
+fn expect_progress(event: NnrpRuntimeEvent) -> Result<(ProgressMetadata, Vec<u8>), RuntimeError> {
+    match (event.metadata, event.tail) {
+        (NnrpRuntimeEventMetadata::Progress(metadata), NnrpRuntimeEventTail::Body(body)) => {
+            Ok((metadata, body))
+        }
         _ => Err(RuntimeError::UnexpectedMessage(
             "wire reference expected PROGRESS event",
         )),
@@ -1383,10 +1443,12 @@ fn expect_progress(event: NnrpClientEvent) -> Result<(ProgressMetadata, Vec<u8>)
 }
 
 fn expect_partial_result(
-    event: NnrpClientEvent,
+    event: NnrpRuntimeEvent,
 ) -> Result<(PartialResultMetadata, Vec<u8>), RuntimeError> {
-    match event {
-        NnrpClientEvent::PartialResult { metadata, body } => Ok((metadata, body)),
+    match (event.metadata, event.tail) {
+        (NnrpRuntimeEventMetadata::PartialResult(metadata), NnrpRuntimeEventTail::Body(body)) => {
+            Ok((metadata, body))
+        }
         _ => Err(RuntimeError::UnexpectedMessage(
             "wire reference expected PARTIAL_RESULT event",
         )),
@@ -1394,37 +1456,37 @@ fn expect_partial_result(
 }
 
 fn expect_result_drop_reason(
-    event: NnrpClientEvent,
+    event: NnrpRuntimeEvent,
 ) -> Result<ResultDropReasonMetadata, RuntimeError> {
-    match event {
-        NnrpClientEvent::ResultDropReason { metadata, .. } => Ok(metadata),
+    match event.metadata {
+        NnrpRuntimeEventMetadata::ResultDropReason(metadata) => Ok(metadata),
         _ => Err(RuntimeError::UnexpectedMessage(
             "wire reference expected RESULT_DROP_REASON event",
         )),
     }
 }
 
-fn expect_capability(event: NnrpClientEvent) -> Result<CapabilityMetadata, RuntimeError> {
-    match event {
-        NnrpClientEvent::Capability { metadata, .. } => Ok(metadata),
+fn expect_capability(event: NnrpRuntimeEvent) -> Result<CapabilityMetadata, RuntimeError> {
+    match event.metadata {
+        NnrpRuntimeEventMetadata::Capability(metadata) => Ok(metadata),
         _ => Err(RuntimeError::UnexpectedMessage(
             "wire reference expected CAPABILITY_NEGOTIATION event",
         )),
     }
 }
 
-fn expect_route_hint(event: NnrpClientEvent) -> Result<RouteHintMetadata, RuntimeError> {
-    match event {
-        NnrpClientEvent::RouteHint { metadata, .. } => Ok(metadata),
+fn expect_route_hint(event: NnrpRuntimeEvent) -> Result<RouteHintMetadata, RuntimeError> {
+    match event.metadata {
+        NnrpRuntimeEventMetadata::RouteHint(metadata) => Ok(metadata),
         _ => Err(RuntimeError::UnexpectedMessage(
             "wire reference expected ROUTE_HINT event",
         )),
     }
 }
 
-fn expect_cache_reference(event: NnrpClientEvent) -> Result<CacheReferenceMetadata, RuntimeError> {
-    match event {
-        NnrpClientEvent::CacheReference { metadata, .. } => Ok(metadata),
+fn expect_cache_reference(event: NnrpRuntimeEvent) -> Result<CacheReferenceMetadata, RuntimeError> {
+    match event.metadata {
+        NnrpRuntimeEventMetadata::CacheReference(metadata) => Ok(metadata),
         _ => Err(RuntimeError::UnexpectedMessage(
             "wire reference expected CACHE_REFERENCE event",
         )),
@@ -1432,10 +1494,10 @@ fn expect_cache_reference(event: NnrpClientEvent) -> Result<CacheReferenceMetada
 }
 
 fn expect_cache_invalidate(
-    event: NnrpClientEvent,
+    event: NnrpRuntimeEvent,
 ) -> Result<CacheInvalidateMetadata, RuntimeError> {
-    match event {
-        NnrpClientEvent::CacheInvalidate(metadata) => Ok(metadata),
+    match event.metadata {
+        NnrpRuntimeEventMetadata::CacheInvalidate(metadata) => Ok(metadata),
         _ => Err(RuntimeError::UnexpectedMessage(
             "wire reference expected CACHE_INVALIDATE event",
         )),
@@ -1499,8 +1561,8 @@ fn token_submit(operation_id: u64) -> FrameSubmitMetadata {
         tile_index_bytes: 0,
         operation_id,
         submit_mode: SubmitMode::Inline,
-        budget_policy: 0,
-        loss_tolerance_policy: 0,
+        budget_policy: nnrp_core::BudgetPolicy::NONE,
+        loss_tolerance_policy: nnrp_core::LossTolerancePolicy::Strict,
         object_ref_mask: 0,
         dependency_frame_id: 0,
         payload_kind_bitmap: PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),

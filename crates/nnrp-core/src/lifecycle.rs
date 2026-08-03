@@ -81,6 +81,14 @@ impl ConnectionLifecycle {
         self.sessions.get(&session_id)
     }
 
+    pub fn snapshot(&self) -> Self {
+        self.clone()
+    }
+
+    pub fn sessions(&self) -> Vec<SessionLifecycle> {
+        self.sessions.values().cloned().collect()
+    }
+
     pub fn close_connection(&mut self) -> Result<(), NnrpError> {
         match self.state {
             ConnectionLifecycleState::Open | ConnectionLifecycleState::Closing => {
@@ -273,6 +281,17 @@ mod tests {
         assert_eq!(
             connection.session(43).unwrap().state,
             SessionLifecycleState::Open
+        );
+
+        let snapshot = connection.snapshot();
+        assert_eq!(snapshot.state(), ConnectionLifecycleState::Open);
+        assert_eq!(
+            snapshot
+                .sessions()
+                .into_iter()
+                .map(|session| session.session_id)
+                .collect::<Vec<_>>(),
+            vec![42, 43]
         );
     }
 

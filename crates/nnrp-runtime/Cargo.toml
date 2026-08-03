@@ -15,15 +15,21 @@ categories.workspace = true
 
 [features]
 default = ["native-tcp"]
-native-tcp = ["dep:tokio"]
+native-tcp = []
 
 [dependencies]
 async-trait.workspace = true
 futures-util.workspace = true
+futures-channel.workspace = true
+futures-timer.workspace = true
+getrandom.workspace = true
 http.workspace = true
-nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.4.19" }
-nnrp-transport-provider = { path = "../nnrp-transport-provider", version = "1.0.0-preview.4.19" }
+nnrp-core = { path = "../nnrp-core", version = "1.0.0-preview.4.22" }
+nnrp-transport-provider = { path = "../nnrp-transport-provider", version = "1.0.0-preview.4.22" }
 thiserror.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { workspace = true, optional = true }
+tokio.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures.workspace = true

@@ -1,6 +1,6 @@
 use crate::{
-    NnrpError, CACHE_ERROR_DEPENDENCY_INVALID, CACHE_ERROR_LEASE_EXPIRED, CACHE_ERROR_MISS,
-    CACHE_ERROR_SCHEMA_MISMATCH, CACHE_ERROR_VERSION_MISMATCH,
+    CacheReuseScope, NnrpError, CACHE_ERROR_DEPENDENCY_INVALID, CACHE_ERROR_LEASE_EXPIRED,
+    CACHE_ERROR_MISS, CACHE_ERROR_SCHEMA_MISMATCH, CACHE_ERROR_VERSION_MISMATCH,
 };
 
 pub const CACHE_PUT_METADATA_LEN: usize = 40;
@@ -125,6 +125,93 @@ pub struct CacheLease {
     pub owner_id: u64,
     pub granted_at_ms: u64,
     pub ttl_ms: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheObjectVersion {
+    pub object_id: CacheObjectId,
+    pub object_version: u64,
+    pub schema_id: u32,
+    pub schema_version: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheLeaseOutcome {
+    Valid,
+    Expired,
+    Renewed,
+    Released,
+    Missing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheLeaseResult {
+    pub object_id: CacheObjectId,
+    pub outcome: CacheLeaseOutcome,
+    pub lease: Option<CacheLease>,
+    pub object_version: Option<CacheObjectVersion>,
+    pub diagnostic: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheInvalidationReason {
+    Explicit,
+    DependencyInvalidated,
+    LeaseExpired,
+    VersionMismatch,
+    SchemaMismatch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheInvalidation {
+    pub object_id: CacheObjectId,
+    pub reason: CacheInvalidationReason,
+    pub object_version: u64,
+    pub diagnostic: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheDependencyInvalidation {
+    pub source: CacheObjectId,
+    pub affected: Vec<CacheObjectId>,
+    pub reason: CacheInvalidationReason,
+    pub schema_id: u32,
+    pub schema_version: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CachePolicyOptions {
+    pub enabled: bool,
+    pub reuse_scope: Option<CacheReuseScope>,
+    pub expiration_hint_ms: u64,
+    pub invalidation_reason: CacheInvalidationReason,
+}
+
+impl Default for CachePolicyOptions {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            reuse_scope: None,
+            expiration_hint_ms: 0,
+            invalidation_reason: CacheInvalidationReason::Explicit,
+        }
+    }
+}
+
+impl CachePolicyOptions {
+    pub fn validate(&self) -> Result<(), NnrpError> {
+        if !self.enabled && (self.reuse_scope.is_some() || self.expiration_hint_ms != 0) {
+            return Err(NnrpError::InvalidProtocolCombination {
+                rule: "disabled cache policy must not carry reuse scope or expiration hint",
+            });
+        }
+        if self.enabled && self.reuse_scope.is_none() {
+            return Err(NnrpError::InvalidProtocolCombination {
+                rule: "enabled cache policy requires a reuse scope",
+            });
+        }
+        Ok(())
+    }
 }
 
 impl CacheLease {
@@ -643,6 +730,37 @@ mod tests {
             CacheValidationFailure::SchemaMismatch.error_code(),
             CACHE_ERROR_SCHEMA_MISMATCH
         );
+    }
+
+    #[test]
+    fn cache_policy_requires_explicit_coherent_reuse_configuration() {
+        assert_eq!(CachePolicyOptions::default().validate(), Ok(()));
+
+        let enabled_without_scope = CachePolicyOptions {
+            enabled: true,
+            ..Default::default()
+        };
+        assert!(matches!(
+            enabled_without_scope.validate(),
+            Err(NnrpError::InvalidProtocolCombination { .. })
+        ));
+
+        let disabled_with_hint = CachePolicyOptions {
+            expiration_hint_ms: 1,
+            ..Default::default()
+        };
+        assert!(matches!(
+            disabled_with_hint.validate(),
+            Err(NnrpError::InvalidProtocolCombination { .. })
+        ));
+
+        let enabled = CachePolicyOptions {
+            enabled: true,
+            reuse_scope: Some(CacheReuseScope::Session),
+            expiration_hint_ms: 1_000,
+            invalidation_reason: CacheInvalidationReason::VersionMismatch,
+        };
+        assert_eq!(enabled.validate(), Ok(()));
     }
 
     #[test]

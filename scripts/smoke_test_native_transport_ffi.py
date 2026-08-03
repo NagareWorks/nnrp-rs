@@ -38,6 +38,18 @@ class NnrpBufferView(ctypes.Structure):
     _fields_ = [("ptr", ctypes.POINTER(ctypes.c_uint8)), ("len", ctypes.c_size_t)]
 
 
+class NnrpU16Slice(ctypes.Structure):
+    _fields_ = [("ptr", ctypes.POINTER(ctypes.c_uint16)), ("len", ctypes.c_size_t)]
+
+
+class NnrpU32Slice(ctypes.Structure):
+    _fields_ = [("ptr", ctypes.POINTER(ctypes.c_uint32)), ("len", ctypes.c_size_t)]
+
+
+class NnrpServerPolicySink(ctypes.Structure):
+    _fields_ = [("user_data", ctypes.c_void_p), ("begin", ctypes.c_void_p)]
+
+
 class NnrpFfiStatus(ctypes.Structure):
     _fields_ = [
         ("status_code", ctypes.c_uint32),
@@ -57,14 +69,28 @@ class NnrpFfiDiagnostic(ctypes.Structure):
     ]
 
 
+class NnrpRuntimeFrameHeader(ctypes.Structure):
+    _fields_ = [
+        ("present", ctypes.c_uint8),
+        ("version_major", ctypes.c_uint8),
+        ("wire_format", ctypes.c_uint8),
+        ("message_type", ctypes.c_uint8),
+        ("flags", ctypes.c_uint32),
+        ("session_id", ctypes.c_uint32),
+        ("frame_id", ctypes.c_uint32),
+        ("view_id", ctypes.c_uint16),
+        ("route_id", ctypes.c_uint16),
+        ("trace_id", ctypes.c_uint64),
+    ]
+
+
 class NnrpEvent(ctypes.Structure):
     _fields_ = [
         ("kind", ctypes.c_uint32),
-        ("message_type", ctypes.c_uint32),
+        ("header", NnrpRuntimeFrameHeader),
         ("connection", NnrpHandle),
         ("session", NnrpHandle),
         ("operation", NnrpHandle),
-        ("frame_id", ctypes.c_uint32),
         ("payload_owner", NnrpHandle),
         ("payload", NnrpBufferView),
         ("diagnostic", NnrpFfiDiagnostic),
@@ -86,6 +112,17 @@ class NnrpServerBindRequest(ctypes.Structure):
         ("generation", ctypes.c_uint32),
         ("reserved0", ctypes.c_uint32),
         ("transport_listener", NnrpHandle),
+        ("supported_profiles", NnrpU16Slice),
+        ("supported_cache_objects", NnrpU32Slice),
+        ("max_cache_objects", ctypes.c_uint64),
+        ("max_cache_object_bytes", ctypes.c_uint32),
+        ("resume_token_bytes", ctypes.c_uint32),
+        ("max_in_flight_operations", ctypes.c_uint16),
+        ("granted_operation_credit", ctypes.c_uint16),
+        ("lease_ttl_ms", ctypes.c_uint32),
+        ("resume_window_ms", ctypes.c_uint32),
+        ("schema_registry", NnrpHandle),
+        ("application_policy", NnrpServerPolicySink),
     ]
 
 
@@ -93,10 +130,19 @@ class NnrpSessionOpenRequest(ctypes.Structure):
     _fields_ = [
         ("connection", NnrpHandle),
         ("requested_session_id", ctypes.c_uint32),
+        ("session_handle_id", ctypes.c_uint64),
         ("generation", ctypes.c_uint32),
         ("profile_id", ctypes.c_uint16),
+        ("priority_class", ctypes.c_uint8),
+        ("allow_resume", ctypes.c_uint8),
         ("schema_id", ctypes.c_uint32),
         ("schema_version", ctypes.c_uint32),
+        ("default_deadline_ms", ctypes.c_uint32),
+        ("max_in_flight_operations", ctypes.c_uint16),
+        ("reserved0", ctypes.c_uint16),
+        ("lease_ttl_hint_ms", ctypes.c_uint32),
+        ("resume_token_bytes", ctypes.c_uint32),
+        ("cache_hints", NnrpU32Slice),
     ]
 
 
@@ -105,6 +151,10 @@ class NnrpSubmitRequest(ctypes.Structure):
         ("session", NnrpHandle),
         ("operation_id", ctypes.c_uint64),
         ("frame_id", ctypes.c_uint32),
+        ("header_flags", ctypes.c_uint32),
+        ("view_id", ctypes.c_uint16),
+        ("route_id", ctypes.c_uint16),
+        ("trace_id", ctypes.c_uint64),
         ("payload", NnrpBufferView),
     ]
 
@@ -290,6 +340,7 @@ def configure_library(library: ctypes.CDLL) -> None:
             [NnrpSessionOpenRequest, ctypes.POINTER(NnrpHandle)],
             NnrpFfiStatus,
         ),
+        "nnrp_session_id": ([NnrpHandle, ctypes.POINTER(ctypes.c_uint32)], NnrpFfiStatus),
         "nnrp_client_submit": (
             [NnrpSubmitRequest, ctypes.POINTER(NnrpHandle)],
             NnrpFfiStatus,
@@ -475,6 +526,23 @@ def packet(frame_id: int) -> bytes:
     )
 
 
+def typed_token_body(body: bytes) -> bytes:
+    prelude = struct.pack("<IIIIIIII", 0, 0, 24, len(body), 0, 0, 0, 0)
+    descriptor = struct.pack(
+        "<HBBIIHHII",
+        PROFILE_TOKEN,
+        0x02,
+        0x02,
+        TOKEN_DELTA_SCHEMA_ID,
+        TOKEN_DELTA_SCHEMA_VERSION,
+        0x02,
+        0,
+        0,
+        len(body),
+    )
+    return prelude + descriptor + body
+
+
 def token_submit_payload(operation_id: int, body: bytes) -> bytes:
     metadata = bytearray(FRAME_SUBMIT_METADATA_LEN)
     struct.pack_into("<H", metadata, 16, 25)
@@ -482,7 +550,7 @@ def token_submit_payload(operation_id: int, body: bytes) -> bytes:
     metadata[52] = 0
     struct.pack_into("<I", metadata, 64, 0x0000_0002)
     struct.pack_into("<H", metadata, 68, 1)
-    return bytes(metadata) + body
+    return bytes(metadata) + typed_token_body(body)
 
 
 def token_result_payload(body: bytes) -> bytes:
@@ -495,7 +563,7 @@ def token_result_payload(body: bytes) -> bytes:
     metadata[44] = 0
     struct.pack_into("<I", metadata, 56, 0x0000_0002)
     struct.pack_into("<H", metadata, 60, 1)
-    return bytes(metadata) + body
+    return bytes(metadata) + typed_token_body(body)
 
 
 def await_role_event(
@@ -638,6 +706,18 @@ def run_smoke_test_at_endpoint(
 def run_role_smoke_test_at_endpoint(
     library_path: Path, scope: str, endpoint: bytes, secure: bool = False
 ) -> None:
+    if ctypes.sizeof(ctypes.c_void_p) == 8:
+        if ctypes.sizeof(NnrpServerBindRequest) != 144:
+            raise RuntimeError("Python server-bind layout does not match the 64-bit FFI ABI")
+        if ctypes.sizeof(NnrpSessionOpenRequest) != 88:
+            raise RuntimeError("Python session-open layout does not match the 64-bit FFI ABI")
+        if NnrpSessionOpenRequest.session_handle_id.offset != 32:
+            raise RuntimeError(
+                "Python session-open session_handle_id offset does not match the FFI ABI"
+            )
+        if NnrpSessionOpenRequest.cache_hints.offset != 72:
+            raise RuntimeError("Python session-open cache_hints offset does not match the FFI ABI")
+
     library = ctypes.CDLL(str(library_path.resolve()))
     configure_library(library)
     transport_id = TRANSPORT_IDS[scope]
@@ -662,9 +742,27 @@ def run_role_smoke_test_at_endpoint(
     require_ok(library.nnrp_buffer_release(endpoint_buffer), "release role endpoint")
 
     server = invalid_handle()
+    supported_profiles_owner = (ctypes.c_uint16 * 1)(PROFILE_TOKEN)
     require_ok(
         library.nnrp_server_bind(
-            NnrpServerBindRequest(900_001, 1, 0, listener), ctypes.byref(server)
+            NnrpServerBindRequest(
+                900_001,
+                1,
+                0,
+                listener,
+                NnrpU16Slice(supported_profiles_owner, 1),
+                NnrpU32Slice(None, 0),
+                0,
+                0,
+                24,
+                4,
+                2,
+                30_000,
+                120_000,
+                invalid_handle(),
+                NnrpServerPolicySink(None, None),
+            ),
+            ctypes.byref(server),
         ),
         "server bind",
     )
@@ -711,11 +809,20 @@ def run_role_smoke_test_at_endpoint(
         library.nnrp_client_open_session(
             NnrpSessionOpenRequest(
                 client,
-                900_003,
+                0,
+                900_006,
                 1,
                 PROFILE_TOKEN,
+                0,
+                1,
                 TOKEN_DELTA_SCHEMA_ID,
                 TOKEN_DELTA_SCHEMA_VERSION,
+                500,
+                4,
+                0,
+                30_000,
+                24,
+                NnrpU32Slice(None, 0),
             ),
             ctypes.byref(client_session),
         ),
@@ -727,6 +834,18 @@ def run_role_smoke_test_at_endpoint(
     server_session = accepted.get_nowait()
     if isinstance(server_session, BaseException):
         raise server_session
+    client_session_id = ctypes.c_uint32()
+    server_session_id = ctypes.c_uint32()
+    require_ok(
+        library.nnrp_session_id(client_session, ctypes.byref(client_session_id)),
+        "client negotiated session id",
+    )
+    require_ok(
+        library.nnrp_session_id(server_session, ctypes.byref(server_session_id)),
+        "server negotiated session id",
+    )
+    if client_session_id.value == 0 or client_session_id.value != server_session_id.value:
+        raise RuntimeError("client and server did not expose the same assigned session id")
 
     operation_id = 900_005
     frame_id = 42
@@ -736,7 +855,14 @@ def run_role_smoke_test_at_endpoint(
     require_ok(
         library.nnrp_client_submit(
             NnrpSubmitRequest(
-                client_session, operation_id, frame_id, submit_view
+                client_session,
+                operation_id,
+                frame_id,
+                0,
+                0,
+                0,
+                0,
+                submit_view,
             ),
             ctypes.byref(client_operation),
         ),
@@ -746,7 +872,7 @@ def run_role_smoke_test_at_endpoint(
         library, "nnrp_server_await_events", server_session
     )
     server_operation = server_event.operation
-    if server_event.kind != EVENT_SUBMIT_ACCEPTED or server_event.frame_id != frame_id:
+    if server_event.kind != EVENT_SUBMIT_ACCEPTED or server_event.header.frame_id != frame_id:
         raise RuntimeError("server did not receive the submitted operation")
     if event_payload(library, server_event) != submit_payload:
         raise RuntimeError("server received an invalid submit payload")
@@ -764,7 +890,7 @@ def run_role_smoke_test_at_endpoint(
     )
     if (
         client_event.kind != EVENT_RESULT_PUSHED
-        or client_event.frame_id != frame_id
+        or client_event.header.frame_id != frame_id
         or client_event.operation.id != client_operation.id
     ):
         raise RuntimeError("client did not receive the operation result")

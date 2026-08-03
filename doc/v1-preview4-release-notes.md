@@ -1,6 +1,58 @@
 # NNRP/1 Preview4 Release Notes
 
+## Browser Connection Multiplexing And Recovery
+
+The browser WASM role boundary now separates a WebSocket-owning client connection from its protocol sessions. One
+connection can open and resume multiple sessions, each session exposes a runtime-issued canonical recovery ticket, and
+closing one session leaves sibling sessions and the shared carrier alive. Artifact inspection requires the connection,
+open, resume, recovery-ticket, ingress, and close exports so downstream browser SDKs cannot regress to one carrier per
+session or emulate recovery outside Rust.
+
 Preview4 moves the Rust workspace beyond token-stream transport substitution and into runtime orchestration features that help SDKs model cancellation, priority, progress, partial results, cache references, route hints, trace context, result drop reasons, IPC, and WebSocket endpoints directly.
+
+## 1.0.0-preview.4.22
+
+The native FFI ABI is `4.4.0`. Server-role adoption now carries asynchronous admission decisions across the native
+boundary, accepted client and server sessions expose their negotiated protocol session identity, and release artifacts
+declare the schema-registry exports required by downstream SDK loaders. These additions let language SDKs preserve one
+frozen high-level contract without reconstructing admission, identity, or schema state outside Rust.
+
+The browser WASM role keeps an in-flight WebSocket receive alive when the Rust driver cancels its current await. Received
+packets remain ordered, only one carrier receive may own ingress at a time, and external packet ingress is enabled only
+after a size-valid successful `SESSION_OPEN_ACK`. The WASM regression suite covers cancellation, concurrent receive
+ownership, oversized handshake rejection, and continued packet delivery.
+
+Native and WASM artifact inspection, transport-scoped role E2E, wire conformance, and downstream package manifests use
+this revision as the coordinated Preview4 SDK baseline.
+
+## 1.0.0-preview.4.21
+
+IPC shutdown now treats terminal Windows named-pipe peer states as an idempotent close after the
+NNRP `SESSION_CLOSE`/`SESSION_CLOSE_ACK` handshake has completed. In particular, Windows
+`ERROR_BROKEN_PIPE`, `ERROR_NO_DATA`, and `ERROR_PIPE_NOT_CONNECTED` no longer surface as a
+generic transport-internal failure when the peer closes immediately after sending the close ACK.
+
+The native FFI ABI remains `4.3.0`. Dynamic-library packet and role E2E validation covers the
+corrected IPC close path while preserving the transport-scoped artifact boundary and coarse FFI
+call shape.
+
+## 1.0.0-preview.4.20
+
+Rust role sessions now expose one public `NnrpRuntimeEvent` envelope for client and server event
+pumps. Every wire event retains the complete non-derived common header, one closed typed metadata
+variant, and one closed owned tail variant. Private role decoders no longer leak language-specific
+client or server event enums into SDK bindings.
+
+The native FFI projects the same envelope without reconstructing message types, frame identities,
+or payload boundaries in each binding. The FFI ABI is `4.3.0`; downstream SDKs must keep local
+lifecycle events separate from wire events and may construct a public runtime event only when the
+native event carries a wire header.
+
+The release validation matrix covers the unified event contract through Rust client/server
+loopbacks, TCP, QUIC, IPC, WebSocket, secure carrier cases, browser WASM role tests, external wire
+conformance, dynamically loaded transport-scoped libraries, and native/WASM artifact inspection.
+Preview4 revision 20 is the coordinated Rust baseline for Python, JavaScript, and C# parity work;
+those SDKs must complete their public API and E2E gates before their corresponding release.
 
 ## 1.0.0-preview.4.19
 

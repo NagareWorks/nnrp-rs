@@ -2,12 +2,15 @@ use std::time::Instant;
 
 use nnrp_core::{
     CacheMissMetadata, CacheMissReason, CacheReferenceMetadata, CacheReuseScope,
-    CapabilityMetadata, FrameSubmitMetadata, InputProfile, MessageType, PartialResultMetadata,
-    PayloadKindBitmap, PressureMetadata, ProgressMetadata, ResultClass, ResultDropReasonMetadata,
-    ResultPushMetadata, RouteHintMetadata, SubmitMode, TileIndexMode, TraceContextMetadata,
-    RESULT_DROP_REASON_DEADLINE_EXPIRED, STANDARD_PROFILE_TOKEN,
+    CapabilityMetadata, MessageType, PartialResultMetadata, PayloadKindBitmap, PressureMetadata,
+    ProgressMetadata, ResultClass, ResultDropReasonMetadata, ResultPushMetadata, RouteHintMetadata,
+    TraceContextMetadata, RESULT_DROP_REASON_DEADLINE_EXPIRED, STANDARD_PROFILE_TOKEN,
 };
-use nnrp_runtime::{FramedListener, NnrpClientEvent, NnrpServer, RuntimeError};
+use nnrp_runtime::{
+    FramedListener, NnrpRuntimeEvent, NnrpRuntimeEventMetadata, NnrpRuntimeEventTail, NnrpServer,
+    NnrpSubmitHeaderContext, NnrpSubmitIdentity, NnrpSubmitPolicy, NnrpSubmitRequest,
+    NnrpTokenChunk, NnrpTokenSubmitInput, RuntimeError,
+};
 use nnrp_transport_quic::{
     QuicClientEndpointConfig, QuicFramedListener, QuicProvider, QuicServerEndpointConfig,
 };
@@ -195,8 +198,9 @@ async fn run_cancel_abort_client(
     let mut session = endpoint.connect().await?.open_session().await?;
     let session_id = session.session_id();
     let operation_id = 101;
+    let request = token_submit(operation_id)?;
     let frame_id = session
-        .submit_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
+        .submit_encoded_nowait(request.metadata, request.body)
         .await?;
     observed.push(
         WireExternalDirection::SuiteToTarget,
@@ -216,17 +220,17 @@ async fn run_cancel_abort_client(
     let mut drop_reason = None;
     while trace.is_none() || drop_reason.is_none() {
         match session.await_event().await? {
-            NnrpClientEvent::TraceContext {
-                frame_id,
-                metadata,
-                body,
+            NnrpRuntimeEvent {
+                header,
+                metadata: NnrpRuntimeEventMetadata::TraceContext(metadata),
+                tail: NnrpRuntimeEventTail::Body(body),
             } => {
                 observed.push(
                     WireExternalDirection::TargetToSuite,
                     WireExternalFrame::TraceContext,
                     json!({
                         "session_id": session_id,
-                        "frame_id": frame_id,
+                        "frame_id": header.frame_id,
                         "trace_id": metadata.trace_id,
                         "span_id": metadata.span_id,
                         "body_bytes": body.len(),
@@ -234,7 +238,11 @@ async fn run_cancel_abort_client(
                 );
                 trace = Some(metadata);
             }
-            NnrpClientEvent::ResultDropReason { metadata, body } => {
+            NnrpRuntimeEvent {
+                metadata: NnrpRuntimeEventMetadata::ResultDropReason(metadata),
+                tail: NnrpRuntimeEventTail::Diagnostic(body),
+                ..
+            } => {
                 observed.push(
                     WireExternalDirection::TargetToSuite,
                     WireExternalFrame::ResultDropReason,
@@ -282,8 +290,9 @@ async fn run_capability_route_cache_client(
     let mut session = endpoint.connect().await?.open_session().await?;
     let session_id = session.session_id();
     let operation_id = 401;
+    let request = token_submit(operation_id)?;
     let frame_id = session
-        .submit_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
+        .submit_encoded_nowait(request.metadata, request.body)
         .await?;
     observed.push(
         WireExternalDirection::SuiteToTarget,
@@ -324,7 +333,11 @@ async fn run_capability_route_cache_client(
     );
 
     let miss = match session.await_event().await? {
-        NnrpClientEvent::CacheMiss { metadata, body } => {
+        NnrpRuntimeEvent {
+            metadata: NnrpRuntimeEventMetadata::CacheMiss(metadata),
+            tail: NnrpRuntimeEventTail::Diagnostic(body),
+            ..
+        } => {
             observed.push(
                 WireExternalDirection::TargetToSuite,
                 WireExternalFrame::CacheMiss,
@@ -345,8 +358,12 @@ async fn run_capability_route_cache_client(
             ));
         }
     };
-    let result = match session.await_event().await? {
-        NnrpClientEvent::Result(result) => result,
+    let (result_frame_id, result_body) = match session.await_event().await? {
+        NnrpRuntimeEvent {
+            header,
+            metadata: NnrpRuntimeEventMetadata::ResultPush(_),
+            tail: NnrpRuntimeEventTail::Body(body),
+        } => (header.frame_id, body),
         _ => {
             return Err(RuntimeError::UnexpectedMessage(
                 "capability/cache scenario expected RESULT_PUSH",
@@ -356,9 +373,9 @@ async fn run_capability_route_cache_client(
     observed.push(
         WireExternalDirection::TargetToSuite,
         WireExternalFrame::ResultPush,
-        json!({ "session_id": session_id, "frame_id": result.frame_id }),
+        json!({ "session_id": session_id, "frame_id": result_frame_id }),
     );
-    if miss != cache_miss() || result.body != RESPONSE_BODY {
+    if miss != cache_miss() || result_body != RESPONSE_BODY {
         return Err(RuntimeError::UnexpectedMessage(
             "capability/cache scenario received unexpected target data",
         ));
@@ -453,12 +470,16 @@ async fn run_priority_deadline_proxy(
         let mut upstream = upstream_endpoint.connect().await?.open_session().await?;
         let submit = downstream.receive_submit().await?;
         let upstream_frame_id = upstream
-            .submit_nowait(token_submit(submit.operation_id), submit.body)
+            .submit_encoded_nowait(submit.metadata, submit.body)
             .await?;
         upstream.update_priority(submit.operation_id, 10, 0).await?;
         upstream.expire_at(submit.operation_id, 1).await?;
         let drop_reason = match upstream.await_event().await? {
-            NnrpClientEvent::ResultDropReason { metadata, .. } => metadata,
+            NnrpRuntimeEvent {
+                metadata: NnrpRuntimeEventMetadata::ResultDropReason(metadata),
+                tail: NnrpRuntimeEventTail::Diagnostic(_),
+                ..
+            } => metadata,
             _ => {
                 return Err(RuntimeError::UnexpectedMessage(
                     "priority/deadline proxy expected RESULT_DROP_REASON",
@@ -489,11 +510,16 @@ async fn run_priority_deadline_proxy(
         .await?;
         let mut session = front_client.open_session().await?;
         let operation_id = 201;
+        let request = token_submit(operation_id)?;
         let frame_id = session
-            .submit_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
+            .submit_encoded_nowait(request.metadata, request.body)
             .await?;
         let drop_reason = match session.await_event().await? {
-            NnrpClientEvent::ResultDropReason { metadata, .. } => metadata,
+            NnrpRuntimeEvent {
+                metadata: NnrpRuntimeEventMetadata::ResultDropReason(metadata),
+                tail: NnrpRuntimeEventTail::Diagnostic(_),
+                ..
+            } => metadata,
             _ => {
                 return Err(RuntimeError::UnexpectedMessage(
                     "priority/deadline probe expected RESULT_DROP_REASON",
@@ -567,32 +593,20 @@ fn report(
     }
 }
 
-fn token_submit(operation_id: u64) -> FrameSubmitMetadata {
-    FrameSubmitMetadata {
-        src_width: 0,
-        src_height: 0,
-        tile_width: 0,
-        tile_height: 0,
-        tile_count: 0,
-        section_count: 0,
-        frame_class: 0,
-        input_profile: InputProfile::Unspecified,
-        tile_index_mode: TileIndexMode::DenseRange,
-        latency_budget_ms: 25,
-        target_fps_x100: 0,
-        retry_of_frame: 0,
-        tile_base_id: 0,
-        camera_bytes: 0,
-        tile_index_bytes: 0,
-        operation_id,
-        submit_mode: SubmitMode::Inline,
-        budget_policy: 0,
-        loss_tolerance_policy: 0,
-        object_ref_mask: 0,
-        dependency_frame_id: 0,
-        payload_kind_bitmap: PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),
-        payload_frame_count: 1,
-    }
+fn token_submit(operation_id: u64) -> Result<NnrpSubmitRequest, RuntimeError> {
+    Ok(NnrpSubmitRequest::token(NnrpTokenSubmitInput {
+        identity: NnrpSubmitIdentity {
+            operation_id,
+            frame_id: 1,
+            header: NnrpSubmitHeaderContext::default(),
+        },
+        policy: NnrpSubmitPolicy {
+            latency_budget_ms: 25,
+            loss_tolerance_policy: nnrp_core::LossTolerancePolicy::Strict,
+            ..NnrpSubmitPolicy::default()
+        },
+        chunks: vec![NnrpTokenChunk::partial(REQUEST_BODY)],
+    })?)
 }
 
 fn token_result() -> ResultPushMetadata {
@@ -744,7 +758,9 @@ pub fn canonical_trace_body() -> &'static [u8] {
 mod tests {
     use std::{net::SocketAddr, str::FromStr, time::Duration};
 
-    use nnrp_runtime::{NnrpClientEvent, NnrpServerEvent, RuntimeError};
+    use nnrp_runtime::{
+        NnrpRuntimeEvent, NnrpRuntimeEventMetadata, NnrpRuntimeEventTail, RuntimeError,
+    };
     use nnrp_transport_ipc::IpcEndpoint;
     use nnrp_transport_quic::QuicServerEndpointConfig;
 
@@ -752,7 +768,7 @@ mod tests {
         cache_miss, cancel_drop_reason, cancel_trace, canonical_response_body,
         run_wire_external_case, token_result, token_submit, WireExternalCase, WireExternalMode,
         WireExternalTerminal, CACHE_BODY, CAPABILITY_BODY, PARTIAL_BODY, PROGRESS_BODY,
-        REQUEST_BODY, RESPONSE_BODY, ROUTE_BODY, TRACE_BODY,
+        RESPONSE_BODY, ROUTE_BODY, TRACE_BODY,
     };
     use crate::wire_endpoint::{ReferenceTransport, WireEndpointSecurity, WireReferenceEndpoint};
 
@@ -911,8 +927,11 @@ mod tests {
         let mut session = server.accept().await?;
         let submit = session.receive_submit().await?;
         match session.await_event().await? {
-            NnrpServerEvent::Control(control)
-                if control.message_type == nnrp_core::MessageType::Cancel => {}
+            NnrpRuntimeEvent {
+                header,
+                metadata: NnrpRuntimeEventMetadata::ControlRequest(_),
+                tail: NnrpRuntimeEventTail::Diagnostic(_),
+            } if header.message_type == nnrp_core::MessageType::Cancel => {}
             _ => {
                 return Err(RuntimeError::UnexpectedMessage(
                     "cancel target expected CANCEL",
@@ -932,7 +951,11 @@ mod tests {
         let mut session = server.accept().await?;
         let submit = session.receive_submit().await?;
         match session.await_event().await? {
-            NnrpServerEvent::Capability { body, .. } if body == CAPABILITY_BODY => {}
+            NnrpRuntimeEvent {
+                metadata: NnrpRuntimeEventMetadata::Capability(_),
+                tail: NnrpRuntimeEventTail::Body(body),
+                ..
+            } if body == CAPABILITY_BODY => {}
             _ => {
                 return Err(RuntimeError::UnexpectedMessage(
                     "target expected capability",
@@ -940,7 +963,11 @@ mod tests {
             }
         }
         match session.await_event().await? {
-            NnrpServerEvent::RouteHint { body, .. } if body == ROUTE_BODY => {}
+            NnrpRuntimeEvent {
+                metadata: NnrpRuntimeEventMetadata::RouteHint(_),
+                tail: NnrpRuntimeEventTail::Body(body),
+                ..
+            } if body == ROUTE_BODY => {}
             _ => {
                 return Err(RuntimeError::UnexpectedMessage(
                     "target expected route hint",
@@ -948,7 +975,11 @@ mod tests {
             }
         }
         match session.await_event().await? {
-            NnrpServerEvent::CacheReference { body, .. } if body == CACHE_BODY => {}
+            NnrpRuntimeEvent {
+                metadata: NnrpRuntimeEventMetadata::CacheReference(_),
+                tail: NnrpRuntimeEventTail::Body(body),
+                ..
+            } if body == CACHE_BODY => {}
             _ => {
                 return Err(RuntimeError::UnexpectedMessage(
                     "target expected cache reference",
@@ -970,7 +1001,11 @@ mod tests {
             nnrp_core::MessageType::ExpireAt,
         ] {
             match session.await_event().await? {
-                NnrpServerEvent::Scheduling(update) if update.message_type == expected => {}
+                NnrpRuntimeEvent {
+                    header,
+                    metadata: NnrpRuntimeEventMetadata::Scheduling(_),
+                    tail: NnrpRuntimeEventTail::None,
+                } if header.message_type == expected => {}
                 _ => {
                     return Err(RuntimeError::UnexpectedMessage(
                         "priority target received unexpected scheduling frame",
@@ -987,15 +1022,25 @@ mod tests {
     async fn progress_target(endpoint: WireReferenceEndpoint) -> Result<(), RuntimeError> {
         let mut session = endpoint.connect().await?.open_session().await?;
         let operation_id = 301;
+        let request = token_submit(operation_id)?;
         session
-            .submit_nowait(token_submit(operation_id), REQUEST_BODY.to_vec())
+            .submit_encoded_nowait(request.metadata, request.body)
             .await?;
         match session.await_event().await? {
-            NnrpClientEvent::Progress { body, .. } if body == PROGRESS_BODY => {}
+            NnrpRuntimeEvent {
+                metadata: NnrpRuntimeEventMetadata::Progress(_),
+                tail: NnrpRuntimeEventTail::Body(body),
+                ..
+            } if body == PROGRESS_BODY => {}
             _ => return Err(RuntimeError::UnexpectedMessage("target expected progress")),
         }
         match session.await_event().await? {
-            NnrpClientEvent::CreditUpdate(metadata) if metadata.credit_window == 1 => {}
+            NnrpRuntimeEvent {
+                header,
+                metadata: NnrpRuntimeEventMetadata::Pressure(metadata),
+                tail: NnrpRuntimeEventTail::None,
+            } if header.message_type == nnrp_core::MessageType::CreditUpdate
+                && metadata.credit_window == 1 => {}
             _ => {
                 return Err(RuntimeError::UnexpectedMessage(
                     "target expected credit update",
@@ -1003,7 +1048,11 @@ mod tests {
             }
         }
         match session.await_event().await? {
-            NnrpClientEvent::PartialResult { body, .. } if body == PARTIAL_BODY => {}
+            NnrpRuntimeEvent {
+                metadata: NnrpRuntimeEventMetadata::PartialResult(_),
+                tail: NnrpRuntimeEventTail::Body(body),
+                ..
+            } if body == PARTIAL_BODY => {}
             _ => {
                 return Err(RuntimeError::UnexpectedMessage(
                     "target expected partial result",
@@ -1011,9 +1060,11 @@ mod tests {
             }
         }
         match session.await_event().await? {
-            NnrpClientEvent::Result(result)
-                if result.metadata == token_result()
-                    && result.body.as_slice() == canonical_response_body() => {}
+            NnrpRuntimeEvent {
+                metadata: NnrpRuntimeEventMetadata::ResultPush(metadata),
+                tail: NnrpRuntimeEventTail::Body(body),
+                ..
+            } if metadata == token_result() && body.as_slice() == canonical_response_body() => {}
             _ => return Err(RuntimeError::UnexpectedMessage("target expected result")),
         }
         session.close().await

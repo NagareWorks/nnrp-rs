@@ -14,7 +14,23 @@ pub struct NnrpServerOptions {
     pub endpoint: NnrpEndpoint,
     pub provider_routes: ServerProviderRoutes,
     pub transport_policy: TransportPolicy,
-    pub session: NnrpServerConfig,
+    pub session_defaults: NnrpServerConfig,
+}
+
+impl NnrpServerOptions {
+    pub fn new(
+        endpoint: NnrpEndpoint,
+        provider_routes: ServerProviderRoutes,
+        transport_policy: TransportPolicy,
+        session_defaults: NnrpServerConfig,
+    ) -> Self {
+        Self {
+            endpoint,
+            provider_routes,
+            transport_policy,
+            session_defaults,
+        }
+    }
 }
 
 pub struct BoundServerProvider {
@@ -455,12 +471,12 @@ mod tests {
     }
 
     fn options(routes: ServerProviderRoutes) -> NnrpServerOptions {
-        NnrpServerOptions {
-            endpoint: "nnrp://127.0.0.1:4500/session".parse().unwrap(),
-            provider_routes: routes,
-            transport_policy: TransportPolicy::Auto,
-            session: NnrpServerConfig::default(),
-        }
+        NnrpServerOptions::new(
+            "nnrp://127.0.0.1:4500/session".parse().unwrap(),
+            routes,
+            TransportPolicy::Auto,
+            NnrpServerConfig::default(),
+        )
     }
 
     #[tokio::test]

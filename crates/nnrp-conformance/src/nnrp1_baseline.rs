@@ -13,9 +13,9 @@ use nnrp_core::{
 use nnrp_core::{ClientHelloMetadata, ResultHintReason, TransportPolicy};
 use nnrp_runtime::{NnrpClient, NnrpClientConfig, NnrpServerConfig, RuntimeError};
 use nnrp_transport_provider::{
-    select_transport_with_probe, summarize_provider_probe, ProbeSample, RemoteTransportSupport,
+    select_transport_with_probe, summarize_provider_probe, ProbeSample,
     TransportCandidateReadiness, TransportProbeObservation, TransportProviderDescriptor,
-    TransportProviderKind,
+    TransportProviderKind, TransportSelectionOptions,
 };
 use nnrp_transport_quic::{QuicClientEndpointConfig, QuicProvider, QuicServerEndpointConfig};
 use nnrp_transport_tcp::TcpProvider;
@@ -299,6 +299,7 @@ fn l1_frame_submit_parse_emit() -> Result<(), String> {
 
     let typed_descriptor = TypedPayloadDescriptor {
         profile_id: STANDARD_PROFILE_TOKEN,
+        payload_kind: nnrp_core::PayloadKind::TokenChunk,
         descriptor_flags: 0x0002,
         schema_id: 0x0000_1001,
         schema_version: 3,
@@ -385,7 +386,6 @@ fn l3_transport_probe_selection() -> Result<(), String> {
             TransportProviderKind::NativeDynamic,
         ),
     ];
-    let remote = RemoteTransportSupport::new([TransportId::Tcp, TransportId::Quic]);
     let samples = [
         ProbeSample::success(
             TransportId::Tcp,
@@ -408,14 +408,16 @@ fn l3_transport_probe_selection() -> Result<(), String> {
     let observations = transport_observations(&providers, &samples);
     let selection = select_transport_with_probe(
         &providers,
-        &remote,
-        TransportPolicy::Auto,
-        None,
-        &readiness,
-        &observations,
+        &TransportSelectionOptions {
+            peer_supported_transports: vec![TransportId::Tcp, TransportId::Quic],
+            policy: TransportPolicy::Auto,
+            requested_max_frame_bytes: None,
+            candidate_readiness: readiness.clone(),
+            probe_observations: observations,
+        },
     )
     .map_err(|error| error.to_string())?;
-    if selection.selected.transport_id != TransportId::Quic {
+    if selection.selected_provider.transport_id != TransportId::Quic {
         return Err("transport probe did not prefer the lower-latency QUIC sample".to_string());
     }
 
@@ -437,14 +439,16 @@ fn l3_transport_probe_selection() -> Result<(), String> {
     ];
     let fallback = select_transport_with_probe(
         &providers,
-        &remote,
-        TransportPolicy::PreferQuic,
-        None,
-        &readiness,
-        &transport_observations(&providers, &fallback_samples),
+        &TransportSelectionOptions {
+            peer_supported_transports: vec![TransportId::Tcp, TransportId::Quic],
+            policy: TransportPolicy::PreferQuic,
+            requested_max_frame_bytes: None,
+            candidate_readiness: readiness,
+            probe_observations: transport_observations(&providers, &fallback_samples),
+        },
     )
     .map_err(|error| error.to_string())?;
-    if fallback.selected.transport_id != TransportId::Tcp {
+    if fallback.selected_provider.transport_id != TransportId::Tcp {
         return Err("transport probe did not fall back to TCP after QUIC failure".to_string());
     }
     Ok(())
@@ -531,9 +535,19 @@ async fn tcp_session_smoke() -> Result<(), RuntimeError> {
 
     let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
     let mut session = client.open_session().await?;
-    let frame_id = session.submit(token_submit(1), b"prompt".to_vec()).await?;
+    let frame_id = session
+        .submit_encoded(token_submit(1), b"prompt".to_vec())
+        .await?;
     let result = session.await_result().await?;
-    if result.frame_id != frame_id || result.body != b"delta" {
+    let event = result
+        .event
+        .as_runtime()
+        .ok_or(RuntimeError::UnexpectedMessage(
+            "TCP smoke received local lifecycle terminal evidence",
+        ))?;
+    if event.header.frame_id != frame_id
+        || event.tail != nnrp_runtime::NnrpRuntimeEventTail::Body(b"delta".to_vec())
+    {
         return Err(RuntimeError::UnexpectedMessage(
             "TCP smoke result did not preserve frame id and body",
         ));
@@ -564,9 +578,19 @@ async fn quic_session_smoke() -> Result<(), RuntimeError> {
     let client =
         QuicProvider::connect_addr(addr, endpoint_config, NnrpClientConfig::default()).await?;
     let mut session = client.open_session().await?;
-    let frame_id = session.submit(token_submit(1), b"prompt".to_vec()).await?;
+    let frame_id = session
+        .submit_encoded(token_submit(1), b"prompt".to_vec())
+        .await?;
     let result = session.await_result().await?;
-    if result.frame_id != frame_id || result.body != b"delta" {
+    let event = result
+        .event
+        .as_runtime()
+        .ok_or(RuntimeError::UnexpectedMessage(
+            "QUIC smoke received local lifecycle terminal evidence",
+        ))?;
+    if event.header.frame_id != frame_id
+        || event.tail != nnrp_runtime::NnrpRuntimeEventTail::Body(b"delta".to_vec())
+    {
         return Err(RuntimeError::UnexpectedMessage(
             "QUIC smoke result did not preserve frame id and body",
         ));
@@ -595,8 +619,8 @@ fn token_submit(operation_id: u64) -> FrameSubmitMetadata {
         tile_index_bytes: 0,
         operation_id,
         submit_mode: SubmitMode::Inline,
-        budget_policy: 0,
-        loss_tolerance_policy: 0,
+        budget_policy: nnrp_core::BudgetPolicy::NONE,
+        loss_tolerance_policy: nnrp_core::LossTolerancePolicy::Strict,
         payload_frame_count: 1,
         object_ref_mask: 0,
         dependency_frame_id: 0,

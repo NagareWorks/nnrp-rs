@@ -45,6 +45,7 @@ fn shutdown_invalidates_live_role_handles_and_restarts_the_runtime() {
                     generation: 1,
                     reserved0: 0,
                     transport_listener: listener,
+                    ..NnrpServerBindRequest::default()
                 },
                 &mut server,
             ),

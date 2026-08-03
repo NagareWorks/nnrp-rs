@@ -30,7 +30,7 @@ class NativeRolePayloadTests(unittest.TestCase):
         self.assertEqual(metadata[52], 0)
         self.assertEqual(struct.unpack_from("<I", metadata, 64)[0], 2)
         self.assertEqual(struct.unpack_from("<H", metadata, 68)[0], 1)
-        self.assertEqual(payload[72:], b"submit")
+        self.assertEqual(payload[72:], smoke.typed_token_body(b"submit"))
 
     def test_token_result_payload_matches_frozen_layout(self):
         smoke = load_smoke_script()
@@ -46,7 +46,18 @@ class NativeRolePayloadTests(unittest.TestCase):
         self.assertEqual(metadata[44], 0)
         self.assertEqual(struct.unpack_from("<I", metadata, 56)[0], 2)
         self.assertEqual(struct.unpack_from("<H", metadata, 60)[0], 1)
-        self.assertEqual(payload[64:], b"result")
+        self.assertEqual(payload[64:], smoke.typed_token_body(b"result"))
+
+    def test_typed_token_body_matches_frozen_descriptor(self):
+        smoke = load_smoke_script()
+        body = smoke.typed_token_body(b"token")
+
+        self.assertEqual(struct.unpack_from("<IIIIIIII", body, 0), (0, 0, 24, 5, 0, 0, 0, 0))
+        self.assertEqual(
+            struct.unpack_from("<HBBIIHHII", body, 32),
+            (smoke.PROFILE_TOKEN, 2, 2, smoke.TOKEN_DELTA_SCHEMA_ID, smoke.TOKEN_DELTA_SCHEMA_VERSION, 2, 0, 0, 5),
+        )
+        self.assertEqual(body[56:], b"token")
 
     def test_secure_websocket_smoke_uses_certificate_server_name(self):
         smoke = load_smoke_script()

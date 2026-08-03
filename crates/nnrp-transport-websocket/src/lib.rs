@@ -542,10 +542,9 @@ mod tests {
         SubmitMode, TileIndexMode, STANDARD_PROFILE_TOKEN,
     };
     use nnrp_runtime::{
-        ClientProviderRoute, ClientProviderRoutes, NnrpClientEvent, NnrpClientOptions,
-        NnrpClientProvider, NnrpResult,
+        ClientProviderRoute, ClientProviderRoutes, NnrpClientOptions, NnrpClientProvider,
+        NnrpRuntimeEventMetadata, NnrpRuntimeEventTail,
     };
-    use nnrp_transport_provider::RemoteTransportSupport;
     use std::sync::Arc;
     use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
@@ -575,15 +574,20 @@ mod tests {
         assert_eq!(registry.providers()[0].name, WebSocketProvider::NAME);
         assert_eq!(registry.providers()[0].transport_id, TransportId::WebSocket);
 
-        let remote = RemoteTransportSupport::new([TransportId::WebSocket]);
         let readiness = [nnrp_transport_provider::TransportCandidateReadiness::ready(
             TransportId::WebSocket,
             registry.providers()[0].metadata.id.clone(),
         )];
         let selection = registry
-            .select(&remote, TransportPolicy::ForceWebSocket, None, &readiness)
+            .select(&nnrp_transport_provider::TransportSelectionOptions {
+                peer_supported_transports: vec![TransportId::WebSocket],
+                policy: TransportPolicy::ForceWebSocket,
+                requested_max_frame_bytes: None,
+                candidate_readiness: readiness.to_vec(),
+                probe_observations: Vec::new(),
+            })
             .expect("websocket provider should satisfy force websocket");
-        assert_eq!(selection.selected.name, WebSocketProvider::NAME);
+        assert_eq!(selection.selected_provider.name, WebSocketProvider::NAME);
     }
 
     #[tokio::test]
@@ -601,9 +605,18 @@ mod tests {
 
         let client = WebSocketProvider::connect(&endpoint, NnrpClientConfig::default()).await?;
         let mut session = client.open_session().await?;
-        session.submit(token_submit(), b"hello".to_vec()).await?;
-        let NnrpResult { body, .. } = session.await_result().await?;
-        assert_eq!(body, b"ws-ok");
+        session
+            .submit_encoded(token_submit(), b"hello".to_vec())
+            .await?;
+        let result = session.await_result().await?;
+        assert_eq!(
+            result
+                .event
+                .as_runtime()
+                .expect("wire result must retain its runtime event")
+                .tail,
+            nnrp_runtime::NnrpRuntimeEventTail::Body(b"ws-ok".to_vec())
+        );
 
         server_task
             .await
@@ -624,13 +637,17 @@ mod tests {
                     ClientProviderRoute::at(provider_endpoint.parse().unwrap()),
                 )]),
                 transport_policy: TransportPolicy::Auto,
-                session: NnrpClientConfig::default(),
+                session_defaults: NnrpClientConfig::default(),
             },
             [Arc::new(WebSocketProvider) as Arc<dyn NnrpClientProvider>],
         )
         .await?;
         assert_eq!(
-            client.transport_selection().unwrap().selected.transport_id,
+            client
+                .transport_selection()
+                .unwrap()
+                .selected_provider
+                .transport_id,
             TransportId::WebSocket
         );
         let client_session = client.open_session().await?;
@@ -752,19 +769,27 @@ mod tests {
         let client = WebSocketProvider::connect(&endpoint, NnrpClientConfig::default()).await?;
         let mut session = client.open_session().await?;
         let frame_id = session
-            .submit_nowait(token_submit(), b"partial-request".to_vec())
+            .submit_encoded_nowait(token_submit(), b"partial-request".to_vec())
             .await?;
         session.send_credit_update(credit_update()).await?;
 
         match session.await_event().await? {
-            NnrpClientEvent::Backpressure(pressure) => {
+            nnrp_runtime::NnrpRuntimeEvent {
+                metadata: NnrpRuntimeEventMetadata::Pressure(pressure),
+                tail: NnrpRuntimeEventTail::None,
+                ..
+            } => {
                 assert_eq!(pressure.pressure_level, BackpressureLevel::Soft as u16);
                 assert_eq!(pressure.credit_window, 2);
             }
             event => panic!("expected backpressure event, got {event:?}"),
         }
         match session.await_event().await? {
-            NnrpClientEvent::Progress { metadata, body } => {
+            nnrp_runtime::NnrpRuntimeEvent {
+                metadata: NnrpRuntimeEventMetadata::Progress(metadata),
+                tail: NnrpRuntimeEventTail::Body(body),
+                ..
+            } => {
                 assert_eq!(metadata.operation_id, frame_id as u64);
                 assert_eq!(metadata.progress_sequence, 1);
                 assert_eq!(metadata.percent_x100, 2_500);
@@ -773,7 +798,11 @@ mod tests {
             event => panic!("expected progress event, got {event:?}"),
         }
         match session.await_event().await? {
-            NnrpClientEvent::PartialResult { metadata, body } => {
+            nnrp_runtime::NnrpRuntimeEvent {
+                metadata: NnrpRuntimeEventMetadata::PartialResult(metadata),
+                tail: NnrpRuntimeEventTail::Body(body),
+                ..
+            } => {
                 assert_eq!(metadata.operation_id, frame_id as u64);
                 assert_eq!(metadata.result_sequence, 1);
                 assert_eq!(body, b"partial");
@@ -806,8 +835,8 @@ mod tests {
             tile_index_bytes: 0,
             operation_id: 1,
             submit_mode: SubmitMode::Inline,
-            budget_policy: 0,
-            loss_tolerance_policy: 0,
+            budget_policy: nnrp_core::BudgetPolicy::NONE,
+            loss_tolerance_policy: nnrp_core::LossTolerancePolicy::Strict,
             object_ref_mask: 0,
             dependency_frame_id: 0,
             payload_kind_bitmap: PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),

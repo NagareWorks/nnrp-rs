@@ -1,17 +1,27 @@
 pub mod client;
 pub mod client_provider;
 pub mod error;
+pub mod event;
+mod multiplex;
 pub mod packet;
 pub mod pressure;
 pub mod route;
 pub mod server;
 pub mod server_provider;
+pub mod submit;
 pub mod transport;
 
-pub use client::{NnrpClient, NnrpClientConfig, NnrpClientEvent, NnrpClientSession, NnrpResult};
+pub use client::{
+    NnrpClient, NnrpClientConfig, NnrpClientSession, NnrpResult, NnrpSessionRecoveryTicket,
+};
 pub use client_provider::{NnrpClientOptions, NnrpClientProvider};
 pub use error::RuntimeError;
-pub use packet::RuntimePacket;
+pub use event::{
+    NnrpRuntimeEvent, NnrpRuntimeEventMetadata, NnrpRuntimeEventTail, NnrpTerminalEvent,
+    OperationLifecycleEvent,
+};
+pub use nnrp_core::{CacheLeaseResult, CachePolicyOptions};
+pub use packet::{RuntimeFrameHeader, RuntimePacket};
 pub use pressure::RuntimePressureState;
 pub use route::{
     ClientProviderRoute, ClientProviderRoutes, ClientTransportSecurity, NnrpEndpoint,
@@ -20,10 +30,15 @@ pub use route::{
 };
 pub use server::{
     AllowAllServerPolicy, NnrpCancel, NnrpMigration, NnrpPressureUpdate, NnrpRuntimeControl,
-    NnrpSchedulingUpdate, NnrpServer, NnrpServerConfig, NnrpServerEvent, NnrpServerPolicy,
-    NnrpServerSession, NnrpSubmit,
+    NnrpSchedulingUpdate, NnrpServer, NnrpServerAcceptOptions, NnrpServerConfig, NnrpServerPolicy,
+    NnrpServerPolicyDecision, NnrpServerSession, NnrpSubmit,
 };
 pub use server_provider::{BoundServerProvider, NnrpServerOptions, NnrpServerProvider};
+pub use submit::{
+    NnrpSubmitHeaderContext, NnrpSubmitIdentity, NnrpSubmitObjectReferences, NnrpSubmitPolicy,
+    NnrpSubmitRequest, NnrpTensorSection, NnrpTensorSubmitInput, NnrpTokenChunk,
+    NnrpTokenSubmitInput, NnrpTypedPayloadInputFrame, NnrpTypedPayloadSubmitInput,
+};
 pub use transport::{
     BoxedFramedListener, BoxedFramedTransport, FramedListener, FramedTransport, RuntimeFrameLimits,
     RuntimeTransportKind,

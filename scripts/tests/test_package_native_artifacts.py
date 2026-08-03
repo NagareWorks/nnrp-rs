@@ -20,6 +20,20 @@ def load_package_script():
 
 
 class NativeExportVerificationTests(unittest.TestCase):
+    def test_cargo_target_root_honors_absolute_and_relative_environment_paths(self):
+        package = load_package_script()
+        absolute = Path(tempfile.gettempdir()) / "nnrp-cargo-target"
+
+        with mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": str(absolute)}):
+            self.assertEqual(package.cargo_target_root(), absolute)
+        with mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": "build/cargo-target"}):
+            self.assertEqual(
+                package.cargo_target_root(),
+                ROOT / "build" / "cargo-target",
+            )
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(package.cargo_target_root(), ROOT / "target")
+
     def test_static_exports_use_rust_llvm_nm(self):
         package = load_package_script()
         library = Path("libnnrp_ffi.a")
@@ -92,11 +106,15 @@ not_an_nnrp_export T 00000004 00000004
             {"nnrp_current_protocol_version", "nnrp_transport_runtime_shutdown"},
         )
 
-    def test_role_connection_lifecycle_exports_are_required(self):
+    def test_role_and_schema_registry_exports_are_required(self):
         package = load_package_script()
 
         self.assertIn("nnrp_connection_close", package.EXPECTED_EXPORTS)
         self.assertIn("nnrp_client_close_connection", package.EXPECTED_EXPORTS)
+        self.assertIn("nnrp_session_id", package.EXPECTED_EXPORTS)
+        self.assertIn("nnrp_schema_registry_create", package.EXPECTED_EXPORTS)
+        self.assertIn("nnrp_schema_registry_install", package.EXPECTED_EXPORTS)
+        self.assertIn("nnrp_schema_registry_release", package.EXPECTED_EXPORTS)
 
     def test_every_retired_abi_export_is_rejected(self):
         package = load_package_script()
@@ -127,6 +145,17 @@ not_an_nnrp_export T 00000004 00000004
         for scope, library in libraries.items():
             self.assertIn(f"{scope}={library}", command)
         self.assertTrue(run.call_args.kwargs["check"])
+
+    def test_skip_build_rejects_multiple_transport_scopes(self):
+        package = load_package_script()
+
+        with self.assertRaisesRegex(SystemExit, "requires exactly one"):
+            package.validate_transport_build_selection(["tcp", "quic"], True)
+
+    def test_skip_build_accepts_one_transport_scope(self):
+        package = load_package_script()
+
+        package.validate_transport_build_selection(["tcp"], True)
 
 
 if __name__ == "__main__":

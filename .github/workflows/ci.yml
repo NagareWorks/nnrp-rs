@@ -143,11 +143,23 @@ jobs:
           path: nnrp-conformance-action
           fetch-depth: 1
 
+      - name: Checkout frozen SDK API contract
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ github.repository_owner }}/nnrp-doc
+          path: nnrp-doc-contract
+          fetch-depth: 1
+
       - name: Format check
         run: cargo fmt --all --check
 
       - name: Release surface sync check
         run: python scripts/check_release_surface_sync.py
+
+      - name: SDK API contract parity
+        run: >-
+          python scripts/check_sdk_api_contract.py
+          --contract nnrp-doc-contract/docs/public/contracts/nnrp-1-preview4-sdk-api.json
 
       - name: Release helper tests
         run: python -m unittest discover -s scripts/tests -p "test_*.py"
@@ -250,6 +262,18 @@ jobs:
             --test wasm_bindgen_smoke \
             --no-default-features \
             --features transport-websocket,wasm-provider
+          for test_name in \
+            wasm_bindgen_browser_role_runs_real_session_submit_and_close \
+            browser_role_routes_control_and_patch_while_event_receive_is_pending
+          do
+            CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner \
+              cargo test -p nnrp-wasm \
+              --target wasm32-unknown-unknown \
+              --test wasm_bindgen_smoke \
+              --no-default-features \
+              --features transport-websocket,wasm-provider \
+              "$test_name" -- --exact
+          done
 
       - name: Build and package WASM primitives
         run: python scripts/package_wasm_primitives.py --out artifacts/wasm
@@ -280,36 +304,17 @@ jobs:
           path: nnrp-conformance-action
           fetch-depth: 1
 
-      - name: Run preview2 suite-owned conformance action
-        uses: ./nnrp-conformance-action/.github/actions/run-conformance
-        with:
-          protocol-version: nnrp-1-preview2
-          capabilities-path: conformance/nnrp-1-preview2.capabilities.json
-          working-directory: .
-          artifact-name: nnrp-rs-preview2-conformance
-          adapter-command: >-
-            cargo run -p nnrp-conformance --bin nnrp-conformance-adapter --
-            --plan $env:NNRP_CONFORMANCE_ADAPTER_PLAN
-            --output $env:NNRP_CONFORMANCE_ADAPTER_RESULTS
-
-      - name: Run preview3 suite-owned conformance action
-        uses: ./nnrp-conformance-action/.github/actions/run-conformance
-        with:
-          protocol-version: nnrp-1-preview3
-          capabilities-path: conformance/nnrp-1-preview3.capabilities.json
-          working-directory: .
-          artifact-name: nnrp-rs-preview3-conformance
-          adapter-command: >-
-            cargo run -p nnrp-conformance --bin nnrp-conformance-adapter --
-            --plan $env:NNRP_CONFORMANCE_ADAPTER_PLAN
-            --output $env:NNRP_CONFORMANCE_ADAPTER_RESULTS
-
       - name: Run preview4 suite-owned conformance action
         uses: ./nnrp-conformance-action/.github/actions/run-conformance
         with:
           protocol-version: nnrp-1-preview4
+          capabilities-path: conformance/nnrp-1-preview4.capabilities.json
           working-directory: .
           artifact-name: nnrp-rs-preview4-conformance
+          adapter-command: >-
+            cargo run -p nnrp-conformance --bin nnrp-conformance-adapter --
+            --plan $env:NNRP_CONFORMANCE_ADAPTER_PLAN
+            --output $env:NNRP_CONFORMANCE_ADAPTER_RESULTS
 
       - name: Run preview4 host-route wire conformance
         run: >-

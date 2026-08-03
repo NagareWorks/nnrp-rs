@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PROTOCOL_VERSION = "NNRP/1"
-FFI_ABI_VERSION = "4.1.1"
+FFI_ABI_VERSION = "4.4.0"
 EXPECTED_EXPORTS = [
     "nnrp_current_protocol_version",
     "nnrp_runtime_capabilities",
@@ -28,6 +28,9 @@ EXPECTED_EXPORTS = [
     "nnrp_client_connect",
     "nnrp_session_open",
     "nnrp_client_open_session",
+    "nnrp_session_id",
+    "nnrp_client_resume_session",
+    "nnrp_client_session_recovery_ticket",
     "nnrp_submit",
     "nnrp_client_submit",
     "nnrp_session_close",
@@ -37,7 +40,11 @@ EXPECTED_EXPORTS = [
     "nnrp_client_cancel",
     "nnrp_client_await_event",
     "nnrp_client_await_events",
+    "nnrp_schema_registry_create",
+    "nnrp_schema_registry_install",
+    "nnrp_schema_registry_release",
     "nnrp_server_bind",
+    "nnrp_server_policy_complete",
     "nnrp_server_accept",
     "nnrp_server_accept_begin",
     "nnrp_server_accept_wait",
@@ -178,11 +185,20 @@ def build_library(release: bool, target: str | None, transport_scope: str) -> No
     subprocess.run(command, cwd=ROOT, check=True)
 
 
+def cargo_target_root() -> Path:
+    configured = os.environ.get("CARGO_TARGET_DIR")
+    if configured is None:
+        return ROOT / "target"
+    target_root = Path(configured)
+    return target_root if target_root.is_absolute() else ROOT / target_root
+
+
 def locate_library(os_name: str, library_kind: str, release: bool, target: str | None) -> Path:
+    target_root = cargo_target_root()
     if target:
-        profile_dir = ROOT / "target" / target / ("release" if release else "debug")
+        profile_dir = target_root / target / ("release" if release else "debug")
     else:
-        profile_dir = ROOT / "target" / ("release" if release else "debug")
+        profile_dir = target_root / ("release" if release else "debug")
     library = profile_dir / expected_library_name(os_name, library_kind)
     if not library.is_file():
         raise SystemExit(f"expected native library was not found: {library}")
@@ -474,6 +490,7 @@ def main() -> None:
 
     release = not args.debug
     transport_scopes = args.transport_scope or ["tcp", "quic", "ipc", "websocket"]
+    validate_transport_build_selection(transport_scopes, args.skip_build)
     packaged_libraries = {}
     for transport_scope in transport_scopes:
         if not args.skip_build:
@@ -501,6 +518,14 @@ def main() -> None:
         and set(transport_scopes) == set(TRANSPORT_SCOPES)
     ):
         verify_library_isolation(packaged_libraries)
+
+
+def validate_transport_build_selection(transport_scopes: list[str], skip_build: bool) -> None:
+    if skip_build and len(transport_scopes) != 1:
+        raise SystemExit(
+            "--skip-build requires exactly one --transport-scope because transport-scoped "
+            "builds share the same Cargo output path"
+        )
 
 
 if __name__ == "__main__":

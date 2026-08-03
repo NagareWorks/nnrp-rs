@@ -1,6 +1,6 @@
 pub mod adapter_conformance;
+#[cfg(test)]
 mod nnrp1_baseline;
-pub mod preview3_vectors;
 pub mod preview4_vectors;
 pub mod wire_conformance;
 pub mod wire_endpoint;
@@ -22,12 +22,10 @@ pub fn current_version_vector() -> GoldenVersionVector {
     }
 }
 
-pub use preview3_vectors::{
-    execute_preview3_case, preview3_case_ids, preview3_fixture_manifest, preview3_golden_vectors,
-    public_preview3_case_ids, PREVIEW3_PROTOCOL_VERSION,
-};
 pub use preview4_vectors::{
-    execute_preview4_case, preview4_case_ids, preview4_fixture_manifest, PREVIEW4_PROTOCOL_VERSION,
+    execute_preview4_case, execute_preview4_public_case, preview4_capability_tokens,
+    preview4_case_ids, preview4_fixture_manifest, preview4_public_case_ids,
+    PREVIEW4_PROTOCOL_VERSION,
 };
 
 #[cfg(test)]

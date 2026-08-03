@@ -22,6 +22,12 @@ use tokio::{
 };
 
 const IPC_TASK_CHANNEL_CAPACITY: usize = 16;
+#[cfg(windows)]
+const WINDOWS_ERROR_BROKEN_PIPE: i32 = 109;
+#[cfg(windows)]
+const WINDOWS_ERROR_NO_DATA: i32 = 232;
+#[cfg(windows)]
+const WINDOWS_ERROR_PIPE_NOT_CONNECTED: i32 = 233;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IpcEndpoint {
@@ -218,18 +224,38 @@ fn spawn_ipc_write_task(
 fn normalize_shutdown(result: io::Result<()>) -> Result<(), RuntimeError> {
     match result {
         Ok(()) => Ok(()),
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::BrokenPipe
-                    | io::ErrorKind::ConnectionAborted
-                    | io::ErrorKind::ConnectionReset
-                    | io::ErrorKind::NotConnected
-            ) =>
-        {
-            Ok(())
-        }
+        Err(error) if is_terminal_shutdown_error(&error) => Ok(()),
         Err(error) => Err(error.into()),
+    }
+}
+
+fn is_terminal_shutdown_error(error: &io::Error) -> bool {
+    if matches!(
+        error.kind(),
+        io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::NotConnected
+    ) {
+        return true;
+    }
+
+    #[cfg(windows)]
+    {
+        // Tokio can preserve these named-pipe shutdown states as raw Windows errors.
+        matches!(
+            error.raw_os_error(),
+            Some(
+                WINDOWS_ERROR_BROKEN_PIPE
+                    | WINDOWS_ERROR_NO_DATA
+                    | WINDOWS_ERROR_PIPE_NOT_CONNECTED
+            )
+        )
+    }
+
+    #[cfg(not(windows))]
+    {
+        false
     }
 }
 
@@ -680,8 +706,7 @@ mod tests {
         ResultPushMetadata, SubmitMode, TileIndexMode, STANDARD_PROFILE_TOKEN,
     };
     #[cfg(unix)]
-    use nnrp_runtime::{NnrpClientEvent, NnrpResult};
-    use nnrp_transport_provider::RemoteTransportSupport;
+    use nnrp_runtime::{NnrpRuntimeEventMetadata, NnrpRuntimeEventTail};
     #[cfg(unix)]
     use tokio::time::{timeout, Duration};
 
@@ -715,15 +740,20 @@ mod tests {
         assert_eq!(registry.providers()[0].name, IpcProvider::NAME);
         assert_eq!(registry.providers()[0].transport_id, TransportId::Ipc);
 
-        let remote = RemoteTransportSupport::new([TransportId::Ipc]);
         let readiness = [nnrp_transport_provider::TransportCandidateReadiness::ready(
             TransportId::Ipc,
             registry.providers()[0].metadata.id.clone(),
         )];
         let selection = registry
-            .select(&remote, TransportPolicy::ForceIpc, None, &readiness)
+            .select(&nnrp_transport_provider::TransportSelectionOptions {
+                peer_supported_transports: vec![TransportId::Ipc],
+                policy: TransportPolicy::ForceIpc,
+                requested_max_frame_bytes: None,
+                candidate_readiness: readiness.to_vec(),
+                probe_observations: Vec::new(),
+            })
             .expect("ipc provider should satisfy force ipc");
-        assert_eq!(selection.selected.name, IpcProvider::NAME);
+        assert_eq!(selection.selected_provider.name, IpcProvider::NAME);
     }
 
     #[cfg(unix)]
@@ -747,9 +777,18 @@ mod tests {
 
         let client = IpcProvider::connect(&endpoint, NnrpClientConfig::default()).await?;
         let mut session = client.open_session().await?;
-        session.submit(token_submit(), b"hello".to_vec()).await?;
-        let NnrpResult { body, .. } = session.await_result().await?;
-        assert_eq!(body, b"ipc-ok");
+        session
+            .submit_encoded(token_submit(), b"hello".to_vec())
+            .await?;
+        let result = session.await_result().await?;
+        assert_eq!(
+            result
+                .event
+                .as_runtime()
+                .expect("wire result must retain its runtime event")
+                .tail,
+            nnrp_runtime::NnrpRuntimeEventTail::Body(b"ipc-ok".to_vec())
+        );
 
         server_task
             .await
@@ -807,6 +846,15 @@ mod tests {
             assert!(normalize_shutdown(Err(io::Error::from(kind))).is_ok());
         }
         assert!(normalize_shutdown(Err(io::Error::from(io::ErrorKind::PermissionDenied))).is_err());
+
+        #[cfg(windows)]
+        for raw_os_error in [
+            WINDOWS_ERROR_BROKEN_PIPE,
+            WINDOWS_ERROR_NO_DATA,
+            WINDOWS_ERROR_PIPE_NOT_CONNECTED,
+        ] {
+            assert!(normalize_shutdown(Err(io::Error::from_raw_os_error(raw_os_error))).is_ok());
+        }
     }
 
     #[cfg(unix)]
@@ -920,22 +968,27 @@ mod tests {
         let client = IpcProvider::connect(&endpoint, NnrpClientConfig::default()).await?;
         let mut session = client.open_session().await?;
         let frame_id = session
-            .submit_nowait(token_submit(), b"cancel-me".to_vec())
+            .submit_encoded_nowait(token_submit(), b"cancel-me".to_vec())
             .await?;
         session.send_credit_update(credit_update()).await?;
         session.cancel_operation(frame_id as u64, 7).await?;
 
         match session.await_event().await? {
-            NnrpClientEvent::Backpressure(pressure) => {
+            nnrp_runtime::NnrpRuntimeEvent {
+                metadata: NnrpRuntimeEventMetadata::Pressure(pressure),
+                tail: NnrpRuntimeEventTail::None,
+                ..
+            } => {
                 assert_eq!(pressure.pressure_level, BackpressureLevel::Soft as u16);
                 assert_eq!(pressure.credit_window, 2);
             }
             event => panic!("expected backpressure event, got {event:?}"),
         }
         match session.await_event().await? {
-            NnrpClientEvent::ResultDropReason {
-                metadata: reason,
-                body,
+            nnrp_runtime::NnrpRuntimeEvent {
+                metadata: NnrpRuntimeEventMetadata::ResultDropReason(reason),
+                tail: NnrpRuntimeEventTail::Diagnostic(body),
+                ..
             } => {
                 assert_eq!(reason.operation_id, frame_id as u64);
                 assert_eq!(reason.drop_reason_code, 7);
@@ -993,8 +1046,8 @@ mod tests {
             tile_index_bytes: 0,
             operation_id: 1,
             submit_mode: SubmitMode::Inline,
-            budget_policy: 0,
-            loss_tolerance_policy: 0,
+            budget_policy: nnrp_core::BudgetPolicy::NONE,
+            loss_tolerance_policy: nnrp_core::LossTolerancePolicy::Strict,
             object_ref_mask: 0,
             dependency_frame_id: 0,
             payload_kind_bitmap: PayloadKindBitmap(PayloadKindBitmap::TOKEN_CHUNK),
