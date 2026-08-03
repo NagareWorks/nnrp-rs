@@ -28,7 +28,7 @@ state is converted into a zero-filled `RuntimeFrameHeader`.
 
 ## Coordinated Baseline
 
-The coordinated baseline is Rust `1.0.0-preview.4.21` with native FFI ABI `4.3.0`. Python,
+The coordinated baseline is Rust `1.0.0-preview.4.22` with native FFI ABI `4.4.0`. Python,
 JavaScript, and C# releases must each prove all of the following against that exact baseline:
 
 1. Public names and field ownership match the frozen language projection.
