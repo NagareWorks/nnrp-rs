@@ -985,6 +985,7 @@ unsafe fn assert_role_handshake(
             NnrpSessionOpenRequest {
                 connection: client,
                 requested_session_id: (id_base + 3) as u32,
+                session_handle_id: id_base + 30,
                 generation: 1,
                 profile_id: PROFILE_TOKEN,
                 priority_class: SessionPriorityClass::Background as u8,
@@ -1065,6 +1066,7 @@ unsafe fn assert_role_handshake(
             NnrpSessionOpenRequest {
                 connection: client,
                 requested_session_id: (id_base + 31) as u32,
+                session_handle_id: id_base + 32,
                 generation: 1,
                 profile_id: PROFILE_TOKEN,
                 priority_class: SessionPriorityClass::Background as u8,
@@ -1831,6 +1833,7 @@ fn tcp_role_runtime_resumes_with_an_opaque_recovery_ticket() {
                 NnrpSessionOpenRequest {
                     connection: first_client,
                     requested_session_id: 910_004,
+                    session_handle_id: 910_004,
                     allow_resume: 1,
                     resume_token_bytes: 24,
                     ..NnrpSessionOpenRequest::default()
@@ -1916,6 +1919,7 @@ fn tcp_role_runtime_resumes_with_an_opaque_recovery_ticket() {
                 NnrpSessionResumeRequest {
                     open: NnrpSessionOpenRequest {
                         connection: resume_client,
+                        session_handle_id: 910_009,
                         allow_resume: 1,
                         resume_token_bytes: 24,
                         ..NnrpSessionOpenRequest::default()
@@ -2036,6 +2040,7 @@ fn role_runtime_rejects_invalid_arguments_and_cross_role_handles() {
                 NnrpSessionOpenRequest {
                     connection: NnrpHandle::invalid(),
                     requested_session_id: 0,
+                    session_handle_id: 0,
                     generation: 0,
                     profile_id: PROFILE_TOKEN,
                     schema_id: TOKEN_DELTA_SCHEMA_ID,
@@ -2163,6 +2168,7 @@ fn role_runtime_rejects_invalid_arguments_and_cross_role_handles() {
         let session_request = |connection| NnrpSessionOpenRequest {
             connection,
             requested_session_id: 730_002,
+            session_handle_id: 730_002,
             generation: 1,
             profile_id: PROFILE_TOKEN,
             schema_id: TOKEN_DELTA_SCHEMA_ID,
