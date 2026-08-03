@@ -47,7 +47,7 @@ class NnrpU32Slice(ctypes.Structure):
 
 
 class NnrpServerPolicySink(ctypes.Structure):
-    _fields_ = [("user_data", ctypes.c_void_p), ("evaluate", ctypes.c_void_p)]
+    _fields_ = [("user_data", ctypes.c_void_p), ("begin", ctypes.c_void_p)]
 
 
 class NnrpFfiStatus(ctypes.Structure):

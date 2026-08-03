@@ -127,11 +127,29 @@ def require_list(value: Any, message: str) -> list[Any]:
     return value
 
 
-def field_shape(type_contract: dict[str, Any]) -> list[tuple[str, str, bool]]:
-    return [
-        (field["name"], field["type"], field.get("required", False))
-        for field in type_contract["fields"]
-    ]
+def field_shape(type_contract: Any) -> list[tuple[str, str, bool]]:
+    contract = require_mapping(type_contract, "SDK type contract must be an object")
+    fields = require_list(contract.get("fields"), "SDK type fields must be an array")
+    shape = []
+    for index, value in enumerate(fields):
+        field = require_mapping(value, f"SDK type field {index} must be an object")
+        name = field.get("name")
+        field_type = field.get("type")
+        required = field.get("required", False)
+        require(
+            isinstance(name, str) and name,
+            f"SDK type field {index} must declare a non-empty name",
+        )
+        require(
+            isinstance(field_type, str) and field_type,
+            f"SDK type field {index} must declare a non-empty type",
+        )
+        require(
+            isinstance(required, bool),
+            f"SDK type field {index} required must be a boolean",
+        )
+        shape.append((name, field_type, required))
+    return shape
 
 
 def check_contract(contract_path: Path) -> None:
