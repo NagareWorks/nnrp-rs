@@ -474,6 +474,7 @@ enum NnrpFfiResource {
     },
     Session {
         connection: NnrpHandle,
+        session_id: u32,
         profile_id: u16,
         schema_id: u32,
         schema_version: u32,
@@ -3099,6 +3100,7 @@ pub unsafe extern "C" fn nnrp_client_open_session(
             handle,
             NnrpFfiResource::Session {
                 connection: request.connection,
+                session_id: request.requested_session_id,
                 profile_id: request.profile_id,
                 schema_id: request.schema_id,
                 schema_version: request.schema_version,
@@ -3159,6 +3161,7 @@ pub unsafe extern "C" fn nnrp_client_open_session(
             handle,
             NnrpFfiResource::Session {
                 connection: request.connection,
+                session_id: request.requested_session_id,
                 profile_id: request.profile_id,
                 schema_id: request.schema_id,
                 schema_version: request.schema_version,
@@ -3258,6 +3261,7 @@ unsafe fn nnrp_client_resume_session_impl(
             handle,
             NnrpFfiResource::Session {
                 connection: open_request.connection,
+                session_id: open_request.requested_session_id,
                 profile_id: open_request.profile_id,
                 schema_id: open_request.schema_id,
                 schema_version: open_request.schema_version,
@@ -3741,6 +3745,7 @@ pub unsafe extern "C" fn nnrp_benchmark_open_session(
             generation: session.generation,
             resource: NnrpFfiResource::Session {
                 connection,
+                session_id: request.requested_session_id,
                 profile_id: 0,
                 schema_id: 0,
                 schema_version: 0,
@@ -6245,9 +6250,10 @@ unsafe fn cache_query_impl(
         }
     };
     let mut store = handle_store();
-    if let Err(status) = store.get(request.owner, owner_kind) {
-        return status;
-    }
+    let owner_id = match cache_owner_semantic_id(&store, request.owner, owner_kind) {
+        Ok(owner_id) => owner_id,
+        Err(status) => return status,
+    };
     let existing = store
         .entries
         .iter()
@@ -6304,7 +6310,7 @@ unsafe fn cache_query_impl(
         object_version: request.expected_version.max(1),
         lease_id: id,
         owner_scope: cache_owner_scope(request.owner.kind),
-        owner_id: request.owner.id,
+        owner_id,
         granted_at_ms: request.now_ms,
         ttl_ms: request.ttl_ms.max(30_000),
     };
@@ -6558,19 +6564,25 @@ pub unsafe extern "C" fn nnrp_server_accept_claim(
     };
 
     #[cfg(test)]
-    let (profile_id, schema_id, schema_version, active_transport_id) =
+    let session_id = match u32::try_from(request.session_handle_id) {
+        Ok(session_id) => session_id,
+        Err(_) => return NnrpFfiStatus::invalid_argument(165),
+    };
+
+    #[cfg(test)]
+    let (session_id, profile_id, schema_id, schema_version, active_transport_id) =
         match store.get(server, NnrpHandleKind::Connection) {
             Ok(NnrpFfiResource::Connection {
                 transport_id,
                 role: NnrpFfiConnectionRole::Server,
                 ..
-            }) => (0, 0, 0, *transport_id),
+            }) => (session_id, 0, 0, 0, *transport_id),
             Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Connection as u32),
             Err(status) => return status,
         };
 
     #[cfg(not(test))]
-    let (profile_id, schema_id, schema_version, active_transport_id, session_runtime) = {
+    let (session_id, profile_id, schema_id, schema_version, active_transport_id, session_runtime) = {
         let runtime = match store.get(request.accept, NnrpHandleKind::ServerAccept) {
             Ok(NnrpFfiResource::ServerAccept { runtime, .. }) => Arc::clone(runtime),
             Ok(_) => {
@@ -6583,6 +6595,7 @@ pub unsafe extern "C" fn nnrp_server_accept_claim(
             Err(status) => return status,
         };
         (
+            session.client_open().requested_session_id,
             session.client_open().profile_id,
             session.client_open().schema_id,
             session.client_open().schema_version,
@@ -6600,6 +6613,7 @@ pub unsafe extern "C" fn nnrp_server_accept_claim(
         session,
         NnrpFfiResource::Session {
             connection: server,
+            session_id,
             profile_id,
             schema_id,
             schema_version,
@@ -6688,6 +6702,10 @@ pub unsafe extern "C" fn nnrp_server_accept(
             }
             Err(status) => return status,
         }
+        let session_id = match u32::try_from(request.session_handle_id) {
+            Ok(session_id) => session_id,
+            Err(_) => return NnrpFfiStatus::invalid_argument(19),
+        };
 
         let handle = NnrpHandle::new(
             NnrpHandleKind::Session,
@@ -6698,6 +6716,7 @@ pub unsafe extern "C" fn nnrp_server_accept(
             handle,
             NnrpFfiResource::Session {
                 connection: request.server,
+                session_id,
                 profile_id: 0,
                 schema_id: 0,
                 schema_version: 0,
@@ -6743,6 +6762,7 @@ pub unsafe extern "C" fn nnrp_server_accept(
             Err(status) => return status,
         };
         let profile_id = session.client_open().profile_id;
+        let session_id = session.client_open().requested_session_id;
         let schema_id = session.client_open().schema_id;
         let schema_version = session.client_open().schema_version;
 
@@ -6756,6 +6776,7 @@ pub unsafe extern "C" fn nnrp_server_accept(
             handle,
             NnrpFfiResource::Session {
                 connection: request.server,
+                session_id,
                 profile_id,
                 schema_id,
                 schema_version,
@@ -7764,6 +7785,23 @@ fn cache_owner_scope(kind: u32) -> CacheLeaseOwnerScope {
         value if value == NnrpHandleKind::Session as u32 => CacheLeaseOwnerScope::Session,
         value if value == NnrpHandleKind::Operation as u32 => CacheLeaseOwnerScope::Operation,
         _ => CacheLeaseOwnerScope::Connection,
+    }
+}
+
+fn cache_owner_semantic_id(
+    store: &NnrpFfiHandleStore,
+    owner: NnrpHandle,
+    owner_kind: NnrpHandleKind,
+) -> Result<u64, NnrpFfiStatus> {
+    match (owner_kind, store.get(owner, owner_kind)?) {
+        (NnrpHandleKind::Connection, NnrpFfiResource::Connection { .. }) => Ok(owner.id),
+        (NnrpHandleKind::Session, NnrpFfiResource::Session { session_id, .. }) => {
+            Ok(u64::from(*session_id))
+        }
+        (NnrpHandleKind::Operation, NnrpFfiResource::Operation { operation_id, .. }) => {
+            Ok(*operation_id)
+        }
+        _ => Err(NnrpFfiStatus::invalid_handle(owner_kind as u32)),
     }
 }
 
@@ -9612,6 +9650,7 @@ mod tests {
                     generation: orphan_session.generation,
                     resource: NnrpFfiResource::Session {
                         connection: missing_connection,
+                        session_id: 93_302,
                         profile_id: 0,
                         schema_id: 0,
                         schema_version: 0,
@@ -11989,7 +12028,7 @@ mod tests {
                     NnrpSessionOpenRequest {
                         connection,
                         requested_session_id: 481,
-                        session_handle_id: 481,
+                        session_handle_id: 481_002,
                         generation: 1,
                         profile_id: nnrp_core::PROFILE_TOKEN,
                         schema_id: nnrp_core::TOKEN_DELTA_SCHEMA_ID,
@@ -12084,6 +12123,57 @@ mod tests {
                 ),
                 NnrpFfiStatus::invalid_handle(NnrpHandleKind::Buffer as u32)
             );
+            let mismatched_owner = NnrpHandle::new(NnrpHandleKind::Session, 481_099, 1);
+            {
+                let mut store = handle_store();
+                assert_eq!(
+                    store.insert(
+                        mismatched_owner,
+                        NnrpFfiResource::Buffer { bytes: Vec::new() },
+                    ),
+                    Ok(())
+                );
+            }
+            assert_eq!(
+                nnrp_cache_query(
+                    NnrpCacheLeaseRequest {
+                        owner: mismatched_owner,
+                        ..request
+                    },
+                    &mut result,
+                ),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32)
+            );
+            handle_store()
+                .entries
+                .remove(&(mismatched_owner.kind, mismatched_owner.id));
+            let semantic_mismatch = NnrpHandle::new(NnrpHandleKind::Session, 481_098, 1);
+            {
+                let mut store = handle_store();
+                assert_eq!(
+                    store.insert(
+                        semantic_mismatch,
+                        NnrpFfiResource::Connection {
+                            transport_id: test_transport_id(),
+                            role: NnrpFfiConnectionRole::Client,
+                        },
+                    ),
+                    Ok(())
+                );
+            }
+            assert_eq!(
+                nnrp_cache_query(
+                    NnrpCacheLeaseRequest {
+                        owner: semantic_mismatch,
+                        ..request
+                    },
+                    &mut result,
+                ),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32)
+            );
+            handle_store()
+                .entries
+                .remove(&(semantic_mismatch.kind, semantic_mismatch.id));
             assert_eq!(
                 nnrp_cache_touch(
                     NnrpCacheLeaseRequest {
@@ -12095,6 +12185,8 @@ mod tests {
                 NnrpFfiStatus::invalid_argument(46)
             );
             assert_eq!(nnrp_cache_query(request, &mut result), NnrpFfiStatus::ok());
+            assert_eq!(result.owner_scope, CacheLeaseOwnerScope::Session as u32);
+            assert_eq!(result.owner_id, 481);
             assert_eq!(
                 nnrp_cache_query(
                     NnrpCacheLeaseRequest {
@@ -12129,6 +12221,8 @@ mod tests {
                 nnrp_cache_query(operation_request, &mut result),
                 NnrpFfiStatus::ok()
             );
+            assert_eq!(result.owner_scope, CacheLeaseOwnerScope::Operation as u32);
+            assert_eq!(result.owner_id, 481_011);
             let operation_lease = result.lease_handle;
             assert_eq!(
                 nnrp_cache_release(result.lease_handle, core::ptr::null_mut()),
@@ -14141,6 +14235,13 @@ mod tests {
                 nnrp_server_accept(server_accept_request(client, 193_004, 1), &mut session,),
                 NnrpFfiStatus::invalid_handle(NnrpHandleKind::Connection as u32)
             );
+            assert_eq!(
+                nnrp_server_accept(
+                    server_accept_request(server, u64::from(u32::MAX) + 1, 1),
+                    &mut session,
+                ),
+                NnrpFfiStatus::invalid_argument(19)
+            );
             assert_eq!(nnrp_connection_close(client), NnrpFfiStatus::ok());
             assert_eq!(nnrp_connection_close(server), NnrpFfiStatus::ok());
         }
@@ -14907,6 +15008,19 @@ mod tests {
             );
 
             let mut accepted = NnrpServerAcceptResult::invalid();
+            assert_eq!(
+                nnrp_server_accept_claim(
+                    NnrpServerAcceptClaimRequest {
+                        accept,
+                        session_handle_id: u64::from(u32::MAX) + 1,
+                        generation: 1,
+                        reserved0: 0,
+                    },
+                    &mut accepted,
+                ),
+                NnrpFfiStatus::invalid_argument(165)
+            );
+            assert_eq!(accepted, NnrpServerAcceptResult::invalid());
             assert_eq!(
                 nnrp_server_accept_claim(
                     NnrpServerAcceptClaimRequest {
