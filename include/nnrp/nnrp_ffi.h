@@ -187,14 +187,19 @@ typedef struct NnrpServerPolicyDecision {
   NnrpBufferView diagnostic;
 } NnrpServerPolicyDecision;
 
-typedef uint32_t (*NnrpServerPolicyCallback)(
+typedef struct NnrpServerPolicyCompleteRequest {
+  uint64_t request_id;
+  NnrpServerPolicyDecision decision;
+} NnrpServerPolicyCompleteRequest;
+
+typedef uint32_t (*NnrpServerPolicyBeginCallback)(
     void *user_data,
-    NnrpBufferView session_open_metadata,
-    NnrpServerPolicyDecision *out_decision);
+    uint64_t request_id,
+    NnrpBufferView session_open_metadata);
 
 typedef struct NnrpServerPolicySink {
   void *user_data;
-  NnrpServerPolicyCallback evaluate;
+  NnrpServerPolicyBeginCallback begin;
 } NnrpServerPolicySink;
 
 typedef struct NnrpTransportOpenRequest {
@@ -627,6 +632,7 @@ NnrpFfiStatus nnrp_cache_touch(NnrpCacheLeaseRequest request, NnrpCacheLeaseResu
 NnrpFfiStatus nnrp_cache_prefetch(NnrpHandle owner, const NnrpCacheObjectId *objects, uintptr_t object_count, uint64_t now_ms, uint32_t ttl_ms, NnrpCacheLeaseResult *out_results);
 NnrpFfiStatus nnrp_cache_release(NnrpHandle lease_handle, NnrpCacheLeaseResult *out_result);
 NnrpFfiStatus nnrp_server_bind(NnrpServerBindRequest request, NnrpHandle *out_server);
+NnrpFfiStatus nnrp_server_policy_complete(NnrpServerPolicyCompleteRequest request);
 NnrpFfiStatus nnrp_server_accept(NnrpServerAcceptRequest request, NnrpHandle *out_session);
 NnrpFfiStatus nnrp_server_accept_begin(NnrpServerAcceptBeginRequest request, NnrpHandle *out_accept);
 NnrpFfiStatus nnrp_server_accept_wait(NnrpServerAcceptWaitRequest request);

@@ -40,6 +40,7 @@ EXPECTED_EXPORTS = [
     "nnrp_client_await_event",
     "nnrp_client_await_events",
     "nnrp_server_bind",
+    "nnrp_server_policy_complete",
     "nnrp_server_accept",
     "nnrp_server_accept_begin",
     "nnrp_server_accept_wait",
