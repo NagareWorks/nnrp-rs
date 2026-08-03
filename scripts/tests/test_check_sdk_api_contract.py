@@ -160,7 +160,9 @@ class SdkApiContractTests(unittest.TestCase):
     def test_rejects_malformed_type_fields_without_a_traceback(self):
         contract = frozen_contract()
         contract["types"]["NnrpResult"] = ["operation_id"]
-        with self.assertRaisesRegex(SystemExit, "SDK type contract must be an object"):
+        with self.assertRaisesRegex(
+            SystemExit, "NnrpResult SDK type contract must be an object"
+        ):
             self.check(contract)
 
         contract = frozen_contract()
@@ -171,6 +173,33 @@ class SdkApiContractTests(unittest.TestCase):
         contract = frozen_contract()
         del contract["types"]["NnrpResult"]["fields"][0]["name"]
         with self.assertRaisesRegex(SystemExit, "must declare a non-empty name"):
+            self.check(contract)
+
+    def test_rejects_non_object_required_type_contracts_without_a_traceback(self):
+        for type_name in ("TerminalEvent", "RuntimeEventMetadata"):
+            with self.subTest(type_name=type_name):
+                contract = frozen_contract()
+                contract["types"][type_name] = ["invalid"]
+                with self.assertRaisesRegex(
+                    SystemExit,
+                    f"{type_name} SDK type contract must be an object",
+                ):
+                    self.check(contract)
+
+    def test_required_type_contract_diagnostics_use_frozen_order(self):
+        contract = frozen_contract()
+        for type_name in (
+            "OperationLifecycleEvent",
+            "TerminalEvent",
+            "NnrpResult",
+            "RuntimeEventMetadata",
+            "SessionRecoveryTicket",
+        ):
+            contract["types"][type_name] = ["invalid"]
+        with self.assertRaisesRegex(
+            SystemExit,
+            "OperationLifecycleEvent SDK type contract must be an object",
+        ):
             self.check(contract)
 
     def test_rejects_recovery_ticket_encoding_drift(self):

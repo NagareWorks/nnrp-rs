@@ -160,18 +160,24 @@ def check_contract(contract_path: Path) -> None:
     )
 
     types = require_mapping(contract.get("types"), "SDK contract types must be an object")
-    required_types = {
+    required_type_names = (
         "OperationLifecycleEvent",
         "TerminalEvent",
         "NnrpResult",
         "RuntimeEventMetadata",
         "SessionRecoveryTicket",
-    }
+    )
     require(
-        required_types.issubset(types),
+        set(required_type_names).issubset(types),
         "SDK contract is missing required Rust projection types",
     )
-    lifecycle = types["OperationLifecycleEvent"]
+    type_contracts = {
+        name: require_mapping(
+            types[name], f"{name} SDK type contract must be an object"
+        )
+        for name in required_type_names
+    }
+    lifecycle = type_contracts["OperationLifecycleEvent"]
     require(
         field_shape(lifecycle)
         == [("operation_id", "u64", True), ("state", "OperationState", True)],
@@ -188,7 +194,7 @@ def check_contract(contract_path: Path) -> None:
         "OperationLifecycleEvent terminal mapping drifted",
     )
 
-    terminal = types["TerminalEvent"]
+    terminal = type_contracts["TerminalEvent"]
     require(
         terminal.get("representation") == "tagged-union",
         "TerminalEvent is no longer a tagged union",
@@ -203,7 +209,7 @@ def check_contract(contract_path: Path) -> None:
         "TerminalEvent variant types drifted",
     )
 
-    result = types["NnrpResult"]
+    result = type_contracts["NnrpResult"]
     require(
         field_shape(result)
         == [
@@ -214,7 +220,7 @@ def check_contract(contract_path: Path) -> None:
         "NnrpResult field contract drifted",
     )
 
-    recovery_ticket = types["SessionRecoveryTicket"]
+    recovery_ticket = type_contracts["SessionRecoveryTicket"]
     require(
         field_shape(recovery_ticket)
         == [
@@ -273,7 +279,7 @@ def check_contract(contract_path: Path) -> None:
         "Rust SDK projection map drifted; update the implementation contract test with the frozen API",
     )
     require(
-        types["RuntimeEventMetadata"].get("variants")
+        type_contracts["RuntimeEventMetadata"].get("variants")
         == EXPECTED_RUNTIME_EVENT_METADATA_VARIANTS,
         "RuntimeEventMetadata closed variant set drifted",
     )
