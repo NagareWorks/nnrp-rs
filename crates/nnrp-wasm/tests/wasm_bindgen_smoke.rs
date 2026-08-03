@@ -10,12 +10,12 @@ use nnrp_core::{
     ResultPushMetadata, RuntimeRole, ServerHelloAckMetadata, SessionCloseAckMetadata,
     SessionCloseMetadata, SessionCloseStatus, SessionOpenAckMetadata, SessionOpenMetadata,
     SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata, SessionPatchRejectReason,
-    SessionStatus, SubmitMode, TileIndexMode, CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED,
-    CURRENT_VERSION_MAJOR, CURRENT_WIRE_FORMAT, PROGRESS_METADATA_LEN, RESULT_PUSH_METADATA_LEN,
-    SERVER_HELLO_ACK_METADATA_LEN, SESSION_ACK_FLAG_RESUME_ENABLED, SESSION_CLOSE_ACK_METADATA_LEN,
-    SESSION_ERROR_NONE, SESSION_FLAG_ALLOW_RESUME, SESSION_OPEN_ACK_METADATA_LEN,
-    SESSION_PATCH_ACK_METADATA_LEN, STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID,
-    TOKEN_DELTA_SCHEMA_VERSION,
+    SessionPriorityClass, SessionStatus, SubmitMode, TileIndexMode,
+    CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED, CURRENT_VERSION_MAJOR, CURRENT_WIRE_FORMAT,
+    PROGRESS_METADATA_LEN, RESULT_PUSH_METADATA_LEN, SERVER_HELLO_ACK_METADATA_LEN,
+    SESSION_ACK_FLAG_RESUME_ENABLED, SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE,
+    SESSION_FLAG_ALLOW_RESUME, SESSION_OPEN_ACK_METADATA_LEN, SESSION_PATCH_ACK_METADATA_LEN,
+    STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
 };
 use nnrp_runtime::{NnrpSubmitHeaderContext, RuntimePacket};
 use nnrp_wasm::{
@@ -108,25 +108,106 @@ fn wasm_bindgen_runtime_control_metadata_encodes_progress_tail() {
 }
 
 #[wasm_bindgen_test(async)]
+async fn browser_role_rejects_oversized_session_ack_before_enabling_external_ingress() {
+    let send = Closure::wrap(Box::new(move |_packet: Uint8Array| -> Promise {
+        Promise::resolve(&JsValue::UNDEFINED)
+    }) as Box<dyn FnMut(Uint8Array) -> Promise>);
+    let receive =
+        Closure::wrap(
+            Box::new(move || -> Promise { Promise::new(&mut |_resolve, _reject| {}) })
+                as Box<dyn FnMut() -> Promise>,
+        );
+    let close = Closure::wrap(
+        Box::new(move || -> Promise { Promise::resolve(&JsValue::UNDEFINED) })
+            as Box<dyn FnMut() -> Promise>,
+    );
+    let connection = open_browser_client_connection(
+        send.as_ref().unchecked_ref::<Function>().clone(),
+        receive.as_ref().unchecked_ref::<Function>().clone(),
+        close.as_ref().unchecked_ref::<Function>().clone(),
+        &serde_json::json!({ "maxPacketBytes": 1 }).to_string(),
+    )
+    .await
+    .expect("browser connection should accept a positive packet limit");
+    let ack = SessionOpenAckMetadata {
+        session_id: 7,
+        accepted_profile_id: STANDARD_PROFILE_TOKEN,
+        accepted_priority_class: SessionPriorityClass::Balanced,
+        session_status: SessionStatus::Opened,
+        schema_id: TOKEN_DELTA_SCHEMA_ID,
+        schema_version: TOKEN_DELTA_SCHEMA_VERSION,
+        granted_operation_credit: 1,
+        max_in_flight_operations: 1,
+        lease_ttl_ms: 1,
+        resume_window_ms: 0,
+        resume_token_bytes: 0,
+        session_extension_bytes: 0,
+        server_session_tag: 0,
+        route_scope_id: 0,
+        session_error_code: SESSION_ERROR_NONE,
+        session_flags_ack: 0,
+    };
+    let packet = response_packet(
+        MessageType::SessionOpenAck,
+        ack.session_id,
+        0,
+        ack.to_bytes().expect("session ack should encode").to_vec(),
+        Vec::new(),
+        SESSION_OPEN_ACK_METADATA_LEN,
+    );
+
+    assert!(
+        connection
+            .ingest_packets(Uint8Array::from(packet.as_slice()).into())
+            .is_err(),
+        "an oversized session ack must be rejected before it can change ingress mode",
+    );
+    connection
+        .close()
+        .await
+        .expect("the rejected packet must not poison carrier shutdown");
+}
+
+#[wasm_bindgen_test(async)]
 async fn wasm_bindgen_browser_role_runs_real_session_submit_and_close() {
     let responses = Rc::new(RefCell::new(VecDeque::<Vec<u8>>::new()));
+    let pending_receive = Rc::new(RefCell::new(None::<Function>));
     let send_responses = Rc::clone(&responses);
+    let send_pending_receive = Rc::clone(&pending_receive);
     let send = Closure::wrap(Box::new(move |packet: Uint8Array| -> Promise {
         CommonHeader::parse_packet(&packet.to_vec())
             .expect("scripted browser send should receive a valid packet");
         for response in browser_role_responses(&packet.to_vec()) {
             send_responses.borrow_mut().push_back(response);
         }
+        if let Some(resolve) = send_pending_receive.borrow_mut().take() {
+            let packet = send_responses
+                .borrow_mut()
+                .pop_front()
+                .expect("a pending browser receive should have a scripted response");
+            resolve
+                .call1(
+                    &JsValue::UNDEFINED,
+                    Uint8Array::from(packet.as_slice()).as_ref(),
+                )
+                .expect("pending browser receive should resolve");
+        }
         Promise::resolve(&JsValue::UNDEFINED)
     }) as Box<dyn FnMut(Uint8Array) -> Promise>);
 
     let receive_responses = Rc::clone(&responses);
+    let receive_pending = Rc::clone(&pending_receive);
     let receive = Closure::wrap(Box::new(move || -> Promise {
         if let Some(packet) = receive_responses.borrow_mut().pop_front() {
             let packet: JsValue = Uint8Array::from(packet.as_slice()).into();
             return Promise::resolve(&packet);
         }
-        Promise::reject(&JsValue::from_str("no scripted browser response"))
+        Promise::new(&mut |resolve, _reject| {
+            assert!(
+                receive_pending.borrow_mut().replace(resolve).is_none(),
+                "the WASM carrier must own only one pending receive callback",
+            );
+        })
     }) as Box<dyn FnMut() -> Promise>);
 
     let close_count = Rc::new(RefCell::new(0_u32));
@@ -332,9 +413,11 @@ async fn wasm_bindgen_browser_role_runs_real_session_submit_and_close() {
 #[wasm_bindgen_test(async)]
 async fn browser_role_routes_control_and_patch_while_event_receive_is_pending() {
     let responses = Rc::new(RefCell::new(VecDeque::<Vec<u8>>::new()));
+    let pending_receive = Rc::new(RefCell::new(None::<Function>));
     let cancel_observed = Rc::new(RefCell::new(false));
 
     let send_responses = Rc::clone(&responses);
+    let send_pending_receive = Rc::clone(&pending_receive);
     let send_cancel_observed = Rc::clone(&cancel_observed);
     let send = Closure::wrap(Box::new(move |packet: Uint8Array| -> Promise {
         let packet = packet.to_vec();
@@ -414,18 +497,34 @@ async fn browser_role_routes_control_and_patch_while_event_receive_is_pending() 
             }
             message_type => panic!("unexpected concurrent browser role packet: {message_type:?}"),
         }
+        if let Some(resolve) = send_pending_receive.borrow_mut().take() {
+            let packet = send_responses
+                .borrow_mut()
+                .pop_front()
+                .expect("a pending concurrent receive should have a scripted response");
+            resolve
+                .call1(
+                    &JsValue::UNDEFINED,
+                    Uint8Array::from(packet.as_slice()).as_ref(),
+                )
+                .expect("pending concurrent receive should resolve");
+        }
         Promise::resolve(&JsValue::UNDEFINED)
     }) as Box<dyn FnMut(Uint8Array) -> Promise>);
 
     let receive_responses = Rc::clone(&responses);
+    let receive_pending = Rc::clone(&pending_receive);
     let receive = Closure::wrap(Box::new(move || -> Promise {
         if let Some(packet) = receive_responses.borrow_mut().pop_front() {
             let packet: JsValue = Uint8Array::from(packet.as_slice()).into();
             return Promise::resolve(&packet);
         }
-        Promise::reject(&JsValue::from_str(
-            "post-handshake packets must use external ingress",
-        ))
+        Promise::new(&mut |resolve, _reject| {
+            assert!(
+                receive_pending.borrow_mut().replace(resolve).is_none(),
+                "the concurrent WASM carrier must own only one pending receive callback",
+            );
+        })
     }) as Box<dyn FnMut() -> Promise>);
 
     let close = Closure::wrap(
