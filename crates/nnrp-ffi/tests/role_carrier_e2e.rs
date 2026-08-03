@@ -26,7 +26,7 @@ use nnrp_ffi::{
     nnrp_runtime_frame_send, nnrp_server_accept, nnrp_server_accept_begin,
     nnrp_server_accept_claim, nnrp_server_accept_release, nnrp_server_accept_wait,
     nnrp_server_await_events, nnrp_server_bind, nnrp_server_close, nnrp_server_policy_complete,
-    nnrp_server_send_partial_result, nnrp_server_send_result, NnrpBufferView,
+    nnrp_server_send_partial_result, nnrp_server_send_result, nnrp_session_id, NnrpBufferView,
     NnrpClientCancelRequest, NnrpClientConnectRequest, NnrpEvent, NnrpEventKind, NnrpFfiStatus,
     NnrpFfiStatusCode, NnrpHandle, NnrpHandleKind, NnrpPollResult, NnrpRoleEventPollRequest,
     NnrpRuntimeFrameSendRequest, NnrpServerAcceptBeginRequest, NnrpServerAcceptClaimRequest,
@@ -1045,7 +1045,7 @@ unsafe fn assert_role_handshake(
         nnrp_client_open_session(
             NnrpSessionOpenRequest {
                 connection: client,
-                requested_session_id: (id_base + 3) as u32,
+                requested_session_id: 0,
                 session_handle_id: id_base + 30,
                 generation: 1,
                 profile_id: PROFILE_TOKEN,
@@ -1098,6 +1098,26 @@ unsafe fn assert_role_handshake(
     assert_eq!(accepted.active_transport_id, transport_id as u32);
     assert_ne!(client_session, NnrpHandle::invalid());
     assert_ne!(server_session, NnrpHandle::invalid());
+    let mut wire_session_id = 0;
+    let mut server_wire_session_id = 0;
+    assert_eq!(
+        nnrp_session_id(client_session, &mut wire_session_id),
+        NnrpFfiStatus::ok()
+    );
+    assert_eq!(
+        nnrp_session_id(server_session, &mut server_wire_session_id),
+        NnrpFfiStatus::ok()
+    );
+    assert_ne!(wire_session_id, 0);
+    assert_eq!(server_wire_session_id, wire_session_id);
+    assert_eq!(
+        nnrp_session_id(client_session, ptr::null_mut()),
+        NnrpFfiStatus::invalid_argument(177)
+    );
+    assert_eq!(
+        nnrp_session_id(client, &mut server_wire_session_id),
+        NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32)
+    );
 
     let mut ticket_owner = NnrpHandle::invalid();
     let mut ticket_view = NnrpBufferView::empty();
@@ -1110,31 +1130,31 @@ unsafe fn assert_role_handshake(
     assert_eq!(u16::from_le_bytes(ticket[4..6].try_into().unwrap()), 1);
     assert_eq!(
         u32::from_le_bytes(ticket[8..12].try_into().unwrap()),
-        (id_base + 3) as u32
+        wire_session_id
     );
     assert_eq!(u32::from_le_bytes(ticket[12..16].try_into().unwrap()), 24);
     assert_eq!(ticket.len(), 52);
     assert_eq!(nnrp_buffer_release(ticket_owner), NnrpFfiStatus::ok());
 
-    let mut second_accept = NnrpHandle::invalid();
-    assert_eq!(
-        nnrp_server_accept_begin(
-            NnrpServerAcceptBeginRequest {
+    let direct_accept = thread::spawn(move || {
+        let mut session = NnrpHandle::invalid();
+        let status = nnrp_server_accept(
+            NnrpServerAcceptRequest {
                 server,
-                accept_handle_id: id_base + 40,
+                session_handle_id: id_base + 41,
                 generation: 1,
-                reserved0: 0,
+                timeout_ms: 5_000,
             },
-            &mut second_accept,
-        ),
-        NnrpFfiStatus::ok()
-    );
+            &mut session,
+        );
+        (status, session)
+    });
     let mut second_client_session = NnrpHandle::invalid();
     assert_eq!(
         nnrp_client_open_session(
             NnrpSessionOpenRequest {
                 connection: client,
-                requested_session_id: (id_base + 31) as u32,
+                requested_session_id: 0,
                 session_handle_id: id_base + 32,
                 generation: 1,
                 profile_id: PROFILE_TOKEN,
@@ -1152,39 +1172,42 @@ unsafe fn assert_role_handshake(
         ),
         NnrpFfiStatus::ok()
     );
-    assert_eq!(
-        nnrp_server_accept_wait(NnrpServerAcceptWaitRequest {
-            accept: second_accept,
-            timeout_ms: 5_000,
-            flags: 0,
-        }),
-        NnrpFfiStatus::ok()
-    );
-    let mut second_accepted = NnrpServerAcceptResult::invalid();
-    assert_eq!(
-        nnrp_server_accept_claim(
-            NnrpServerAcceptClaimRequest {
-                accept: second_accept,
-                session_handle_id: id_base + 41,
-                generation: 1,
-                reserved0: 0,
-            },
-            &mut second_accepted,
-        ),
-        NnrpFfiStatus::ok()
-    );
+    let (direct_accept_status, second_server_session) =
+        direct_accept.join().expect("direct accept thread joins");
+    assert_eq!(direct_accept_status, NnrpFfiStatus::ok());
+    policy_context
+        .completion
+        .lock()
+        .expect("policy completion lock should not be poisoned")
+        .take()
+        .expect("direct accept should spawn one policy completion thread")
+        .join()
+        .expect("policy completion thread should not panic");
     assert_ne!(second_client_session, client_session);
-    assert_ne!(second_accepted.session, server_session);
+    assert_ne!(second_server_session, server_session);
+    let mut second_client_session_id = 0;
+    let mut second_server_session_id = 0;
+    assert_eq!(
+        nnrp_session_id(second_client_session, &mut second_client_session_id),
+        NnrpFfiStatus::ok()
+    );
+    assert_eq!(
+        nnrp_session_id(second_server_session, &mut second_server_session_id),
+        NnrpFfiStatus::ok()
+    );
+    assert_ne!(second_client_session_id, 0);
+    assert_ne!(second_client_session_id, wire_session_id);
+    assert_eq!(second_server_session_id, second_client_session_id);
 
     let second_client_close = thread::spawn(move || nnrp_client_close(second_client_session));
-    let second_close_event = poll_server_event(second_accepted.session);
+    let second_close_event = poll_server_event(second_server_session);
     assert_eq!(second_close_event.kind, NnrpEventKind::SessionClosed as u32);
     assert_eq!(
         nnrp_buffer_release(second_close_event.payload_owner),
         NnrpFfiStatus::ok()
     );
     assert_eq!(
-        nnrp_server_close(second_accepted.session),
+        nnrp_server_close(second_server_session),
         NnrpFfiStatus::ok()
     );
     assert_eq!(
@@ -1431,7 +1454,7 @@ unsafe fn assert_role_handshake(
     for case in bidirectional_runtime_frames(
         submit_request.operation_id,
         submit_request.frame_id,
-        (id_base + 3) as u32,
+        wire_session_id,
         RuntimeRole::Client,
         RuntimeRole::Server,
     ) {
@@ -1470,7 +1493,7 @@ unsafe fn assert_role_handshake(
     for case in bidirectional_runtime_frames(
         submit_request.operation_id,
         submit_request.frame_id,
-        (id_base + 3) as u32,
+        wire_session_id,
         RuntimeRole::Server,
         RuntimeRole::Client,
     ) {
@@ -1932,6 +1955,18 @@ fn tcp_role_runtime_resumes_with_an_opaque_recovery_ticket() {
             ),
             NnrpFfiStatus::ok()
         );
+        let mut first_client_session_id = 0;
+        let mut first_server_session_id = 0;
+        assert_eq!(
+            nnrp_session_id(first_session, &mut first_client_session_id),
+            NnrpFfiStatus::ok()
+        );
+        assert_eq!(
+            nnrp_session_id(first_accepted.session, &mut first_server_session_id),
+            NnrpFfiStatus::ok()
+        );
+        assert_eq!(first_client_session_id, 910_004);
+        assert_eq!(first_server_session_id, first_client_session_id);
 
         let mut ticket_owner = NnrpHandle::invalid();
         let mut ticket_view = NnrpBufferView::empty();
@@ -2023,6 +2058,18 @@ fn tcp_role_runtime_resumes_with_an_opaque_recovery_ticket() {
             ),
             NnrpFfiStatus::ok()
         );
+        let mut resumed_client_session_id = 0;
+        let mut resumed_server_session_id = 0;
+        assert_eq!(
+            nnrp_session_id(resumed_session, &mut resumed_client_session_id),
+            NnrpFfiStatus::ok()
+        );
+        assert_eq!(
+            nnrp_session_id(resumed_accepted.session, &mut resumed_server_session_id),
+            NnrpFfiStatus::ok()
+        );
+        assert_eq!(resumed_client_session_id, first_client_session_id);
+        assert_eq!(resumed_server_session_id, first_client_session_id);
 
         let client_close = thread::spawn(move || nnrp_client_close(resumed_session));
         let close_event = poll_server_event(resumed_accepted.session);

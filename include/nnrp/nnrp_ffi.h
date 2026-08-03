@@ -566,6 +566,7 @@ NnrpRuntimeCapabilities nnrp_runtime_capabilities(void);
 NnrpFfiStatus nnrp_client_connect(NnrpClientConnectRequest request, NnrpHandle *out_connection);
 NnrpFfiStatus nnrp_session_open(NnrpSessionOpenRequest request, NnrpHandle *out_session);
 NnrpFfiStatus nnrp_client_open_session(NnrpSessionOpenRequest request, NnrpHandle *out_session);
+NnrpFfiStatus nnrp_session_id(NnrpHandle session, uint32_t *out_session_id);
 NnrpFfiStatus nnrp_client_resume_session(NnrpSessionResumeRequest request, NnrpHandle *out_session, NnrpSessionRecoveryOutcome *out_outcome);
 NnrpFfiStatus nnrp_client_session_recovery_ticket(NnrpHandle session, NnrpHandle *out_buffer, NnrpBufferView *out_ticket);
 NnrpFfiStatus nnrp_submit(NnrpSubmitRequest request, NnrpHandle *out_operation);

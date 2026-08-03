@@ -3243,6 +3243,7 @@ pub unsafe extern "C" fn nnrp_client_open_session(
             Ok(session) => session,
             Err(status) => return status,
         };
+        let session_id = session.session_id();
 
         let handle = NnrpHandle::new(
             NnrpHandleKind::Session,
@@ -3254,7 +3255,7 @@ pub unsafe extern "C" fn nnrp_client_open_session(
             handle,
             NnrpFfiResource::Session {
                 connection: request.connection,
-                session_id: request.requested_session_id,
+                session_id,
                 profile_id: request.profile_id,
                 schema_id: request.schema_id,
                 schema_version: request.schema_version,
@@ -3267,6 +3268,29 @@ pub unsafe extern "C" fn nnrp_client_open_session(
         *out_session = handle;
         NnrpFfiStatus::ok()
     }
+}
+
+#[no_mangle]
+/// Returns the negotiated wire session id for a live client or server session.
+///
+/// # Safety
+///
+/// `out_session_id` must point to one writable `u32` value.
+pub unsafe extern "C" fn nnrp_session_id(
+    session: NnrpHandle,
+    out_session_id: *mut u32,
+) -> NnrpFfiStatus {
+    if out_session_id.is_null() {
+        return NnrpFfiStatus::invalid_argument(177);
+    }
+    let store = handle_store();
+    let session_id = match store.get(session, NnrpHandleKind::Session) {
+        Ok(NnrpFfiResource::Session { session_id, .. }) => *session_id,
+        Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32),
+        Err(status) => return status,
+    };
+    *out_session_id = session_id;
+    NnrpFfiStatus::ok()
 }
 
 #[no_mangle]
@@ -3340,6 +3364,7 @@ unsafe fn nnrp_client_resume_session_impl(
             Ok(session) => session,
             Err(status) => return status,
         };
+        let session_id = session.session_id();
         let resume_window_ms = session
             .recovery_ticket()
             .map(|ticket| ticket.resume_window_ms())
@@ -3354,7 +3379,7 @@ unsafe fn nnrp_client_resume_session_impl(
             handle,
             NnrpFfiResource::Session {
                 connection: open_request.connection,
-                session_id: open_request.requested_session_id,
+                session_id,
                 profile_id: open_request.profile_id,
                 schema_id: open_request.schema_id,
                 schema_version: open_request.schema_version,
@@ -6688,7 +6713,7 @@ pub unsafe extern "C" fn nnrp_server_accept_claim(
             Err(status) => return status,
         };
         (
-            session.client_open().requested_session_id,
+            session.session_id(),
             session.client_open().profile_id,
             session.client_open().schema_id,
             session.client_open().schema_version,
@@ -6855,7 +6880,7 @@ pub unsafe extern "C" fn nnrp_server_accept(
             Err(status) => return status,
         };
         let profile_id = session.client_open().profile_id;
-        let session_id = session.client_open().requested_session_id;
+        let session_id = session.session_id();
         let schema_id = session.client_open().schema_id;
         let schema_version = session.client_open().schema_version;
 
@@ -8924,6 +8949,26 @@ mod tests {
             assert_eq!(first_session.id, 78_003);
             assert_eq!(second_session.id, 78_004);
             assert_ne!(first_session, second_session);
+            let mut first_session_id = 0;
+            let mut second_session_id = 0;
+            assert_eq!(
+                nnrp_session_id(first_session, &mut first_session_id),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(
+                nnrp_session_id(second_session, &mut second_session_id),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(first_session_id, 42);
+            assert_eq!(second_session_id, 42);
+            assert_eq!(
+                nnrp_session_id(first_session, ptr::null_mut()),
+                NnrpFfiStatus::invalid_argument(177)
+            );
+            assert_eq!(
+                nnrp_session_id(first_connection, &mut first_session_id),
+                NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32)
+            );
             assert_eq!(nnrp_client_close(first_session), NnrpFfiStatus::ok());
             assert_eq!(nnrp_client_close(second_session), NnrpFfiStatus::ok());
             assert_eq!(

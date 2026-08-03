@@ -340,6 +340,7 @@ def configure_library(library: ctypes.CDLL) -> None:
             [NnrpSessionOpenRequest, ctypes.POINTER(NnrpHandle)],
             NnrpFfiStatus,
         ),
+        "nnrp_session_id": ([NnrpHandle, ctypes.POINTER(ctypes.c_uint32)], NnrpFfiStatus),
         "nnrp_client_submit": (
             [NnrpSubmitRequest, ctypes.POINTER(NnrpHandle)],
             NnrpFfiStatus,
@@ -808,7 +809,7 @@ def run_role_smoke_test_at_endpoint(
         library.nnrp_client_open_session(
             NnrpSessionOpenRequest(
                 client,
-                900_003,
+                0,
                 900_006,
                 1,
                 PROFILE_TOKEN,
@@ -833,6 +834,18 @@ def run_role_smoke_test_at_endpoint(
     server_session = accepted.get_nowait()
     if isinstance(server_session, BaseException):
         raise server_session
+    client_session_id = ctypes.c_uint32()
+    server_session_id = ctypes.c_uint32()
+    require_ok(
+        library.nnrp_session_id(client_session, ctypes.byref(client_session_id)),
+        "client negotiated session id",
+    )
+    require_ok(
+        library.nnrp_session_id(server_session, ctypes.byref(server_session_id)),
+        "server negotiated session id",
+    )
+    if client_session_id.value == 0 or client_session_id.value != server_session_id.value:
+        raise RuntimeError("client and server did not expose the same assigned session id")
 
     operation_id = 900_005
     frame_id = 42
