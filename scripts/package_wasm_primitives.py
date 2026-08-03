@@ -23,7 +23,7 @@ WASM_EXPORTS = [
     "decodeRuntimeControlMetadataJson",
     "encodeRuntimeObjectMetadataJson",
     "decodeRuntimeObjectMetadataJson",
-    "openBrowserClientRole",
+    "openBrowserClientConnection",
 ]
 TRANSPORT_REJECTION_REASONS = {
     "policy-disallowed",
@@ -63,6 +63,24 @@ def declared_string_union(typescript: str, name: str) -> set[str]:
     if match is None:
         raise SystemExit(f"missing TypeScript string union {name}")
     return set(re.findall(r'"([^"]+)"', match.group(1)))
+
+
+def declared_class_body(typescript: str, name: str) -> str:
+    match = re.search(
+        rf"\bexport class\s+{re.escape(name)}\s*\{{(.*?)\n\}}",
+        typescript,
+        re.DOTALL,
+    )
+    if match is None:
+        raise SystemExit(f"missing TypeScript class {name}")
+    return match.group(1)
+
+
+def require_class_methods(typescript: str, name: str, methods: tuple[str, ...]) -> None:
+    body = declared_class_body(typescript, name)
+    for method in methods:
+        if re.search(rf"\b{re.escape(method)}\s*\(", body) is None:
+            raise SystemExit(f"TypeScript class {name} is missing method {method}")
 
 
 def cargo_target_root() -> Path:
@@ -153,9 +171,17 @@ def package_wasm(out_dir: Path, transport_scope: str) -> Path:
     packaged_declarations = source_dts.read_text()
     if "patchSession(metadata: Uint8Array): Promise<Uint8Array>" not in packaged_declarations:
         raise SystemExit("packaged declarations are missing BrowserClientRole.patchSession")
-    for method in ("ingestPackets", "failReceive"):
-        if method not in generated_declarations or method not in packaged_declarations:
-            raise SystemExit(f"browser WASM declarations are missing BrowserClientRole.{method}")
+    connection_methods = (
+        "openSession",
+        "resumeSession",
+        "ingestPackets",
+        "failReceive",
+        "close",
+    )
+    role_methods = ("patchSession", "recoveryTicket", "close")
+    for declarations in (generated_declarations, packaged_declarations):
+        require_class_methods(declarations, "BrowserClientConnection", connection_methods)
+        require_class_methods(declarations, "BrowserClientRole", role_methods)
     rejection_reasons = declared_string_union(
         packaged_declarations, "TransportRejectionReason"
     )

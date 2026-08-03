@@ -67,7 +67,24 @@ export interface BrowserClientRoleConfig {
   defaultDeadlineMs: number;
   maxInFlightOperations: number;
   leaseTtlHintMs: number;
+  allowResume: boolean;
+  resumeTokenBytes: number;
+  cacheHints: number[];
+}
+
+export interface BrowserClientConnectionConfig {
   maxPacketBytes: number;
+}
+
+export class BrowserClientConnection {
+  private constructor();
+  free(): void;
+  [Symbol.dispose](): void;
+  openSession(configJson: string): Promise<BrowserClientRole>;
+  resumeSession(recoveryTicket: Uint8Array, configJson: string): Promise<BrowserClientRole>;
+  ingestPackets(packets: Uint8Array | readonly Uint8Array[]): void;
+  failReceive(detail: string): void;
+  close(): Promise<void>;
 }
 
 export class BrowserClientEventPacket {
@@ -102,21 +119,27 @@ export class BrowserClientRole {
   [Symbol.dispose](): void;
   awaitEvent(): Promise<BrowserClientEventPacket>;
   awaitEventBatch(maxEvents: number): Promise<BrowserClientEventBatch>;
-  ingestPackets(packets: Uint8Array | readonly Uint8Array[]): void;
-  failReceive(detail: string): void;
   close(): Promise<void>;
   patchSession(metadata: Uint8Array): Promise<Uint8Array>;
+  recoveryTicket(): Uint8Array | undefined;
   sendRuntimeFrame(messageType: number, frameId: number, payload: Uint8Array): Promise<void>;
-  submitNoWait(frameId: number, payload: Uint8Array): Promise<number>;
+  submitNoWait(
+    frameId: number,
+    headerFlags: number,
+    viewId: number,
+    routeId: number,
+    traceId: bigint,
+    payload: Uint8Array,
+  ): Promise<number>;
   readonly sessionId: number;
 }
 
-export function openBrowserClientRole(
+export function openBrowserClientConnection(
   send: (packet: Uint8Array) => void | Promise<void>,
   receive: () => Uint8Array | readonly Uint8Array[] | Promise<Uint8Array | readonly Uint8Array[]>,
   close: () => void | Promise<void>,
   configJson: string,
-): Promise<BrowserClientRole>;
+): Promise<BrowserClientConnection>;
 
 export type ProbeState = "not-run" | "succeeded" | "failed" | "missing";
 export type TransportRejectionReason =

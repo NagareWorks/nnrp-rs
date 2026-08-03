@@ -1146,14 +1146,16 @@ async fn server_registry_tracks_resume_enabled_sessions() -> Result<(), RuntimeE
     let addr = server.local_addr()?;
 
     let server_task = tokio::spawn(async move {
-        let first = server.accept().await?;
+        let mut first = server.accept().await?;
         assert_eq!(server.session_count()?, 1);
         assert_eq!(first.session_id(), 77);
+        assert_eq!(first.receive_submit().await?.operation_id, 9);
 
         let mut resumed = server.accept().await?;
         assert_eq!(server.session_count()?, 1);
         assert_eq!(resumed.session_id(), 77);
         assert_eq!(resumed.client_open().resume_token_bytes, 24);
+        assert_eq!(resumed.receive_submit().await?.operation_id, 10);
 
         let close = resumed.receive_close().await?;
         resumed.ack_close(&close).await?;
@@ -1169,10 +1171,14 @@ async fn server_registry_tracks_resume_enabled_sessions() -> Result<(), RuntimeE
     }
     .with_resume(24);
     let initial_client = NnrpClient::connect_tcp(addr, initial_config).await?;
-    let initial = initial_client.open_session().await?;
+    let mut initial = initial_client.open_session().await?;
+    initial
+        .submit_encoded_nowait(token_submit(9), b"initial".to_vec())
+        .await?;
     let ticket = initial
         .recovery_ticket()
         .expect("resume-enabled session must expose a recovery ticket");
+    assert_eq!(ticket.resume_from_operation_id(), Some(9));
     initial.close_transport().await?;
     drop(initial_client);
     tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1182,8 +1188,23 @@ async fn server_registry_tracks_resume_enabled_sessions() -> Result<(), RuntimeE
     }
     .with_resume(24);
     let resume_client = NnrpClient::connect_tcp(addr, resume_config).await?;
-    let resumed = resume_client.resume_session(ticket).await?;
+    let mut resumed = resume_client.resume_session(ticket).await?;
     assert_eq!(resumed.session_id(), 77);
+    assert_eq!(
+        resumed
+            .recovery_ticket()
+            .and_then(|ticket| ticket.resume_from_operation_id()),
+        Some(9)
+    );
+    resumed
+        .submit_encoded_nowait(token_submit(10), b"resumed".to_vec())
+        .await?;
+    assert_eq!(
+        resumed
+            .recovery_ticket()
+            .and_then(|ticket| ticket.resume_from_operation_id()),
+        Some(10)
+    );
 
     resumed.close().await?;
     server_task.await.expect("server task should join")?;

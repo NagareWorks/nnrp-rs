@@ -22,7 +22,8 @@ use wasm_bindgen::prelude::*;
 mod browser_role;
 #[cfg(target_arch = "wasm32")]
 pub use browser_role::{
-    open_browser_client_role, BrowserClientEventBatch, BrowserClientEventPacket, BrowserClientRole,
+    open_browser_client_connection, BrowserClientConnection, BrowserClientEventBatch,
+    BrowserClientEventPacket, BrowserClientRole,
 };
 
 #[cfg(not(any(

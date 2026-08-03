@@ -1,7 +1,8 @@
 #![cfg(target_arch = "wasm32")]
 
-use std::{cell::RefCell, collections::VecDeque, rc::Rc};
+use std::{cell::RefCell, collections::VecDeque, future::Future, rc::Rc};
 
+use futures_util::future::{select, Either};
 use js_sys::{Array, Function, Promise, Reflect, Uint8Array};
 use nnrp_core::{
     BudgetMetadata, ClientHelloMetadata, CommonHeader, ControlRequestMetadata, FrameSubmitMetadata,
@@ -11,15 +12,16 @@ use nnrp_core::{
     SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata, SessionPatchRejectReason,
     SessionStatus, SubmitMode, TileIndexMode, CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED,
     CURRENT_VERSION_MAJOR, CURRENT_WIRE_FORMAT, PROGRESS_METADATA_LEN, RESULT_PUSH_METADATA_LEN,
-    SERVER_HELLO_ACK_METADATA_LEN, SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE,
-    SESSION_OPEN_ACK_METADATA_LEN, SESSION_PATCH_ACK_METADATA_LEN, STANDARD_PROFILE_TOKEN,
-    TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
+    SERVER_HELLO_ACK_METADATA_LEN, SESSION_ACK_FLAG_RESUME_ENABLED, SESSION_CLOSE_ACK_METADATA_LEN,
+    SESSION_ERROR_NONE, SESSION_FLAG_ALLOW_RESUME, SESSION_OPEN_ACK_METADATA_LEN,
+    SESSION_PATCH_ACK_METADATA_LEN, STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID,
+    TOKEN_DELTA_SCHEMA_VERSION,
 };
 use nnrp_runtime::{NnrpSubmitHeaderContext, RuntimePacket};
 use nnrp_wasm::{
     decode_runtime_control_metadata_json, decode_websocket_binary_frame_batch_json,
     decode_websocket_binary_frame_json, encode_runtime_control_metadata_json,
-    encode_websocket_binary_frame_json, open_browser_client_role, BrowserClientRole,
+    encode_websocket_binary_frame_json, open_browser_client_connection, BrowserClientConnection,
 };
 use serde_json::Value;
 use wasm_bindgen::{closure::Closure, JsCast, JsValue};
@@ -110,6 +112,8 @@ async fn wasm_bindgen_browser_role_runs_real_session_submit_and_close() {
     let responses = Rc::new(RefCell::new(VecDeque::<Vec<u8>>::new()));
     let send_responses = Rc::clone(&responses);
     let send = Closure::wrap(Box::new(move |packet: Uint8Array| -> Promise {
+        CommonHeader::parse_packet(&packet.to_vec())
+            .expect("scripted browser send should receive a valid packet");
         for response in browser_role_responses(&packet.to_vec()) {
             send_responses.borrow_mut().push_back(response);
         }
@@ -118,16 +122,11 @@ async fn wasm_bindgen_browser_role_runs_real_session_submit_and_close() {
 
     let receive_responses = Rc::clone(&responses);
     let receive = Closure::wrap(Box::new(move || -> Promise {
-        let mut responses = receive_responses.borrow_mut();
-        if responses.is_empty() {
-            return Promise::reject(&JsValue::from_str("no scripted browser response"));
+        if let Some(packet) = receive_responses.borrow_mut().pop_front() {
+            let packet: JsValue = Uint8Array::from(packet.as_slice()).into();
+            return Promise::resolve(&packet);
         }
-        let packets = Array::new();
-        while let Some(packet) = responses.pop_front() {
-            packets.push(&Uint8Array::from(packet.as_slice()));
-        }
-        let packets: JsValue = packets.into();
-        Promise::resolve(&packets)
+        Promise::reject(&JsValue::from_str("no scripted browser response"))
     }) as Box<dyn FnMut() -> Promise>);
 
     let close_count = Rc::new(RefCell::new(0_u32));
@@ -137,6 +136,14 @@ async fn wasm_bindgen_browser_role_runs_real_session_submit_and_close() {
         Promise::resolve(&JsValue::UNDEFINED)
     }) as Box<dyn FnMut() -> Promise>);
 
+    let connection = open_browser_client_connection(
+        send.as_ref().unchecked_ref::<Function>().clone(),
+        receive.as_ref().unchecked_ref::<Function>().clone(),
+        close.as_ref().unchecked_ref::<Function>().clone(),
+        &serde_json::json!({ "maxPacketBytes": 64 * 1024 * 1024 }).to_string(),
+    )
+    .await
+    .expect("browser connection should own the WebSocket carrier");
     let config = serde_json::json!({
         "requestedSessionId": 7,
         "profileId": STANDARD_PROFILE_TOKEN,
@@ -146,16 +153,14 @@ async fn wasm_bindgen_browser_role_runs_real_session_submit_and_close() {
         "defaultDeadlineMs": 500,
         "maxInFlightOperations": 4,
         "leaseTtlHintMs": 30_000,
-        "maxPacketBytes": 64 * 1024 * 1024,
+        "allowResume": true,
+        "resumeTokenBytes": 24,
+        "cacheHints": [],
     });
-    let role = open_browser_client_role(
-        send.as_ref().unchecked_ref::<Function>().clone(),
-        receive.as_ref().unchecked_ref::<Function>().clone(),
-        close.as_ref().unchecked_ref::<Function>().clone(),
-        &config.to_string(),
-    )
-    .await
-    .expect("browser role should open a real NNRP session");
+    let role = connection
+        .open_session(&config.to_string())
+        .await
+        .expect("browser role should open a real NNRP session");
 
     let submit = token_submit(42);
     let mut payload = Vec::from(submit.to_bytes().expect("submit metadata should encode"));
@@ -175,7 +180,6 @@ async fn wasm_bindgen_browser_role_runs_real_session_submit_and_close() {
         .expect("browser role should submit through the Rust runtime"),
         9
     );
-
     let budget = BudgetMetadata {
         operation_id: 42,
         compute_budget_units: 100,
@@ -191,7 +195,6 @@ async fn wasm_bindgen_browser_role_runs_real_session_submit_and_close() {
     )
     .await
     .expect("browser role should route runtime controls through the Rust session");
-
     let patch = SessionPatchMetadata {
         profile_id: STANDARD_PROFILE_TOKEN,
         patch_mask: 0x03,
@@ -204,11 +207,8 @@ async fn wasm_bindgen_browser_role_runs_real_session_submit_and_close() {
         profile_patch_bytes: 0,
     };
     let patch_bytes = patch.to_bytes().expect("patch metadata should encode");
-    let (patch_ack, ()) = futures_util::future::join(
-        role.patch_session(&patch_bytes),
-        ingest_scripted_responses(&role, &responses),
-    )
-    .await;
+    let patch_ack =
+        drive_scripted_operation(&connection, &responses, role.patch_session(&patch_bytes)).await;
     let patch_ack = patch_ack
         .expect("browser role should patch through the Rust runtime")
         .to_vec();
@@ -244,14 +244,89 @@ async fn wasm_bindgen_browser_role_runs_real_session_submit_and_close() {
     assert_eq!(event_packets[1].1.len(), RESULT_PUSH_METADATA_LEN);
     assert_eq!(event_packets[1].2, b"answer");
 
-    let (close_result, ()) =
-        futures_util::future::join(role.close(), ingest_scripted_responses(&role, &responses))
-            .await;
-    close_result.expect("browser role should close the session and carrier");
-    role.close()
+    let recovery_ticket = role
+        .recovery_ticket_bytes()
+        .expect("resumable browser session should expose a Rust-owned ticket");
+    assert_eq!(&recovery_ticket[..4], b"NRTK");
+
+    let sibling_config = serde_json::json!({
+        "requestedSessionId": 8,
+        "profileId": STANDARD_PROFILE_TOKEN,
+        "schemaId": TOKEN_DELTA_SCHEMA_ID,
+        "schemaVersion": TOKEN_DELTA_SCHEMA_VERSION,
+        "priorityClass": 1,
+        "defaultDeadlineMs": 500,
+        "maxInFlightOperations": 4,
+        "leaseTtlHintMs": 30_000,
+        "allowResume": false,
+        "resumeTokenBytes": 0,
+        "cacheHints": [],
+    });
+    let sibling_config = sibling_config.to_string();
+    let sibling = drive_scripted_operation(
+        &connection,
+        &responses,
+        connection.open_session(&sibling_config),
+    )
+    .await;
+    let sibling = sibling.expect("one browser connection should open a sibling session");
+    assert_eq!(
+        sibling
+            .session_id()
+            .expect("sibling session should remain open"),
+        8
+    );
+    let sibling_close = drive_scripted_operation(&connection, &responses, sibling.close()).await;
+    sibling_close.expect("closing a sibling session should preserve the carrier");
+    sibling
+        .close()
         .await
         .expect("browser role close should be idempotent");
-    assert_eq!(*close_count.borrow(), 1);
+
+    connection.fail_receive("scripted browser carrier loss".to_owned());
+    assert!(
+        role.session_id().is_err(),
+        "a failed carrier must invalidate roles owned by the old connection"
+    );
+    assert!(
+        connection.close().await.is_err(),
+        "closing a failed connection must report the original carrier failure"
+    );
+
+    let replacement = open_browser_client_connection(
+        send.as_ref().unchecked_ref::<Function>().clone(),
+        receive.as_ref().unchecked_ref::<Function>().clone(),
+        close.as_ref().unchecked_ref::<Function>().clone(),
+        &serde_json::json!({ "maxPacketBytes": 64 * 1024 * 1024 }).to_string(),
+    )
+    .await
+    .expect("replacement browser connection should own a fresh carrier");
+
+    let config = config.to_string();
+    let resumed = drive_scripted_operation(
+        &replacement,
+        &responses,
+        replacement.resume_session(&recovery_ticket, &config),
+    )
+    .await;
+    let resumed = resumed.expect("browser connection should resume from the canonical ticket");
+    assert_eq!(
+        resumed
+            .session_id()
+            .expect("resumed session should remain open"),
+        7
+    );
+    let resumed_close = drive_scripted_operation(&replacement, &responses, resumed.close()).await;
+    resumed_close.expect("resumed browser session should close without closing the carrier");
+    replacement
+        .close()
+        .await
+        .expect("browser connection should close the carrier");
+    assert_eq!(*close_count.borrow(), 2);
+    assert!(
+        replacement.open_session(&config).await.is_err(),
+        "a closed browser connection must reject new sessions"
+    );
 }
 
 #[wasm_bindgen_test(async)]
@@ -357,6 +432,14 @@ async fn browser_role_routes_control_and_patch_while_event_receive_is_pending() 
         Box::new(move || -> Promise { Promise::resolve(&JsValue::UNDEFINED) })
             as Box<dyn FnMut() -> Promise>,
     );
+    let connection = open_browser_client_connection(
+        send.as_ref().unchecked_ref::<Function>().clone(),
+        receive.as_ref().unchecked_ref::<Function>().clone(),
+        close.as_ref().unchecked_ref::<Function>().clone(),
+        &serde_json::json!({ "maxPacketBytes": 64 * 1024 * 1024 }).to_string(),
+    )
+    .await
+    .expect("concurrent browser connection should own the WebSocket carrier");
     let config = serde_json::json!({
         "requestedSessionId": 7,
         "profileId": STANDARD_PROFILE_TOKEN,
@@ -366,16 +449,14 @@ async fn browser_role_routes_control_and_patch_while_event_receive_is_pending() 
         "defaultDeadlineMs": 500,
         "maxInFlightOperations": 4,
         "leaseTtlHintMs": 30_000,
-        "maxPacketBytes": 64 * 1024 * 1024,
+        "allowResume": true,
+        "resumeTokenBytes": 24,
+        "cacheHints": [],
     });
-    let role = open_browser_client_role(
-        send.as_ref().unchecked_ref::<Function>().clone(),
-        receive.as_ref().unchecked_ref::<Function>().clone(),
-        close.as_ref().unchecked_ref::<Function>().clone(),
-        &config.to_string(),
-    )
-    .await
-    .expect("concurrent browser role should open a real NNRP session");
+    let role = connection
+        .open_session(&config.to_string())
+        .await
+        .expect("concurrent browser role should open a real NNRP session");
 
     let submit = token_submit(42);
     let mut submit_payload = Vec::from(submit.to_bytes().expect("submit metadata should encode"));
@@ -395,9 +476,10 @@ async fn browser_role_routes_control_and_patch_while_event_receive_is_pending() 
     let event_future = role.await_event();
     let cancel_bytes = cancel.to_bytes().expect("cancel metadata should encode");
     let cancel_future = role.send_runtime_frame(MessageType::Cancel as u8, 9, &cancel_bytes);
-    let ((event, cancel_result), ()) = futures_util::future::join(
+    let (event, cancel_result) = drive_scripted_operation(
+        &connection,
+        &responses,
         futures_util::future::join(event_future, cancel_future),
-        ingest_scripted_responses(&role, &responses),
     )
     .await;
 
@@ -451,8 +533,15 @@ async fn browser_role_routes_control_and_patch_while_event_receive_is_pending() 
     let _patch_completion = role
         .patch_session_promise(&patch_bytes)
         .then2(&patch_callback, &patch_error);
+    JsFuture::from(Promise::resolve(&JsValue::UNDEFINED))
+        .await
+        .expect("pending patch should advance to the session lock");
+    assert!(
+        role.recovery_ticket_bytes().is_some(),
+        "recovery tickets must remain synchronously available while an async session call is pending"
+    );
 
-    ingest_scripted_responses(&role, &responses).await;
+    ingest_scripted_responses(&connection, &responses).await;
     for _ in 0..64 {
         if event_result.borrow().is_some() && patch_result.borrow().is_some() {
             break;
@@ -492,9 +581,10 @@ async fn browser_role_routes_control_and_patch_while_event_receive_is_pending() 
 
     let pending_event = role.await_event();
     let close = role.close();
-    let ((event_result, close_result), ()) = futures_util::future::join(
+    let (event_result, close_result) = drive_scripted_operation(
+        &connection,
+        &responses,
         futures_util::future::join(pending_event, close),
-        ingest_scripted_responses(&role, &responses),
     )
     .await;
     assert!(
@@ -502,10 +592,51 @@ async fn browser_role_routes_control_and_patch_while_event_receive_is_pending() 
         "closing the role should cancel a pending event receive"
     );
     close_result.expect("concurrent browser role should close cleanly");
+    connection
+        .close()
+        .await
+        .expect("concurrent browser connection should close cleanly");
+}
+
+async fn drive_scripted_operation<F>(
+    connection: &BrowserClientConnection,
+    responses: &Rc<RefCell<VecDeque<Vec<u8>>>>,
+    operation: F,
+) -> F::Output
+where
+    F: Future,
+{
+    let mut operation = Box::pin(operation);
+    for _ in 0..256 {
+        let ingress_turn = Box::pin(ingest_scripted_response_turn(connection, responses));
+        match select(operation, ingress_turn).await {
+            Either::Left((output, _)) => return output,
+            Either::Right(((), pending_operation)) => operation = pending_operation,
+        }
+    }
+    panic!("scripted browser operation did not complete within 256 ingress turns");
+}
+
+async fn ingest_scripted_response_turn(
+    connection: &BrowserClientConnection,
+    responses: &Rc<RefCell<VecDeque<Vec<u8>>>>,
+) {
+    JsFuture::from(Promise::resolve(&JsValue::UNDEFINED))
+        .await
+        .expect("scripted carrier turn should complete");
+    let packets = Array::new();
+    while let Some(packet) = responses.borrow_mut().pop_front() {
+        packets.push(&Uint8Array::from(packet.as_slice()));
+    }
+    if packets.length() > 0 {
+        connection
+            .ingest_packets(packets.into())
+            .expect("external ingress should accept complete NNRP packets");
+    }
 }
 
 async fn ingest_scripted_responses(
-    role: &BrowserClientRole,
+    connection: &BrowserClientConnection,
     responses: &Rc<RefCell<VecDeque<Vec<u8>>>>,
 ) {
     for _ in 0..64 {
@@ -522,14 +653,15 @@ async fn ingest_scripted_responses(
     }
     assert!(
         packets.length() > 0,
-        "exported role call should produce an external-ingress response"
+        "exported connection call should produce an external-ingress response"
     );
-    role.ingest_packets(packets.into())
+    connection
+        .ingest_packets(packets.into())
         .expect("external ingress should accept complete NNRP packets");
 }
 
 fn browser_role_responses(packet: &[u8]) -> Vec<Vec<u8>> {
-    let (header, metadata, _) =
+    let (header, metadata, body) =
         CommonHeader::parse_packet(packet).expect("browser carrier should receive a valid packet");
     match header.message_type {
         MessageType::ClientHello => {
@@ -576,30 +708,44 @@ fn browser_role_responses(packet: &[u8]) -> Vec<Vec<u8>> {
         }
         MessageType::SessionOpen => {
             let open = SessionOpenMetadata::parse(metadata).expect("session open should parse");
+            assert_eq!(body.len(), open.resume_token_bytes as usize);
+            let resume_token = if open.session_flags & SESSION_FLAG_ALLOW_RESUME != 0 {
+                b"runtime-recovery-token".to_vec()
+            } else {
+                Vec::new()
+            };
             let ack = SessionOpenAckMetadata {
                 session_id: open.requested_session_id,
                 accepted_profile_id: open.profile_id,
                 accepted_priority_class: open.priority_class,
-                session_status: SessionStatus::Opened,
+                session_status: if open.resume_token_bytes == 0 {
+                    SessionStatus::Opened
+                } else {
+                    SessionStatus::Resumed
+                },
                 schema_id: open.schema_id,
                 schema_version: open.schema_version,
                 granted_operation_credit: open.max_in_flight_operations,
                 max_in_flight_operations: open.max_in_flight_operations,
                 lease_ttl_ms: open.lease_ttl_hint_ms,
-                resume_window_ms: 0,
-                resume_token_bytes: 0,
+                resume_window_ms: if resume_token.is_empty() { 0 } else { 120_000 },
+                resume_token_bytes: resume_token.len() as u32,
                 session_extension_bytes: 0,
                 server_session_tag: open.client_session_tag,
                 route_scope_id: 0,
                 session_error_code: SESSION_ERROR_NONE,
-                session_flags_ack: 0,
+                session_flags_ack: if resume_token.is_empty() {
+                    0
+                } else {
+                    SESSION_ACK_FLAG_RESUME_ENABLED
+                },
             };
             vec![response_packet(
                 MessageType::SessionOpenAck,
                 ack.session_id,
                 0,
                 ack.to_bytes().expect("session ack should encode").to_vec(),
-                Vec::new(),
+                resume_token,
                 SESSION_OPEN_ACK_METADATA_LEN,
             )]
         }
