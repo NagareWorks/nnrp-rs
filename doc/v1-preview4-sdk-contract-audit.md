@@ -2,7 +2,7 @@
 
 This audit binds the Preview4 machine contract to the Rust runtime and downstream SDK release
 surface. The canonical contract is
-`nnrp-doc/docs/public/contracts/nnrp-1-preview4-sdk-api.json` at contract version 8.
+`nnrp-doc/docs/public/contracts/nnrp-1-preview4-sdk-api.json` at contract version 9.
 
 ## Runtime Event Envelope
 

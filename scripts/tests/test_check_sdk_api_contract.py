@@ -157,6 +157,22 @@ class SdkApiContractTests(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "NnrpResult field contract drifted"):
             self.check(contract)
 
+    def test_rejects_malformed_type_fields_without_a_traceback(self):
+        contract = frozen_contract()
+        contract["types"]["NnrpResult"] = ["operation_id"]
+        with self.assertRaisesRegex(SystemExit, "SDK type contract must be an object"):
+            self.check(contract)
+
+        contract = frozen_contract()
+        contract["types"]["NnrpResult"]["fields"] = {"name": "operation_id"}
+        with self.assertRaisesRegex(SystemExit, "SDK type fields must be an array"):
+            self.check(contract)
+
+        contract = frozen_contract()
+        del contract["types"]["NnrpResult"]["fields"][0]["name"]
+        with self.assertRaisesRegex(SystemExit, "must declare a non-empty name"):
+            self.check(contract)
+
     def test_rejects_recovery_ticket_encoding_drift(self):
         contract = frozen_contract()
         contract["types"]["SessionRecoveryTicket"]["opaqueEncoding"][
