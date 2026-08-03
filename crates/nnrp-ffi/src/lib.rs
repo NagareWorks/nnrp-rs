@@ -2509,6 +2509,7 @@ impl Default for NnrpServerBindRequest {
 pub struct NnrpSessionOpenRequest {
     pub connection: NnrpHandle,
     pub requested_session_id: u32,
+    pub session_handle_id: u64,
     pub generation: u32,
     pub profile_id: u16,
     pub priority_class: u8,
@@ -2525,7 +2526,8 @@ pub struct NnrpSessionOpenRequest {
 
 impl NnrpSessionOpenRequest {
     fn validate(self) -> Result<(), NnrpFfiStatus> {
-        if self.generation == 0
+        if self.session_handle_id == 0
+            || self.generation == 0
             || self.allow_resume > 1
             || self.reserved0 != 0
             || self.max_in_flight_operations == 0
@@ -2568,6 +2570,7 @@ impl Default for NnrpSessionOpenRequest {
         Self {
             connection: NnrpHandle::invalid(),
             requested_session_id: 0,
+            session_handle_id: 0,
             generation: 1,
             profile_id: nnrp_core::STANDARD_PROFILE_TOKEN,
             priority_class: SessionPriorityClass::Balanced as u8,
@@ -3087,12 +3090,11 @@ pub unsafe extern "C" fn nnrp_client_open_session(
             Err(status) => return status,
         }
 
-        let session_id = if request.requested_session_id == 0 {
-            next_handle_id(&mut store, NnrpHandleKind::Session)
-        } else {
-            request.requested_session_id as u64
-        };
-        let handle = NnrpHandle::new(NnrpHandleKind::Session, session_id, request.generation);
+        let handle = NnrpHandle::new(
+            NnrpHandleKind::Session,
+            request.session_handle_id,
+            request.generation,
+        );
         if let Err(status) = store.insert(
             handle,
             NnrpFfiResource::Session {
@@ -3149,7 +3151,7 @@ pub unsafe extern "C" fn nnrp_client_open_session(
 
         let handle = NnrpHandle::new(
             NnrpHandleKind::Session,
-            session.session_id() as u64,
+            request.session_handle_id,
             request.generation,
         );
         let mut store = handle_store();
@@ -3248,7 +3250,7 @@ unsafe fn nnrp_client_resume_session_impl(
             .unwrap_or(0);
         let handle = NnrpHandle::new(
             NnrpHandleKind::Session,
-            session.session_id() as u64,
+            open_request.session_handle_id,
             open_request.generation,
         );
         let mut store = handle_store();
@@ -8673,6 +8675,7 @@ mod tests {
                     NnrpSessionOpenRequest {
                         connection,
                         requested_session_id: 42,
+                        session_handle_id: 78,
                         generation: 1,
                         profile_id: 2,
                         schema_id: 0x1001,
@@ -8684,6 +8687,7 @@ mod tests {
                 NnrpFfiStatus::ok()
             );
             assert_eq!(session.kind, NnrpHandleKind::Session as u32);
+            assert_eq!(session.id, 78);
 
             let payload = [1u8, 2, 3];
             let mut operation = NnrpHandle::invalid();
@@ -8716,6 +8720,93 @@ mod tests {
     }
 
     #[test]
+    fn session_open_requests_require_an_explicit_private_handle() {
+        assert_eq!(
+            NnrpSessionOpenRequest::default().validate(),
+            Err(NnrpFfiStatus::invalid_argument(174))
+        );
+        assert_eq!(
+            NnrpSessionOpenRequest {
+                session_handle_id: 1,
+                ..NnrpSessionOpenRequest::default()
+            }
+            .validate(),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn ffi_session_handles_are_independent_from_protocol_session_ids() {
+        unsafe {
+            let mut first_connection = NnrpHandle::invalid();
+            let mut second_connection = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_connection_bootstrap(
+                    NnrpConnectionBootstrap {
+                        connection_id: 78_001,
+                        generation: 1,
+                        transport_id: test_transport_id(),
+                    },
+                    &mut first_connection,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(
+                nnrp_connection_bootstrap(
+                    NnrpConnectionBootstrap {
+                        connection_id: 78_002,
+                        generation: 1,
+                        transport_id: test_transport_id(),
+                    },
+                    &mut second_connection,
+                ),
+                NnrpFfiStatus::ok()
+            );
+
+            let mut first_session = NnrpHandle::invalid();
+            let mut second_session = NnrpHandle::invalid();
+            assert_eq!(
+                nnrp_client_open_session(
+                    NnrpSessionOpenRequest {
+                        connection: first_connection,
+                        requested_session_id: 42,
+                        session_handle_id: 78_003,
+                        ..NnrpSessionOpenRequest::default()
+                    },
+                    &mut first_session,
+                ),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(
+                nnrp_client_open_session(
+                    NnrpSessionOpenRequest {
+                        connection: second_connection,
+                        requested_session_id: 42,
+                        session_handle_id: 78_004,
+                        ..NnrpSessionOpenRequest::default()
+                    },
+                    &mut second_session,
+                ),
+                NnrpFfiStatus::ok()
+            );
+
+            assert_eq!(first_session.id, 78_003);
+            assert_eq!(second_session.id, 78_004);
+            assert_ne!(first_session, second_session);
+            assert_eq!(nnrp_client_close(first_session), NnrpFfiStatus::ok());
+            assert_eq!(nnrp_client_close(second_session), NnrpFfiStatus::ok());
+            assert_eq!(
+                nnrp_client_close_connection(first_connection),
+                NnrpFfiStatus::ok()
+            );
+            assert_eq!(
+                nnrp_client_close_connection(second_connection),
+                NnrpFfiStatus::ok()
+            );
+        }
+    }
+
+    #[test]
     fn ffi_client_abi_emits_pollable_runtime_events() {
         unsafe {
             let mut connection = NnrpHandle::invalid();
@@ -8741,6 +8832,7 @@ mod tests {
                     NnrpSessionOpenRequest {
                         connection,
                         requested_session_id: 91_002,
+                        session_handle_id: 91_002,
                         generation: 1,
                         profile_id: 2,
                         schema_id: 0x1001,
@@ -8822,6 +8914,7 @@ mod tests {
                     NnrpSessionOpenRequest {
                         connection,
                         requested_session_id: 91_002,
+                        session_handle_id: 91_002,
                         generation: 1,
                         profile_id: 2,
                         schema_id: 0x1001,
@@ -8884,6 +8977,7 @@ mod tests {
                     NnrpSessionOpenRequest {
                         connection,
                         requested_session_id: 91_102,
+                        session_handle_id: 91_102,
                         generation: 1,
                         profile_id: 2,
                         schema_id: 0x1001,
@@ -8964,6 +9058,7 @@ mod tests {
                     NnrpSessionOpenRequest {
                         connection,
                         requested_session_id: 91_402,
+                        session_handle_id: 91_402,
                         generation: 1,
                         profile_id: 2,
                         schema_id: 0x1001,
@@ -9077,6 +9172,7 @@ mod tests {
                     NnrpSessionOpenRequest {
                         connection,
                         requested_session_id: 91_422,
+                        session_handle_id: 91_422,
                         generation: 1,
                         profile_id: 2,
                         schema_id: 0x1001,
@@ -9148,6 +9244,7 @@ mod tests {
                     NnrpSessionOpenRequest {
                         connection,
                         requested_session_id: 91_427,
+                        session_handle_id: 91_427,
                         generation: 1,
                         profile_id: 2,
                         schema_id: 0x1001,
@@ -9545,6 +9642,7 @@ mod tests {
                     NnrpSessionOpenRequest {
                         connection,
                         requested_session_id: 91_651,
+                        session_handle_id: 91_651,
                         generation: 1,
                         profile_id: 2,
                         schema_id: 0x1001,
@@ -9687,6 +9785,7 @@ mod tests {
                     NnrpSessionOpenRequest {
                         connection,
                         requested_session_id: 91_657,
+                        session_handle_id: 91_657,
                         generation: 1,
                         profile_id: 2,
                         schema_id: 0x1001,
@@ -9806,6 +9905,7 @@ mod tests {
                     NnrpSessionOpenRequest {
                         connection,
                         requested_session_id: 92_432,
+                        session_handle_id: 92_432,
                         generation: 1,
                         profile_id: 2,
                         schema_id: 0x1001,
@@ -9966,6 +10066,7 @@ mod tests {
                     NnrpSessionOpenRequest {
                         connection,
                         requested_session_id: 91_502,
+                        session_handle_id: 91_502,
                         generation: 1,
                         profile_id: 2,
                         schema_id: 0x1001,
@@ -10056,6 +10157,7 @@ mod tests {
                     NnrpSessionOpenRequest {
                         connection,
                         requested_session_id: 91_512,
+                        session_handle_id: 91_512,
                         generation: 1,
                         profile_id: 2,
                         schema_id: 0x1001,
@@ -10153,6 +10255,7 @@ mod tests {
                     NnrpSessionOpenRequest {
                         connection,
                         requested_session_id: 91_522,
+                        session_handle_id: 91_522,
                         generation: 1,
                         profile_id: 2,
                         schema_id: 0x1001,
@@ -10568,6 +10671,7 @@ mod tests {
                     NnrpSessionOpenRequest {
                         connection,
                         requested_session_id: 91_532,
+                        session_handle_id: 91_532,
                         generation: 1,
                         profile_id: 2,
                         schema_id: 0x1001,
@@ -11885,6 +11989,7 @@ mod tests {
                     NnrpSessionOpenRequest {
                         connection,
                         requested_session_id: 481,
+                        session_handle_id: 481,
                         generation: 1,
                         profile_id: nnrp_core::PROFILE_TOKEN,
                         schema_id: nnrp_core::TOKEN_DELTA_SCHEMA_ID,
@@ -12080,6 +12185,7 @@ mod tests {
                     NnrpSessionResumeRequest {
                         open: NnrpSessionOpenRequest {
                             connection,
+                            session_handle_id: 481_101,
                             resume_token_bytes: 16,
                             ..NnrpSessionOpenRequest::default()
                         },
@@ -12091,7 +12197,7 @@ mod tests {
                 NnrpFfiStatus::ok()
             );
             assert_eq!(session.kind, NnrpHandleKind::Session as u32);
-            assert_eq!(session.id, 88);
+            assert_eq!(session.id, 481_101);
             assert_eq!(outcome.outcome_code, NNRP_SESSION_RECOVERY_OUTCOME_RESUMED);
             assert_eq!(outcome.resume_window_ms, 120_000);
 
@@ -12121,6 +12227,7 @@ mod tests {
                         open: NnrpSessionOpenRequest {
                             connection,
                             requested_session_id: 90,
+                            session_handle_id: 481_102,
                             allow_resume: 1,
                             resume_token_bytes: 16,
                             ..NnrpSessionOpenRequest::default()
@@ -12138,6 +12245,7 @@ mod tests {
                         open: NnrpSessionOpenRequest {
                             connection: NnrpHandle::invalid(),
                             requested_session_id: 90,
+                            session_handle_id: 481_103,
                             allow_resume: 1,
                             resume_token_bytes: 16,
                             ..NnrpSessionOpenRequest::default()
@@ -12169,6 +12277,7 @@ mod tests {
                     NnrpSessionOpenRequest {
                         connection,
                         requested_session_id: 89,
+                        session_handle_id: 481_201,
                         generation: 1,
                         profile_id: nnrp_core::PROFILE_TOKEN,
                         schema_id: nnrp_core::TOKEN_DELTA_SCHEMA_ID,
@@ -12887,6 +12996,7 @@ mod tests {
                     NnrpSessionOpenRequest {
                         connection,
                         requested_session_id: 95_102,
+                        session_handle_id: 95_102,
                         generation: 1,
                         profile_id: 2,
                         schema_id: 0x1001,
@@ -12988,6 +13098,7 @@ mod tests {
                     NnrpSessionOpenRequest {
                         connection,
                         requested_session_id: 93_002,
+                        session_handle_id: 93_002,
                         generation: 1,
                         profile_id: 2,
                         schema_id: 0x1001,
@@ -13074,6 +13185,7 @@ mod tests {
                     NnrpSessionOpenRequest {
                         connection: client,
                         requested_session_id: 94_002,
+                        session_handle_id: 94_002,
                         generation: 1,
                         profile_id: 2,
                         schema_id: 0x1001,
@@ -13293,6 +13405,7 @@ mod tests {
                     NnrpSessionOpenRequest {
                         connection,
                         requested_session_id: 95_002,
+                        session_handle_id: 95_002,
                         generation: 1,
                         profile_id: 2,
                         schema_id: 0x1001,
@@ -14013,6 +14126,7 @@ mod tests {
                     NnrpSessionOpenRequest {
                         connection: server,
                         requested_session_id: 193_003,
+                        session_handle_id: 193_003,
                         generation: 1,
                         profile_id: 2,
                         schema_id: 0x1001,
@@ -14068,6 +14182,7 @@ mod tests {
                     NnrpSessionOpenRequest {
                         connection: unregistered_connection,
                         requested_session_id: 90_002,
+                        session_handle_id: 90_002,
                         generation: 1,
                         profile_id: 2,
                         schema_id: 0x1001,
@@ -14099,6 +14214,7 @@ mod tests {
                     NnrpSessionOpenRequest {
                         connection: stale_connection,
                         requested_session_id: 90_004,
+                        session_handle_id: 90_004,
                         generation: 1,
                         profile_id: 2,
                         schema_id: 0x1001,
@@ -14115,6 +14231,7 @@ mod tests {
                     NnrpSessionOpenRequest {
                         connection,
                         requested_session_id: 90_005,
+                        session_handle_id: 90_005,
                         generation: 1,
                         profile_id: 2,
                         schema_id: 0x1001,
@@ -14376,13 +14493,13 @@ mod tests {
             poll_result_event,
         ) = match (core::mem::size_of::<usize>(), core::mem::align_of::<u64>()) {
             (8, 8) => (
-                24, 8, 64, 24, 48, 60, 40, 144, 80, 96, 40, 24, 32, 36, 224, 24,
+                24, 8, 64, 24, 48, 60, 40, 144, 88, 104, 40, 24, 32, 36, 224, 24,
             ),
             (4, 8) => (
-                24, 8, 56, 16, 40, 52, 40, 120, 72, 80, 40, 24, 32, 36, 216, 24,
+                24, 8, 56, 16, 40, 52, 40, 120, 80, 88, 40, 24, 32, 36, 216, 24,
             ),
             (4, 4) => (
-                20, 4, 52, 16, 36, 48, 36, 108, 64, 72, 36, 20, 28, 32, 184, 20,
+                20, 4, 52, 16, 36, 48, 36, 108, 72, 80, 36, 20, 28, 32, 184, 20,
             ),
             layout => panic!("unsupported FFI ABI layout: {layout:?}"),
         };
@@ -14441,11 +14558,19 @@ mod tests {
             handle_size
         );
         assert_eq!(
-            core::mem::offset_of!(NnrpSessionOpenRequest, cache_hints),
-            if core::mem::size_of::<usize>() == 8 {
-                64
+            core::mem::offset_of!(NnrpSessionOpenRequest, session_handle_id),
+            if core::mem::align_of::<u64>() == 8 {
+                32
             } else {
-                56
+                24
+            }
+        );
+        assert_eq!(
+            core::mem::offset_of!(NnrpSessionOpenRequest, cache_hints),
+            if core::mem::size_of::<usize>() == 8 || core::mem::align_of::<u64>() == 8 {
+                72
+            } else {
+                64
             }
         );
         assert_eq!(

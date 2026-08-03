@@ -384,6 +384,7 @@ typedef struct NnrpServerBindRequest {
 typedef struct NnrpSessionOpenRequest {
   NnrpHandle connection;
   uint32_t requested_session_id;
+  uint64_t session_handle_id;
   uint32_t generation;
   uint16_t profile_id;
   uint8_t priority_class;

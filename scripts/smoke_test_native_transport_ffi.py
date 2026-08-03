@@ -130,6 +130,7 @@ class NnrpSessionOpenRequest(ctypes.Structure):
     _fields_ = [
         ("connection", NnrpHandle),
         ("requested_session_id", ctypes.c_uint32),
+        ("session_handle_id", ctypes.c_uint64),
         ("generation", ctypes.c_uint32),
         ("profile_id", ctypes.c_uint16),
         ("priority_class", ctypes.c_uint8),
@@ -707,9 +708,13 @@ def run_role_smoke_test_at_endpoint(
     if ctypes.sizeof(ctypes.c_void_p) == 8:
         if ctypes.sizeof(NnrpServerBindRequest) != 144:
             raise RuntimeError("Python server-bind layout does not match the 64-bit FFI ABI")
-        if ctypes.sizeof(NnrpSessionOpenRequest) != 80:
+        if ctypes.sizeof(NnrpSessionOpenRequest) != 88:
             raise RuntimeError("Python session-open layout does not match the 64-bit FFI ABI")
-        if NnrpSessionOpenRequest.cache_hints.offset != 64:
+        if NnrpSessionOpenRequest.session_handle_id.offset != 32:
+            raise RuntimeError(
+                "Python session-open session_handle_id offset does not match the FFI ABI"
+            )
+        if NnrpSessionOpenRequest.cache_hints.offset != 72:
             raise RuntimeError("Python session-open cache_hints offset does not match the FFI ABI")
 
     library = ctypes.CDLL(str(library_path.resolve()))
@@ -804,6 +809,7 @@ def run_role_smoke_test_at_endpoint(
             NnrpSessionOpenRequest(
                 client,
                 900_003,
+                900_006,
                 1,
                 PROFILE_TOKEN,
                 0,
