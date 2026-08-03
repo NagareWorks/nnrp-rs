@@ -28,6 +28,7 @@ EXPECTED_EXPORTS = [
     "nnrp_client_connect",
     "nnrp_session_open",
     "nnrp_client_open_session",
+    "nnrp_session_id",
     "nnrp_client_resume_session",
     "nnrp_client_session_recovery_ticket",
     "nnrp_submit",

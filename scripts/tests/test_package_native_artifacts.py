@@ -111,6 +111,7 @@ not_an_nnrp_export T 00000004 00000004
 
         self.assertIn("nnrp_connection_close", package.EXPECTED_EXPORTS)
         self.assertIn("nnrp_client_close_connection", package.EXPECTED_EXPORTS)
+        self.assertIn("nnrp_session_id", package.EXPECTED_EXPORTS)
         self.assertIn("nnrp_schema_registry_create", package.EXPECTED_EXPORTS)
         self.assertIn("nnrp_schema_registry_install", package.EXPECTED_EXPORTS)
         self.assertIn("nnrp_schema_registry_release", package.EXPECTED_EXPORTS)
