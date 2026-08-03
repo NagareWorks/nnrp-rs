@@ -10,6 +10,21 @@ session or emulate recovery outside Rust.
 
 Preview4 moves the Rust workspace beyond token-stream transport substitution and into runtime orchestration features that help SDKs model cancellation, priority, progress, partial results, cache references, route hints, trace context, result drop reasons, IPC, and WebSocket endpoints directly.
 
+## 1.0.0-preview.4.22
+
+The native FFI ABI is `4.4.0`. Server-role adoption now carries asynchronous admission decisions across the native
+boundary, accepted client and server sessions expose their negotiated protocol session identity, and release artifacts
+declare the schema-registry exports required by downstream SDK loaders. These additions let language SDKs preserve one
+frozen high-level contract without reconstructing admission, identity, or schema state outside Rust.
+
+The browser WASM role keeps an in-flight WebSocket receive alive when the Rust driver cancels its current await. Received
+packets remain ordered, only one carrier receive may own ingress at a time, and external packet ingress is enabled only
+after a size-valid successful `SESSION_OPEN_ACK`. The WASM regression suite covers cancellation, concurrent receive
+ownership, oversized handshake rejection, and continued packet delivery.
+
+Native and WASM artifact inspection, transport-scoped role E2E, wire conformance, and downstream package manifests use
+this revision as the coordinated Preview4 SDK baseline.
+
 ## 1.0.0-preview.4.21
 
 IPC shutdown now treats terminal Windows named-pipe peer states as an idempotent close after the
