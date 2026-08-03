@@ -106,11 +106,14 @@ not_an_nnrp_export T 00000004 00000004
             {"nnrp_current_protocol_version", "nnrp_transport_runtime_shutdown"},
         )
 
-    def test_role_connection_lifecycle_exports_are_required(self):
+    def test_role_and_schema_registry_exports_are_required(self):
         package = load_package_script()
 
         self.assertIn("nnrp_connection_close", package.EXPECTED_EXPORTS)
         self.assertIn("nnrp_client_close_connection", package.EXPECTED_EXPORTS)
+        self.assertIn("nnrp_schema_registry_create", package.EXPECTED_EXPORTS)
+        self.assertIn("nnrp_schema_registry_install", package.EXPECTED_EXPORTS)
+        self.assertIn("nnrp_schema_registry_release", package.EXPECTED_EXPORTS)
 
     def test_every_retired_abi_export_is_rejected(self):
         package = load_package_script()
