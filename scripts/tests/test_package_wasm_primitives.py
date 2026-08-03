@@ -34,6 +34,31 @@ class WasmArtifactPathTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertEqual(package.cargo_target_root(), ROOT / "target")
 
+    def test_declared_class_method_checks_are_class_scoped(self):
+        package = load_package_script()
+        declarations = """
+export class BrowserClientConnection {
+  openSession(): Promise<any>;
+  close(): Promise<any>;
+}
+export class BrowserClientRole {
+  recoveryTicket(): Uint8Array | undefined;
+  close(): Promise<any>;
+}
+"""
+
+        package.require_class_methods(
+            declarations,
+            "BrowserClientConnection",
+            ("openSession", "close"),
+        )
+        with self.assertRaisesRegex(SystemExit, "BrowserClientConnection.*recoveryTicket"):
+            package.require_class_methods(
+                declarations,
+                "BrowserClientConnection",
+                ("recoveryTicket",),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

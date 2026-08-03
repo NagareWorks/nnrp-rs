@@ -1,5 +1,13 @@
 # NNRP/1 Preview4 Release Notes
 
+## Browser Connection Multiplexing And Recovery
+
+The browser WASM role boundary now separates a WebSocket-owning client connection from its protocol sessions. One
+connection can open and resume multiple sessions, each session exposes a runtime-issued canonical recovery ticket, and
+closing one session leaves sibling sessions and the shared carrier alive. Artifact inspection requires the connection,
+open, resume, recovery-ticket, ingress, and close exports so downstream browser SDKs cannot regress to one carrier per
+session or emulate recovery outside Rust.
+
 Preview4 moves the Rust workspace beyond token-stream transport substitution and into runtime orchestration features that help SDKs model cancellation, priority, progress, partial results, cache references, route hints, trace context, result drop reasons, IPC, and WebSocket endpoints directly.
 
 ## 1.0.0-preview.4.21

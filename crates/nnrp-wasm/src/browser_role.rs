@@ -3,7 +3,7 @@ use std::{
     collections::{BTreeMap, VecDeque},
     future::Future,
     pin::Pin,
-    rc::Rc,
+    rc::{Rc, Weak},
     task::{Context, Poll, Waker},
 };
 
@@ -14,12 +14,14 @@ use futures_util::{
 };
 use js_sys::{Array, Function, Promise, Uint32Array, Uint8Array};
 use nnrp_core::{
-    CommonHeader, FrameSubmitMetadata, HeaderFlags, MessageType, SessionPatchMetadata,
-    SessionPriorityClass, FRAME_SUBMIT_METADATA_LEN, SESSION_PATCH_METADATA_LEN,
+    CacheObjectKind, CommonHeader, FrameSubmitMetadata, HeaderFlags, MessageType,
+    SessionPatchMetadata, SessionPriorityClass, FRAME_SUBMIT_METADATA_LEN,
+    SESSION_PATCH_METADATA_LEN,
 };
 use nnrp_runtime::{
-    FramedTransport, NnrpClient, NnrpClientConfig, NnrpClientSession, NnrpSubmitHeaderContext,
-    NnrpSubmitRequest, RuntimeError, RuntimeFrameLimits, RuntimePacket, RuntimeTransportKind,
+    FramedTransport, NnrpClient, NnrpClientConfig, NnrpClientSession, NnrpSessionRecoveryTicket,
+    NnrpSubmitHeaderContext, NnrpSubmitRequest, RuntimeError, RuntimeFrameLimits, RuntimePacket,
+    RuntimeTransportKind,
 };
 use serde::Deserialize;
 use wasm_bindgen::{prelude::*, JsCast};
@@ -36,32 +38,48 @@ struct BrowserClientRoleConfig {
     default_deadline_ms: u32,
     max_in_flight_operations: u16,
     lease_ttl_hint_ms: u32,
-    max_packet_bytes: usize,
+    allow_resume: bool,
+    resume_token_bytes: u32,
+    cache_hints: Vec<u32>,
 }
 
 impl BrowserClientRoleConfig {
-    fn into_runtime(self) -> Result<(NnrpClientConfig, RuntimeFrameLimits), JsValue> {
+    fn into_runtime(self) -> Result<NnrpClientConfig, JsValue> {
+        let priority_class =
+            SessionPriorityClass::try_from_u8(self.priority_class).map_err(js_nnrp_error)?;
+        let cache_hints = self
+            .cache_hints
+            .into_iter()
+            .map(|kind| CacheObjectKind::try_from_u32(kind).map_err(js_nnrp_error))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(NnrpClientConfig {
+            requested_session_id: self.requested_session_id,
+            profile_id: self.profile_id,
+            schema_id: self.schema_id,
+            schema_version: self.schema_version,
+            priority_class,
+            default_deadline_ms: self.default_deadline_ms,
+            max_in_flight_operations: self.max_in_flight_operations,
+            lease_ttl_hint_ms: self.lease_ttl_hint_ms,
+            allow_resume: self.allow_resume,
+            resume_token_bytes: self.resume_token_bytes,
+            cache_hints,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct BrowserClientConnectionConfig {
+    max_packet_bytes: usize,
+}
+
+impl BrowserClientConnectionConfig {
+    fn limits(self) -> Result<RuntimeFrameLimits, JsValue> {
         if self.max_packet_bytes == 0 {
             return Err(js_error("maxPacketBytes must be greater than zero"));
         }
-        let priority_class =
-            SessionPriorityClass::try_from_u8(self.priority_class).map_err(js_nnrp_error)?;
-        Ok((
-            NnrpClientConfig {
-                requested_session_id: self.requested_session_id,
-                profile_id: self.profile_id,
-                schema_id: self.schema_id,
-                schema_version: self.schema_version,
-                priority_class,
-                default_deadline_ms: self.default_deadline_ms,
-                max_in_flight_operations: self.max_in_flight_operations,
-                lease_ttl_hint_ms: self.lease_ttl_hint_ms,
-                allow_resume: false,
-                resume_token_bytes: 0,
-                cache_hints: Vec::new(),
-            },
-            RuntimeFrameLimits::new(self.max_packet_bytes),
-        ))
+        Ok(RuntimeFrameLimits::new(self.max_packet_bytes))
     }
 }
 
@@ -539,6 +557,167 @@ impl BrowserClientEventPacket {
     }
 }
 
+#[wasm_bindgen(js_name = BrowserClientConnection)]
+pub struct BrowserClientConnection {
+    state: Rc<BrowserClientConnectionState>,
+}
+
+struct BrowserClientConnectionState {
+    client: NnrpClient,
+    carrier: Rc<HostWebSocketCarrier>,
+    lifecycle_gate: Mutex<()>,
+    sessions: RefCell<Vec<Weak<BrowserClientRoleState>>>,
+    closed: Cell<bool>,
+}
+
+#[wasm_bindgen(js_class = BrowserClientConnection)]
+impl BrowserClientConnection {
+    #[wasm_bindgen(js_name = openSession)]
+    pub fn open_session_promise(&self, config_json: String) -> Promise {
+        let state = Rc::clone(&self.state);
+        future_to_promise(async move {
+            state
+                .open_session(&config_json, None)
+                .await
+                .map(JsValue::from)
+        })
+    }
+
+    #[wasm_bindgen(js_name = resumeSession)]
+    pub fn resume_session_promise(&self, recovery_ticket: &[u8], config_json: String) -> Promise {
+        let state = Rc::clone(&self.state);
+        let recovery_ticket = recovery_ticket.to_vec();
+        future_to_promise(async move {
+            let ticket = NnrpSessionRecoveryTicket::from_bytes(&recovery_ticket)
+                .map_err(js_runtime_error)?;
+            state
+                .open_session(&config_json, Some(ticket))
+                .await
+                .map(JsValue::from)
+        })
+    }
+
+    #[wasm_bindgen(js_name = ingestPackets)]
+    pub fn ingest_packets_js(&self, packets: JsValue) -> Result<(), JsValue> {
+        self.state
+            .carrier
+            .ingest_receive_value(packets)
+            .map_err(js_runtime_error)
+    }
+
+    #[wasm_bindgen(js_name = failReceive)]
+    pub fn fail_receive(&self, detail: String) {
+        self.state.carrier.fail_receive(detail);
+    }
+
+    #[wasm_bindgen(js_name = close)]
+    pub fn close_promise(&self) -> Promise {
+        let state = Rc::clone(&self.state);
+        future_to_promise(async move { state.close().await.map(|()| JsValue::UNDEFINED) })
+    }
+}
+
+impl BrowserClientConnection {
+    pub async fn open_session(&self, config_json: &str) -> Result<BrowserClientRole, JsValue> {
+        self.state.open_session(config_json, None).await
+    }
+
+    pub async fn resume_session(
+        &self,
+        recovery_ticket: &[u8],
+        config_json: &str,
+    ) -> Result<BrowserClientRole, JsValue> {
+        let ticket =
+            NnrpSessionRecoveryTicket::from_bytes(recovery_ticket).map_err(js_runtime_error)?;
+        self.state.open_session(config_json, Some(ticket)).await
+    }
+
+    pub fn ingest_packets(&self, packets: JsValue) -> Result<(), JsValue> {
+        self.state
+            .carrier
+            .ingest_receive_value(packets)
+            .map_err(js_runtime_error)
+    }
+
+    pub async fn close(&self) -> Result<(), JsValue> {
+        self.state.close().await
+    }
+}
+
+impl BrowserClientConnectionState {
+    async fn open_session(
+        &self,
+        config_json: &str,
+        recovery_ticket: Option<NnrpSessionRecoveryTicket>,
+    ) -> Result<BrowserClientRole, JsValue> {
+        let _lifecycle_guard = self.lifecycle_gate.lock().await;
+        self.ensure_open()?;
+        let config: BrowserClientRoleConfig =
+            serde_json::from_str(config_json).map_err(js_serde_error)?;
+        let config = config.into_runtime()?;
+        let session = match recovery_ticket {
+            Some(ticket) => self
+                .client
+                .resume_session_with(ticket, config)
+                .await
+                .map_err(js_runtime_error)?,
+            None => self
+                .client
+                .open_session_with(config)
+                .await
+                .map_err(js_runtime_error)?,
+        };
+        self.carrier.enable_external_ingress();
+        let session_id = session.session_id();
+        let recovery_ticket = session.recovery_ticket();
+        let state = Rc::new(BrowserClientRoleState {
+            session_id,
+            session: Mutex::new(Some(session)),
+            recovery_ticket: RefCell::new(recovery_ticket),
+            carrier: Rc::clone(&self.carrier),
+            receive_gate: Mutex::new(()),
+            receive_abort: RefCell::new(None),
+        });
+        let mut sessions = self.sessions.borrow_mut();
+        sessions.retain(|session| session.strong_count() != 0);
+        sessions.push(Rc::downgrade(&state));
+        Ok(BrowserClientRole { state })
+    }
+
+    async fn close(&self) -> Result<(), JsValue> {
+        let _lifecycle_guard = self.lifecycle_gate.lock().await;
+        if self.closed.replace(true) {
+            return Ok(());
+        }
+        let sessions = self
+            .sessions
+            .borrow_mut()
+            .drain(..)
+            .filter_map(|session| session.upgrade())
+            .collect::<Vec<_>>();
+        let mut first_error = None;
+        for session in sessions {
+            if let Err(error) = session.close().await {
+                first_error.get_or_insert(error);
+            }
+        }
+        if let Err(error) = self.carrier.close().await {
+            first_error.get_or_insert_with(|| js_runtime_error(error));
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    fn ensure_open(&self) -> Result<(), JsValue> {
+        if self.closed.get() {
+            return Err(js_error("browser client connection is closed"));
+        }
+        self.carrier.ensure_open().map_err(js_runtime_error)
+    }
+}
+
 #[wasm_bindgen(js_name = BrowserClientRole)]
 pub struct BrowserClientRole {
     state: Rc<BrowserClientRoleState>,
@@ -547,6 +726,7 @@ pub struct BrowserClientRole {
 struct BrowserClientRoleState {
     session_id: u32,
     session: Mutex<Option<NnrpClientSession>>,
+    recovery_ticket: RefCell<Option<NnrpSessionRecoveryTicket>>,
     carrier: Rc<HostWebSocketCarrier>,
     receive_gate: Mutex<()>,
     receive_abort: RefCell<Option<AbortHandle>>,
@@ -619,6 +799,13 @@ impl BrowserClientRole {
         })
     }
 
+    #[wasm_bindgen(js_name = recoveryTicket)]
+    pub fn recovery_ticket_js(&self) -> Option<Uint8Array> {
+        self.state
+            .recovery_ticket()
+            .map(|ticket| Uint8Array::from(ticket.as_slice()))
+    }
+
     #[wasm_bindgen(js_name = awaitEvent)]
     pub fn await_event_promise(&self) -> Promise {
         let state = Rc::clone(&self.state);
@@ -634,19 +821,6 @@ impl BrowserClientRole {
         future_to_promise(
             async move { state.await_event_batch(max_events).await.map(JsValue::from) },
         )
-    }
-
-    #[wasm_bindgen(js_name = ingestPackets)]
-    pub fn ingest_packets(&self, packets: JsValue) -> Result<(), JsValue> {
-        self.state
-            .carrier
-            .ingest_receive_value(packets)
-            .map_err(js_runtime_error)
-    }
-
-    #[wasm_bindgen(js_name = failReceive)]
-    pub fn fail_receive(&self, detail: String) {
-        self.state.carrier.fail_receive(detail);
     }
 
     #[wasm_bindgen(js_name = close)]
@@ -690,6 +864,10 @@ impl BrowserClientRole {
         self.state.patch_session(metadata).await
     }
 
+    pub fn recovery_ticket_bytes(&self) -> Option<Vec<u8>> {
+        self.state.recovery_ticket()
+    }
+
     pub async fn await_event(&self) -> Result<BrowserClientEventPacket, JsValue> {
         self.state.await_event().await
     }
@@ -707,6 +885,13 @@ impl BrowserClientRole {
 }
 
 impl BrowserClientRoleState {
+    fn recovery_ticket(&self) -> Option<Vec<u8>> {
+        self.recovery_ticket
+            .borrow()
+            .as_ref()
+            .map(|ticket| ticket.to_bytes())
+    }
+
     async fn submit_no_wait(
         &self,
         frame_id: u32,
@@ -727,11 +912,9 @@ impl BrowserClientRoleState {
             route_id,
             trace_id,
         };
-        self.session
-            .lock()
-            .await
-            .as_mut()
-            .ok_or_else(closed_role_error)?
+        let mut session_slot = self.session.lock().await;
+        let session = session_slot.as_mut().ok_or_else(closed_role_error)?;
+        let submitted_frame_id = session
             .submit_nowait(NnrpSubmitRequest {
                 operation_id: metadata.operation_id,
                 frame_id,
@@ -740,7 +923,9 @@ impl BrowserClientRoleState {
                 body: payload[FRAME_SUBMIT_METADATA_LEN..].to_vec(),
             })
             .await
-            .map_err(js_runtime_error)
+            .map_err(js_runtime_error)?;
+        self.recovery_ticket.replace(session.recovery_ticket());
+        Ok(submitted_frame_id)
     }
 
     async fn send_runtime_frame(
@@ -852,40 +1037,37 @@ impl BrowserClientRoleState {
         }
         let _receive_guard = self.receive_gate.lock().await;
         let mut session_slot = self.session.lock().await;
-        let session_result = if let Some(mut session) = session_slot.take() {
+        self.recovery_ticket.replace(None);
+        if let Some(mut session) = session_slot.take() {
             session.close_in_place().await
         } else {
             Ok(())
-        };
-        let carrier_result = self.carrier.close().await;
-        session_result.map_err(js_runtime_error)?;
-        carrier_result.map_err(js_runtime_error)
+        }
+        .map_err(js_runtime_error)
     }
 }
 
-#[wasm_bindgen(js_name = openBrowserClientRole)]
-pub async fn open_browser_client_role(
+#[wasm_bindgen(js_name = openBrowserClientConnection)]
+pub async fn open_browser_client_connection(
     send: Function,
     receive: Function,
     close: Function,
     config_json: &str,
-) -> Result<BrowserClientRole, JsValue> {
-    let config: BrowserClientRoleConfig =
+) -> Result<BrowserClientConnection, JsValue> {
+    let config: BrowserClientConnectionConfig =
         serde_json::from_str(config_json).map_err(js_serde_error)?;
-    let (config, limits) = config.into_runtime()?;
+    let limits = config.limits()?;
     let carrier = Rc::new(HostWebSocketCarrier::new(send, receive, close, limits));
     let transport = HostWebSocketTransport::new(Rc::clone(&carrier));
-    let client = NnrpClient::from_transport(transport, config).map_err(js_runtime_error)?;
-    let session = client.open_session().await.map_err(js_runtime_error)?;
-    carrier.enable_external_ingress();
-    let session_id = session.session_id();
-    Ok(BrowserClientRole {
-        state: Rc::new(BrowserClientRoleState {
-            session_id,
-            session: Mutex::new(Some(session)),
+    let client = NnrpClient::from_transport(transport, NnrpClientConfig::default())
+        .map_err(js_runtime_error)?;
+    Ok(BrowserClientConnection {
+        state: Rc::new(BrowserClientConnectionState {
+            client,
             carrier,
-            receive_gate: Mutex::new(()),
-            receive_abort: RefCell::new(None),
+            lifecycle_gate: Mutex::new(()),
+            sessions: RefCell::new(Vec::new()),
+            closed: Cell::new(false),
         }),
     })
 }

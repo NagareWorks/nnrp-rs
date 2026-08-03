@@ -697,8 +697,15 @@ impl NnrpClientSession {
 
     pub fn recovery_ticket(&self) -> Option<NnrpSessionRecoveryTicket> {
         self.recovery_ticket.clone().map(|mut ticket| {
-            ticket.resume_from_operation_id =
-                (self.last_operation_id != 0).then_some(self.last_operation_id);
+            if self.last_operation_id != 0 {
+                ticket.resume_from_operation_id = Some(
+                    ticket
+                        .resume_from_operation_id
+                        .map_or(self.last_operation_id, |existing| {
+                            existing.max(self.last_operation_id)
+                        }),
+                );
+            }
             ticket
         })
     }

@@ -262,6 +262,18 @@ jobs:
             --test wasm_bindgen_smoke \
             --no-default-features \
             --features transport-websocket,wasm-provider
+          for test_name in \
+            wasm_bindgen_browser_role_runs_real_session_submit_and_close \
+            browser_role_routes_control_and_patch_while_event_receive_is_pending
+          do
+            CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner \
+              cargo test -p nnrp-wasm \
+              --target wasm32-unknown-unknown \
+              --test wasm_bindgen_smoke \
+              --no-default-features \
+              --features transport-websocket,wasm-provider \
+              "$test_name" -- --exact
+          done
 
       - name: Build and package WASM primitives
         run: python scripts/package_wasm_primitives.py --out artifacts/wasm
