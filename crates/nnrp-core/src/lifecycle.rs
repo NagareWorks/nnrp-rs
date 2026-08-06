@@ -53,6 +53,7 @@ pub struct SessionLifecycle {
 pub struct ConnectionLifecycle {
     state: ConnectionLifecycleState,
     sessions: BTreeMap<u32, SessionLifecycle>,
+    established_session_states: BTreeMap<u32, SessionLifecycleState>,
 }
 
 impl Default for ConnectionLifecycle {
@@ -66,6 +67,7 @@ impl ConnectionLifecycle {
         Self {
             state: ConnectionLifecycleState::Open,
             sessions: BTreeMap::new(),
+            established_session_states: BTreeMap::new(),
         }
     }
 
@@ -125,6 +127,8 @@ impl ConnectionLifecycle {
                     SessionStatus::Rejected | SessionStatus::RetryLater => unreachable!(),
                 };
 
+                self.established_session_states
+                    .insert(ack.session_id, state);
                 self.sessions.insert(
                     ack.session_id,
                     SessionLifecycle {
@@ -220,7 +224,11 @@ impl ConnectionLifecycle {
             SessionCloseStatus::Acknowledged => SessionLifecycleState::Closing,
             SessionCloseStatus::Draining => SessionLifecycleState::Draining,
             SessionCloseStatus::Closed => SessionLifecycleState::Closed,
-            SessionCloseStatus::Rejected => SessionLifecycleState::Open,
+            SessionCloseStatus::Rejected => self
+                .established_session_states
+                .get(&header.session_id)
+                .copied()
+                .ok_or(NnrpError::UnknownSession(header.session_id))?,
         };
         session.last_operation_id = ack.last_operation_id;
         session.session_error_code = ack.session_error_code;
@@ -481,6 +489,30 @@ mod tests {
         assert_eq!(
             connection.session(42).unwrap().state,
             SessionLifecycleState::Open
+        );
+
+        let mut resumed = ConnectionLifecycle::new();
+        let mut resumed_ack = open_ack(77);
+        resumed_ack.session_status = SessionStatus::Resumed;
+        resumed.apply_session_open_ack(&resumed_ack).unwrap();
+        let mut resumed_close_header =
+            crate::CommonHeader::new(MessageType::SessionCloseAck, 16, 0);
+        resumed_close_header.session_id = 77;
+        resumed
+            .apply_session_close_ack(
+                &resumed_close_header,
+                &close_ack(SessionCloseStatus::Acknowledged, 1),
+            )
+            .unwrap();
+        resumed
+            .apply_session_close_ack(
+                &resumed_close_header,
+                &close_ack(SessionCloseStatus::Rejected, 1),
+            )
+            .unwrap();
+        assert_eq!(
+            resumed.session(77).unwrap().state,
+            SessionLifecycleState::Resumed
         );
     }
 

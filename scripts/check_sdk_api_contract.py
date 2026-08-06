@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 
-EXPECTED_CONTRACT_VERSION = 9
+EXPECTED_CONTRACT_VERSION = 10
 EXPECTED_API_DOMAINS = {
     "submission",
     "runtimeEvents",
