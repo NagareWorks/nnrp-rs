@@ -40,6 +40,15 @@ def frozen_contract():
                     checker.EXPECTED_NATIVE_LIFECYCLE_PROJECTION
                 ),
             },
+            "ClientEvent": {
+                "fields": [],
+                "representation": "tagged-union",
+                "variants": ["runtime", "lifecycle"],
+                "variantTypes": {
+                    "runtime": "RuntimeEvent",
+                    "lifecycle": "OperationLifecycleEvent",
+                },
+            },
             "TerminalEvent": {
                 "representation": "tagged-union",
                 "variants": ["runtime", "lifecycle"],
@@ -156,6 +165,7 @@ def frozen_contract():
             }
         },
         "roleOperations": {
+            "client_session.next_event": {"returns": "ClientEvent"},
             "server_session.next_event": {"returns": "ServerEvent"},
             "server_session.receive_submit": {
                 "returns": "ServerOperation",
@@ -189,6 +199,31 @@ class SdkApiContractTests(unittest.TestCase):
         contract = frozen_contract()
         contract["types"]["NnrpResult"]["fields"][2]["type"] = "RuntimeEvent"
         with self.assertRaisesRegex(SystemExit, "NnrpResult field contract drifted"):
+            self.check(contract)
+
+    def test_rejects_client_event_or_operation_drift(self):
+        contract = frozen_contract()
+        contract["types"]["ClientEvent"]["representation"] = "untagged_union"
+        with self.assertRaisesRegex(SystemExit, "ClientEvent is no longer a tagged union"):
+            self.check(contract)
+
+        contract = frozen_contract()
+        contract["types"]["ClientEvent"]["variants"] = ["runtime"]
+        with self.assertRaisesRegex(SystemExit, "ClientEvent variants drifted"):
+            self.check(contract)
+
+        contract = frozen_contract()
+        contract["types"]["ClientEvent"]["variantTypes"]["lifecycle"] = (
+            "RuntimeEvent"
+        )
+        with self.assertRaisesRegex(SystemExit, "ClientEvent variant types drifted"):
+            self.check(contract)
+
+        contract = frozen_contract()
+        contract["roleOperations"]["client_session.next_event"]["returns"] = (
+            "RuntimeEvent"
+        )
+        with self.assertRaisesRegex(SystemExit, "client next-event return type drifted"):
             self.check(contract)
 
     def test_rejects_server_event_or_selective_receive_drift(self):
