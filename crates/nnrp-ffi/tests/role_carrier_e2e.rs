@@ -1619,6 +1619,16 @@ unsafe fn assert_role_handshake(
     .expect("partial metadata")
     .to_vec();
     partial_payload.extend_from_slice(partial_body);
+    assert_ne!(
+        nnrp_runtime_frame_send(NnrpRuntimeFrameSendRequest {
+            handle: server_session,
+            message_type: nnrp_core::MessageType::PartialResult as u32,
+            frame_id: server_event.header.frame_id,
+            payload: view(&partial_payload),
+        }),
+        NnrpFfiStatus::ok(),
+        "operation-scoped server frames must reject a session handle"
+    );
     assert_eq!(
         nnrp_runtime_frame_send(NnrpRuntimeFrameSendRequest {
             handle: server_event.operation,
@@ -1743,6 +1753,14 @@ unsafe fn assert_role_handshake(
         }),
         NnrpFfiStatus::ok()
     );
+    assert_ne!(
+        nnrp_server_send_result(NnrpServerSendResultRequest {
+            operation: server_event.operation,
+            payload: view(&result_payload),
+        }),
+        NnrpFfiStatus::ok(),
+        "terminal result must reject operation reuse before lifecycle delivery"
+    );
 
     let lifecycle_event = poll_server_event(server_session);
     assert_eq!(
@@ -1755,7 +1773,10 @@ unsafe fn assert_role_handshake(
         lifecycle_event.diagnostic.related_operation_id,
         submit_request.operation_id
     );
-    assert_eq!(lifecycle_event.diagnostic.related_frame_id, 0);
+    assert_eq!(
+        lifecycle_event.diagnostic.related_frame_id,
+        submit_request.frame_id
+    );
     assert_eq!(
         slice::from_raw_parts(lifecycle_event.payload.ptr, lifecycle_event.payload.len),
         [OperationState::Completed as u8]
@@ -1763,6 +1784,15 @@ unsafe fn assert_role_handshake(
     assert_eq!(
         nnrp_buffer_release(lifecycle_event.payload_owner),
         NnrpFfiStatus::ok()
+    );
+    assert_eq!(
+        nnrp_server_send_result(NnrpServerSendResultRequest {
+            operation: server_event.operation,
+            payload: view(&result_payload),
+        })
+        .status_code,
+        nnrp_ffi::NnrpFfiStatusCode::InvalidHandle as u32,
+        "lifecycle delivery must release the terminal server operation handle"
     );
 
     let mut client_events = [NnrpEvent::none(); 2];

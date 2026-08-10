@@ -540,8 +540,8 @@ mod tests {
             let submit = session.receive_submit().await?;
             assert_eq!(submit.frame_id, 1);
             assert_eq!(submit.body(), b"prompt");
-            session
-                .send_result(submit.frame_id, token_result(), b"delta".to_vec())
+            submit
+                .send_result(&mut session, token_result(), b"delta".to_vec())
                 .await?;
             assert!(matches!(
                 session.await_event().await?,

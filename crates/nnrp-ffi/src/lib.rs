@@ -39,7 +39,7 @@ use nnrp_core::{
 #[cfg(not(test))]
 use nnrp_runtime::{
     NnrpClient, NnrpClientConfig, NnrpClientRoleEvent, NnrpClientSession, NnrpServer,
-    NnrpServerConfig, NnrpServerEvent, NnrpServerPolicy,
+    NnrpServerConfig, NnrpServerEvent, NnrpServerOperation, NnrpServerPolicy,
     NnrpServerPolicyDecision as RuntimeServerPolicyDecision, NnrpServerSession,
     OperationLifecycleEvent, RuntimeTransportKind,
 };
@@ -494,6 +494,8 @@ enum NnrpFfiResource {
         operation_id: u64,
         frame_id: u32,
         payload_len: usize,
+        #[cfg(not(test))]
+        server_operation: Option<Arc<NnrpServerOperation>>,
     },
     SchemaRegistry {
         registry: SchemaRegistry,
@@ -3614,6 +3616,7 @@ unsafe fn nnrp_client_submit_impl(
                 operation_id: request.operation_id,
                 frame_id: request.frame_id,
                 payload_len: request.payload.len,
+                server_operation: None,
             },
         ) {
             return status;
@@ -4089,6 +4092,8 @@ unsafe fn benchmark_client_submit(
                 operation_id: request.operation_id,
                 frame_id: request.frame_id,
                 payload_len: request.payload.len,
+                #[cfg(not(test))]
+                server_operation: None,
             },
         },
     );
@@ -4172,6 +4177,8 @@ unsafe fn benchmark_client_submit_result_compact_batch_impl(
                     operation_id,
                     frame_id,
                     payload_len: request.submit_payload.len,
+                    #[cfg(not(test))]
+                    server_operation: None,
                 },
             },
         );
@@ -5206,19 +5213,24 @@ fn server_role_event(
     connection: NnrpHandle,
     event: NnrpServerEvent,
 ) -> Result<NnrpEvent, NnrpFfiStatus> {
-    let event = match event {
-        NnrpServerEvent::Submit(operation) => operation.into_submit(),
-        NnrpServerEvent::Runtime(event) => event,
+    let (runtime_event, server_operation) = match event {
+        NnrpServerEvent::Submit(operation) => (None, Some(Arc::new(operation))),
+        NnrpServerEvent::Runtime(event) => (Some(event), None),
         NnrpServerEvent::Lifecycle(event) => {
             return role_lifecycle_event(scope, connection, event);
         }
     };
+    let event = server_operation
+        .as_ref()
+        .map(|operation| operation.submit())
+        .or(runtime_event.as_ref())
+        .expect("server runtime events retain exactly one payload owner");
     let header = event.header;
     let operation_id = event.metadata.operation_id();
     let create_operation = header.message_type == MessageType::FrameSubmit;
     let kind = role_event_kind(header.message_type);
     let payload = event
-        .into_payload()
+        .to_payload()
         .map_err(|error| NnrpFfiStatus::from_core_error(&error))?;
     let wire_frame_id = header.frame_id;
     let diagnostic = role_event_diagnostic(connection, header, operation_id);
@@ -5236,6 +5248,7 @@ fn server_role_event(
                 operation_id: operation_id.expect("submit event has operation id"),
                 frame_id: wire_frame_id,
                 payload_len: payload.len(),
+                server_operation,
             },
         )?;
         operation
@@ -5320,13 +5333,25 @@ fn role_lifecycle_event(
     };
     let operation = find_operation_handle(&store, scope, Some(event.operation_id), None)
         .unwrap_or(NnrpHandle::invalid());
-    let frame_id = if operation.kind == NnrpHandleKind::Operation as u32 {
+    let (frame_id, release_operation) = if operation.kind == NnrpHandleKind::Operation as u32 {
         match store.get(operation, NnrpHandleKind::Operation) {
-            Ok(NnrpFfiResource::Operation { frame_id, .. }) => *frame_id,
-            _ => 0,
+            Ok(NnrpFfiResource::Operation {
+                frame_id,
+                server_operation,
+                ..
+            }) => (*frame_id, server_operation.is_some()),
+            _ => (0, false),
         }
     } else {
-        0
+        (0, false)
+    };
+    if release_operation {
+        store.remove(operation, NnrpHandleKind::Operation)?;
+    }
+    let event_operation = if release_operation {
+        NnrpHandle::invalid()
+    } else {
+        operation
     };
     let (payload_owner, payload) = insert_owned_buffer(&mut store, vec![event.state as u8])?;
     Ok(NnrpEvent {
@@ -5334,7 +5359,7 @@ fn role_lifecycle_event(
         header: NnrpRuntimeFrameHeader::absent(),
         connection,
         session: scope,
-        operation,
+        operation: event_operation,
         payload_owner,
         payload,
         diagnostic: NnrpFfiDiagnostic {
@@ -7100,13 +7125,15 @@ unsafe fn nnrp_server_send_result_impl(request: NnrpServerSendResultRequest) -> 
         Err(error) => return NnrpFfiStatus::from_core_error(&error),
     };
     let body = payload[RESULT_PUSH_METADATA_LEN..].to_vec();
-    let (session_handle, frame_id, session) = {
+    let (session_handle, operation, session) = {
         let store = handle_store();
-        let (session_handle, frame_id) =
+        let (session_handle, operation) =
             match store.get(request.operation, NnrpHandleKind::Operation) {
                 Ok(NnrpFfiResource::Operation {
-                    session, frame_id, ..
-                }) => (*session, *frame_id),
+                    session,
+                    server_operation: Some(operation),
+                    ..
+                }) => (*session, Arc::clone(operation)),
                 Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Operation as u32),
                 Err(status) => return status,
             };
@@ -7118,28 +7145,22 @@ unsafe fn nnrp_server_send_result_impl(request: NnrpServerSendResultRequest) -> 
             Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32),
             Err(status) => return status,
         };
-        (session_handle, frame_id, session)
+        (session_handle, operation, session)
     };
     if let Err(status) = role_session_connection(session_handle, NnrpFfiConnectionRole::Server) {
         return status;
     }
     if let Err(status) = transport::run_role_async(
         async move {
-            session
-                .lock()
-                .await
-                .send_result(frame_id, metadata, body)
+            operation
+                .send_result(&mut *session.lock().await, metadata, body)
                 .await
         },
         0,
     ) {
         return status;
     }
-    let mut store = handle_store();
-    match store.remove(request.operation, NnrpHandleKind::Operation) {
-        Ok(()) => NnrpFfiStatus::ok(),
-        Err(status) => status,
-    }
+    NnrpFfiStatus::ok()
 }
 
 #[no_mangle]
@@ -7194,8 +7215,8 @@ unsafe fn nnrp_server_send_partial_result_impl(
 
     #[cfg(not(test))]
     {
-        let session = match server_runtime_for_operation(request.operation) {
-            Ok(session) => session,
+        let (operation, session) = match server_operation_runtime(request.operation) {
+            Ok(resources) => resources,
             Err(status) => {
                 *out_result = poll_result_none(status);
                 return status;
@@ -7204,10 +7225,8 @@ unsafe fn nnrp_server_send_partial_result_impl(
         let body = ffi_read_slice(request.partial_body).to_vec();
         let status = match transport::run_role_async(
             async move {
-                session
-                    .lock()
-                    .await
-                    .send_partial_result(metadata, body)
+                operation
+                    .send_partial_result(&mut *session.lock().await, metadata, body)
                     .await
             },
             0,
@@ -7297,8 +7316,8 @@ unsafe fn nnrp_server_drop_stale_result_impl(
 
     #[cfg(not(test))]
     {
-        let session = match server_runtime_for_operation(request.operation) {
-            Ok(session) => session,
+        let (operation, session) = match server_operation_runtime(request.operation) {
+            Ok(resources) => resources,
             Err(status) => {
                 *out_result = poll_result_none(status);
                 return status;
@@ -7307,10 +7326,8 @@ unsafe fn nnrp_server_drop_stale_result_impl(
         let diagnostics = ffi_read_slice(request.diagnostics).to_vec();
         let status = match transport::run_role_async(
             async move {
-                session
-                    .lock()
-                    .await
-                    .send_result_drop_reason_with_diagnostics(metadata, diagnostics)
+                operation
+                    .send_result_drop(&mut *session.lock().await, metadata, diagnostics)
                     .await
             },
             0,
@@ -7318,14 +7335,6 @@ unsafe fn nnrp_server_drop_stale_result_impl(
             Ok(()) => NnrpFfiStatus::ok(),
             Err(status) => status,
         };
-        if status.status_code == NnrpFfiStatusCode::Ok as u32 {
-            if let Err(remove_status) =
-                handle_store().remove(request.operation, NnrpHandleKind::Operation)
-            {
-                *out_result = poll_result_none(remove_status);
-                return remove_status;
-            }
-        }
         *out_result = poll_result_none(status);
         status
     }
@@ -7357,12 +7366,16 @@ unsafe fn nnrp_server_drop_stale_result_impl(
 }
 
 #[cfg(not(test))]
-fn server_runtime_for_operation(
+fn server_operation_runtime(
     operation: NnrpHandle,
-) -> Result<Arc<AsyncMutex<NnrpServerSession>>, NnrpFfiStatus> {
+) -> Result<(Arc<NnrpServerOperation>, Arc<AsyncMutex<NnrpServerSession>>), NnrpFfiStatus> {
     let store = handle_store();
-    let session = match store.get(operation, NnrpHandleKind::Operation)? {
-        NnrpFfiResource::Operation { session, .. } => *session,
+    let (session, operation) = match store.get(operation, NnrpHandleKind::Operation)? {
+        NnrpFfiResource::Operation {
+            session,
+            server_operation: Some(operation),
+            ..
+        } => (*session, Arc::clone(operation)),
         _ => {
             return Err(NnrpFfiStatus::invalid_handle(
                 NnrpHandleKind::Operation as u32,
@@ -7386,7 +7399,7 @@ fn server_runtime_for_operation(
             NnrpHandleKind::Session as u32,
         ));
     }
-    Ok(runtime)
+    Ok((operation, runtime))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7592,12 +7605,13 @@ unsafe fn nnrp_runtime_frame_send_role_impl(
     message_type: MessageType,
 ) -> NnrpFfiStatus {
     let payload = ffi_read_slice(request.payload).to_vec();
-    let (role, runtime) = {
+    let (role, runtime, server_operation) = {
         let store = handle_store();
-        let (connection, session, _) = match event_scope_for_handle(&store, request.handle) {
-            Ok(scope) => scope,
-            Err(status) => return status,
-        };
+        let (connection, session, operation_handle) =
+            match event_scope_for_handle(&store, request.handle) {
+                Ok(scope) => scope,
+                Err(status) => return status,
+            };
         if session.kind != NnrpHandleKind::Session as u32 {
             return NnrpFfiStatus::invalid_handle(request.handle.kind);
         }
@@ -7620,7 +7634,19 @@ unsafe fn nnrp_runtime_frame_send_role_impl(
             Ok(_) => return NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32),
             Err(status) => return status,
         };
-        (role, runtime)
+        let server_operation = if operation_handle.kind == NnrpHandleKind::Operation as u32 {
+            match store.get(operation_handle, NnrpHandleKind::Operation) {
+                Ok(NnrpFfiResource::Operation {
+                    server_operation: Some(operation),
+                    ..
+                }) => Some(Arc::clone(operation)),
+                Ok(_) => None,
+                Err(status) => return status,
+            }
+        } else {
+            None
+        };
+        (role, runtime, server_operation)
     };
 
     match (role, runtime) {
@@ -7634,7 +7660,13 @@ unsafe fn nnrp_runtime_frame_send_role_impl(
         }
         (NnrpFfiConnectionRole::Server, NnrpFfiRoleSession::Server(session)) => {
             transport::run_role_async(
-                send_server_runtime_frame(session, message_type, request.frame_id, payload),
+                send_server_runtime_frame(
+                    session,
+                    server_operation,
+                    message_type,
+                    request.frame_id,
+                    payload,
+                ),
                 0,
             )
             .map(|_| NnrpFfiStatus::ok())
@@ -7661,6 +7693,7 @@ async fn send_client_runtime_frame(
 #[cfg(not(test))]
 async fn send_server_runtime_frame(
     session: Arc<AsyncMutex<NnrpServerSession>>,
+    operation: Option<Arc<NnrpServerOperation>>,
     message_type: MessageType,
     frame_id: u32,
     payload: Vec<u8>,
@@ -7694,11 +7727,23 @@ async fn send_server_runtime_frame(
         }
         MessageType::Progress => {
             let (metadata, body) = ProgressMetadata::parse_with_body(&payload)?;
-            session.send_progress(metadata, body.to_vec()).await
+            operation
+                .as_ref()
+                .ok_or(RuntimeError::UnexpectedMessage(
+                    "server PROGRESS requires an operation handle",
+                ))?
+                .send_progress(&mut session, metadata, body.to_vec())
+                .await
         }
         MessageType::PartialResult => {
             let (metadata, body) = PartialResultMetadata::parse_with_body(&payload)?;
-            session.send_partial_result(metadata, body.to_vec()).await
+            operation
+                .as_ref()
+                .ok_or(RuntimeError::UnexpectedMessage(
+                    "server PARTIAL_RESULT requires an operation handle",
+                ))?
+                .send_partial_result(&mut session, metadata, body.to_vec())
+                .await
         }
         MessageType::Backpressure => {
             session
@@ -7730,8 +7775,12 @@ async fn send_server_runtime_frame(
         }
         MessageType::ResultDropReason => {
             let (metadata, body) = ResultDropReasonMetadata::parse_with_diagnostics(&payload)?;
-            session
-                .send_result_drop_reason_with_diagnostics(metadata, body.to_vec())
+            operation
+                .as_ref()
+                .ok_or(RuntimeError::UnexpectedMessage(
+                    "server RESULT_DROP_REASON requires an operation handle",
+                ))?
+                .send_result_drop(&mut session, metadata, body.to_vec())
                 .await
         }
         MessageType::ErrorRecoverable => {

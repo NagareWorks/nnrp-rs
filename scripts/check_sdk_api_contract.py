@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 
-EXPECTED_CONTRACT_VERSION = 13
+EXPECTED_CONTRACT_VERSION = 14
 EXPECTED_API_DOMAINS = {
     "submission",
     "runtimeEvents",
@@ -98,6 +98,19 @@ EXPECTED_RUST_PROJECTIONS = {
     "clientEvent": "nnrp_runtime::NnrpClientRoleEvent",
     "serverEvent": "nnrp_runtime::NnrpServerEvent",
     "serverOperation": "nnrp_runtime::NnrpServerOperation",
+    "roleMethods": {
+        "client.open_session": "open_session",
+        "client.resume_session": "resume_session",
+        "client_session.recovery_ticket": "recovery_ticket",
+        "client_session.next_event": "await_event",
+        "server.accept": "accept",
+        "server_session.next_event": "await_event",
+        "server_session.receive_submit": "receive_submit",
+        "server_operation.send_result": "send_result",
+        "server_operation.send_result_drop": "send_result_drop",
+        "server_operation.send_progress": "send_progress",
+        "server_operation.send_partial_result": "send_partial_result",
+    },
     "operationLifecycleEvent": "nnrp_runtime::OperationLifecycleEvent",
     "terminalEvent": "nnrp_runtime::NnrpTerminalEvent",
     "result": "nnrp_runtime::NnrpResult",
@@ -268,6 +281,15 @@ def check_contract(contract_path: Path) -> None:
         ],
         "ServerOperation field contract drifted",
     )
+    require(
+        server_operation.get("terminalMethods") == ["send_result", "send_result_drop"],
+        "ServerOperation terminal method contract drifted",
+    )
+    require(
+        server_operation.get("streamingMethods")
+        == ["send_progress", "send_partial_result"],
+        "ServerOperation streaming method contract drifted",
+    )
 
     server_event = type_contracts["ServerEvent"]
     require(
@@ -404,6 +426,60 @@ def check_contract(contract_path: Path) -> None:
         and receive_submit.get("retainsSkippedEvents") is True,
         "server selective submit contract drifted",
     )
+    expected_operation_methods = {
+        "server_operation.send_result": (
+            [("metadata", "ResultPushMetadata", True), ("body", "bytes", False)],
+            True,
+        ),
+        "server_operation.send_result_drop": (
+            [
+                ("metadata", "ResultDropReasonMetadata", True),
+                ("diagnostic", "bytes", False),
+            ],
+            True,
+        ),
+        "server_operation.send_progress": (
+            [("metadata", "ProgressMetadata", True), ("body", "bytes", False)],
+            False,
+        ),
+        "server_operation.send_partial_result": (
+            [
+                ("metadata", "PartialResultMetadata", True),
+                ("body", "bytes", False),
+            ],
+            False,
+        ),
+    }
+    for operation_name, (parameters, terminal) in expected_operation_methods.items():
+        operation = require_mapping(
+            role_operations.get(operation_name),
+            f"{operation_name} role operation must be an object",
+        )
+        actual_parameters = []
+        for index, parameter in enumerate(
+            require_list(
+                operation.get("parameters"),
+                f"{operation_name} parameters must be an array",
+            )
+        ):
+            parameter = require_mapping(
+                parameter,
+                f"{operation_name} parameter {index} must be an object",
+            )
+            actual_parameters.append(
+                (
+                    parameter.get("name"),
+                    parameter.get("type"),
+                    parameter.get("required"),
+                )
+            )
+        require(
+            actual_parameters == parameters
+            and operation.get("returns") == "void"
+            and operation.get("async") is True
+            and operation.get("terminal") is terminal,
+            f"{operation_name} role operation drifted",
+        )
     role_method_messages = require_list(
         contract.get("roleMethodMessages"),
         "SDK role-method messages must be an array",
@@ -435,6 +511,9 @@ def check_contract(contract_path: Path) -> None:
     runtime_client_source = (
         repository_root / "crates" / "nnrp-runtime" / "src" / "client.rs"
     ).read_text(encoding="utf-8")
+    runtime_server_source = (
+        repository_root / "crates" / "nnrp-runtime" / "src" / "server.rs"
+    ).read_text(encoding="utf-8")
     ffi_source = (
         repository_root / "crates" / "nnrp-ffi" / "src" / "lib.rs"
     ).read_text(encoding="utf-8")
@@ -456,6 +535,70 @@ def check_contract(contract_path: Path) -> None:
         is not None,
         "NnrpClientSession::await_event no longer returns the frozen client event union",
     )
+    operation_impl = re.search(
+        r"impl\s+NnrpServerOperation\s*\{(?P<body>.*?)\n\}",
+        runtime_server_source,
+        re.DOTALL,
+    )
+    require(operation_impl is not None, "Rust server operation implementation is missing")
+    operation_body = operation_impl.group("body")
+    operation_signatures = {
+        "send_result": "ResultPushMetadata",
+        "send_result_drop": "ResultDropReasonMetadata",
+        "send_progress": "ProgressMetadata",
+        "send_partial_result": "PartialResultMetadata",
+    }
+    for method, metadata_type in operation_signatures.items():
+        require(
+            re.search(
+                rf"pub\s+async\s+fn\s+{method}\s*\(\s*&self\s*,\s*"
+                rf"session\s*:\s*&mut\s+NnrpServerSession\s*,\s*"
+                rf"metadata\s*:\s*{metadata_type}\s*,\s*"
+                rf"(?:body|diagnostic)\s*:\s*Vec\s*<\s*u8\s*>\s*,?\s*\)\s*"
+                rf"->\s*Result\s*<\s*\(\)\s*,\s*RuntimeError\s*>",
+                operation_body,
+                re.DOTALL,
+            )
+            is not None,
+            f"NnrpServerOperation::{method} signature drifted",
+        )
+    require(
+        re.search(
+            r"#\[derive\([^\]]*\bClone\b[^\]]*\)\]\s*"
+            r"pub\s+struct\s+NnrpServerOperation",
+            runtime_server_source,
+        )
+        is None,
+        "NnrpServerOperation must not be clonable",
+    )
+    _, session_impl_marker, session_impl = runtime_server_source.partition(
+        "impl NnrpServerSession"
+    )
+    require(
+        bool(session_impl_marker),
+        "Rust server session implementation is missing",
+    )
+    for method in ("send_result", "send_result_drop", "send_progress", "send_partial_result"):
+        require(
+            re.search(rf"pub\s+async\s+fn\s+{method}\s*\(", session_impl)
+            is None,
+            f"NnrpServerSession::{method} bypasses frozen operation ownership",
+        )
+    for method in (
+        "send_operation_result_for_binding",
+        "send_operation_result_drop_for_binding",
+        "send_operation_progress_for_binding",
+        "send_operation_partial_result_for_binding",
+    ):
+        require(
+            re.search(rf"pub\s+async\s+fn\s+{method}\s*\(", session_impl) is None,
+            f"NnrpServerSession::{method} is publicly callable",
+        )
+        require(
+            re.search(rf"pub\(crate\)\s+async\s+fn\s+{method}\s*\(", session_impl)
+            is not None,
+            f"NnrpServerSession::{method} is no longer crate-internal",
+        )
     require(
         "NnrpClientRoleEvent::Lifecycle(event)" in ffi_source
         and "role_lifecycle_event(scope, connection, event)" in ffi_source,

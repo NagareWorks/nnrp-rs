@@ -463,8 +463,12 @@ async fn run_progress_backpressure_server(
             "operation_id": submit.operation_id,
         }),
     );
-    session
-        .send_progress(progress(submit.operation_id), PROGRESS_BODY.to_vec())
+    submit
+        .send_progress(
+            &mut session,
+            progress(submit.operation_id),
+            PROGRESS_BODY.to_vec(),
+        )
         .await?;
     observed.push(
         WireExternalDirection::SuiteToTarget,
@@ -477,16 +481,20 @@ async fn run_progress_backpressure_server(
         WireExternalFrame::CreditUpdate,
         json!({ "session_id": session_id, "max_in_flight": 1 }),
     );
-    session
-        .send_partial_result(partial_result(submit.operation_id), PARTIAL_BODY.to_vec())
+    submit
+        .send_partial_result(
+            &mut session,
+            partial_result(submit.operation_id),
+            PARTIAL_BODY.to_vec(),
+        )
         .await?;
     observed.push(
         WireExternalDirection::SuiteToTarget,
         WireExternalFrame::PartialResult,
         json!({ "session_id": session_id, "operation_id": submit.operation_id }),
     );
-    session
-        .send_result(submit.frame_id, token_result(), RESPONSE_BODY.to_vec())
+    submit
+        .send_result(&mut session, token_result(), RESPONSE_BODY.to_vec())
         .await?;
     expect_completed_lifecycle(&mut session, submit.operation_id).await?;
     let close = session.receive_close().await?;
@@ -523,15 +531,11 @@ async fn run_priority_deadline_proxy(
         let mut upstream = upstream_endpoint.connect().await?.open_session().await?;
         let submit = downstream.receive_submit().await?;
         let operation_id = submit.operation_id;
-        let submit = submit.into_submit();
-        let metadata = match submit.metadata {
-            NnrpRuntimeEventMetadata::FrameSubmit(metadata) => metadata,
+        let metadata = match &submit.submit.metadata {
+            NnrpRuntimeEventMetadata::FrameSubmit(metadata) => *metadata,
             _ => unreachable!("server operation owns a FRAME_SUBMIT event"),
         };
-        let body = match submit.tail {
-            NnrpRuntimeEventTail::Body(body) => body,
-            _ => unreachable!("FRAME_SUBMIT event owns a body tail"),
-        };
+        let body = submit.body().to_vec();
         let upstream_frame_id = upstream.submit_encoded_nowait(metadata, body).await?;
         upstream.update_priority(operation_id, 10, 0).await?;
         upstream.expire_at(operation_id, 1).await?;
@@ -552,7 +556,9 @@ async fn run_priority_deadline_proxy(
                 "priority/deadline proxy received mismatched upstream state",
             ));
         }
-        downstream.send_result_drop_reason(drop_reason).await?;
+        submit
+            .send_result_drop(&mut downstream, drop_reason, Vec::new())
+            .await?;
         upstream.close().await?;
         let close = downstream.receive_close().await?;
         downstream.ack_close(&close).await?;
@@ -1013,8 +1019,12 @@ mod tests {
         session
             .send_trace_context(submit.frame_id, cancel_trace(), TRACE_BODY.to_vec())
             .await?;
-        session
-            .send_result_drop_reason(cancel_drop_reason(submit.operation_id))
+        submit
+            .send_result_drop(
+                &mut session,
+                cancel_drop_reason(submit.operation_id),
+                Vec::new(),
+            )
             .await?;
         close_server_session(&mut session).await
     }
@@ -1059,8 +1069,8 @@ mod tests {
             }
         }
         session.send_cache_miss(cache_miss(), Vec::new()).await?;
-        session
-            .send_result(submit.frame_id, token_result(), RESPONSE_BODY.to_vec())
+        submit
+            .send_result(&mut session, token_result(), RESPONSE_BODY.to_vec())
             .await?;
         expect_completed_lifecycle(&mut session, submit.operation_id).await?;
         close_server_session(&mut session).await
@@ -1086,8 +1096,12 @@ mod tests {
                 }
             }
         }
-        session
-            .send_result_drop_reason(cancel_drop_reason(submit.operation_id))
+        submit
+            .send_result_drop(
+                &mut session,
+                cancel_drop_reason(submit.operation_id),
+                Vec::new(),
+            )
             .await?;
         close_server_session(&mut session).await
     }

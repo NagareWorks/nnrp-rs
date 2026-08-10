@@ -3,8 +3,10 @@
 ## Unreleased SDK Server Event Alignment
 
 The Rust server role now exposes a closed `NnrpServerEvent` union. `FRAME_SUBMIT` is delivered as
-an `NnrpServerOperation` that owns the complete submit event and reply identity, while other wire
-messages retain `NnrpRuntimeEvent` and local state remains a distinct lifecycle variant.
+an `NnrpServerOperation` that owns the complete submit event, reply identity, streaming sends, and
+terminal sends, while other wire messages retain `NnrpRuntimeEvent` and local state remains a
+distinct lifecycle variant. Application code no longer sends operation results through parallel
+session methods.
 
 `NnrpServerSession::await_event` preserves per-session event order. The selective
 `receive_submit` convenience retains every skipped non-submit event for the canonical event pump,

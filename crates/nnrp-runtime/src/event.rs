@@ -102,16 +102,16 @@ pub enum NnrpRuntimeEventTail {
 }
 
 impl NnrpRuntimeEventTail {
-    fn append_to(self, payload: &mut Vec<u8>) {
+    fn append_to(&self, payload: &mut Vec<u8>) {
         match self {
             Self::None => {}
-            Self::Body(body) | Self::Diagnostic(body) => payload.extend_from_slice(&body),
+            Self::Body(body) | Self::Diagnostic(body) => payload.extend_from_slice(body),
             Self::MetadataBodyAndDelta {
                 metadata_body,
                 delta,
             } => {
-                payload.extend_from_slice(&metadata_body);
-                payload.extend_from_slice(&delta);
+                payload.extend_from_slice(metadata_body);
+                payload.extend_from_slice(delta);
             }
         }
     }
@@ -198,6 +198,13 @@ impl NnrpRuntimeEvent {
     }
 
     pub fn into_payload(self) -> Result<Vec<u8>, NnrpError> {
+        let mut payload = self.metadata.to_bytes()?;
+        self.tail.append_to(&mut payload);
+        Ok(payload)
+    }
+
+    #[doc(hidden)]
+    pub fn to_payload(&self) -> Result<Vec<u8>, NnrpError> {
         let mut payload = self.metadata.to_bytes()?;
         self.tail.append_to(&mut payload);
         Ok(payload)
@@ -462,6 +469,7 @@ mod tests {
         let runtime_event = NnrpClientRoleEvent::Runtime(runtime.clone());
         assert_eq!(runtime_event.as_runtime(), Some(&runtime));
         assert!(runtime_event.as_lifecycle().is_none());
+        assert_eq!(runtime.to_payload().unwrap(), b"progress");
 
         let (wire_header, metadata, body) = runtime.into_wire_parts().unwrap();
         assert_eq!(wire_header, header);

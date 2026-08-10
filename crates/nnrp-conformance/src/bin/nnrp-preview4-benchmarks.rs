@@ -296,8 +296,8 @@ async fn bench_ipc_loopback(iterations: u64) -> Result<BenchCase, Box<dyn Error>
         let mut session = server.accept().await?;
         for _ in 0..iterations {
             let submit = session.receive_submit().await?;
-            session
-                .send_result(submit.frame_id, token_result(), b"ok".to_vec())
+            submit
+                .send_result(&mut session, token_result(), b"ok".to_vec())
                 .await?;
             consume_completed_lifecycle(&mut session, submit.operation_id).await?;
         }
@@ -344,8 +344,8 @@ async fn bench_websocket_loopback(iterations: u64) -> Result<BenchCase, Box<dyn 
         let mut session = server.accept().await?;
         for _ in 0..iterations {
             let submit = session.receive_submit().await?;
-            session
-                .send_result(submit.frame_id, token_result(), b"ok".to_vec())
+            submit
+                .send_result(&mut session, token_result(), b"ok".to_vec())
                 .await?;
             consume_completed_lifecycle(&mut session, submit.operation_id).await?;
         }

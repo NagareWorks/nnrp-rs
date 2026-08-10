@@ -20,34 +20,34 @@ use futures_util::{
 use nnrp_core::{
     validate_control_request_semantics, validate_partial_result_semantics,
     validate_pressure_semantics, validate_profile_assignment, validate_progress_semantics,
-    validate_result_drop_header, validate_result_drop_reason_semantics,
-    validate_scheduling_semantics, validate_trace_context_semantics, BudgetMetadata,
-    CacheAckMetadata, CacheInvalidateMetadata, CacheMissMetadata, CacheObjectId, CacheObjectKind,
-    CachePutMetadata, CacheReferenceMetadata, CapabilityMetadata, ClientHelloMetadata,
-    CommonHeader, ConnectionLifecycle, ControlRequestMetadata, FlowUpdateMetadata,
-    FrameSubmitMetadata, MessageType, ObjectDeltaMetadata, ObjectDescriptorMetadata,
-    ObjectReferenceMetadata, ObjectReleaseMetadata, OperationCancelRequest, OperationDescriptor,
-    OperationRegistry, PartialResultMetadata, PressureMetadata, ProgressMetadata,
-    RecoverableErrorMetadata, ResultDropReasonMetadata, ResultHintMetadata, ResultPushMetadata,
-    RetryAfterMetadata, RouteHintMetadata, RuntimeRole, SchedulingMetadata, SchemaRegistry,
-    ServerHelloAckMetadata, SessionCloseAckMetadata, SessionCloseMetadata, SessionCloseStatus,
-    SessionMigrateAckMetadata, SessionMigrateMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
-    SessionPatchAckMetadata, SessionPatchMetadata, SessionStatus, SupersedeMetadata,
-    TraceContextMetadata, TransportProbeAckMetadata, TransportProbeMetadata, BUDGET_METADATA_LEN,
-    CACHE_ACK_METADATA_LEN, CACHE_INVALIDATE_METADATA_LEN, CACHE_MISS_METADATA_LEN,
-    CACHE_PUT_METADATA_LEN, CACHE_REFERENCE_METADATA_LEN, CAPABILITY_METADATA_LEN,
-    CLIENT_HELLO_METADATA_LEN, CONTROL_REQUEST_METADATA_LEN, FLOW_UPDATE_METADATA_LEN,
-    FRAME_SUBMIT_METADATA_LEN, OBJECT_DELTA_METADATA_LEN, OBJECT_DESCRIPTOR_METADATA_LEN,
-    OBJECT_REFERENCE_METADATA_LEN, OBJECT_RELEASE_METADATA_LEN, PARTIAL_RESULT_METADATA_LEN,
-    PRESSURE_METADATA_LEN, PROGRESS_METADATA_LEN, RECOVERABLE_ERROR_METADATA_LEN,
-    RESULT_DROP_REASON_DEADLINE_EXPIRED, RESULT_DROP_REASON_METADATA_LEN, RESULT_PUSH_METADATA_LEN,
-    RETRY_AFTER_METADATA_LEN, ROUTE_HINT_METADATA_LEN, SCHEDULING_FLAG_EMIT_DROP_REASON,
-    SCHEDULING_METADATA_LEN, SERVER_HELLO_ACK_METADATA_LEN, SESSION_ACK_FLAG_RESUME_ENABLED,
-    SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_LIMIT_REACHED, SESSION_ERROR_NONE,
-    SESSION_ERROR_PROFILE_UNSUPPORTED, SESSION_ERROR_RESUME_REJECTED,
-    SESSION_ERROR_SCHEMA_UNSUPPORTED, SESSION_FLAG_ALLOW_RESUME, SESSION_MIGRATE_ACK_METADATA_LEN,
-    SESSION_MIGRATE_METADATA_LEN, SESSION_OPEN_ACK_METADATA_LEN, SESSION_PATCH_ACK_METADATA_LEN,
-    SESSION_PATCH_METADATA_LEN, SUPERSEDE_METADATA_LEN, TRACE_CONTEXT_METADATA_LEN,
+    validate_result_drop_reason_semantics, validate_scheduling_semantics,
+    validate_trace_context_semantics, BudgetMetadata, CacheAckMetadata, CacheInvalidateMetadata,
+    CacheMissMetadata, CacheObjectId, CacheObjectKind, CachePutMetadata, CacheReferenceMetadata,
+    CapabilityMetadata, ClientHelloMetadata, CommonHeader, ConnectionLifecycle,
+    ControlRequestMetadata, FlowUpdateMetadata, FrameSubmitMetadata, MessageType,
+    ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata, ObjectReleaseMetadata,
+    OperationCancelRequest, OperationDescriptor, OperationRegistry, PartialResultMetadata,
+    PressureMetadata, ProgressMetadata, RecoverableErrorMetadata, ResultDropReasonMetadata,
+    ResultHintMetadata, ResultPushMetadata, RetryAfterMetadata, RouteHintMetadata, RuntimeRole,
+    SchedulingMetadata, SchemaRegistry, ServerHelloAckMetadata, SessionCloseAckMetadata,
+    SessionCloseMetadata, SessionCloseStatus, SessionMigrateAckMetadata, SessionMigrateMetadata,
+    SessionOpenAckMetadata, SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchMetadata,
+    SessionStatus, SupersedeMetadata, TraceContextMetadata, TransportProbeAckMetadata,
+    TransportProbeMetadata, BUDGET_METADATA_LEN, CACHE_ACK_METADATA_LEN,
+    CACHE_INVALIDATE_METADATA_LEN, CACHE_MISS_METADATA_LEN, CACHE_PUT_METADATA_LEN,
+    CACHE_REFERENCE_METADATA_LEN, CAPABILITY_METADATA_LEN, CLIENT_HELLO_METADATA_LEN,
+    CONTROL_REQUEST_METADATA_LEN, FLOW_UPDATE_METADATA_LEN, FRAME_SUBMIT_METADATA_LEN,
+    OBJECT_DELTA_METADATA_LEN, OBJECT_DESCRIPTOR_METADATA_LEN, OBJECT_REFERENCE_METADATA_LEN,
+    OBJECT_RELEASE_METADATA_LEN, PARTIAL_RESULT_METADATA_LEN, PRESSURE_METADATA_LEN,
+    PROGRESS_METADATA_LEN, RECOVERABLE_ERROR_METADATA_LEN, RESULT_DROP_REASON_DEADLINE_EXPIRED,
+    RESULT_DROP_REASON_METADATA_LEN, RESULT_PUSH_METADATA_LEN, RETRY_AFTER_METADATA_LEN,
+    ROUTE_HINT_METADATA_LEN, SCHEDULING_FLAG_EMIT_DROP_REASON, SCHEDULING_METADATA_LEN,
+    SERVER_HELLO_ACK_METADATA_LEN, SESSION_ACK_FLAG_RESUME_ENABLED, SESSION_CLOSE_ACK_METADATA_LEN,
+    SESSION_ERROR_LIMIT_REACHED, SESSION_ERROR_NONE, SESSION_ERROR_PROFILE_UNSUPPORTED,
+    SESSION_ERROR_RESUME_REJECTED, SESSION_ERROR_SCHEMA_UNSUPPORTED, SESSION_FLAG_ALLOW_RESUME,
+    SESSION_MIGRATE_ACK_METADATA_LEN, SESSION_MIGRATE_METADATA_LEN, SESSION_OPEN_ACK_METADATA_LEN,
+    SESSION_PATCH_ACK_METADATA_LEN, SESSION_PATCH_METADATA_LEN, SUPERSEDE_METADATA_LEN,
+    TRACE_CONTEXT_METADATA_LEN,
 };
 #[cfg(all(feature = "native-tcp", not(target_arch = "wasm32")))]
 use tokio::net::TcpListener;
@@ -304,7 +304,7 @@ static NEXT_CONNECTION_NONCE: AtomicU64 = AtomicU64::new(1);
 
 type SharedSessionRegistry = Arc<Mutex<BTreeMap<u32, RuntimeSessionRecord>>>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct NnrpServerOperation {
     pub operation_id: u64,
     pub frame_id: u32,
@@ -364,9 +364,80 @@ impl NnrpServerOperation {
     pub fn into_submit(self) -> NnrpRuntimeEvent {
         self.submit
     }
+
+    pub async fn send_result(
+        &self,
+        session: &mut NnrpServerSession,
+        metadata: ResultPushMetadata,
+        body: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        self.require_session(session)?;
+        session
+            .send_operation_result_for_binding(self.frame_id, metadata, body)
+            .await
+    }
+
+    pub async fn send_result_drop(
+        &self,
+        session: &mut NnrpServerSession,
+        metadata: ResultDropReasonMetadata,
+        diagnostic: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        self.require_session(session)?;
+        self.require_operation_id(metadata.operation_id)?;
+        session
+            .send_operation_result_drop_for_binding(metadata, diagnostic)
+            .await
+    }
+
+    pub async fn send_progress(
+        &self,
+        session: &mut NnrpServerSession,
+        metadata: ProgressMetadata,
+        body: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        self.require_session(session)?;
+        self.require_operation_id(metadata.operation_id)?;
+        session
+            .send_operation_progress_for_binding(metadata, body)
+            .await
+    }
+
+    pub async fn send_partial_result(
+        &self,
+        session: &mut NnrpServerSession,
+        metadata: PartialResultMetadata,
+        body: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        self.require_session(session)?;
+        self.require_operation_id(metadata.operation_id)?;
+        session
+            .send_operation_partial_result_for_binding(metadata, body)
+            .await
+    }
+
+    fn require_session(&self, session: &NnrpServerSession) -> Result<(), RuntimeError> {
+        if self.submit.header.session_id != session.session_id
+            || session.operation_id_for_frame(self.frame_id)? != self.operation_id
+        {
+            return Err(RuntimeError::UnexpectedMessage(
+                "server operation does not belong to this session",
+            ));
+        }
+        Ok(())
+    }
+
+    fn require_operation_id(&self, operation_id: u64) -> Result<(), RuntimeError> {
+        if operation_id != self.operation_id {
+            return Err(RuntimeError::UnexpectedMessage(
+                "server operation metadata operation id mismatch",
+            ));
+        }
+        Ok(())
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum NnrpServerEvent {
     Submit(NnrpServerOperation),
     Runtime(NnrpRuntimeEvent),
@@ -1959,6 +2030,25 @@ impl NnrpServerSession {
         Ok(())
     }
 
+    fn require_operation_completion(&self, operation_id: u64) -> Result<(), RuntimeError> {
+        let current = self
+            .operations
+            .operation(operation_id)
+            .ok_or(nnrp_core::NnrpError::UnknownOperation(operation_id))?
+            .state;
+        if current.is_terminal()
+            || (current != nnrp_core::OperationState::Accepted
+                && !current.can_transition_to(nnrp_core::OperationState::Completed))
+        {
+            return Err(nnrp_core::NnrpError::InvalidOperationTransition {
+                from: current,
+                to: nnrp_core::OperationState::Completed,
+            }
+            .into());
+        }
+        Ok(())
+    }
+
     fn take_pending_specialized_input(&mut self) -> Option<PendingServerInput> {
         let index = self.pending_inputs.iter().position(|input| {
             !matches!(
@@ -2011,7 +2101,7 @@ impl NnrpServerSession {
         }
     }
 
-    pub async fn send_result(
+    pub(crate) async fn send_operation_result_for_binding(
         &mut self,
         frame_id: u32,
         metadata: ResultPushMetadata,
@@ -2042,7 +2132,7 @@ impl NnrpServerSession {
             .into());
         }
         self.ensure_pending_capacity()?;
-        self.operations.complete(operation_id)?;
+        self.require_operation_completion(operation_id)?;
         let mut header = CommonHeader::new(
             MessageType::ResultPush,
             RESULT_PUSH_METADATA_LEN as u32,
@@ -2057,6 +2147,7 @@ impl NnrpServerSession {
                 body,
             )?)
             .await?;
+        self.operations.complete(operation_id)?;
         self.pending_inputs
             .push_back(PendingServerInput::Event(NnrpServerEvent::Lifecycle(
                 crate::OperationLifecycleEvent::new(
@@ -2067,29 +2158,7 @@ impl NnrpServerSession {
         Ok(())
     }
 
-    pub async fn send_result_drop(&mut self, frame_id: u32) -> Result<(), RuntimeError> {
-        let operation_id = self.operation_id_for_frame(frame_id)?;
-        let transition = self
-            .operation_transition_required(operation_id, nnrp_core::OperationState::Superseded)?;
-        if transition {
-            self.ensure_pending_capacity()?;
-        }
-        let mut header = CommonHeader::new(MessageType::ResultDrop, 0, 0);
-        header.session_id = self.session_id;
-        header.frame_id = frame_id;
-        validate_result_drop_header(&header)?;
-        self.transport
-            .write_packet(&RuntimePacket::new(header, Vec::new(), Vec::new())?)
-            .await?;
-        if transition {
-            self.operations
-                .transition(operation_id, nnrp_core::OperationState::Superseded)?;
-            self.queue_lifecycle(operation_id, nnrp_core::OperationState::Superseded)?;
-        }
-        Ok(())
-    }
-
-    pub async fn send_partial_result(
+    pub(crate) async fn send_operation_partial_result_for_binding(
         &mut self,
         metadata: PartialResultMetadata,
         body: Vec<u8>,
@@ -2116,7 +2185,7 @@ impl NnrpServerSession {
             .await
     }
 
-    pub async fn send_progress(
+    pub(crate) async fn send_operation_progress_for_binding(
         &mut self,
         metadata: ProgressMetadata,
         body: Vec<u8>,
@@ -2143,15 +2212,7 @@ impl NnrpServerSession {
             .await
     }
 
-    pub async fn send_result_drop_reason(
-        &mut self,
-        metadata: ResultDropReasonMetadata,
-    ) -> Result<(), RuntimeError> {
-        self.send_result_drop_reason_with_diagnostics(metadata, Vec::new())
-            .await
-    }
-
-    pub async fn send_result_drop_reason_with_diagnostics(
+    pub(crate) async fn send_operation_result_drop_for_binding(
         &mut self,
         metadata: ResultDropReasonMetadata,
         diagnostics: Vec<u8>,
@@ -3163,6 +3224,40 @@ mod accept_tests {
     use super::*;
     use crate::RuntimeTransportKind;
 
+    struct FailOnceResultTransport {
+        failed: bool,
+        writes: Arc<Mutex<Vec<MessageType>>>,
+    }
+
+    #[async_trait]
+    impl crate::FramedTransport for FailOnceResultTransport {
+        fn transport_kind(&self) -> RuntimeTransportKind {
+            RuntimeTransportKind::Tcp
+        }
+
+        async fn read_packet(&mut self) -> Result<RuntimePacket, RuntimeError> {
+            std::future::pending().await
+        }
+
+        async fn write_packet(&mut self, packet: &RuntimePacket) -> Result<(), RuntimeError> {
+            if !self.failed && packet.header.message_type == MessageType::ResultPush {
+                self.failed = true;
+                return Err(RuntimeError::Internal(
+                    "scripted transport rejected one packet",
+                ));
+            }
+            self.writes
+                .lock()
+                .expect("writes should lock")
+                .push(packet.header.message_type);
+            Ok(())
+        }
+
+        async fn close(&mut self) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn session_id_allocation_finds_first_gap_in_sorted_registry_keys() {
         assert_eq!(first_available_session_id([]), Some(1));
@@ -3231,6 +3326,111 @@ mod accept_tests {
                 "server operation requires a FRAME_SUBMIT runtime event"
             ))
         ));
+    }
+
+    #[tokio::test]
+    async fn failed_result_write_keeps_the_server_operation_retryable() {
+        let session_id = 1;
+        let operation_id = 7_100;
+        let frame_id = 71;
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let mut operations = OperationRegistry::new();
+        operations
+            .register(OperationDescriptor::new(session_id, operation_id))
+            .expect("operation should register");
+        let mut session = NnrpServerSession {
+            session_id,
+            active_transport_id: nnrp_core::TransportId::Tcp,
+            client_open: SessionOpenMetadata {
+                requested_session_id: session_id,
+                profile_id: nnrp_core::STANDARD_PROFILE_TOKEN,
+                priority_class: nnrp_core::SessionPriorityClass::Balanced,
+                session_flags: 0,
+                schema_id: nnrp_core::TOKEN_DELTA_SCHEMA_ID,
+                schema_version: nnrp_core::TOKEN_DELTA_SCHEMA_VERSION,
+                default_deadline_ms: 500,
+                max_in_flight_operations: 4,
+                lease_ttl_hint_ms: 30_000,
+                resume_token_bytes: 0,
+                auth_bytes: 0,
+                session_extension_bytes: 0,
+                client_session_tag: 1,
+            },
+            transport: Box::new(FailOnceResultTransport {
+                failed: false,
+                writes: Arc::clone(&writes),
+            }),
+            lifecycle: ConnectionLifecycle::new(),
+            operations,
+            frame_operations: BTreeMap::from([(frame_id, operation_id)]),
+            operation_frames: BTreeMap::from([(operation_id, frame_id)]),
+            pressure: RuntimePressureState::default(),
+            cache_objects: Vec::new(),
+            supported_cache_objects: Vec::new(),
+            max_cache_objects: 0,
+            max_cache_object_bytes: 0,
+            connection_nonce: 1,
+            sessions: Arc::new(Mutex::new(BTreeMap::new())),
+            pending_close: None,
+            pending_inputs: VecDeque::new(),
+        };
+        let metadata = ResultPushMetadata {
+            status_code: 200,
+            result_flags: 0,
+            section_count: 0,
+            tile_count: 0,
+            active_profile_id: nnrp_core::STANDARD_PROFILE_TOKEN,
+            inference_ms: 3,
+            queue_ms: 1,
+            server_total_ms: 4,
+            tile_base_id: 0,
+            tile_index_bytes: 0,
+            result_class: nnrp_core::ResultClass::Complete,
+            applied_budget_policy: 0,
+            reused_frame_id: 0,
+            covered_tile_count: 0,
+            dropped_tile_count: 0,
+            payload_kind_bitmap: nnrp_core::PayloadKindBitmap(
+                nnrp_core::PayloadKindBitmap::TOKEN_CHUNK,
+            ),
+            payload_frame_count: 1,
+        };
+
+        assert!(matches!(
+            session
+                .send_operation_result_for_binding(frame_id, metadata, b"first".to_vec())
+                .await,
+            Err(RuntimeError::Internal(
+                "scripted transport rejected one packet"
+            ))
+        ));
+        assert_eq!(
+            session
+                .operations
+                .operation(operation_id)
+                .expect("operation should remain registered")
+                .state,
+            nnrp_core::OperationState::Accepted
+        );
+        assert!(session.pending_inputs.is_empty());
+
+        session
+            .send_operation_result_for_binding(frame_id, metadata, b"second".to_vec())
+            .await
+            .expect("retry should succeed");
+        assert_eq!(
+            session
+                .operations
+                .operation(operation_id)
+                .expect("operation should remain registered")
+                .state,
+            nnrp_core::OperationState::Completed
+        );
+        assert_eq!(session.pending_inputs.len(), 1);
+        assert_eq!(
+            writes.lock().expect("writes should lock").as_slice(),
+            [MessageType::ResultPush]
+        );
     }
 
     #[async_trait]
