@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 
-EXPECTED_CONTRACT_VERSION = 12
+EXPECTED_CONTRACT_VERSION = 13
 EXPECTED_API_DOMAINS = {
     "submission",
     "runtimeEvents",
@@ -95,6 +95,7 @@ EXPECTED_RUST_PROJECTIONS = {
     ],
     "runtimeFrameHeader": "nnrp_runtime::RuntimeFrameHeader",
     "runtimeEvent": "nnrp_runtime::NnrpRuntimeEvent",
+    "clientEvent": "nnrp_runtime::NnrpClientRoleEvent",
     "serverEvent": "nnrp_runtime::NnrpServerEvent",
     "serverOperation": "nnrp_runtime::NnrpServerOperation",
     "operationLifecycleEvent": "nnrp_runtime::OperationLifecycleEvent",
@@ -187,6 +188,7 @@ def check_contract(contract_path: Path) -> None:
     types = require_mapping(contract.get("types"), "SDK contract types must be an object")
     required_type_names = (
         "OperationLifecycleEvent",
+        "ClientEvent",
         "TerminalEvent",
         "NnrpResult",
         "RuntimeEventMetadata",
@@ -196,7 +198,7 @@ def check_contract(contract_path: Path) -> None:
     )
     require(
         set(required_type_names).issubset(types),
-        "SDK contract is missing required Rust projection types",
+        "SDK contract is missing required type contracts",
     )
     type_contracts = {
         name: require_mapping(
@@ -224,6 +226,21 @@ def check_contract(contract_path: Path) -> None:
         lifecycle.get("nativeEventProjection")
         == EXPECTED_NATIVE_LIFECYCLE_PROJECTION,
         "OperationLifecycleEvent native projection drifted",
+    )
+
+    client_event = type_contracts["ClientEvent"]
+    require(
+        client_event.get("representation") == "tagged-union",
+        "ClientEvent is no longer a tagged union",
+    )
+    require(
+        client_event.get("variants") == ["runtime", "lifecycle"],
+        "ClientEvent variants drifted",
+    )
+    require(
+        client_event.get("variantTypes")
+        == {"runtime": "RuntimeEvent", "lifecycle": "OperationLifecycleEvent"},
+        "ClientEvent variant types drifted",
     )
 
     terminal = type_contracts["TerminalEvent"]
@@ -360,6 +377,14 @@ def check_contract(contract_path: Path) -> None:
     )
     role_operations = require_mapping(
         contract.get("roleOperations"), "SDK role operations must be an object"
+    )
+    require(
+        require_mapping(
+            role_operations.get("client_session.next_event"),
+            "client next-event operation must be an object",
+        ).get("returns")
+        == "ClientEvent",
+        "client next-event return type drifted",
     )
     require(
         require_mapping(
