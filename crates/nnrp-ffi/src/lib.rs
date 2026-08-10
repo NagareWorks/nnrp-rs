@@ -38,7 +38,7 @@ use nnrp_core::{
 };
 #[cfg(not(test))]
 use nnrp_runtime::{
-    NnrpClient, NnrpClientConfig, NnrpClientSession, NnrpRuntimeEvent, NnrpServer,
+    NnrpClient, NnrpClientConfig, NnrpClientRoleEvent, NnrpClientSession, NnrpServer,
     NnrpServerConfig, NnrpServerEvent, NnrpServerPolicy,
     NnrpServerPolicyDecision as RuntimeServerPolicyDecision, NnrpServerSession,
     OperationLifecycleEvent, RuntimeTransportKind,
@@ -4960,20 +4960,22 @@ fn validate_role_event_poll(
 #[cfg(not(test))]
 fn client_role_event(
     scope: NnrpHandle,
-    event: NnrpRuntimeEvent,
+    event: NnrpClientRoleEvent,
 ) -> Result<NnrpEvent, NnrpFfiStatus> {
     let connection = role_session_connection(scope, NnrpFfiConnectionRole::Client)?;
+    let event = match event {
+        NnrpClientRoleEvent::Runtime(event) => event,
+        NnrpClientRoleEvent::Lifecycle(event) => {
+            return role_lifecycle_event(scope, connection, event);
+        }
+    };
     let header = event.header;
     let operation_id = event.metadata.operation_id();
-    let (kind, terminal) = match header.message_type {
-        MessageType::ResultPush => (NnrpEventKind::ResultPushed, true),
-        MessageType::ResultDrop | MessageType::ResultDropReason => {
-            (NnrpEventKind::ResultDropped, true)
-        }
-        MessageType::FlowUpdate => (NnrpEventKind::FlowUpdated, false),
-        MessageType::ResultHint => (NnrpEventKind::ResultHint, false),
-        _ => (NnrpEventKind::RuntimeFrame, false),
-    };
+    let kind = role_event_kind(header.message_type);
+    let terminal = matches!(
+        header.message_type,
+        MessageType::ResultPush | MessageType::ResultDrop | MessageType::ResultDropReason
+    );
     let payload = event
         .into_payload()
         .map_err(|error| NnrpFfiStatus::from_core_error(&error))?;
@@ -5208,20 +5210,13 @@ fn server_role_event(
         NnrpServerEvent::Submit(operation) => operation.into_submit(),
         NnrpServerEvent::Runtime(event) => event,
         NnrpServerEvent::Lifecycle(event) => {
-            return server_lifecycle_event(scope, connection, event);
+            return role_lifecycle_event(scope, connection, event);
         }
     };
     let header = event.header;
     let operation_id = event.metadata.operation_id();
     let create_operation = header.message_type == MessageType::FrameSubmit;
-    let kind = match header.message_type {
-        MessageType::FrameSubmit => NnrpEventKind::SubmitAccepted,
-        MessageType::FrameCancel => NnrpEventKind::Control,
-        MessageType::SessionClose => NnrpEventKind::SessionClosed,
-        MessageType::ResultDropReason => NnrpEventKind::ResultDropped,
-        MessageType::FlowUpdate => NnrpEventKind::FlowUpdated,
-        _ => NnrpEventKind::RuntimeFrame,
-    };
+    let kind = role_event_kind(header.message_type);
     let payload = event
         .into_payload()
         .map_err(|error| NnrpFfiStatus::from_core_error(&error))?;
@@ -5277,8 +5272,39 @@ fn server_role_event(
     })
 }
 
+fn role_event_kind(message_type: MessageType) -> NnrpEventKind {
+    match message_type {
+        MessageType::SessionClose => NnrpEventKind::SessionClosed,
+        MessageType::FrameSubmit => NnrpEventKind::SubmitAccepted,
+        MessageType::ResultPush => NnrpEventKind::ResultPushed,
+        MessageType::ResultDrop | MessageType::ResultDropReason => NnrpEventKind::ResultDropped,
+        MessageType::FlowUpdate => NnrpEventKind::FlowUpdated,
+        MessageType::ResultHint => NnrpEventKind::ResultHint,
+        MessageType::PartialResult => NnrpEventKind::PartialResult,
+        MessageType::FrameCancel
+        | MessageType::Cancel
+        | MessageType::Abort
+        | MessageType::PriorityUpdate
+        | MessageType::Deadline
+        | MessageType::ExpireAt
+        | MessageType::Supersede
+        | MessageType::BudgetUpdate
+        | MessageType::Progress
+        | MessageType::Backpressure
+        | MessageType::CreditUpdate
+        | MessageType::CapabilityNegotiation
+        | MessageType::DegradeProfile
+        | MessageType::RouteHint
+        | MessageType::ExecutionHint
+        | MessageType::TraceContext
+        | MessageType::ErrorRecoverable
+        | MessageType::RetryAfter => NnrpEventKind::Control,
+        _ => NnrpEventKind::RuntimeFrame,
+    }
+}
+
 #[cfg(not(test))]
-fn server_lifecycle_event(
+fn role_lifecycle_event(
     scope: NnrpHandle,
     connection: NnrpHandle,
     event: OperationLifecycleEvent,
@@ -7980,6 +8006,29 @@ fn cache_owner_semantic_id(
 mod tests {
     use super::*;
     use core::ptr;
+
+    #[test]
+    fn role_event_kind_keeps_native_poll_categories_role_independent() {
+        for message_type in [
+            MessageType::FrameCancel,
+            MessageType::Cancel,
+            MessageType::Abort,
+        ] {
+            assert_eq!(role_event_kind(message_type), NnrpEventKind::Control);
+        }
+        assert_eq!(
+            role_event_kind(MessageType::PartialResult),
+            NnrpEventKind::PartialResult
+        );
+        assert_eq!(
+            role_event_kind(MessageType::ResultDropReason),
+            NnrpEventKind::ResultDropped
+        );
+        assert_eq!(
+            role_event_kind(MessageType::ObjectDeclare),
+            NnrpEventKind::RuntimeFrame
+        );
+    }
 
     #[test]
     fn role_configuration_slices_reject_nonempty_null_views() {

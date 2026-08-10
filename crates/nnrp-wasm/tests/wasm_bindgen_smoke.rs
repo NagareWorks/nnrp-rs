@@ -6,8 +6,8 @@ use futures_util::future::{select, Either};
 use js_sys::{Array, Function, Promise, Reflect, Uint8Array};
 use nnrp_core::{
     BudgetMetadata, ClientHelloMetadata, CommonHeader, ControlRequestMetadata, FrameSubmitMetadata,
-    HeaderFlags, InputProfile, MessageType, PayloadKindBitmap, ProgressMetadata, ResultClass,
-    ResultPushMetadata, RuntimeRole, ServerHelloAckMetadata, SessionCloseAckMetadata,
+    HeaderFlags, InputProfile, MessageType, OperationState, PayloadKindBitmap, ProgressMetadata,
+    ResultClass, ResultPushMetadata, RuntimeRole, ServerHelloAckMetadata, SessionCloseAckMetadata,
     SessionCloseMetadata, SessionCloseStatus, SessionOpenAckMetadata, SessionOpenMetadata,
     SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata, SessionPatchRejectReason,
     SessionPriorityClass, SessionStatus, SubmitMode, TileIndexMode,
@@ -17,16 +17,39 @@ use nnrp_core::{
     SESSION_FLAG_ALLOW_RESUME, SESSION_OPEN_ACK_METADATA_LEN, SESSION_PATCH_ACK_METADATA_LEN,
     STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
 };
-use nnrp_runtime::{NnrpSubmitHeaderContext, RuntimePacket};
+use nnrp_runtime::{
+    NnrpClientRoleEvent, NnrpSubmitHeaderContext, OperationLifecycleEvent, RuntimePacket,
+};
 use nnrp_wasm::{
     decode_runtime_control_metadata_json, decode_websocket_binary_frame_batch_json,
     decode_websocket_binary_frame_json, encode_runtime_control_metadata_json,
     encode_websocket_binary_frame_json, open_browser_client_connection, BrowserClientConnection,
+    BrowserClientEventPacket,
 };
 use serde_json::Value;
 use wasm_bindgen::{closure::Closure, JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::wasm_bindgen_test;
+
+#[wasm_bindgen_test]
+fn browser_lifecycle_event_projection_preserves_the_frozen_absent_header_shape() {
+    let projected = BrowserClientEventPacket::try_from(NnrpClientRoleEvent::Lifecycle(
+        OperationLifecycleEvent::new(41, OperationState::Cancelled).unwrap(),
+    ))
+    .unwrap();
+
+    assert_eq!(projected.event_kind(), 14);
+    assert_eq!(projected.header_present(), 0);
+    assert_eq!(projected.related_operation_id(), 41);
+    assert_eq!(
+        projected.operation_state(),
+        Some(OperationState::Cancelled as u8)
+    );
+    assert_eq!(projected.version_major(), 0);
+    assert_eq!(projected.message_type(), 0);
+    assert!(projected.metadata().to_vec().is_empty());
+    assert!(projected.body().to_vec().is_empty());
+}
 
 #[wasm_bindgen_test]
 fn wasm_bindgen_websocket_frame_codec_round_trips() {
@@ -585,15 +608,28 @@ async fn browser_role_routes_control_and_patch_while_event_receive_is_pending() 
     cancel_result.expect("cancel should write while receive remains pending");
     assert!(*cancel_observed.borrow());
     let event = event.expect("pending receive should finish after cancel is written");
-    assert_eq!(event.version_major(), 1);
-    assert_eq!(event.wire_format(), 0);
-    assert_eq!(event.message_type(), MessageType::Progress as u8);
-    assert_eq!(event.flags(), 0);
-    assert_eq!(event.session_id(), 7);
-    assert_eq!(event.frame_id(), 9);
-    assert_eq!(event.view_id(), 0);
-    assert_eq!(event.route_id(), 0);
-    assert_eq!(event.trace_id(), 0);
+    assert_eq!(event.event_kind(), 14);
+    assert_eq!(event.header_present(), 0);
+    assert_eq!(event.related_operation_id(), 42);
+    assert_eq!(
+        event.operation_state(),
+        Some(nnrp_core::OperationState::Cancelled as u8)
+    );
+
+    let progress = drive_scripted_operation(&connection, &responses, role.await_event())
+        .await
+        .expect("wire progress should remain available after local lifecycle delivery");
+    assert_eq!(progress.event_kind(), 13);
+    assert_eq!(progress.header_present(), 1);
+    assert_eq!(progress.version_major(), 1);
+    assert_eq!(progress.wire_format(), 0);
+    assert_eq!(progress.message_type(), MessageType::Progress as u8);
+    assert_eq!(progress.flags(), 0);
+    assert_eq!(progress.session_id(), 7);
+    assert_eq!(progress.frame_id(), 9);
+    assert_eq!(progress.view_id(), 0);
+    assert_eq!(progress.route_id(), 0);
+    assert_eq!(progress.trace_id(), 0);
 
     let patch = SessionPatchMetadata {
         profile_id: STANDARD_PROFILE_TOKEN,

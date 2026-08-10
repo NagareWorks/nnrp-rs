@@ -974,22 +974,29 @@ mod tests {
         session.cancel_operation(frame_id as u64, 7).await?;
 
         match session.await_event().await? {
-            nnrp_runtime::NnrpRuntimeEvent {
+            nnrp_runtime::NnrpClientRoleEvent::Lifecycle(event) => {
+                assert_eq!(event.operation_id, frame_id as u64);
+                assert_eq!(event.state, nnrp_core::OperationState::Cancelled);
+            }
+            event => panic!("expected cancelled lifecycle event, got {event:?}"),
+        }
+        match session.await_event().await? {
+            nnrp_runtime::NnrpClientRoleEvent::Runtime(nnrp_runtime::NnrpRuntimeEvent {
                 metadata: NnrpRuntimeEventMetadata::Pressure(pressure),
                 tail: NnrpRuntimeEventTail::None,
                 ..
-            } => {
+            }) => {
                 assert_eq!(pressure.pressure_level, BackpressureLevel::Soft as u16);
                 assert_eq!(pressure.credit_window, 2);
             }
             event => panic!("expected backpressure event, got {event:?}"),
         }
         match session.await_event().await? {
-            nnrp_runtime::NnrpRuntimeEvent {
+            nnrp_runtime::NnrpClientRoleEvent::Runtime(nnrp_runtime::NnrpRuntimeEvent {
                 metadata: NnrpRuntimeEventMetadata::ResultDropReason(reason),
                 tail: NnrpRuntimeEventTail::Diagnostic(body),
                 ..
-            } => {
+            }) => {
                 assert_eq!(reason.operation_id, frame_id as u64);
                 assert_eq!(reason.drop_reason_code, 7);
                 assert!(body.is_empty());

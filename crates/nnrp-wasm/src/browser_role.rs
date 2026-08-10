@@ -19,9 +19,9 @@ use nnrp_core::{
     FRAME_SUBMIT_METADATA_LEN, SESSION_PATCH_METADATA_LEN,
 };
 use nnrp_runtime::{
-    FramedTransport, NnrpClient, NnrpClientConfig, NnrpClientSession, NnrpSessionRecoveryTicket,
-    NnrpSubmitHeaderContext, NnrpSubmitRequest, RuntimeError, RuntimeFrameLimits, RuntimePacket,
-    RuntimeTransportKind,
+    FramedTransport, NnrpClient, NnrpClientConfig, NnrpClientRoleEvent, NnrpClientSession,
+    NnrpSessionRecoveryTicket, NnrpSubmitHeaderContext, NnrpSubmitRequest, RuntimeError,
+    RuntimeFrameLimits, RuntimePacket, RuntimeTransportKind,
 };
 use serde::Deserialize;
 use wasm_bindgen::{prelude::*, JsCast};
@@ -480,6 +480,10 @@ impl FramedTransport for HostWebSocketTransport {
 
 #[wasm_bindgen(js_name = BrowserClientEventPacket)]
 pub struct BrowserClientEventPacket {
+    event_kind: u32,
+    header_present: u8,
+    related_operation_id: u64,
+    operation_state: Option<u8>,
     version_major: u8,
     wire_format: u8,
     message_type: u8,
@@ -496,6 +500,10 @@ pub struct BrowserClientEventPacket {
 impl From<RuntimePacket> for BrowserClientEventPacket {
     fn from(packet: RuntimePacket) -> Self {
         Self {
+            event_kind: 13,
+            header_present: 1,
+            related_operation_id: 0,
+            operation_state: None,
             version_major: packet.header.version_major,
             wire_format: packet.header.wire_format as u8,
             message_type: packet.header.message_type as u8,
@@ -507,6 +515,54 @@ impl From<RuntimePacket> for BrowserClientEventPacket {
             trace_id: packet.header.trace_id,
             metadata: packet.metadata,
             body: packet.body,
+        }
+    }
+}
+
+impl TryFrom<NnrpClientRoleEvent> for BrowserClientEventPacket {
+    type Error = RuntimeError;
+
+    fn try_from(event: NnrpClientRoleEvent) -> Result<Self, Self::Error> {
+        match event {
+            NnrpClientRoleEvent::Runtime(event) => {
+                let related_operation_id = event.metadata.operation_id().unwrap_or(0);
+                let (header, metadata, body) =
+                    event.into_wire_parts().map_err(RuntimeError::from)?;
+                Ok(Self {
+                    event_kind: 13,
+                    header_present: 1,
+                    related_operation_id,
+                    operation_state: None,
+                    version_major: header.version_major,
+                    wire_format: header.wire_format as u8,
+                    message_type: header.message_type as u8,
+                    flags: header.flags.0,
+                    session_id: header.session_id,
+                    frame_id: header.frame_id,
+                    view_id: header.view_id,
+                    route_id: header.route_id,
+                    trace_id: header.trace_id,
+                    metadata,
+                    body,
+                })
+            }
+            NnrpClientRoleEvent::Lifecycle(event) => Ok(Self {
+                event_kind: 14,
+                header_present: 0,
+                related_operation_id: event.operation_id,
+                operation_state: Some(event.state as u8),
+                version_major: 0,
+                wire_format: 0,
+                message_type: 0,
+                flags: 0,
+                session_id: 0,
+                frame_id: 0,
+                view_id: 0,
+                route_id: 0,
+                trace_id: 0,
+                metadata: Vec::new(),
+                body: Vec::new(),
+            }),
         }
     }
 }
@@ -558,6 +614,26 @@ impl BrowserClientEventBatch {
 
 #[wasm_bindgen(js_class = BrowserClientEventPacket)]
 impl BrowserClientEventPacket {
+    #[wasm_bindgen(getter, js_name = eventKind)]
+    pub fn event_kind(&self) -> u32 {
+        self.event_kind
+    }
+
+    #[wasm_bindgen(getter, js_name = headerPresent)]
+    pub fn header_present(&self) -> u8 {
+        self.header_present
+    }
+
+    #[wasm_bindgen(getter, js_name = relatedOperationId)]
+    pub fn related_operation_id(&self) -> u64 {
+        self.related_operation_id
+    }
+
+    #[wasm_bindgen(getter, js_name = operationState)]
+    pub fn operation_state(&self) -> Option<u8> {
+        self.operation_state
+    }
+
     #[wasm_bindgen(getter, js_name = versionMajor)]
     pub fn version_major(&self) -> u8 {
         self.version_major
@@ -998,7 +1074,9 @@ impl BrowserClientRoleState {
             .ok_or_else(closed_role_error)?
             .send_runtime_frame(message_type, frame_id, payload)
             .await
-            .map_err(js_runtime_error)
+            .map_err(js_runtime_error)?;
+        self.carrier.notify_event_waiters();
+        Ok(())
     }
 
     async fn patch_session(&self, metadata: &[u8]) -> Result<Uint8Array, JsValue> {
@@ -1028,11 +1106,35 @@ impl BrowserClientRoleState {
     }
 
     async fn await_event(&self) -> Result<BrowserClientEventPacket, JsValue> {
-        let mut events = self.receive_event_packets(1).await?;
-        let (_, packet) = events
-            .pop()
-            .ok_or_else(|| js_error("browser event receive produced no packet"))?;
-        Ok(packet.into())
+        let _receive_guard = self.receive_gate.lock().await;
+        let (abort, registration) = AbortHandle::new_pair();
+        self.receive_abort.borrow_mut().replace(abort);
+        let result = Abortable::new(self.receive_role_event_locked(), registration).await;
+        self.receive_abort.borrow_mut().take();
+        let event = result.map_err(|_| closed_role_error())??;
+        BrowserClientEventPacket::try_from(event).map_err(js_runtime_error)
+    }
+
+    async fn receive_role_event_locked(&self) -> Result<NnrpClientRoleEvent, JsValue> {
+        loop {
+            let observed_generation = self.carrier.event_generation();
+            if let Some(event) = self.poll_session_role_event().await? {
+                return Ok(event);
+            }
+            self.carrier
+                .wait_for_event(observed_generation)
+                .await
+                .map_err(js_runtime_error)?;
+        }
+    }
+
+    async fn poll_session_role_event(&self) -> Result<Option<NnrpClientRoleEvent>, JsValue> {
+        let mut session_slot = self.session.lock().await;
+        session_slot
+            .as_mut()
+            .ok_or_else(closed_role_error)?
+            .poll_event()
+            .map_err(js_runtime_error)
     }
 
     async fn await_event_batch(&self, max_events: u32) -> Result<BrowserClientEventBatch, JsValue> {
@@ -1173,4 +1275,31 @@ fn js_serde_error(error: serde_json::Error) -> JsValue {
 
 fn js_error(message: &str) -> JsValue {
     js_sys::Error::new(message).into()
+}
+
+#[cfg(test)]
+mod event_projection_tests {
+    use super::BrowserClientEventPacket;
+    use nnrp_core::OperationState;
+    use nnrp_runtime::{NnrpClientRoleEvent, OperationLifecycleEvent};
+
+    #[test]
+    fn lifecycle_projection_preserves_identity_and_has_no_wire_header() {
+        let projected = BrowserClientEventPacket::try_from(NnrpClientRoleEvent::Lifecycle(
+            OperationLifecycleEvent::new(41, OperationState::Cancelled).unwrap(),
+        ))
+        .unwrap();
+
+        assert_eq!(projected.event_kind, 14);
+        assert_eq!(projected.header_present, 0);
+        assert_eq!(projected.related_operation_id, 41);
+        assert_eq!(
+            projected.operation_state,
+            Some(OperationState::Cancelled as u8)
+        );
+        assert_eq!(projected.version_major, 0);
+        assert_eq!(projected.message_type, 0);
+        assert!(projected.metadata.is_empty());
+        assert!(projected.body.is_empty());
+    }
 }

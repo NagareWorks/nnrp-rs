@@ -774,22 +774,22 @@ mod tests {
         session.send_credit_update(credit_update()).await?;
 
         match session.await_event().await? {
-            nnrp_runtime::NnrpRuntimeEvent {
+            nnrp_runtime::NnrpClientRoleEvent::Runtime(nnrp_runtime::NnrpRuntimeEvent {
                 metadata: NnrpRuntimeEventMetadata::Pressure(pressure),
                 tail: NnrpRuntimeEventTail::None,
                 ..
-            } => {
+            }) => {
                 assert_eq!(pressure.pressure_level, BackpressureLevel::Soft as u16);
                 assert_eq!(pressure.credit_window, 2);
             }
             event => panic!("expected backpressure event, got {event:?}"),
         }
         match session.await_event().await? {
-            nnrp_runtime::NnrpRuntimeEvent {
+            nnrp_runtime::NnrpClientRoleEvent::Runtime(nnrp_runtime::NnrpRuntimeEvent {
                 metadata: NnrpRuntimeEventMetadata::Progress(metadata),
                 tail: NnrpRuntimeEventTail::Body(body),
                 ..
-            } => {
+            }) => {
                 assert_eq!(metadata.operation_id, frame_id as u64);
                 assert_eq!(metadata.progress_sequence, 1);
                 assert_eq!(metadata.percent_x100, 2_500);
@@ -798,11 +798,11 @@ mod tests {
             event => panic!("expected progress event, got {event:?}"),
         }
         match session.await_event().await? {
-            nnrp_runtime::NnrpRuntimeEvent {
+            nnrp_runtime::NnrpClientRoleEvent::Runtime(nnrp_runtime::NnrpRuntimeEvent {
                 metadata: NnrpRuntimeEventMetadata::PartialResult(metadata),
                 tail: NnrpRuntimeEventTail::Body(body),
                 ..
-            } => {
+            }) => {
                 assert_eq!(metadata.operation_id, frame_id as u64);
                 assert_eq!(metadata.result_sequence, 1);
                 assert_eq!(body, b"partial");

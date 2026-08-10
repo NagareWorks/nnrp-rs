@@ -20,7 +20,10 @@ TOKEN_DELTA_SCHEMA_VERSION = 3
 EVENT_SESSION_CLOSED = 4
 EVENT_SUBMIT_ACCEPTED = 5
 EVENT_RESULT_PUSHED = 6
+EVENT_CONTROL = 9
 EVENT_OPERATION_LIFECYCLE = 14
+MESSAGE_FRAME_CANCEL = 0x11
+OPERATION_STATE_CANCELLED = 5
 OPERATION_STATE_COMPLETED = 7
 FRAME_SUBMIT_METADATA_LEN = 72
 RESULT_PUSH_METADATA_LEN = 64
@@ -159,6 +162,10 @@ class NnrpSubmitRequest(ctypes.Structure):
         ("trace_id", ctypes.c_uint64),
         ("payload", NnrpBufferView),
     ]
+
+
+class NnrpClientCancelRequest(ctypes.Structure):
+    _fields_ = [("session", NnrpHandle), ("frame_id", ctypes.c_uint32)]
 
 
 class NnrpServerAcceptRequest(ctypes.Structure):
@@ -347,6 +354,7 @@ def configure_library(library: ctypes.CDLL) -> None:
             [NnrpSubmitRequest, ctypes.POINTER(NnrpHandle)],
             NnrpFfiStatus,
         ),
+        "nnrp_client_cancel": ([NnrpClientCancelRequest], NnrpFfiStatus),
         "nnrp_client_await_events": (
             [
                 NnrpRoleEventPollRequest,
@@ -917,6 +925,76 @@ def run_role_smoke_test_at_endpoint(
     if event_payload(library, lifecycle_event) != bytes([OPERATION_STATE_COMPLETED]):
         raise RuntimeError("operation lifecycle event carried an invalid state payload")
 
+    cancel_operation_id = operation_id + 1
+    cancel_frame_id = frame_id + 1
+    cancel_payload = token_submit_payload(cancel_operation_id, b"artifact-role-cancel")
+    cancel_owner, cancel_view = buffer_view(cancel_payload)
+    cancel_operation = invalid_handle()
+    require_ok(
+        library.nnrp_client_submit(
+            NnrpSubmitRequest(
+                client_session,
+                cancel_operation_id,
+                cancel_frame_id,
+                0,
+                0,
+                0,
+                0,
+                cancel_view,
+            ),
+            ctypes.byref(cancel_operation),
+        ),
+        "client submit cancellable operation",
+    )
+    cancel_submit = await_role_event(
+        library, "nnrp_server_await_events", server_session
+    )
+    if (
+        cancel_submit.kind != EVENT_SUBMIT_ACCEPTED
+        or cancel_submit.header.frame_id != cancel_frame_id
+    ):
+        raise RuntimeError("server did not receive the cancellable operation")
+    event_payload(library, cancel_submit)
+
+    require_ok(
+        library.nnrp_client_cancel(
+            NnrpClientCancelRequest(client_session, cancel_frame_id)
+        ),
+        "client cancel operation",
+    )
+    client_lifecycle = await_role_event(
+        library, "nnrp_client_await_events", client_session
+    )
+    if client_lifecycle.kind != EVENT_OPERATION_LIFECYCLE:
+        raise RuntimeError("client cancel did not emit operation lifecycle evidence")
+    if client_lifecycle.header.present != 0:
+        raise RuntimeError("client cancel lifecycle unexpectedly carried a wire header")
+    if (
+        client_lifecycle.operation.id != cancel_operation.id
+        or client_lifecycle.diagnostic.related_operation_id != cancel_operation_id
+    ):
+        raise RuntimeError("client cancel lifecycle lost operation identity")
+    if event_payload(library, client_lifecycle) != bytes([OPERATION_STATE_CANCELLED]):
+        raise RuntimeError("client cancel lifecycle carried an invalid state payload")
+
+    cancel_wire = await_role_event(library, "nnrp_server_await_events", server_session)
+    if (
+        cancel_wire.kind != EVENT_CONTROL
+        or cancel_wire.header.message_type != MESSAGE_FRAME_CANCEL
+        or cancel_wire.header.frame_id != cancel_frame_id
+    ):
+        raise RuntimeError("server did not receive the client FRAME_CANCEL")
+    event_payload(library, cancel_wire)
+    server_cancel_lifecycle = await_role_event(
+        library, "nnrp_server_await_events", server_session
+    )
+    if server_cancel_lifecycle.kind != EVENT_OPERATION_LIFECYCLE:
+        raise RuntimeError("server cancel did not emit operation lifecycle evidence")
+    if event_payload(library, server_cancel_lifecycle) != bytes(
+        [OPERATION_STATE_CANCELLED]
+    ):
+        raise RuntimeError("server cancel lifecycle carried an invalid state payload")
+
     close_result: queue.Queue = queue.Queue()
 
     def close_client_session() -> None:
@@ -945,7 +1023,13 @@ def run_role_smoke_test_at_endpoint(
     if scope == "quic" or secure:
         require_ok(library.nnrp_transport_close(client_config), "close client config")
         require_ok(library.nnrp_transport_close(server_config), "close server config")
-    _ = (endpoint_owner, resolved_owner, submit_owner, result_owner)
+    _ = (
+        endpoint_owner,
+        resolved_owner,
+        submit_owner,
+        result_owner,
+        cancel_owner,
+    )
 
 
 def run_smoke_test(library_path: Path, scope: str) -> None:
