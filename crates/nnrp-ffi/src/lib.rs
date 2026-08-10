@@ -465,6 +465,10 @@ impl NnrpHandle {
 
         Ok(())
     }
+
+    const fn normalized(self) -> Self {
+        Self { flags: 0, ..self }
+    }
 }
 
 #[allow(dead_code)]
@@ -701,6 +705,8 @@ struct NnrpFfiResourceEntry {
 struct NnrpFfiHandleStore {
     entries: BTreeMap<(u32, u64), NnrpFfiResourceEntry>,
     next_ids: BTreeMap<u32, u64>,
+    deferred_operation_releases: Vec<(NnrpHandle, NnrpHandle)>,
+    terminal_operation_replies: Vec<NnrpHandle>,
     #[cfg(any(test, feature = "benchmark-ffi"))]
     events: VecDeque<NnrpQueuedEvent>,
 }
@@ -776,6 +782,8 @@ impl NnrpFfiHandleStore {
             }
         }
         self.entries.clear();
+        self.deferred_operation_releases.clear();
+        self.terminal_operation_replies.clear();
         #[cfg(any(test, feature = "benchmark-ffi"))]
         self.events.clear();
     }
@@ -833,8 +841,77 @@ impl NnrpFfiHandleStore {
 
     fn remove(&mut self, handle: NnrpHandle, kind: NnrpHandleKind) -> Result<(), NnrpFfiStatus> {
         self.get(handle, kind)?;
+        let handle = handle.normalized();
         self.entries.remove(&(handle.kind, handle.id));
+        if kind == NnrpHandleKind::Operation {
+            self.deferred_operation_releases
+                .retain(|(_, operation)| *operation != handle);
+            self.terminal_operation_replies
+                .retain(|operation| *operation != handle);
+        }
         Ok(())
+    }
+
+    #[cfg(not(test))]
+    fn defer_operation_release(&mut self, session: NnrpHandle, operation: NnrpHandle) {
+        let session = session.normalized();
+        let operation = operation.normalized();
+        if !self
+            .deferred_operation_releases
+            .contains(&(session, operation))
+        {
+            self.deferred_operation_releases.push((session, operation));
+        }
+    }
+
+    #[cfg(not(test))]
+    fn release_deferred_operations(&mut self, session: NnrpHandle) {
+        let session = session.normalized();
+        let pending = core::mem::take(&mut self.deferred_operation_releases);
+        let mut retained = Vec::with_capacity(pending.len());
+        for (owner, operation) in pending {
+            if owner == session {
+                if self
+                    .entries
+                    .get(&(operation.kind, operation.id))
+                    .is_some_and(|entry| entry.generation == operation.generation)
+                {
+                    self.entries.remove(&(operation.kind, operation.id));
+                    self.terminal_operation_replies
+                        .retain(|terminal| *terminal != operation);
+                }
+            } else {
+                retained.push((owner, operation));
+            }
+        }
+        self.deferred_operation_releases = retained;
+    }
+
+    #[cfg(not(test))]
+    fn record_terminal_operation_reply(
+        &mut self,
+        session: NnrpHandle,
+        operation: NnrpHandle,
+    ) -> Result<(), NnrpFfiStatus> {
+        self.get(operation, NnrpHandleKind::Operation)?;
+        let session = session.normalized();
+        let operation = operation.normalized();
+        if self
+            .deferred_operation_releases
+            .contains(&(session, operation))
+        {
+            return self.remove(operation, NnrpHandleKind::Operation);
+        }
+        if !self.terminal_operation_replies.contains(&operation) {
+            self.terminal_operation_replies.push(operation);
+        }
+        Ok(())
+    }
+
+    #[cfg(not(test))]
+    fn terminal_operation_reply_recorded(&self, operation: NnrpHandle) -> bool {
+        self.terminal_operation_replies
+            .contains(&operation.normalized())
     }
 
     fn get_mut(
@@ -920,6 +997,10 @@ impl NnrpFfiHandleStore {
         for session in &sessions {
             self.entries.remove(&(session.kind, session.id));
         }
+        self.deferred_operation_releases
+            .retain(|(session, _)| !sessions.contains(session));
+        self.terminal_operation_replies
+            .retain(|operation| !operations.contains(operation));
         self.entries.retain(|_, entry| match &entry.resource {
             NnrpFfiResource::CacheLease { owner, .. } => {
                 *owner != connection
@@ -970,6 +1051,10 @@ impl NnrpFfiHandleStore {
         for operation in &operations {
             self.entries.remove(&(operation.kind, operation.id));
         }
+        self.deferred_operation_releases
+            .retain(|(owner, _)| *owner != session);
+        self.terminal_operation_replies
+            .retain(|operation| !operations.contains(operation));
         self.entries.retain(|_, entry| match &entry.resource {
             NnrpFfiResource::CacheLease { owner, .. } => {
                 *owner != session && !operations.iter().any(|operation| operation == owner)
@@ -5182,6 +5267,7 @@ unsafe fn role_server_await_events_impl(
     if let Err(status) = role_session_connection(request.scope, NnrpFfiConnectionRole::Server) {
         return status;
     }
+    handle_store().release_deferred_operations(request.scope);
 
     for index in 0..limit {
         let timeout_ms = if index == 0 { request.timeout_ms } else { 1 };
@@ -5333,7 +5419,7 @@ fn role_lifecycle_event(
     };
     let operation = find_operation_handle(&store, scope, Some(event.operation_id), None)
         .unwrap_or(NnrpHandle::invalid());
-    let (frame_id, release_operation) = if operation.kind == NnrpHandleKind::Operation as u32 {
+    let (frame_id, server_operation) = if operation.kind == NnrpHandleKind::Operation as u32 {
         match store.get(operation, NnrpHandleKind::Operation) {
             Ok(NnrpFfiResource::Operation {
                 frame_id,
@@ -5345,12 +5431,14 @@ fn role_lifecycle_event(
     } else {
         (0, false)
     };
-    if release_operation {
+    let event_operation = if server_operation && store.terminal_operation_reply_recorded(operation)
+    {
         store.remove(operation, NnrpHandleKind::Operation)?;
-    }
-    let event_operation = if release_operation {
         NnrpHandle::invalid()
     } else {
+        if server_operation {
+            store.defer_operation_release(scope, operation);
+        }
         operation
     };
     let (payload_owner, payload) = insert_owned_buffer(&mut store, vec![event.state as u8])?;
@@ -7160,7 +7248,10 @@ unsafe fn nnrp_server_send_result_impl(request: NnrpServerSendResultRequest) -> 
     ) {
         return status;
     }
-    NnrpFfiStatus::ok()
+    handle_store()
+        .record_terminal_operation_reply(session_handle, request.operation)
+        .map(|_| NnrpFfiStatus::ok())
+        .unwrap_or_else(|status| status)
 }
 
 #[no_mangle]
@@ -7605,7 +7696,7 @@ unsafe fn nnrp_runtime_frame_send_role_impl(
     message_type: MessageType,
 ) -> NnrpFfiStatus {
     let payload = ffi_read_slice(request.payload).to_vec();
-    let (role, runtime, server_operation) = {
+    let (role, runtime, server_operation, session_handle) = {
         let store = handle_store();
         let (connection, session, operation_handle) =
             match event_scope_for_handle(&store, request.handle) {
@@ -7646,10 +7737,10 @@ unsafe fn nnrp_runtime_frame_send_role_impl(
         } else {
             None
         };
-        (role, runtime, server_operation)
+        (role, runtime, server_operation, session)
     };
 
-    match (role, runtime) {
+    let status = match (role, runtime) {
         (NnrpFfiConnectionRole::Client, NnrpFfiRoleSession::Client(session)) => {
             transport::run_role_async(
                 send_client_runtime_frame(session, message_type, request.frame_id, payload),
@@ -7673,7 +7764,18 @@ unsafe fn nnrp_runtime_frame_send_role_impl(
             .unwrap_or_else(|status| status)
         }
         _ => NnrpFfiStatus::invalid_handle(NnrpHandleKind::Session as u32),
+    };
+    if status.status_code == NnrpFfiStatusCode::Ok as u32
+        && role == NnrpFfiConnectionRole::Server
+        && message_type == MessageType::ResultDropReason
+        && request.handle.kind == NnrpHandleKind::Operation as u32
+    {
+        return handle_store()
+            .record_terminal_operation_reply(session_handle, request.handle)
+            .map(|_| NnrpFfiStatus::ok())
+            .unwrap_or_else(|release_status| release_status);
     }
+    status
 }
 
 #[cfg(not(test))]

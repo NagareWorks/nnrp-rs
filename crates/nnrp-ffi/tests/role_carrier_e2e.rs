@@ -1861,18 +1861,47 @@ unsafe fn assert_role_handshake(
             MessageType::Supersede => OperationState::Superseded,
             _ => unreachable!("terminal control list is closed"),
         };
-        assert_lifecycle_event(
-            poll_server_event(server_session),
-            operation_id,
-            frame_id,
-            state,
-        );
+        let server_lifecycle = poll_server_event(server_session);
+        assert_lifecycle_event(server_lifecycle, operation_id, frame_id, state);
+        if matches!(message_type, MessageType::Cancel | MessageType::Abort) {
+            assert_eq!(server_lifecycle.operation, server_control_operation);
+        }
         assert_lifecycle_event(
             poll_client_event(client_session),
             operation_id,
             frame_id,
             state,
         );
+        if matches!(message_type, MessageType::Cancel | MessageType::Abort) {
+            let drop_reason = drop_reason_payload(operation_id, RuntimeRole::Server);
+            let server_control_operation = NnrpHandle {
+                flags: 0xA5A5,
+                ..server_control_operation
+            };
+            send_runtime_frame(
+                server_control_operation,
+                MessageType::ResultDropReason,
+                frame_id,
+                &drop_reason,
+            );
+            assert_runtime_event(
+                poll_client_event(client_session),
+                MessageType::ResultDropReason,
+                Some(client_control_operation),
+                &drop_reason,
+            );
+            assert_eq!(
+                nnrp_runtime_frame_send(NnrpRuntimeFrameSendRequest {
+                    handle: server_control_operation,
+                    message_type: MessageType::ResultDropReason as u32,
+                    frame_id,
+                    payload: view(&drop_reason),
+                })
+                .status_code,
+                nnrp_ffi::NnrpFfiStatusCode::InvalidHandle as u32,
+                "successful terminal drop must release the server operation handle"
+            );
+        }
     }
 
     let frame_cancel_id = 59;
