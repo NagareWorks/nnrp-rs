@@ -39,8 +39,9 @@ use nnrp_core::{
 #[cfg(not(test))]
 use nnrp_runtime::{
     NnrpClient, NnrpClientConfig, NnrpClientSession, NnrpRuntimeEvent, NnrpServer,
-    NnrpServerConfig, NnrpServerPolicy, NnrpServerPolicyDecision as RuntimeServerPolicyDecision,
-    NnrpServerSession, RuntimeTransportKind,
+    NnrpServerConfig, NnrpServerEvent, NnrpServerPolicy,
+    NnrpServerPolicyDecision as RuntimeServerPolicyDecision, NnrpServerSession,
+    OperationLifecycleEvent, RuntimeTransportKind,
 };
 use nnrp_runtime::{NnrpSessionRecoveryTicket, RuntimeError, RuntimeFrameHeader};
 #[cfg(not(test))]
@@ -2229,6 +2230,7 @@ pub enum NnrpEventKind {
     ResultHint = 11,
     PartialResult = 12,
     RuntimeFrame = 13,
+    OperationLifecycle = 14,
 }
 
 #[repr(C)]
@@ -5200,8 +5202,15 @@ unsafe fn role_server_await_events_impl(
 fn server_role_event(
     scope: NnrpHandle,
     connection: NnrpHandle,
-    event: NnrpRuntimeEvent,
+    event: NnrpServerEvent,
 ) -> Result<NnrpEvent, NnrpFfiStatus> {
+    let event = match event {
+        NnrpServerEvent::Submit(operation) => operation.into_submit(),
+        NnrpServerEvent::Runtime(event) => event,
+        NnrpServerEvent::Lifecycle(event) => {
+            return server_lifecycle_event(scope, connection, event);
+        }
+    };
     let header = event.header;
     let operation_id = event.metadata.operation_id();
     let create_operation = header.message_type == MessageType::FrameSubmit;
@@ -5265,6 +5274,50 @@ fn server_role_event(
         payload_owner,
         payload: payload_view,
         diagnostic,
+    })
+}
+
+#[cfg(not(test))]
+fn server_lifecycle_event(
+    scope: NnrpHandle,
+    connection: NnrpHandle,
+    event: OperationLifecycleEvent,
+) -> Result<NnrpEvent, NnrpFfiStatus> {
+    let mut store = handle_store();
+    let session_id = match store.get(scope, NnrpHandleKind::Session)? {
+        NnrpFfiResource::Session { session_id, .. } => *session_id,
+        _ => {
+            return Err(NnrpFfiStatus::invalid_handle(
+                NnrpHandleKind::Session as u32,
+            ))
+        }
+    };
+    let operation = find_operation_handle(&store, scope, Some(event.operation_id), None)
+        .unwrap_or(NnrpHandle::invalid());
+    let frame_id = if operation.kind == NnrpHandleKind::Operation as u32 {
+        match store.get(operation, NnrpHandleKind::Operation) {
+            Ok(NnrpFfiResource::Operation { frame_id, .. }) => *frame_id,
+            _ => 0,
+        }
+    } else {
+        0
+    };
+    let (payload_owner, payload) = insert_owned_buffer(&mut store, vec![event.state as u8])?;
+    Ok(NnrpEvent {
+        kind: NnrpEventKind::OperationLifecycle as u32,
+        header: NnrpRuntimeFrameHeader::absent(),
+        connection,
+        session: scope,
+        operation,
+        payload_owner,
+        payload,
+        diagnostic: NnrpFfiDiagnostic {
+            status: NnrpFfiStatus::ok(),
+            related_connection_id: connection.id,
+            related_session_id: session_id,
+            related_operation_id: event.operation_id,
+            related_frame_id: frame_id,
+        },
     })
 }
 

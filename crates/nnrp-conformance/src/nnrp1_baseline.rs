@@ -2,16 +2,19 @@ use nnrp_core::{
     BackpressureLevel, BodyRegionPrelude, CacheAckMetadata, CacheInvalidateMetadata,
     CacheObjectKind, CachePutMetadata, CommonHeader, FlowScopeKind, FlowUpdateMetadata,
     FlowUpdateReason, FrameSubmitMetadata, InputProfile, MessageType, ObjectReferenceBlock,
-    ObjectReferenceRegion, PayloadKindBitmap, ResultClass, ResultHintMetadata, ResultPushMetadata,
-    SessionPatchAckMetadata, SubmitMode, TileIndexMode, TransportId, TransportProbeAckMetadata,
-    TransportProbeMetadata, TypedPayloadDescriptor, TypedPayloadRegion, CACHE_ACK_METADATA_LEN,
-    CACHE_INVALIDATE_METADATA_LEN, CACHE_PUT_METADATA_LEN, CLIENT_HELLO_METADATA_LEN,
-    FLOW_UPDATE_FLAG_CREDIT_VALID, FLOW_UPDATE_FLAG_RETRY_AFTER_VALID, FRAME_SUBMIT_METADATA_LEN,
-    OBJECT_REFERENCE_BLOCK_LEN, PAYLOAD_KIND_KNOWN_MASK, RESULT_PUSH_METADATA_LEN,
-    SESSION_PATCH_ACK_METADATA_LEN, STANDARD_PROFILE_TOKEN,
+    ObjectReferenceRegion, OperationState, PayloadKindBitmap, ResultClass, ResultHintMetadata,
+    ResultPushMetadata, SessionPatchAckMetadata, SubmitMode, TileIndexMode, TransportId,
+    TransportProbeAckMetadata, TransportProbeMetadata, TypedPayloadDescriptor, TypedPayloadRegion,
+    CACHE_ACK_METADATA_LEN, CACHE_INVALIDATE_METADATA_LEN, CACHE_PUT_METADATA_LEN,
+    CLIENT_HELLO_METADATA_LEN, FLOW_UPDATE_FLAG_CREDIT_VALID, FLOW_UPDATE_FLAG_RETRY_AFTER_VALID,
+    FRAME_SUBMIT_METADATA_LEN, OBJECT_REFERENCE_BLOCK_LEN, PAYLOAD_KIND_KNOWN_MASK,
+    RESULT_PUSH_METADATA_LEN, SESSION_PATCH_ACK_METADATA_LEN, STANDARD_PROFILE_TOKEN,
 };
 use nnrp_core::{ClientHelloMetadata, ResultHintReason, TransportPolicy};
-use nnrp_runtime::{NnrpClient, NnrpClientConfig, NnrpServerConfig, RuntimeError};
+use nnrp_runtime::{
+    NnrpClient, NnrpClientConfig, NnrpServerConfig, NnrpServerEvent, NnrpServerSession,
+    RuntimeError,
+};
 use nnrp_transport_provider::{
     select_transport_with_probe, summarize_provider_probe, ProbeSample,
     TransportCandidateReadiness, TransportProbeObservation, TransportProviderDescriptor,
@@ -25,6 +28,22 @@ struct Preview3FrameSubmitMetadata {
     bytes: [u8; FRAME_SUBMIT_METADATA_LEN],
     submit_mode: SubmitMode,
     object_ref_mask: u32,
+}
+
+async fn expect_completed_lifecycle(
+    session: &mut NnrpServerSession,
+    operation_id: u64,
+) -> Result<(), RuntimeError> {
+    match session.await_event().await? {
+        NnrpServerEvent::Lifecycle(event)
+            if event.operation_id == operation_id && event.state == OperationState::Completed =>
+        {
+            Ok(())
+        }
+        _ => Err(RuntimeError::UnexpectedMessage(
+            "baseline server expected completed operation lifecycle evidence",
+        )),
+    }
 }
 
 impl Preview3FrameSubmitMetadata {
@@ -528,6 +547,7 @@ async fn tcp_session_smoke() -> Result<(), RuntimeError> {
         session
             .send_result(submit.frame_id, token_result(), b"delta".to_vec())
             .await?;
+        expect_completed_lifecycle(&mut session, submit.operation_id).await?;
         let close = session.receive_close().await?;
         session.ack_close(&close).await?;
         session.close().await
@@ -568,6 +588,7 @@ async fn quic_session_smoke() -> Result<(), RuntimeError> {
         session
             .send_result(submit.frame_id, token_result(), b"delta".to_vec())
             .await?;
+        expect_completed_lifecycle(&mut session, submit.operation_id).await?;
         let close = session.receive_close().await?;
         session.ack_close(&close).await?;
         session.close().await

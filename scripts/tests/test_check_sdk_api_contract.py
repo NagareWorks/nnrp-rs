@@ -36,11 +36,31 @@ def frozen_contract():
                     "superseded": "dropped",
                     "failed": "error",
                 },
+                "nativeEventProjection": copy.deepcopy(
+                    checker.EXPECTED_NATIVE_LIFECYCLE_PROJECTION
+                ),
             },
             "TerminalEvent": {
                 "representation": "tagged-union",
                 "variants": ["runtime", "lifecycle"],
                 "variantTypes": {
+                    "runtime": "RuntimeEvent",
+                    "lifecycle": "OperationLifecycleEvent",
+                },
+            },
+            "ServerOperation": {
+                "fields": [
+                    {"name": "operation_id", "type": "u64", "required": True},
+                    {"name": "frame_id", "type": "u32", "required": True},
+                    {"name": "submit", "type": "RuntimeEvent", "required": True},
+                ]
+            },
+            "ServerEvent": {
+                "fields": [],
+                "representation": "tagged-union",
+                "variants": ["submit", "runtime", "lifecycle"],
+                "variantTypes": {
+                    "submit": "ServerOperation",
                     "runtime": "RuntimeEvent",
                     "lifecycle": "OperationLifecycleEvent",
                 },
@@ -129,6 +149,20 @@ def frozen_contract():
         "languageProjections": {
             "rust": copy.deepcopy(checker.EXPECTED_RUST_PROJECTIONS),
         },
+        "roleSurfaces": {
+            "serverEventPump": {
+                "canonicalOperation": "server_session.next_event",
+                "submitConvenience": "server_session.receive_submit",
+            }
+        },
+        "roleOperations": {
+            "server_session.next_event": {"returns": "ServerEvent"},
+            "server_session.receive_submit": {
+                "returns": "ServerOperation",
+                "selective": True,
+                "retainsSkippedEvents": True,
+            },
+        },
     }
 
 
@@ -155,6 +189,19 @@ class SdkApiContractTests(unittest.TestCase):
         contract = frozen_contract()
         contract["types"]["NnrpResult"]["fields"][2]["type"] = "RuntimeEvent"
         with self.assertRaisesRegex(SystemExit, "NnrpResult field contract drifted"):
+            self.check(contract)
+
+    def test_rejects_server_event_or_selective_receive_drift(self):
+        contract = frozen_contract()
+        contract["types"]["ServerEvent"]["variants"] = ["runtime"]
+        with self.assertRaisesRegex(SystemExit, "ServerEvent variants drifted"):
+            self.check(contract)
+
+        contract = frozen_contract()
+        contract["roleOperations"]["server_session.receive_submit"][
+            "retainsSkippedEvents"
+        ] = False
+        with self.assertRaisesRegex(SystemExit, "selective submit contract drifted"):
             self.check(contract)
 
     def test_rejects_malformed_type_fields_without_a_traceback(self):
@@ -193,6 +240,8 @@ class SdkApiContractTests(unittest.TestCase):
             "TerminalEvent",
             "NnrpResult",
             "RuntimeEventMetadata",
+            "ServerEvent",
+            "ServerOperation",
             "SessionRecoveryTicket",
         ):
             contract["types"][type_name] = ["invalid"]
@@ -209,6 +258,16 @@ class SdkApiContractTests(unittest.TestCase):
         ] = 24
         with self.assertRaisesRegex(
             SystemExit, "SessionRecoveryTicket opaque encoding drifted"
+        ):
+            self.check(contract)
+
+    def test_rejects_native_lifecycle_projection_drift(self):
+        contract = frozen_contract()
+        contract["types"]["OperationLifecycleEvent"]["nativeEventProjection"][
+            "eventKindCode"
+        ] = 13
+        with self.assertRaisesRegex(
+            SystemExit, "OperationLifecycleEvent native projection drifted"
         ):
             self.check(contract)
 

@@ -7,13 +7,14 @@ use std::{
 use nnrp_core::{
     CacheMissMetadata, CacheMissReason, CacheReferenceMetadata, CacheReuseScope,
     FrameSubmitMetadata, InputProfile, MemoryLocationHint, ObjectDescriptorMetadata,
-    ObjectReferenceMetadata, ObjectReleaseMetadata, ObjectReleaseReason, OwnershipHint,
-    PartialResultMetadata, PayloadKindBitmap, PressureMetadata, ProgressMetadata, ResultClass,
-    ResultPushMetadata, RuntimeObjectKind, RuntimeRole, SchedulingMetadata, SubmitMode,
-    TileIndexMode, STANDARD_PROFILE_TOKEN,
+    ObjectReferenceMetadata, ObjectReleaseMetadata, ObjectReleaseReason, OperationState,
+    OwnershipHint, PartialResultMetadata, PayloadKindBitmap, PressureMetadata, ProgressMetadata,
+    ResultClass, ResultPushMetadata, RuntimeObjectKind, RuntimeRole, SchedulingMetadata,
+    SubmitMode, TileIndexMode, STANDARD_PROFILE_TOKEN,
 };
 use nnrp_runtime::{
-    NnrpClient, NnrpClientConfig, NnrpRuntimeEventTail, NnrpServerConfig, RuntimeError,
+    NnrpClient, NnrpClientConfig, NnrpRuntimeEventTail, NnrpServerConfig, NnrpServerEvent,
+    NnrpServerSession, RuntimeError,
 };
 use nnrp_transport_ipc::{IpcEndpoint, IpcProvider};
 use nnrp_transport_websocket::{WebSocketEndpoint, WebSocketProvider};
@@ -24,6 +25,22 @@ struct BenchCase {
     iterations: u64,
     operations: u64,
     elapsed: Duration,
+}
+
+async fn consume_completed_lifecycle(
+    session: &mut NnrpServerSession,
+    operation_id: u64,
+) -> Result<(), RuntimeError> {
+    match session.await_event().await? {
+        NnrpServerEvent::Lifecycle(event)
+            if event.operation_id == operation_id && event.state == OperationState::Completed =>
+        {
+            Ok(())
+        }
+        _ => Err(RuntimeError::UnexpectedMessage(
+            "benchmark server expected completed operation lifecycle evidence",
+        )),
+    }
 }
 
 impl BenchCase {
@@ -282,6 +299,7 @@ async fn bench_ipc_loopback(iterations: u64) -> Result<BenchCase, Box<dyn Error>
             session
                 .send_result(submit.frame_id, token_result(), b"ok".to_vec())
                 .await?;
+            consume_completed_lifecycle(&mut session, submit.operation_id).await?;
         }
         Ok::<(), RuntimeError>(())
     });
@@ -329,6 +347,7 @@ async fn bench_websocket_loopback(iterations: u64) -> Result<BenchCase, Box<dyn 
             session
                 .send_result(submit.frame_id, token_result(), b"ok".to_vec())
                 .await?;
+            consume_completed_lifecycle(&mut session, submit.operation_id).await?;
         }
         Ok::<(), RuntimeError>(())
     });

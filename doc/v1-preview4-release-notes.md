@@ -1,5 +1,16 @@
 # NNRP/1 Preview4 Release Notes
 
+## Unreleased SDK Server Event Alignment
+
+The Rust server role now exposes a closed `NnrpServerEvent` union. `FRAME_SUBMIT` is delivered as
+an `NnrpServerOperation` that owns the complete submit event and reply identity, while other wire
+messages retain `NnrpRuntimeEvent` and local state remains a distinct lifecycle variant.
+
+`NnrpServerSession::await_event` preserves per-session event order. The selective
+`receive_submit` convenience retains every skipped non-submit event for the canonical event pump,
+so control, object, cache, and lifecycle evidence cannot be silently discarded. Native polling
+keeps the existing coarse batch boundary and does not add per-field FFI calls.
+
 ## Browser Connection Multiplexing And Recovery
 
 The browser WASM role boundary now separates a WebSocket-owning client connection from its protocol sessions. One

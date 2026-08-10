@@ -21,6 +21,9 @@ Downstream SDKs should consume Preview4 as a protocol and artifact boundary upda
 - Keep complete NNRP packets as the transport FFI unit; do not introduce per-socket-chunk cross-language calls.
 - Project `NnrpRuntimeEvent` losslessly from native event batches; do not reconstruct missing header fields or expose private role-decoder enums.
 - Keep native events with `header.present == 0` in a separate lifecycle-event type; never manufacture a wire header for them.
+- Expose one closed server event union whose submit variant owns the complete submit event and native reply capability.
+- Make the ordered server event pump canonical; selective submit receive must retain skipped events in the same session queue.
+- Serialize or reject concurrent receive calls so two consumers cannot race one native event source.
 - Reject duplicate transport IDs and duplicate provider IDs during provider registration.
 - Supply exactly one route/security readiness record for every registered provider before selection.
 - Match readiness and aggregate probe observations by the `(transport_id, provider_id)` identity pair; reject duplicate, unmatched, incomplete, or structurally invalid evidence before producing candidate diagnostics.

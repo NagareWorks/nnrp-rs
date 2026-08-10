@@ -30,8 +30,8 @@ pub use route::{
 };
 pub use server::{
     AllowAllServerPolicy, NnrpCancel, NnrpMigration, NnrpPressureUpdate, NnrpRuntimeControl,
-    NnrpSchedulingUpdate, NnrpServer, NnrpServerAcceptOptions, NnrpServerConfig, NnrpServerPolicy,
-    NnrpServerPolicyDecision, NnrpServerSession, NnrpSubmit,
+    NnrpSchedulingUpdate, NnrpServer, NnrpServerAcceptOptions, NnrpServerConfig, NnrpServerEvent,
+    NnrpServerOperation, NnrpServerPolicy, NnrpServerPolicyDecision, NnrpServerSession,
 };
 pub use server_provider::{BoundServerProvider, NnrpServerOptions, NnrpServerProvider};
 pub use submit::{

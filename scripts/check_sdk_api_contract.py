@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 
-EXPECTED_CONTRACT_VERSION = 10
+EXPECTED_CONTRACT_VERSION = 12
 EXPECTED_API_DOMAINS = {
     "submission",
     "runtimeEvents",
@@ -62,6 +62,28 @@ EXPECTED_ROLE_METHOD_MESSAGES = {
     "ping",
     "pong",
 }
+EXPECTED_NATIVE_LIFECYCLE_PROJECTION = {
+    "eventKind": "operation_lifecycle",
+    "eventKindCode": 14,
+    "headerPresent": 0,
+    "payloadBytes": 1,
+    "payloadLayout": [
+        {
+            "name": "state",
+            "type": "OperationState",
+            "wireType": "u8",
+            "offset": 0,
+        }
+    ],
+    "operationIdentity": (
+        "diagnostic.related_operation_id and the operation handle, "
+        "when the handle remains live"
+    ),
+    "ownership": (
+        "the one-byte state payload follows the same payload_owner lifetime as "
+        "wire-event payloads"
+    ),
+}
 EXPECTED_RUST_PROJECTIONS = {
     "submitRequest": "nnrp_runtime::NnrpSubmitRequest",
     "submitHeaderContext": "nnrp_runtime::NnrpSubmitHeaderContext",
@@ -72,6 +94,8 @@ EXPECTED_RUST_PROJECTIONS = {
     ],
     "runtimeFrameHeader": "nnrp_runtime::RuntimeFrameHeader",
     "runtimeEvent": "nnrp_runtime::NnrpRuntimeEvent",
+    "serverEvent": "nnrp_runtime::NnrpServerEvent",
+    "serverOperation": "nnrp_runtime::NnrpServerOperation",
     "operationLifecycleEvent": "nnrp_runtime::OperationLifecycleEvent",
     "terminalEvent": "nnrp_runtime::NnrpTerminalEvent",
     "result": "nnrp_runtime::NnrpResult",
@@ -165,6 +189,8 @@ def check_contract(contract_path: Path) -> None:
         "TerminalEvent",
         "NnrpResult",
         "RuntimeEventMetadata",
+        "ServerEvent",
+        "ServerOperation",
         "SessionRecoveryTicket",
     )
     require(
@@ -193,6 +219,11 @@ def check_contract(contract_path: Path) -> None:
         },
         "OperationLifecycleEvent terminal mapping drifted",
     )
+    require(
+        lifecycle.get("nativeEventProjection")
+        == EXPECTED_NATIVE_LIFECYCLE_PROJECTION,
+        "OperationLifecycleEvent native projection drifted",
+    )
 
     terminal = type_contracts["TerminalEvent"]
     require(
@@ -207,6 +238,36 @@ def check_contract(contract_path: Path) -> None:
         terminal.get("variantTypes")
         == {"runtime": "RuntimeEvent", "lifecycle": "OperationLifecycleEvent"},
         "TerminalEvent variant types drifted",
+    )
+
+    server_operation = type_contracts["ServerOperation"]
+    require(
+        field_shape(server_operation)
+        == [
+            ("operation_id", "u64", True),
+            ("frame_id", "u32", True),
+            ("submit", "RuntimeEvent", True),
+        ],
+        "ServerOperation field contract drifted",
+    )
+
+    server_event = type_contracts["ServerEvent"]
+    require(
+        server_event.get("representation") == "tagged-union",
+        "ServerEvent is no longer a tagged union",
+    )
+    require(
+        server_event.get("variants") == ["submit", "runtime", "lifecycle"],
+        "ServerEvent variants drifted",
+    )
+    require(
+        server_event.get("variantTypes")
+        == {
+            "submit": "ServerOperation",
+            "runtime": "RuntimeEvent",
+            "lifecycle": "OperationLifecycleEvent",
+        },
+        "ServerEvent variant types drifted",
     )
 
     result = type_contracts["NnrpResult"]
@@ -282,6 +343,40 @@ def check_contract(contract_path: Path) -> None:
         type_contracts["RuntimeEventMetadata"].get("variants")
         == EXPECTED_RUNTIME_EVENT_METADATA_VARIANTS,
         "RuntimeEventMetadata closed variant set drifted",
+    )
+    role_surfaces = require_mapping(
+        contract.get("roleSurfaces"), "SDK role surfaces must be an object"
+    )
+    server_event_pump = require_mapping(
+        role_surfaces.get("serverEventPump"),
+        "server event pump contract must be an object",
+    )
+    require(
+        server_event_pump.get("canonicalOperation") == "server_session.next_event"
+        and server_event_pump.get("submitConvenience")
+        == "server_session.receive_submit",
+        "server event-pump operation names drifted",
+    )
+    role_operations = require_mapping(
+        contract.get("roleOperations"), "SDK role operations must be an object"
+    )
+    require(
+        require_mapping(
+            role_operations.get("server_session.next_event"),
+            "server next-event operation must be an object",
+        ).get("returns")
+        == "ServerEvent",
+        "server next-event return type drifted",
+    )
+    receive_submit = require_mapping(
+        role_operations.get("server_session.receive_submit"),
+        "server receive-submit operation must be an object",
+    )
+    require(
+        receive_submit.get("returns") == "ServerOperation"
+        and receive_submit.get("selective") is True
+        and receive_submit.get("retainsSkippedEvents") is True,
+        "server selective submit contract drifted",
     )
     role_method_messages = require_list(
         contract.get("roleMethodMessages"),

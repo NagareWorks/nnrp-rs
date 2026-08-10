@@ -8,7 +8,7 @@ use nnrp_core::{
     SupersedeMetadata, TraceContextMetadata,
 };
 
-use crate::{client::NnrpClientEvent, server::NnrpServerEvent, RuntimeFrameHeader};
+use crate::{client::NnrpClientEvent, server::DecodedServerEvent, RuntimeFrameHeader};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NnrpRuntimeEventMetadata {
@@ -287,84 +287,84 @@ impl NnrpRuntimeEvent {
         }
     }
 
-    pub(crate) fn from_server(header: RuntimeFrameHeader, event: NnrpServerEvent) -> Self {
+    pub(crate) fn from_server(header: RuntimeFrameHeader, event: DecodedServerEvent) -> Self {
         let (metadata, tail) = match event {
-            NnrpServerEvent::Submit(submit) => (
+            DecodedServerEvent::Submit(submit) => (
                 NnrpRuntimeEventMetadata::FrameSubmit(submit.metadata),
                 NnrpRuntimeEventTail::Body(submit.body),
             ),
-            NnrpServerEvent::FrameCancel(_) => {
+            DecodedServerEvent::FrameCancel(_) => {
                 (NnrpRuntimeEventMetadata::None, NnrpRuntimeEventTail::None)
             }
-            NnrpServerEvent::PartialResult { metadata, body } => (
+            DecodedServerEvent::PartialResult { metadata, body } => (
                 NnrpRuntimeEventMetadata::PartialResult(metadata),
                 NnrpRuntimeEventTail::Body(body),
             ),
-            NnrpServerEvent::Progress { metadata, body } => (
+            DecodedServerEvent::Progress { metadata, body } => (
                 NnrpRuntimeEventMetadata::Progress(metadata),
                 NnrpRuntimeEventTail::Body(body),
             ),
-            NnrpServerEvent::ResultDropReason { metadata, body } => (
+            DecodedServerEvent::ResultDropReason { metadata, body } => (
                 NnrpRuntimeEventMetadata::ResultDropReason(metadata),
                 NnrpRuntimeEventTail::Diagnostic(body),
             ),
-            NnrpServerEvent::Control(control) => (
+            DecodedServerEvent::Control(control) => (
                 NnrpRuntimeEventMetadata::ControlRequest(control.metadata),
                 NnrpRuntimeEventTail::Diagnostic(control.body),
             ),
-            NnrpServerEvent::Scheduling(update) => (
+            DecodedServerEvent::Scheduling(update) => (
                 NnrpRuntimeEventMetadata::Scheduling(update.metadata),
                 NnrpRuntimeEventTail::None,
             ),
-            NnrpServerEvent::Supersede { metadata, body } => (
+            DecodedServerEvent::Supersede { metadata, body } => (
                 NnrpRuntimeEventMetadata::Supersede(metadata),
                 NnrpRuntimeEventTail::Diagnostic(body),
             ),
-            NnrpServerEvent::Budget(metadata) => (
+            DecodedServerEvent::Budget(metadata) => (
                 NnrpRuntimeEventMetadata::Budget(metadata),
                 NnrpRuntimeEventTail::None,
             ),
-            NnrpServerEvent::FlowUpdate(metadata) => (
+            DecodedServerEvent::FlowUpdate(metadata) => (
                 NnrpRuntimeEventMetadata::FlowUpdate(metadata),
                 NnrpRuntimeEventTail::None,
             ),
-            NnrpServerEvent::Pressure(update) => (
+            DecodedServerEvent::Pressure(update) => (
                 NnrpRuntimeEventMetadata::Pressure(update.metadata),
                 NnrpRuntimeEventTail::None,
             ),
-            NnrpServerEvent::Capability { metadata, body, .. } => (
+            DecodedServerEvent::Capability { metadata, body, .. } => (
                 NnrpRuntimeEventMetadata::Capability(metadata),
                 NnrpRuntimeEventTail::Body(body),
             ),
-            NnrpServerEvent::RouteHint { metadata, body, .. } => (
+            DecodedServerEvent::RouteHint { metadata, body, .. } => (
                 NnrpRuntimeEventMetadata::RouteHint(metadata),
                 NnrpRuntimeEventTail::Body(body),
             ),
-            NnrpServerEvent::TraceContext { metadata, body, .. } => (
+            DecodedServerEvent::TraceContext { metadata, body, .. } => (
                 NnrpRuntimeEventMetadata::TraceContext(metadata),
                 NnrpRuntimeEventTail::Body(body),
             ),
-            NnrpServerEvent::RecoverableError { metadata, body } => (
+            DecodedServerEvent::RecoverableError { metadata, body } => (
                 NnrpRuntimeEventMetadata::RecoverableError(metadata),
                 NnrpRuntimeEventTail::Diagnostic(body),
             ),
-            NnrpServerEvent::RetryAfter { metadata, body } => (
+            DecodedServerEvent::RetryAfter { metadata, body } => (
                 NnrpRuntimeEventMetadata::RetryAfter(metadata),
                 NnrpRuntimeEventTail::Diagnostic(body),
             ),
-            NnrpServerEvent::ObjectDeclare { metadata, body } => (
+            DecodedServerEvent::ObjectDeclare { metadata, body } => (
                 NnrpRuntimeEventMetadata::ObjectDescriptor(metadata),
                 NnrpRuntimeEventTail::Body(body),
             ),
-            NnrpServerEvent::ObjectRef { metadata, body } => (
+            DecodedServerEvent::ObjectRef { metadata, body } => (
                 NnrpRuntimeEventMetadata::ObjectReference(metadata),
                 NnrpRuntimeEventTail::Body(body),
             ),
-            NnrpServerEvent::ObjectRelease { metadata, body } => (
+            DecodedServerEvent::ObjectRelease { metadata, body } => (
                 NnrpRuntimeEventMetadata::ObjectRelease(metadata),
                 NnrpRuntimeEventTail::Diagnostic(body),
             ),
-            NnrpServerEvent::ObjectDelta {
+            DecodedServerEvent::ObjectDelta {
                 metadata, mut body, ..
             } => {
                 let delta = body.split_off(metadata.metadata_bytes as usize);
@@ -376,19 +376,19 @@ impl NnrpRuntimeEvent {
                     },
                 )
             }
-            NnrpServerEvent::CacheReference { metadata, body } => (
+            DecodedServerEvent::CacheReference { metadata, body } => (
                 NnrpRuntimeEventMetadata::CacheReference(metadata),
                 NnrpRuntimeEventTail::Body(body),
             ),
-            NnrpServerEvent::CacheMiss { metadata, body } => (
+            DecodedServerEvent::CacheMiss { metadata, body } => (
                 NnrpRuntimeEventMetadata::CacheMiss(metadata),
                 NnrpRuntimeEventTail::Diagnostic(body),
             ),
-            NnrpServerEvent::CacheInvalidate(metadata) => (
+            DecodedServerEvent::CacheInvalidate(metadata) => (
                 NnrpRuntimeEventMetadata::CacheInvalidate(metadata),
                 NnrpRuntimeEventTail::None,
             ),
-            NnrpServerEvent::Close(metadata) => (
+            DecodedServerEvent::Close(metadata) => (
                 NnrpRuntimeEventMetadata::SessionClose(metadata),
                 NnrpRuntimeEventTail::None,
             ),

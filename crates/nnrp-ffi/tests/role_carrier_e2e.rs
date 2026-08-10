@@ -11,13 +11,14 @@ use nnrp_core::{
     CapabilityMetadata, ControlRequestMetadata, ErrorScope, FlowScopeKind, FlowUpdateMetadata,
     FlowUpdateReason, FrameSubmitMetadata, InputProfile, MemoryLocationHint, MessageType,
     ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata, ObjectReleaseMetadata,
-    ObjectReleaseReason, OwnershipHint, PartialResultMetadata, PayloadKindBitmap, PressureMetadata,
-    ProgressMetadata, RecoverableErrorMetadata, ResultClass, ResultDropReasonMetadata,
-    ResultHintBudgetPolicy, ResultHintCongestionState, ResultHintMetadata, ResultHintReason,
-    ResultPushMetadata, RetryAfterMetadata, RouteHintMetadata, RuntimeObjectKind, RuntimeRole,
-    SchedulingMetadata, SessionOpenMetadata, SessionPriorityClass, SubmitMode, SupersedeMetadata,
-    TileIndexMode, TraceContextMetadata, TransportId, FLOW_UPDATE_FLAG_CREDIT_VALID, PROFILE_TOKEN,
-    SESSION_FLAG_ALLOW_RESUME, TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
+    ObjectReleaseReason, OperationState, OwnershipHint, PartialResultMetadata, PayloadKindBitmap,
+    PressureMetadata, ProgressMetadata, RecoverableErrorMetadata, ResultClass,
+    ResultDropReasonMetadata, ResultHintBudgetPolicy, ResultHintCongestionState,
+    ResultHintMetadata, ResultHintReason, ResultPushMetadata, RetryAfterMetadata,
+    RouteHintMetadata, RuntimeObjectKind, RuntimeRole, SchedulingMetadata, SessionOpenMetadata,
+    SessionPriorityClass, SubmitMode, SupersedeMetadata, TileIndexMode, TraceContextMetadata,
+    TransportId, FLOW_UPDATE_FLAG_CREDIT_VALID, PROFILE_TOKEN, SESSION_FLAG_ALLOW_RESUME,
+    TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
 };
 use nnrp_ffi::{
     nnrp_buffer_release, nnrp_client_await_event, nnrp_client_await_events, nnrp_client_cancel,
@@ -1684,6 +1685,27 @@ unsafe fn assert_role_handshake(
             operation: server_event.operation,
             payload: view(&result_payload),
         }),
+        NnrpFfiStatus::ok()
+    );
+
+    let lifecycle_event = poll_server_event(server_session);
+    assert_eq!(
+        lifecycle_event.kind,
+        NnrpEventKind::OperationLifecycle as u32
+    );
+    assert_eq!(lifecycle_event.header.present, 0);
+    assert_eq!(lifecycle_event.operation, NnrpHandle::invalid());
+    assert_eq!(
+        lifecycle_event.diagnostic.related_operation_id,
+        submit_request.operation_id
+    );
+    assert_eq!(lifecycle_event.diagnostic.related_frame_id, 0);
+    assert_eq!(
+        slice::from_raw_parts(lifecycle_event.payload.ptr, lifecycle_event.payload.len),
+        [OperationState::Completed as u8]
+    );
+    assert_eq!(
+        nnrp_buffer_release(lifecycle_event.payload_owner),
         NnrpFfiStatus::ok()
     );
 
