@@ -37,9 +37,9 @@ use crate::TcpTransport;
 use crate::{
     client_provider::{connect_client, NnrpClientOptions, NnrpClientProvider},
     multiplex::MultiplexedConnection,
-    BoxedFramedTransport, FramedTransport, NnrpRuntimeEvent, NnrpRuntimeEventMetadata,
-    NnrpRuntimeEventTail, NnrpSubmitRequest, NnrpTerminalEvent, OperationLifecycleEvent,
-    RuntimeError, RuntimeFrameHeader, RuntimePacket, RuntimePressureState,
+    BoxedFramedTransport, FramedTransport, NnrpClientRoleEvent, NnrpRuntimeEvent,
+    NnrpRuntimeEventMetadata, NnrpRuntimeEventTail, NnrpSubmitRequest, NnrpTerminalEvent,
+    OperationLifecycleEvent, RuntimeError, RuntimeFrameHeader, RuntimePacket, RuntimePressureState,
 };
 use futures_util::lock::Mutex as AsyncMutex;
 use nnrp_transport_provider::TransportSelection;
@@ -107,12 +107,14 @@ pub struct NnrpClientSession {
     next_frame_id: u32,
     operation_frames: BTreeMap<u64, u32>,
     frame_operations: BTreeMap<u32, u64>,
+    local_operation_states: BTreeMap<u64, nnrp_core::OperationState>,
     seen_operation_ids: BTreeSet<u64>,
     last_operation_id: u64,
     transport: BoxedFramedTransport,
     lifecycle: ConnectionLifecycle,
     pressure: RuntimePressureState,
     pending_events: VecDeque<(NnrpClientEvent, RuntimePacket)>,
+    pending_role_events: VecDeque<NnrpClientRoleEvent>,
     recovery_ticket: Option<NnrpSessionRecoveryTicket>,
 }
 
@@ -566,12 +568,14 @@ impl NnrpClient {
             next_frame_id: 1,
             operation_frames: BTreeMap::new(),
             frame_operations: BTreeMap::new(),
+            local_operation_states: BTreeMap::new(),
             seen_operation_ids: BTreeSet::new(),
             last_operation_id: 0,
             transport: Box::new(transport),
             lifecycle,
             pressure: RuntimePressureState::default(),
             pending_events: VecDeque::new(),
+            pending_role_events: VecDeque::new(),
             recovery_ticket,
         })
     }
@@ -921,6 +925,14 @@ impl NnrpClientSession {
     }
 
     pub async fn await_result(&mut self) -> Result<NnrpResult, RuntimeError> {
+        if let Some(event) = self.pending_role_events.pop_front() {
+            return match event {
+                NnrpClientRoleEvent::Lifecycle(event) => NnrpResult::from_lifecycle(event),
+                NnrpClientRoleEvent::Runtime(_) => {
+                    unreachable!("client pending role queue contains only local lifecycle events")
+                }
+            };
+        }
         match self.await_client_event_packet().await?.0 {
             NnrpClientEvent::Result(result) => Ok(result),
             _ => Err(RuntimeError::UnexpectedMessage(
@@ -929,8 +941,23 @@ impl NnrpClientSession {
         }
     }
 
-    pub async fn await_event(&mut self) -> Result<NnrpRuntimeEvent, RuntimeError> {
-        Ok(self.await_event_packet().await?.0)
+    pub async fn await_event(&mut self) -> Result<NnrpClientRoleEvent, RuntimeError> {
+        if let Some(event) = self.pending_role_events.pop_front() {
+            return Ok(event);
+        }
+        Ok(NnrpClientRoleEvent::Runtime(
+            self.await_event_packet().await?.0,
+        ))
+    }
+
+    pub fn poll_event(&mut self) -> Result<Option<NnrpClientRoleEvent>, RuntimeError> {
+        if let Some(event) = self.pending_role_events.pop_front() {
+            return Ok(Some(event));
+        }
+        Ok(self
+            .poll_event_packet_batch(1)?
+            .pop()
+            .map(|(event, _)| NnrpClientRoleEvent::Runtime(event)))
     }
 
     pub async fn await_event_packet(
@@ -1113,6 +1140,13 @@ impl NnrpClientSession {
                     "client received runtime control diagnostic body length mismatch",
                 )?;
                 self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
+                self.ensure_pending_role_capacity()?;
+                let state = match packet.header.message_type {
+                    MessageType::Cancel => nnrp_core::OperationState::Cancelled,
+                    MessageType::Abort => nnrp_core::OperationState::Failed,
+                    _ => unreachable!("runtime control message type was matched earlier"),
+                };
+                self.complete_local_operation(metadata.operation_id, state)?;
                 Ok(NnrpClientEvent::Control {
                     message_type: packet.header.message_type,
                     metadata,
@@ -1154,6 +1188,11 @@ impl NnrpClientSession {
                     "client received SUPERSEDE diagnostic body length mismatch",
                 )?;
                 self.require_operation_frame(metadata.old_operation_id, packet.header.frame_id)?;
+                self.ensure_pending_role_capacity()?;
+                self.complete_local_operation(
+                    metadata.old_operation_id,
+                    nnrp_core::OperationState::Superseded,
+                )?;
                 Ok(NnrpClientEvent::Supersede {
                     metadata,
                     body: packet.body,
@@ -1534,6 +1573,7 @@ impl NnrpClientSession {
                     "client terminal event references an unknown frame",
                 ))?;
         self.operation_frames.remove(&operation_id);
+        self.local_operation_states.remove(&operation_id);
         Ok(operation_id)
     }
 
@@ -1541,6 +1581,7 @@ impl NnrpClientSession {
         self.require_operation_frame(operation_id, frame_id)?;
         self.operation_frames.remove(&operation_id);
         self.frame_operations.remove(&frame_id);
+        self.local_operation_states.remove(&operation_id);
         Ok(())
     }
 
@@ -1685,6 +1726,7 @@ impl NnrpClientSession {
             metadata.diagnostic_bytes as usize,
             "client runtime control diagnostic body length mismatch",
         )?;
+        self.ensure_pending_role_capacity()?;
         let mut header = CommonHeader::new(
             message_type,
             CONTROL_REQUEST_METADATA_LEN as u32,
@@ -1698,7 +1740,13 @@ impl NnrpClientSession {
                 metadata.to_bytes()?.to_vec(),
                 diagnostics,
             )?)
-            .await
+            .await?;
+        let state = match message_type {
+            MessageType::Cancel => nnrp_core::OperationState::Cancelled,
+            MessageType::Abort => nnrp_core::OperationState::Failed,
+            _ => unreachable!("validated client control request is cancel or abort"),
+        };
+        self.complete_local_operation(metadata.operation_id, state)
     }
 
     pub async fn update_priority(
@@ -1806,6 +1854,7 @@ impl NnrpClientSession {
             metadata.diagnostic_bytes as usize,
             "client supersede diagnostic body length mismatch",
         )?;
+        self.ensure_pending_role_capacity()?;
         let frame_id = self.correlated_frame_id(metadata.old_operation_id)?;
         self.write_runtime_packet(
             MessageType::Supersede,
@@ -1813,7 +1862,11 @@ impl NnrpClientSession {
             metadata.to_bytes()?.to_vec(),
             diagnostics,
         )
-        .await
+        .await?;
+        self.complete_local_operation(
+            metadata.old_operation_id,
+            nnrp_core::OperationState::Superseded,
+        )
     }
 
     pub async fn update_budget(&mut self, metadata: BudgetMetadata) -> Result<(), RuntimeError> {
@@ -2182,12 +2235,47 @@ impl NnrpClientSession {
     }
 
     pub async fn cancel_frame(&mut self, frame_id: u32) -> Result<(), RuntimeError> {
+        self.ensure_pending_role_capacity()?;
+        let operation_id = self.frame_operations.get(&frame_id).copied().ok_or(
+            RuntimeError::UnexpectedMessage("client frame cancel references an unknown frame"),
+        )?;
         let mut header = CommonHeader::new(MessageType::FrameCancel, 0, 0);
         header.session_id = self.session_id;
         header.frame_id = frame_id;
         self.transport
             .write_packet(&RuntimePacket::new(header, Vec::new(), Vec::new())?)
-            .await
+            .await?;
+        self.complete_local_operation(operation_id, nnrp_core::OperationState::Cancelled)
+    }
+
+    fn complete_local_operation(
+        &mut self,
+        operation_id: u64,
+        state: nnrp_core::OperationState,
+    ) -> Result<(), RuntimeError> {
+        self.correlated_frame_id(operation_id)?;
+        if let Some(current) = self.local_operation_states.get(&operation_id).copied() {
+            return Err(nnrp_core::NnrpError::InvalidOperationTransition {
+                from: current,
+                to: state,
+            }
+            .into());
+        }
+        self.local_operation_states.insert(operation_id, state);
+        self.pending_role_events
+            .push_back(NnrpClientRoleEvent::Lifecycle(
+                OperationLifecycleEvent::new(operation_id, state)?,
+            ));
+        Ok(())
+    }
+
+    fn ensure_pending_role_capacity(&self) -> Result<(), RuntimeError> {
+        if self.pending_role_events.len() >= MAX_PENDING_EVENTS_DURING_SESSION_PATCH {
+            return Err(RuntimeError::UnexpectedMessage(
+                "client local lifecycle event queue exceeded its limit",
+            ));
+        }
+        Ok(())
     }
 
     pub async fn patch_session(

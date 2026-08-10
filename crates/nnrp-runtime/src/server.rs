@@ -1389,11 +1389,15 @@ impl NnrpServerSession {
                     ));
                 }
                 let operation_id = self.operation_id_for_frame(packet.header.frame_id)?;
-                self.operations.cancel(OperationCancelRequest {
+                self.ensure_pending_capacity()?;
+                let cancelled = self.operations.cancel(OperationCancelRequest {
                     session_id: self.session_id,
                     operation_id,
                     cancel_scope: nnrp_core::CancelScope::Operation,
                 })?;
+                for operation_id in cancelled {
+                    self.queue_lifecycle(operation_id, nnrp_core::OperationState::Cancelled)?;
+                }
                 Ok(DecodedServerEvent::FrameCancel(NnrpCancel {
                     frame_id: packet.header.frame_id,
                 }))
@@ -1485,17 +1489,28 @@ impl NnrpServerSession {
                     "server received runtime control diagnostic body length mismatch",
                 )?;
                 self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
-                match packet.header.message_type {
+                self.ensure_pending_capacity()?;
+                let lifecycle_state = match packet.header.message_type {
                     MessageType::Cancel => {
-                        self.operations.cancel(OperationCancelRequest {
+                        let cancelled = self.operations.cancel(OperationCancelRequest {
                             session_id: self.session_id,
                             operation_id: metadata.operation_id,
                             cancel_scope: nnrp_core::CancelScope::Operation,
                         })?;
+                        if cancelled.is_empty() {
+                            return Err(RuntimeError::UnexpectedMessage(
+                                "server cancel did not transition an active operation",
+                            ));
+                        }
+                        nnrp_core::OperationState::Cancelled
                     }
-                    MessageType::Abort => self.operations.abort(metadata.operation_id)?,
+                    MessageType::Abort => {
+                        self.operations.abort(metadata.operation_id)?;
+                        nnrp_core::OperationState::Failed
+                    }
                     _ => unreachable!("runtime control message type was matched earlier"),
-                }
+                };
+                self.queue_lifecycle(metadata.operation_id, lifecycle_state)?;
                 Ok(DecodedServerEvent::Control(NnrpRuntimeControl {
                     message_type: packet.header.message_type,
                     metadata,
@@ -1542,6 +1557,15 @@ impl NnrpServerSession {
                     "server received SUPERSEDE diagnostic body length mismatch",
                 )?;
                 self.require_operation_frame(metadata.old_operation_id, packet.header.frame_id)?;
+                self.ensure_pending_capacity()?;
+                self.operations.transition(
+                    metadata.old_operation_id,
+                    nnrp_core::OperationState::Superseded,
+                )?;
+                self.queue_lifecycle(
+                    metadata.old_operation_id,
+                    nnrp_core::OperationState::Superseded,
+                )?;
                 Ok(DecodedServerEvent::Supersede {
                     metadata,
                     body: packet.body,
@@ -1879,17 +1903,80 @@ impl NnrpServerSession {
         Ok(())
     }
 
+    fn queue_lifecycle(
+        &mut self,
+        operation_id: u64,
+        state: nnrp_core::OperationState,
+    ) -> Result<(), RuntimeError> {
+        self.ensure_pending_capacity()?;
+        self.pending_inputs
+            .push_back(PendingServerInput::Event(NnrpServerEvent::Lifecycle(
+                crate::OperationLifecycleEvent::new(operation_id, state)?,
+            )));
+        Ok(())
+    }
+
+    fn operation_transition_required(
+        &self,
+        operation_id: u64,
+        state: nnrp_core::OperationState,
+    ) -> Result<bool, RuntimeError> {
+        let current = self
+            .operations
+            .operation(operation_id)
+            .ok_or(nnrp_core::NnrpError::UnknownOperation(operation_id))?
+            .state;
+        if current.is_terminal() {
+            return Ok(false);
+        }
+        if !current.can_transition_to(state) {
+            return Err(nnrp_core::NnrpError::InvalidOperationTransition {
+                from: current,
+                to: state,
+            }
+            .into());
+        }
+        Ok(true)
+    }
+
+    fn require_operation_transition(
+        &self,
+        operation_id: u64,
+        state: nnrp_core::OperationState,
+    ) -> Result<(), RuntimeError> {
+        if !self.operation_transition_required(operation_id, state)? {
+            let current = self
+                .operations
+                .operation(operation_id)
+                .expect("operation transition lookup already succeeded")
+                .state;
+            return Err(nnrp_core::NnrpError::InvalidOperationTransition {
+                from: current,
+                to: state,
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    fn take_pending_specialized_input(&mut self) -> Option<PendingServerInput> {
+        let index = self.pending_inputs.iter().position(|input| {
+            !matches!(
+                input,
+                PendingServerInput::Event(NnrpServerEvent::Lifecycle(_))
+            )
+        })?;
+        self.pending_inputs.remove(index)
+    }
+
     async fn receive_runtime_event(
         &mut self,
         expected: MessageType,
         error: &'static str,
     ) -> Result<NnrpRuntimeEvent, RuntimeError> {
-        let input = if self.pending_inputs.is_empty() {
-            self.read_next_input().await?
-        } else {
-            self.pending_inputs
-                .pop_front()
-                .expect("pending input was checked as non-empty")
+        let input = match self.take_pending_specialized_input() {
+            Some(input) => input,
+            None => self.read_next_input().await?,
         };
         match input {
             PendingServerInput::Event(NnrpServerEvent::Runtime(event))
@@ -1909,12 +1996,9 @@ impl NnrpServerSession {
         expected: MessageType,
         error: &'static str,
     ) -> Result<RuntimePacket, RuntimeError> {
-        let input = if self.pending_inputs.is_empty() {
-            self.read_next_input().await?
-        } else {
-            self.pending_inputs
-                .pop_front()
-                .expect("pending input was checked as non-empty")
+        let input = match self.take_pending_specialized_input() {
+            Some(input) => input,
+            None => self.read_next_input().await?,
         };
         match input {
             PendingServerInput::RolePacket(packet) if packet.header.message_type == expected => {
@@ -1938,17 +2022,19 @@ impl NnrpServerSession {
             .operations
             .expire_if_stale(operation_id, current_unix_ms())?
         {
+            self.ensure_pending_capacity()?;
             if schedule.flags & SCHEDULING_FLAG_EMIT_DROP_REASON != 0 {
-                self.send_result_drop_reason(ResultDropReasonMetadata {
+                let metadata = ResultDropReasonMetadata {
                     operation_id,
                     result_sequence: schedule.update_sequence,
                     drop_reason_code: RESULT_DROP_REASON_DEADLINE_EXPIRED,
                     source_role: RuntimeRole::Server as u8,
                     flags: 0,
                     diagnostic_bytes: 0,
-                })
-                .await?;
+                };
+                self.write_result_drop_reason(metadata, Vec::new()).await?;
             }
+            self.queue_lifecycle(operation_id, nnrp_core::OperationState::Superseded)?;
             return Err(nnrp_core::NnrpError::InvalidOperationTransition {
                 from: nnrp_core::OperationState::Superseded,
                 to: nnrp_core::OperationState::Completed,
@@ -1982,7 +2068,12 @@ impl NnrpServerSession {
     }
 
     pub async fn send_result_drop(&mut self, frame_id: u32) -> Result<(), RuntimeError> {
-        self.operation_id_for_frame(frame_id)?;
+        let operation_id = self.operation_id_for_frame(frame_id)?;
+        let transition = self
+            .operation_transition_required(operation_id, nnrp_core::OperationState::Superseded)?;
+        if transition {
+            self.ensure_pending_capacity()?;
+        }
         let mut header = CommonHeader::new(MessageType::ResultDrop, 0, 0);
         header.session_id = self.session_id;
         header.frame_id = frame_id;
@@ -1990,6 +2081,11 @@ impl NnrpServerSession {
         self.transport
             .write_packet(&RuntimePacket::new(header, Vec::new(), Vec::new())?)
             .await?;
+        if transition {
+            self.operations
+                .transition(operation_id, nnrp_core::OperationState::Superseded)?;
+            self.queue_lifecycle(operation_id, nnrp_core::OperationState::Superseded)?;
+        }
         Ok(())
     }
 
@@ -2066,6 +2162,27 @@ impl NnrpServerSession {
             metadata.diagnostic_bytes as usize,
             "server RESULT_DROP_REASON diagnostic body length mismatch",
         )?;
+        let transition = self.operation_transition_required(
+            metadata.operation_id,
+            nnrp_core::OperationState::Superseded,
+        )?;
+        if transition {
+            self.ensure_pending_capacity()?;
+        }
+        self.write_result_drop_reason(metadata, diagnostics).await?;
+        if transition {
+            self.operations
+                .transition(metadata.operation_id, nnrp_core::OperationState::Superseded)?;
+            self.queue_lifecycle(metadata.operation_id, nnrp_core::OperationState::Superseded)?;
+        }
+        Ok(())
+    }
+
+    async fn write_result_drop_reason(
+        &mut self,
+        metadata: ResultDropReasonMetadata,
+        diagnostics: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
         let mut header = CommonHeader::new(
             MessageType::ResultDropReason,
             RESULT_DROP_REASON_METADATA_LEN as u32,
@@ -2095,13 +2212,22 @@ impl NnrpServerSession {
             "server runtime control diagnostic body length mismatch",
         )?;
         let frame_id = self.correlated_frame_id(metadata.operation_id)?;
+        let state = match message_type {
+            MessageType::Cancel => nnrp_core::OperationState::Cancelled,
+            MessageType::Abort => nnrp_core::OperationState::Failed,
+            _ => unreachable!("validated server control request is cancel or abort"),
+        };
+        self.require_operation_transition(metadata.operation_id, state)?;
+        self.ensure_pending_capacity()?;
         self.write_runtime_packet(
             message_type,
             frame_id,
             metadata.to_bytes()?.to_vec(),
             diagnostics,
         )
-        .await
+        .await?;
+        self.operations.transition(metadata.operation_id, state)?;
+        self.queue_lifecycle(metadata.operation_id, state)
     }
 
     pub async fn send_scheduling_update(
@@ -2131,13 +2257,26 @@ impl NnrpServerSession {
             "server SUPERSEDE diagnostic body length mismatch",
         )?;
         let frame_id = self.correlated_frame_id(metadata.old_operation_id)?;
+        self.require_operation_transition(
+            metadata.old_operation_id,
+            nnrp_core::OperationState::Superseded,
+        )?;
+        self.ensure_pending_capacity()?;
         self.write_runtime_packet(
             MessageType::Supersede,
             frame_id,
             metadata.to_bytes()?.to_vec(),
             diagnostics,
         )
-        .await
+        .await?;
+        self.operations.transition(
+            metadata.old_operation_id,
+            nnrp_core::OperationState::Superseded,
+        )?;
+        self.queue_lifecycle(
+            metadata.old_operation_id,
+            nnrp_core::OperationState::Superseded,
+        )
     }
 
     pub async fn update_budget(&mut self, metadata: BudgetMetadata) -> Result<(), RuntimeError> {
@@ -2527,12 +2666,9 @@ impl NnrpServerSession {
     }
 
     pub async fn receive_runtime_control(&mut self) -> Result<NnrpRuntimeControl, RuntimeError> {
-        let input = if self.pending_inputs.is_empty() {
-            self.read_next_input().await?
-        } else {
-            self.pending_inputs
-                .pop_front()
-                .expect("pending input was checked as non-empty")
+        let input = match self.take_pending_specialized_input() {
+            Some(input) => input,
+            None => self.read_next_input().await?,
         };
         let event = match input {
             PendingServerInput::Event(NnrpServerEvent::Runtime(event))
@@ -2569,12 +2705,9 @@ impl NnrpServerSession {
     pub async fn receive_scheduling_update(
         &mut self,
     ) -> Result<NnrpSchedulingUpdate, RuntimeError> {
-        let input = if self.pending_inputs.is_empty() {
-            self.read_next_input().await?
-        } else {
-            self.pending_inputs
-                .pop_front()
-                .expect("pending input was checked as non-empty")
+        let input = match self.take_pending_specialized_input() {
+            Some(input) => input,
+            None => self.read_next_input().await?,
         };
         let event = match input {
             PendingServerInput::Event(NnrpServerEvent::Runtime(event))
@@ -2604,12 +2737,9 @@ impl NnrpServerSession {
     }
 
     pub async fn receive_pressure_update(&mut self) -> Result<NnrpPressureUpdate, RuntimeError> {
-        let input = if self.pending_inputs.is_empty() {
-            self.read_next_input().await?
-        } else {
-            self.pending_inputs
-                .pop_front()
-                .expect("pending input was checked as non-empty")
+        let input = match self.take_pending_specialized_input() {
+            Some(input) => input,
+            None => self.read_next_input().await?,
         };
         let event = match input {
             PendingServerInput::Event(NnrpServerEvent::Runtime(event))

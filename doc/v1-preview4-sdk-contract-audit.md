@@ -12,6 +12,7 @@ surface. The canonical contract is
 | Closed metadata union | `nnrp_runtime::NnrpRuntimeEventMetadata` | client/server loopbacks and external wire conformance |
 | Closed owned tail union | `nnrp_runtime::NnrpRuntimeEventTail` | object delta, diagnostic, partial, result, and cache cases |
 | One role-neutral wire event | `nnrp_runtime::NnrpRuntimeEvent` | client, transport, FFI, and WASM tests |
+| Closed client event union | `nnrp_runtime::NnrpClientRoleEvent` | runtime loopbacks, native FFI projection, and browser WASM export tests |
 | Submit operation ownership | `nnrp_runtime::NnrpServerOperation` | server event-pump and selective-receive tests |
 | Closed server event union | `nnrp_runtime::NnrpServerEvent` | submit, runtime, and lifecycle variant tests |
 | Headerless lifecycle event | `nnrp_runtime::OperationLifecycleEvent` | runtime event-pump and native FFI role-carrier E2E tests |
@@ -23,6 +24,18 @@ Private role decoders remain implementation details. The public server event pum
 role-neutral runtime envelope, and headerless local state uses the lifecycle variant. The FFI
 transports one complete encoded metadata-plus-tail payload and the full header in one coarse poll
 result; it does not add per-field or per-frame boundary calls.
+
+`NnrpClientSession::await_event` returns the closed `NnrpClientRoleEvent` union. Wire input remains
+the complete `Runtime` variant. Headerless local operation state remains the `Lifecycle` variant;
+native FFI and browser WASM preserve its event kind, operation identity, and state without creating
+a zero-valued `RuntimeFrameHeader`.
+
+Cancellation, abort, supersession, frame cancellation, successful completion, and dropped-result
+paths emit local lifecycle evidence from the role whose operation state changed. Bidirectional TCP
+and QUIC carrier E2E cases assert the wire event and both local role transitions separately. Native
+poll categories are role independent: terminal results, partial results, flow updates, result hints,
+control messages, and generic runtime frames keep the same category on client and server while the
+wire header remains the authoritative message discriminator.
 
 `NnrpServerSession::await_event` is the canonical ordered receive operation.
 `NnrpServerSession::receive_submit` is selective convenience only: it retains skipped events in the
@@ -49,6 +62,10 @@ JavaScript, and C# releases must each prove all of the following against that ex
 7. Public API parity and wire conformance both pass; neither substitutes for the other.
 8. Canonical server event pumps preserve event order and selective submit receives retain every
    skipped event.
+
+The Rust gate executes the external suite checkout against local Rust sources before any artifact
+release. The host-route matrix currently proves all ten native scenarios, the known-uninstalled
+QUIC diagnostic scenario, and the browser WebSocket lifecycle path through the wasm-bindgen job.
 
 Benchmark results are recorded for regression analysis but do not replace correctness, API parity,
 wire conformance, or artifact-boundary gates.

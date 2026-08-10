@@ -130,6 +130,28 @@ pub struct OperationLifecycleEvent {
     pub state: OperationState,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NnrpClientRoleEvent {
+    Runtime(NnrpRuntimeEvent),
+    Lifecycle(OperationLifecycleEvent),
+}
+
+impl NnrpClientRoleEvent {
+    pub fn as_runtime(&self) -> Option<&NnrpRuntimeEvent> {
+        match self {
+            Self::Runtime(event) => Some(event),
+            Self::Lifecycle(_) => None,
+        }
+    }
+
+    pub fn as_lifecycle(&self) -> Option<&OperationLifecycleEvent> {
+        match self {
+            Self::Runtime(_) => None,
+            Self::Lifecycle(event) => Some(event),
+        }
+    }
+}
+
 impl OperationLifecycleEvent {
     pub fn new(operation_id: u64, state: OperationState) -> Result<Self, NnrpError> {
         if operation_id == 0 {
@@ -167,6 +189,14 @@ impl NnrpTerminalEvent {
 }
 
 impl NnrpRuntimeEvent {
+    #[doc(hidden)]
+    pub fn into_wire_parts(self) -> Result<(RuntimeFrameHeader, Vec<u8>, Vec<u8>), NnrpError> {
+        let metadata = self.metadata.to_bytes()?;
+        let mut body = Vec::new();
+        self.tail.append_to(&mut body);
+        Ok((self.header, metadata, body))
+    }
+
     pub fn into_payload(self) -> Result<Vec<u8>, NnrpError> {
         let mut payload = self.metadata.to_bytes()?;
         self.tail.append_to(&mut payload);
@@ -398,5 +428,49 @@ impl NnrpRuntimeEvent {
             metadata,
             tail,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nnrp_core::{HeaderFlags, MessageType, OperationState};
+
+    use super::{
+        NnrpClientRoleEvent, NnrpRuntimeEvent, NnrpRuntimeEventMetadata, NnrpRuntimeEventTail,
+        OperationLifecycleEvent,
+    };
+    use crate::RuntimeFrameHeader;
+
+    #[test]
+    fn client_role_event_union_preserves_exact_variant_and_wire_parts() {
+        let header = RuntimeFrameHeader {
+            version_major: 1,
+            wire_format: 0,
+            message_type: MessageType::Progress,
+            flags: HeaderFlags(0),
+            session_id: 7,
+            frame_id: 9,
+            view_id: 3,
+            route_id: 4,
+            trace_id: 11,
+        };
+        let runtime = NnrpRuntimeEvent {
+            header,
+            metadata: NnrpRuntimeEventMetadata::None,
+            tail: NnrpRuntimeEventTail::Body(b"progress".to_vec()),
+        };
+        let runtime_event = NnrpClientRoleEvent::Runtime(runtime.clone());
+        assert_eq!(runtime_event.as_runtime(), Some(&runtime));
+        assert!(runtime_event.as_lifecycle().is_none());
+
+        let (wire_header, metadata, body) = runtime.into_wire_parts().unwrap();
+        assert_eq!(wire_header, header);
+        assert!(metadata.is_empty());
+        assert_eq!(body, b"progress");
+
+        let lifecycle = OperationLifecycleEvent::new(41, OperationState::Cancelled).unwrap();
+        let lifecycle_event = NnrpClientRoleEvent::Lifecycle(lifecycle);
+        assert!(lifecycle_event.as_runtime().is_none());
+        assert_eq!(lifecycle_event.as_lifecycle(), Some(&lifecycle));
     }
 }

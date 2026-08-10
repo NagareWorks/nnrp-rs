@@ -92,10 +92,14 @@ export class BrowserClientEventPacket {
   free(): void;
   [Symbol.dispose](): void;
   readonly body: Uint8Array;
+  readonly eventKind: number;
   readonly flags: number;
   readonly frameId: number;
+  readonly headerPresent: number;
   readonly messageType: number;
   readonly metadata: Uint8Array;
+  readonly operationState: number | undefined;
+  readonly relatedOperationId: bigint;
   readonly routeId: number;
   readonly sessionId: number;
   readonly traceId: bigint;

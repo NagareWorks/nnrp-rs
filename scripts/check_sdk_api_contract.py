@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -400,6 +401,47 @@ def check_contract(contract_path: Path) -> None:
     require(
         set(message_types) == EXPECTED_ROLE_METHOD_MESSAGES,
         "dedicated role-method message set drifted",
+    )
+
+    repository_root = Path(__file__).resolve().parent.parent
+    runtime_event_source = (
+        repository_root / "crates" / "nnrp-runtime" / "src" / "event.rs"
+    ).read_text(encoding="utf-8")
+    runtime_client_source = (
+        repository_root / "crates" / "nnrp-runtime" / "src" / "client.rs"
+    ).read_text(encoding="utf-8")
+    ffi_source = (
+        repository_root / "crates" / "nnrp-ffi" / "src" / "lib.rs"
+    ).read_text(encoding="utf-8")
+    wasm_source = (
+        repository_root / "crates" / "nnrp-wasm" / "src" / "browser_role.rs"
+    ).read_text(encoding="utf-8")
+    require(
+        "pub enum NnrpClientRoleEvent" in runtime_event_source
+        and "Runtime(NnrpRuntimeEvent)" in runtime_event_source
+        and "Lifecycle(OperationLifecycleEvent)" in runtime_event_source,
+        "Rust client role event union implementation drifted",
+    )
+    require(
+        re.search(
+            r"pub\s+async\s+fn\s+await_event\s*\(\s*&mut\s+self\s*\)\s*"
+            r"->\s*Result\s*<\s*NnrpClientRoleEvent\s*,\s*RuntimeError\s*>",
+            runtime_client_source,
+        )
+        is not None,
+        "NnrpClientSession::await_event no longer returns the frozen client event union",
+    )
+    require(
+        "NnrpClientRoleEvent::Lifecycle(event)" in ffi_source
+        and "role_lifecycle_event(scope, connection, event)" in ffi_source,
+        "native client lifecycle projection implementation drifted",
+    )
+    require(
+        "event_kind: 14" in wasm_source
+        and "header_present: 0" in wasm_source
+        and "related_operation_id: event.operation_id" in wasm_source
+        and "operation_state: Some(event.state as u8)" in wasm_source,
+        "browser WASM client lifecycle projection implementation drifted",
     )
 
 

@@ -17,8 +17,8 @@ pub use client::{
 pub use client_provider::{NnrpClientOptions, NnrpClientProvider};
 pub use error::RuntimeError;
 pub use event::{
-    NnrpRuntimeEvent, NnrpRuntimeEventMetadata, NnrpRuntimeEventTail, NnrpTerminalEvent,
-    OperationLifecycleEvent,
+    NnrpClientRoleEvent, NnrpRuntimeEvent, NnrpRuntimeEventMetadata, NnrpRuntimeEventTail,
+    NnrpTerminalEvent, OperationLifecycleEvent,
 };
 pub use nnrp_core::{CacheLeaseResult, CachePolicyOptions};
 pub use packet::{RuntimeFrameHeader, RuntimePacket};

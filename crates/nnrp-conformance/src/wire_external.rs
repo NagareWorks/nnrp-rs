@@ -8,9 +8,10 @@ use nnrp_core::{
     STANDARD_PROFILE_TOKEN,
 };
 use nnrp_runtime::{
-    FramedListener, NnrpRuntimeEvent, NnrpRuntimeEventMetadata, NnrpRuntimeEventTail, NnrpServer,
-    NnrpServerEvent, NnrpServerSession, NnrpSubmitHeaderContext, NnrpSubmitIdentity,
-    NnrpSubmitPolicy, NnrpSubmitRequest, NnrpTokenChunk, NnrpTokenSubmitInput, RuntimeError,
+    FramedListener, NnrpClientRoleEvent, NnrpRuntimeEvent, NnrpRuntimeEventMetadata,
+    NnrpRuntimeEventTail, NnrpServer, NnrpServerEvent, NnrpServerSession, NnrpSubmitHeaderContext,
+    NnrpSubmitIdentity, NnrpSubmitPolicy, NnrpSubmitRequest, NnrpTokenChunk, NnrpTokenSubmitInput,
+    RuntimeError,
 };
 use nnrp_transport_quic::{
     QuicClientEndpointConfig, QuicFramedListener, QuicProvider, QuicServerEndpointConfig,
@@ -27,6 +28,34 @@ const CACHE_BODY: &[u8] = b"ref!";
 const TRACE_BODY: &[u8] = b"trace";
 const PROGRESS_BODY: &[u8] = b"stage";
 const PARTIAL_BODY: &[u8] = b"partial";
+
+fn expect_client_runtime_event(
+    event: NnrpClientRoleEvent,
+) -> Result<NnrpRuntimeEvent, RuntimeError> {
+    match event {
+        NnrpClientRoleEvent::Runtime(event) => Ok(event),
+        NnrpClientRoleEvent::Lifecycle(_) => Err(RuntimeError::UnexpectedMessage(
+            "wire external case expected a client wire event",
+        )),
+    }
+}
+
+fn expect_client_lifecycle(
+    event: NnrpClientRoleEvent,
+    operation_id: u64,
+    state: OperationState,
+) -> Result<(), RuntimeError> {
+    match event {
+        NnrpClientRoleEvent::Lifecycle(event)
+            if event.operation_id == operation_id && event.state == state =>
+        {
+            Ok(())
+        }
+        _ => Err(RuntimeError::UnexpectedMessage(
+            "wire external case expected client lifecycle evidence",
+        )),
+    }
+}
 
 async fn expect_completed_lifecycle(
     session: &mut NnrpServerSession,
@@ -232,11 +261,16 @@ async fn run_cancel_abort_client(
         WireExternalFrame::Cancel,
         json!({ "session_id": session_id, "operation_id": operation_id }),
     );
+    expect_client_lifecycle(
+        session.await_event().await?,
+        operation_id,
+        OperationState::Cancelled,
+    )?;
 
     let mut trace = None;
     let mut drop_reason = None;
     while trace.is_none() || drop_reason.is_none() {
-        match session.await_event().await? {
+        match expect_client_runtime_event(session.await_event().await?)? {
             NnrpRuntimeEvent {
                 header,
                 metadata: NnrpRuntimeEventMetadata::TraceContext(metadata),
@@ -349,7 +383,7 @@ async fn run_capability_route_cache_client(
         json!({ "session_id": session_id }),
     );
 
-    let miss = match session.await_event().await? {
+    let miss = match expect_client_runtime_event(session.await_event().await?)? {
         NnrpRuntimeEvent {
             metadata: NnrpRuntimeEventMetadata::CacheMiss(metadata),
             tail: NnrpRuntimeEventTail::Diagnostic(body),
@@ -375,18 +409,19 @@ async fn run_capability_route_cache_client(
             ));
         }
     };
-    let (result_frame_id, result_body) = match session.await_event().await? {
-        NnrpRuntimeEvent {
-            header,
-            metadata: NnrpRuntimeEventMetadata::ResultPush(_),
-            tail: NnrpRuntimeEventTail::Body(body),
-        } => (header.frame_id, body),
-        _ => {
-            return Err(RuntimeError::UnexpectedMessage(
-                "capability/cache scenario expected RESULT_PUSH",
-            ));
-        }
-    };
+    let (result_frame_id, result_body) =
+        match expect_client_runtime_event(session.await_event().await?)? {
+            NnrpRuntimeEvent {
+                header,
+                metadata: NnrpRuntimeEventMetadata::ResultPush(_),
+                tail: NnrpRuntimeEventTail::Body(body),
+            } => (header.frame_id, body),
+            _ => {
+                return Err(RuntimeError::UnexpectedMessage(
+                    "capability/cache scenario expected RESULT_PUSH",
+                ));
+            }
+        };
     observed.push(
         WireExternalDirection::TargetToSuite,
         WireExternalFrame::ResultPush,
@@ -500,7 +535,7 @@ async fn run_priority_deadline_proxy(
         let upstream_frame_id = upstream.submit_encoded_nowait(metadata, body).await?;
         upstream.update_priority(operation_id, 10, 0).await?;
         upstream.expire_at(operation_id, 1).await?;
-        let drop_reason = match upstream.await_event().await? {
+        let drop_reason = match expect_client_runtime_event(upstream.await_event().await?)? {
             NnrpRuntimeEvent {
                 metadata: NnrpRuntimeEventMetadata::ResultDropReason(metadata),
                 tail: NnrpRuntimeEventTail::Diagnostic(_),
@@ -540,7 +575,7 @@ async fn run_priority_deadline_proxy(
         let frame_id = session
             .submit_encoded_nowait(request.metadata, request.body)
             .await?;
-        let drop_reason = match session.await_event().await? {
+        let drop_reason = match expect_client_runtime_event(session.await_event().await?)? {
             NnrpRuntimeEvent {
                 metadata: NnrpRuntimeEventMetadata::ResultDropReason(metadata),
                 tail: NnrpRuntimeEventTail::Diagnostic(_),
@@ -785,19 +820,29 @@ mod tests {
     use std::{net::SocketAddr, str::FromStr, time::Duration};
 
     use nnrp_runtime::{
-        NnrpRuntimeEvent, NnrpRuntimeEventMetadata, NnrpRuntimeEventTail, NnrpServerEvent,
-        RuntimeError,
+        NnrpClientRoleEvent, NnrpRuntimeEvent, NnrpRuntimeEventMetadata, NnrpRuntimeEventTail,
+        NnrpServerEvent, OperationLifecycleEvent, RuntimeError,
     };
     use nnrp_transport_ipc::IpcEndpoint;
     use nnrp_transport_quic::QuicServerEndpointConfig;
 
     use super::{
         cache_miss, cancel_drop_reason, cancel_trace, canonical_response_body,
-        expect_completed_lifecycle, run_wire_external_case, token_result, token_submit,
-        WireExternalCase, WireExternalMode, WireExternalTerminal, CACHE_BODY, CAPABILITY_BODY,
-        PARTIAL_BODY, PROGRESS_BODY, RESPONSE_BODY, ROUTE_BODY, TRACE_BODY,
+        expect_client_runtime_event, expect_completed_lifecycle, run_wire_external_case,
+        token_result, token_submit, WireExternalCase, WireExternalMode, WireExternalTerminal,
+        CACHE_BODY, CAPABILITY_BODY, PARTIAL_BODY, PROGRESS_BODY, RESPONSE_BODY, ROUTE_BODY,
+        TRACE_BODY,
     };
     use crate::wire_endpoint::{ReferenceTransport, WireEndpointSecurity, WireReferenceEndpoint};
+
+    #[test]
+    fn external_wire_expectation_rejects_headerless_client_lifecycle() {
+        let event = OperationLifecycleEvent::new(41, nnrp_core::OperationState::Cancelled)
+            .expect("lifecycle event should be valid");
+        let error = expect_client_runtime_event(NnrpClientRoleEvent::Lifecycle(event))
+            .expect_err("wire-only expectation must reject local lifecycle");
+        assert!(matches!(error, RuntimeError::UnexpectedMessage(_)));
+    }
 
     #[tokio::test]
     async fn external_cancel_case_drives_a_real_tcp_target() {
@@ -1054,7 +1099,7 @@ mod tests {
         session
             .submit_encoded_nowait(request.metadata, request.body)
             .await?;
-        match session.await_event().await? {
+        match expect_client_runtime_event(session.await_event().await?)? {
             NnrpRuntimeEvent {
                 metadata: NnrpRuntimeEventMetadata::Progress(_),
                 tail: NnrpRuntimeEventTail::Body(body),
@@ -1062,7 +1107,7 @@ mod tests {
             } if body == PROGRESS_BODY => {}
             _ => return Err(RuntimeError::UnexpectedMessage("target expected progress")),
         }
-        match session.await_event().await? {
+        match expect_client_runtime_event(session.await_event().await?)? {
             NnrpRuntimeEvent {
                 header,
                 metadata: NnrpRuntimeEventMetadata::Pressure(metadata),
@@ -1075,7 +1120,7 @@ mod tests {
                 ));
             }
         }
-        match session.await_event().await? {
+        match expect_client_runtime_event(session.await_event().await?)? {
             NnrpRuntimeEvent {
                 metadata: NnrpRuntimeEventMetadata::PartialResult(_),
                 tail: NnrpRuntimeEventTail::Body(body),
@@ -1087,7 +1132,7 @@ mod tests {
                 ));
             }
         }
-        match session.await_event().await? {
+        match expect_client_runtime_event(session.await_event().await?)? {
             NnrpRuntimeEvent {
                 metadata: NnrpRuntimeEventMetadata::ResultPush(metadata),
                 tail: NnrpRuntimeEventTail::Body(body),
