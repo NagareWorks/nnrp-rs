@@ -2,7 +2,7 @@
 
 This audit binds the Preview4 machine contract to the Rust runtime and downstream SDK release
 surface. The canonical contract is
-`nnrp-doc/docs/public/contracts/nnrp-1-preview4-sdk-api.json` at contract version 12.
+`nnrp-doc/docs/public/contracts/nnrp-1-preview4-sdk-api.json` at contract version 14.
 
 ## Runtime Event Envelope
 
@@ -40,8 +40,10 @@ wire header remains the authoritative message discriminator.
 `NnrpServerSession::await_event` is the canonical ordered receive operation.
 `NnrpServerSession::receive_submit` is selective convenience only: it retains skipped events in the
 session queue and cannot decode-and-forget control, object, cache, or lifecycle evidence. A server
-operation owns the complete submit event and both wire identities until the application sends one
-terminal outcome or closes the session.
+operation owns the complete submit event and both wire identities. Applications send progress,
+partial results, terminal results, and terminal drops through `NnrpServerOperation`; the session
+does not expose parallel application-facing operation reply methods. Rust operation methods accept
+the owning mutable session explicitly so one transport receive source remains serialized.
 
 `NnrpResult.event` is a closed `Runtime | Lifecycle` union. Wire results retain the complete
 `NnrpRuntimeEvent`; local completion, cancellation, supersession, and failure retain the exact
@@ -62,6 +64,8 @@ JavaScript, and C# releases must each prove all of the following against that ex
 7. Public API parity and wire conformance both pass; neither substitutes for the other.
 8. Canonical server event pumps preserve event order and selective submit receives retain every
    skipped event.
+9. Server operations own progress, partial-result, result, and drop methods; session methods cannot
+   bypass operation identity checks.
 
 The Rust gate executes the external suite checkout against local Rust sources before any artifact
 release. The host-route matrix currently proves all ten native scenarios, the known-uninstalled

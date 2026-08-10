@@ -919,7 +919,7 @@ def run_role_smoke_test_at_endpoint(
     if (
         lifecycle_event.diagnostic.related_session_id != server_session_id.value
         or lifecycle_event.diagnostic.related_operation_id != operation_id
-        or lifecycle_event.diagnostic.related_frame_id != 0
+        or lifecycle_event.diagnostic.related_frame_id != frame_id
     ):
         raise RuntimeError("operation lifecycle event carried invalid diagnostic identity")
     if event_payload(library, lifecycle_event) != bytes([OPERATION_STATE_COMPLETED]):

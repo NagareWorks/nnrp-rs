@@ -557,8 +557,8 @@ async fn reference_server_task(server: NnrpServer) -> Result<(), RuntimeError> {
             "wire reference server received unexpected request body",
         ));
     }
-    session
-        .send_result(submit.frame_id, token_result(), RESPONSE_BODY.to_vec())
+    submit
+        .send_result(&mut session, token_result(), RESPONSE_BODY.to_vec())
         .await?;
     expect_completed_lifecycle(&mut session, submit.operation_id).await?;
     let close = session.receive_close().await?;
@@ -612,8 +612,8 @@ async fn run_reference_server(
             "wire reference suite received unexpected request body",
         ));
     }
-    session
-        .send_result(submit.frame_id, token_result(), RESPONSE_BODY.to_vec())
+    submit
+        .send_result(&mut session, token_result(), RESPONSE_BODY.to_vec())
         .await?;
     expect_completed_lifecycle(&mut session, submit.operation_id).await?;
     frames.push(
@@ -765,8 +765,8 @@ async fn reference_scenario_server_task(
         WireReferenceScenario::CancelAbort => {
             let submit = session.receive_submit().await?;
             session.receive_runtime_control().await?;
-            session
-                .send_result_drop_reason(drop_reason(submit.operation_id))
+            submit
+                .send_result_drop(&mut session, drop_reason(submit.operation_id), Vec::new())
                 .await?;
 
             let abort_submit = session.receive_submit().await?;
@@ -783,8 +783,8 @@ async fn reference_scenario_server_task(
             let submit = session.receive_submit().await?;
             session.receive_scheduling_update().await?;
             session.receive_scheduling_update().await?;
-            session
-                .send_result(submit.frame_id, token_result(), RESPONSE_BODY.to_vec())
+            submit
+                .send_result(&mut session, token_result(), RESPONSE_BODY.to_vec())
                 .await?;
             expect_completed_lifecycle(&mut session, submit.operation_id).await?;
         }
@@ -792,14 +792,22 @@ async fn reference_scenario_server_task(
             let submit = session.receive_submit().await?;
             session.receive_pressure_update().await?;
             session.send_backpressure(soft_backpressure()).await?;
-            session
-                .send_progress(progress(submit.operation_id), b"stage".to_vec())
+            submit
+                .send_progress(
+                    &mut session,
+                    progress(submit.operation_id),
+                    b"stage".to_vec(),
+                )
                 .await?;
-            session
-                .send_partial_result(partial_result(submit.operation_id), b"partial".to_vec())
+            submit
+                .send_partial_result(
+                    &mut session,
+                    partial_result(submit.operation_id),
+                    b"partial".to_vec(),
+                )
                 .await?;
-            session
-                .send_result(submit.frame_id, token_result(), RESPONSE_BODY.to_vec())
+            submit
+                .send_result(&mut session, token_result(), RESPONSE_BODY.to_vec())
                 .await?;
             expect_completed_lifecycle(&mut session, submit.operation_id).await?;
         }
@@ -824,8 +832,8 @@ async fn reference_scenario_server_task(
                 .send_cache_reference(cache_reference(), b"hint".to_vec())
                 .await?;
             session.send_cache_invalidate(cache_invalidate()).await?;
-            session
-                .send_result(submit.frame_id, token_result(), RESPONSE_BODY.to_vec())
+            submit
+                .send_result(&mut session, token_result(), RESPONSE_BODY.to_vec())
                 .await?;
             expect_completed_lifecycle(&mut session, submit.operation_id).await?;
         }
@@ -1344,15 +1352,23 @@ async fn reference_proxy_target_server_task(
         Err(error) => return Err(error),
     };
     if action == ReferenceProxyAction::PerturbPartialBeforeProgress {
-        session
-            .send_progress(progress(submit.operation_id), b"stage".to_vec())
+        submit
+            .send_progress(
+                &mut session,
+                progress(submit.operation_id),
+                b"stage".to_vec(),
+            )
             .await?;
-        session
-            .send_partial_result(partial_result(submit.operation_id), b"partial".to_vec())
+        submit
+            .send_partial_result(
+                &mut session,
+                partial_result(submit.operation_id),
+                b"partial".to_vec(),
+            )
             .await?;
     }
-    session
-        .send_result(submit.frame_id, token_result(), RESPONSE_BODY.to_vec())
+    submit
+        .send_result(&mut session, token_result(), RESPONSE_BODY.to_vec())
         .await?;
     expect_completed_lifecycle(&mut session, submit.operation_id).await?;
     let close = session.receive_close().await?;

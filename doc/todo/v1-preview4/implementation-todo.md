@@ -11,7 +11,7 @@ Preview4 moves NNRP from token-stream transport substitution toward runtime obje
 - [x] [04 - FFI and WASM artifact surface](04-ffi-wasm-artifact-surface.md)
 - [x] [05 - Wire conformance runner](05-wire-conformance-runner.md)
 - [x] [06 - Release validation and docs](06-release-validation-and-docs.md)
-- [x] [07 - SDK contract v12 client events](07-sdk-contract-v12-client-events.md)
+- [x] [07 - SDK contract v14 role events](07-sdk-contract-v14-role-events.md)
 
 ## Coordination Rules
 

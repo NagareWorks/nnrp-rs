@@ -544,8 +544,8 @@ async fn tcp_session_smoke() -> Result<(), RuntimeError> {
     let server_task = tokio::spawn(async move {
         let mut session = server.accept().await?;
         let submit = session.receive_submit().await?;
-        session
-            .send_result(submit.frame_id, token_result(), b"delta".to_vec())
+        submit
+            .send_result(&mut session, token_result(), b"delta".to_vec())
             .await?;
         expect_completed_lifecycle(&mut session, submit.operation_id).await?;
         let close = session.receive_close().await?;
@@ -585,8 +585,8 @@ async fn quic_session_smoke() -> Result<(), RuntimeError> {
     let server_task = tokio::spawn(async move {
         let mut session = server.accept().await?;
         let submit = session.receive_submit().await?;
-        session
-            .send_result(submit.frame_id, token_result(), b"delta".to_vec())
+        submit
+            .send_result(&mut session, token_result(), b"delta".to_vec())
             .await?;
         expect_completed_lifecycle(&mut session, submit.operation_id).await?;
         let close = session.receive_close().await?;

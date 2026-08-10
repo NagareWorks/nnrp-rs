@@ -598,8 +598,8 @@ mod tests {
         let server_task = tokio::spawn(async move {
             let mut session = server.accept().await?;
             let submit = session.receive_submit().await?;
-            session
-                .send_result(submit.frame_id, token_result(), b"ws-ok".to_vec())
+            submit
+                .send_result(&mut session, token_result(), b"ws-ok".to_vec())
                 .await
         });
 
@@ -758,11 +758,19 @@ mod tests {
             let credit = session.receive_pressure_update().await?;
             assert_eq!(credit.metadata.credit_window, 9);
             session.send_backpressure(soft_backpressure()).await?;
-            session
-                .send_progress(progress(submit.frame_id as u64), b"stage".to_vec())
+            submit
+                .send_progress(
+                    &mut session,
+                    progress(submit.operation_id),
+                    b"stage".to_vec(),
+                )
                 .await?;
-            session
-                .send_partial_result(partial_result(submit.frame_id as u64), b"partial".to_vec())
+            submit
+                .send_partial_result(
+                    &mut session,
+                    partial_result(submit.operation_id),
+                    b"partial".to_vec(),
+                )
                 .await
         });
 

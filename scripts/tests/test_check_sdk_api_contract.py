@@ -62,7 +62,9 @@ def frozen_contract():
                     {"name": "operation_id", "type": "u64", "required": True},
                     {"name": "frame_id", "type": "u32", "required": True},
                     {"name": "submit", "type": "RuntimeEvent", "required": True},
-                ]
+                ],
+                "terminalMethods": ["send_result", "send_result_drop"],
+                "streamingMethods": ["send_progress", "send_partial_result"],
             },
             "ServerEvent": {
                 "fields": [],
@@ -172,6 +174,50 @@ def frozen_contract():
                 "selective": True,
                 "retainsSkippedEvents": True,
             },
+            "server_operation.send_result": {
+                "parameters": [
+                    {"name": "metadata", "type": "ResultPushMetadata", "required": True},
+                    {"name": "body", "type": "bytes", "required": False},
+                ],
+                "returns": "void",
+                "async": True,
+                "terminal": True,
+            },
+            "server_operation.send_result_drop": {
+                "parameters": [
+                    {
+                        "name": "metadata",
+                        "type": "ResultDropReasonMetadata",
+                        "required": True,
+                    },
+                    {"name": "diagnostic", "type": "bytes", "required": False},
+                ],
+                "returns": "void",
+                "async": True,
+                "terminal": True,
+            },
+            "server_operation.send_progress": {
+                "parameters": [
+                    {"name": "metadata", "type": "ProgressMetadata", "required": True},
+                    {"name": "body", "type": "bytes", "required": False},
+                ],
+                "returns": "void",
+                "async": True,
+                "terminal": False,
+            },
+            "server_operation.send_partial_result": {
+                "parameters": [
+                    {
+                        "name": "metadata",
+                        "type": "PartialResultMetadata",
+                        "required": True,
+                    },
+                    {"name": "body", "type": "bytes", "required": False},
+                ],
+                "returns": "void",
+                "async": True,
+                "terminal": False,
+            },
         },
     }
 
@@ -237,6 +283,37 @@ class SdkApiContractTests(unittest.TestCase):
             "retainsSkippedEvents"
         ] = False
         with self.assertRaisesRegex(SystemExit, "selective submit contract drifted"):
+            self.check(contract)
+
+    def test_rejects_server_operation_method_drift(self):
+        contract = frozen_contract()
+        contract["types"]["ServerOperation"]["terminalMethods"] = ["send_result"]
+        with self.assertRaisesRegex(
+            SystemExit, "ServerOperation terminal method contract drifted"
+        ):
+            self.check(contract)
+
+        contract = frozen_contract()
+        contract["roleOperations"]["server_operation.send_progress"]["terminal"] = True
+        with self.assertRaisesRegex(
+            SystemExit, "server_operation.send_progress role operation drifted"
+        ):
+            self.check(contract)
+
+        contract = frozen_contract()
+        contract["languageProjections"]["rust"]["roleMethods"][
+            "server_operation.send_result"
+        ] = "reply"
+        with self.assertRaisesRegex(SystemExit, "Rust SDK projection map drifted"):
+            self.check(contract)
+
+        contract = frozen_contract()
+        contract["types"]["ServerOperation"]["streamingMethods"] = [
+            "send_partial_result"
+        ]
+        with self.assertRaisesRegex(
+            SystemExit, "ServerOperation streaming method contract drifted"
+        ):
             self.check(contract)
 
     def test_rejects_malformed_type_fields_without_a_traceback(self):

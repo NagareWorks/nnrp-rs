@@ -770,8 +770,8 @@ mod tests {
         let server_task = tokio::spawn(async move {
             let mut session = server.accept().await?;
             let submit = session.receive_submit().await?;
-            session
-                .send_result(submit.frame_id, token_result(), b"ipc-ok".to_vec())
+            submit
+                .send_result(&mut session, token_result(), b"ipc-ok".to_vec())
                 .await
         });
 
@@ -960,8 +960,8 @@ mod tests {
 
             let control = session.receive_runtime_control().await?;
             assert_eq!(control.metadata.operation_id, submit.frame_id as u64);
-            session
-                .send_result_drop_reason(drop_reason(submit.frame_id as u64))
+            submit
+                .send_result_drop(&mut session, drop_reason(submit.operation_id), Vec::new())
                 .await
         });
 
