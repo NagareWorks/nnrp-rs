@@ -705,7 +705,7 @@ struct NnrpFfiResourceEntry {
 struct NnrpFfiHandleStore {
     entries: BTreeMap<(u32, u64), NnrpFfiResourceEntry>,
     next_ids: BTreeMap<u32, u64>,
-    deferred_operation_releases: Vec<(NnrpHandle, NnrpHandle)>,
+    lifecycle_delivered_operations: Vec<(NnrpHandle, NnrpHandle)>,
     terminal_operation_replies: Vec<NnrpHandle>,
     #[cfg(any(test, feature = "benchmark-ffi"))]
     events: VecDeque<NnrpQueuedEvent>,
@@ -782,7 +782,7 @@ impl NnrpFfiHandleStore {
             }
         }
         self.entries.clear();
-        self.deferred_operation_releases.clear();
+        self.lifecycle_delivered_operations.clear();
         self.terminal_operation_replies.clear();
         #[cfg(any(test, feature = "benchmark-ffi"))]
         self.events.clear();
@@ -844,7 +844,7 @@ impl NnrpFfiHandleStore {
         let handle = handle.normalized();
         self.entries.remove(&(handle.kind, handle.id));
         if kind == NnrpHandleKind::Operation {
-            self.deferred_operation_releases
+            self.lifecycle_delivered_operations
                 .retain(|(_, operation)| *operation != handle);
             self.terminal_operation_replies
                 .retain(|operation| *operation != handle);
@@ -853,38 +853,16 @@ impl NnrpFfiHandleStore {
     }
 
     #[cfg(not(test))]
-    fn defer_operation_release(&mut self, session: NnrpHandle, operation: NnrpHandle) {
+    fn mark_operation_lifecycle_delivered(&mut self, session: NnrpHandle, operation: NnrpHandle) {
         let session = session.normalized();
         let operation = operation.normalized();
         if !self
-            .deferred_operation_releases
+            .lifecycle_delivered_operations
             .contains(&(session, operation))
         {
-            self.deferred_operation_releases.push((session, operation));
+            self.lifecycle_delivered_operations
+                .push((session, operation));
         }
-    }
-
-    #[cfg(not(test))]
-    fn release_deferred_operations(&mut self, session: NnrpHandle) {
-        let session = session.normalized();
-        let pending = core::mem::take(&mut self.deferred_operation_releases);
-        let mut retained = Vec::with_capacity(pending.len());
-        for (owner, operation) in pending {
-            if owner == session {
-                if self
-                    .entries
-                    .get(&(operation.kind, operation.id))
-                    .is_some_and(|entry| entry.generation == operation.generation)
-                {
-                    self.entries.remove(&(operation.kind, operation.id));
-                    self.terminal_operation_replies
-                        .retain(|terminal| *terminal != operation);
-                }
-            } else {
-                retained.push((owner, operation));
-            }
-        }
-        self.deferred_operation_releases = retained;
     }
 
     #[cfg(not(test))]
@@ -897,7 +875,7 @@ impl NnrpFfiHandleStore {
         let session = session.normalized();
         let operation = operation.normalized();
         if self
-            .deferred_operation_releases
+            .lifecycle_delivered_operations
             .contains(&(session, operation))
         {
             return self.remove(operation, NnrpHandleKind::Operation);
@@ -997,7 +975,7 @@ impl NnrpFfiHandleStore {
         for session in &sessions {
             self.entries.remove(&(session.kind, session.id));
         }
-        self.deferred_operation_releases
+        self.lifecycle_delivered_operations
             .retain(|(session, _)| !sessions.contains(session));
         self.terminal_operation_replies
             .retain(|operation| !operations.contains(operation));
@@ -1051,7 +1029,7 @@ impl NnrpFfiHandleStore {
         for operation in &operations {
             self.entries.remove(&(operation.kind, operation.id));
         }
-        self.deferred_operation_releases
+        self.lifecycle_delivered_operations
             .retain(|(owner, _)| *owner != session);
         self.terminal_operation_replies
             .retain(|operation| !operations.contains(operation));
@@ -5267,8 +5245,6 @@ unsafe fn role_server_await_events_impl(
     if let Err(status) = role_session_connection(request.scope, NnrpFfiConnectionRole::Server) {
         return status;
     }
-    handle_store().release_deferred_operations(request.scope);
-
     for index in 0..limit {
         let timeout_ms = if index == 0 { request.timeout_ms } else { 1 };
         let runtime = Arc::clone(&session);
@@ -5437,7 +5413,7 @@ fn role_lifecycle_event(
         NnrpHandle::invalid()
     } else {
         if server_operation {
-            store.defer_operation_release(scope, operation);
+            store.mark_operation_lifecycle_delivered(scope, operation);
         }
         operation
     };
