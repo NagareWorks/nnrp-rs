@@ -150,6 +150,34 @@ def declared_typescript_string_union(typescript: str, name: str) -> set[str]:
     return set(re.findall(r'"([^"]+)"', match.group(1)))
 
 
+def declared_rust_enum(source: str, name: str) -> dict[str, int]:
+    match = re.search(rf"pub enum\s+{re.escape(name)}\s*\{{(.*?)\}}", source, re.DOTALL)
+    if match is None:
+        raise SystemExit(f"missing Rust enum {name}")
+    return {
+        variant: int(value)
+        for variant, value in re.findall(r"\b([A-Za-z][A-Za-z0-9_]*)\s*=\s*(\d+)", match.group(1))
+    }
+
+
+def declared_header_enum(source: str, name: str) -> dict[str, int]:
+    match = re.search(
+        rf"typedef enum\s+{re.escape(name)}\s*\{{(.*?)\}}\s*{re.escape(name)}\s*;",
+        source,
+        re.DOTALL,
+    )
+    if match is None:
+        raise SystemExit(f"missing header enum {name}")
+    return {
+        variant: int(value)
+        for variant, value in re.findall(r"\b([A-Z][A-Z0-9_]*)\s*=\s*(\d+)", match.group(1))
+    }
+
+
+def screaming_snake(name: str) -> str:
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).upper()
+
+
 def check_abi_version() -> None:
     rust = read_text("crates/nnrp-ffi/src/lib.rs")
     header = read_text("include/nnrp/nnrp_ffi.h")
@@ -209,6 +237,15 @@ def check_transport_slots() -> None:
             rust_const_u32(rust, const_name),
             f"{const_name} header/Rust value",
         )
+
+
+def check_event_kinds() -> None:
+    rust = declared_rust_enum(read_text("crates/nnrp-ffi/src/lib.rs"), "NnrpEventKind")
+    header = declared_header_enum(read_text("include/nnrp/nnrp_ffi.h"), "NnrpEventKind")
+    expected_header = {
+        f"NNRP_EVENT_{screaming_snake(variant)}": value for variant, value in rust.items()
+    }
+    require_equal(header, expected_header, "NnrpEventKind header/Rust values")
 
 
 def check_native_manifests() -> None:
@@ -367,6 +404,7 @@ def main() -> None:
     check_abi_version()
     check_sdk_version_header()
     check_transport_slots()
+    check_event_kinds()
     check_native_manifests()
     check_wasm_manifest()
     check_expected_exports_are_declared()

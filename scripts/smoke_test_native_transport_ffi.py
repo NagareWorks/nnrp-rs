@@ -20,6 +20,8 @@ TOKEN_DELTA_SCHEMA_VERSION = 3
 EVENT_SESSION_CLOSED = 4
 EVENT_SUBMIT_ACCEPTED = 5
 EVENT_RESULT_PUSHED = 6
+EVENT_OPERATION_LIFECYCLE = 14
+OPERATION_STATE_COMPLETED = 7
 FRAME_SUBMIT_METADATA_LEN = 72
 RESULT_PUSH_METADATA_LEN = 64
 SECURE_WEBSOCKET_ENDPOINT = b"wss://localhost:0/nnrp"
@@ -896,6 +898,24 @@ def run_role_smoke_test_at_endpoint(
         raise RuntimeError("client did not receive the operation result")
     if event_payload(library, client_event) != result_payload:
         raise RuntimeError("client received an invalid result payload")
+
+    lifecycle_event = await_role_event(
+        library, "nnrp_server_await_events", server_session
+    )
+    if lifecycle_event.kind != EVENT_OPERATION_LIFECYCLE:
+        raise RuntimeError("server did not receive completed operation lifecycle evidence")
+    if lifecycle_event.header.present != 0:
+        raise RuntimeError("operation lifecycle event unexpectedly carried a wire header")
+    if lifecycle_event.operation.kind != 0:
+        raise RuntimeError("completed operation lifecycle retained a terminal operation handle")
+    if (
+        lifecycle_event.diagnostic.related_session_id != server_session_id.value
+        or lifecycle_event.diagnostic.related_operation_id != operation_id
+        or lifecycle_event.diagnostic.related_frame_id != 0
+    ):
+        raise RuntimeError("operation lifecycle event carried invalid diagnostic identity")
+    if event_payload(library, lifecycle_event) != bytes([OPERATION_STATE_COMPLETED]):
+        raise RuntimeError("operation lifecycle event carried an invalid state payload")
 
     close_result: queue.Queue = queue.Queue()
 

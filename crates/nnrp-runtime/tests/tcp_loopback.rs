@@ -25,15 +25,32 @@ use nnrp_core::{
 use nnrp_runtime::{
     BoxedFramedTransport, FramedListener, FramedTransport, NnrpClient, NnrpClientConfig,
     NnrpRuntimeEvent, NnrpRuntimeEventMetadata, NnrpRuntimeEventTail, NnrpServer,
-    NnrpServerAcceptOptions, NnrpServerConfig, NnrpServerPolicy, NnrpServerPolicyDecision,
-    NnrpTerminalEvent, RuntimeError, RuntimeFrameLimits, RuntimePacket, RuntimeTransportKind,
-    TcpFramedListener, TcpTransport,
+    NnrpServerAcceptOptions, NnrpServerConfig, NnrpServerEvent, NnrpServerPolicy,
+    NnrpServerPolicyDecision, NnrpServerSession, NnrpTerminalEvent, RuntimeError,
+    RuntimeFrameLimits, RuntimePacket, RuntimeTransportKind, TcpFramedListener, TcpTransport,
 };
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
+
+async fn expect_completed_lifecycle(
+    session: &mut NnrpServerSession,
+    operation_id: u64,
+) -> Result<(), RuntimeError> {
+    let event = session.await_event().await?;
+    assert!(event.runtime_event().is_none());
+    assert!(event.clone().into_runtime_event().is_none());
+    match event {
+        NnrpServerEvent::Lifecycle(event) => {
+            assert_eq!(event.operation_id, operation_id);
+            assert_eq!(event.state, OperationState::Completed);
+        }
+        event => panic!("expected completed lifecycle event, got {event:?}"),
+    }
+    Ok(())
+}
 
 #[tokio::test]
 async fn tcp_packet_read_preserves_partial_bytes_across_timeouts() -> Result<(), RuntimeError> {
@@ -199,10 +216,10 @@ async fn tcp_loopback_submits_frame_receives_result_and_closes() -> Result<(), R
         let submit = session.receive_submit().await?;
         assert_eq!(submit.frame_id, 1);
         assert_eq!(
-            submit.metadata.payload_kind_bitmap.0,
+            submit.metadata().payload_kind_bitmap.0,
             PayloadKindBitmap::TOKEN_CHUNK
         );
-        assert_eq!(submit.body, b"prompt".to_vec());
+        assert_eq!(submit.body(), b"prompt");
 
         session
             .send_result(submit.frame_id, token_result(), b"delta".to_vec())
@@ -215,6 +232,7 @@ async fn tcp_loopback_submits_frame_receives_result_and_closes() -> Result<(), R
                 .state,
             OperationState::Completed
         );
+        expect_completed_lifecycle(&mut session, submit.operation_id).await?;
         let close = session.receive_close().await?;
         assert_eq!(close.last_operation_id, 101);
         session.ack_close(&close).await?;
@@ -261,6 +279,7 @@ async fn tcp_loopback_preserves_explicit_frame_ids_and_advances_allocator(
             session
                 .send_result(submit.frame_id, token_result(), b"delta".to_vec())
                 .await?;
+            expect_completed_lifecycle(&mut session, submit.operation_id).await?;
         }
         let close = session.receive_close().await?;
         assert_eq!(close.last_operation_id, 4_300);
@@ -695,6 +714,256 @@ async fn tcp_loopback_preserves_partial_result_order_with_interleaving() -> Resu
 }
 
 #[tokio::test]
+async fn server_event_pump_preserves_submit_ownership_and_skipped_control_order(
+) -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        let first_event = session.await_event().await?;
+        assert_eq!(
+            first_event
+                .runtime_event()
+                .expect("submit event should expose its runtime event")
+                .header
+                .message_type,
+            MessageType::FrameSubmit
+        );
+        assert_eq!(
+            first_event
+                .clone()
+                .into_runtime_event()
+                .expect("submit event should convert into its runtime event")
+                .header
+                .message_type,
+            MessageType::FrameSubmit
+        );
+        let first = match first_event {
+            NnrpServerEvent::Submit(operation) => operation,
+            event => panic!("expected submit operation, got {event:?}"),
+        };
+        assert_eq!(first.operation_id, 3_301);
+        assert_eq!(first.operation_id(), 3_301);
+        assert_eq!(first.frame_id(), first.frame_id);
+        assert_eq!(first.metadata().operation_id, 3_301);
+        assert_eq!(first.body(), b"first");
+        assert_eq!(first.submit().header.message_type, MessageType::FrameSubmit);
+        assert_eq!(first.submit.header.message_type, MessageType::FrameSubmit);
+
+        let second = session.receive_submit().await?;
+        assert_eq!(second.operation_id, 3_302);
+        assert!(matches!(
+            session.receive_runtime_control().await,
+            Err(RuntimeError::UnexpectedMessage(_))
+        ));
+        match session.await_event().await? {
+            NnrpServerEvent::Runtime(NnrpRuntimeEvent {
+                header,
+                metadata: NnrpRuntimeEventMetadata::Scheduling(update),
+                tail: NnrpRuntimeEventTail::None,
+            }) if header.message_type == MessageType::PriorityUpdate => {
+                assert_eq!(update.operation_id, first.operation_id);
+                assert_eq!(update.priority_class, 9);
+            }
+            event => panic!("expected retained priority update, got {event:?}"),
+        }
+        assert!(matches!(
+            session.await_event().await,
+            Err(RuntimeError::UnexpectedMessage(_))
+        ));
+        session.receive_ping().await?;
+
+        session
+            .send_result(first.frame_id, token_result(), b"first".to_vec())
+            .await?;
+        expect_completed_lifecycle(&mut session, first.operation_id).await?;
+        session
+            .send_result(second.frame_id, token_result(), b"second".to_vec())
+            .await?;
+        expect_completed_lifecycle(&mut session, second.operation_id).await?;
+        let close = session.receive_close().await?;
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let mut session = client.open_session().await?;
+    session
+        .submit_encoded_nowait(token_submit(3_301), b"first".to_vec())
+        .await?;
+    session.update_priority(3_301, 9, 0).await?;
+    session.send_ping().await?;
+    session
+        .submit_encoded_nowait(token_submit(3_302), b"second".to_vec())
+        .await?;
+
+    assert_eq!(session.await_result().await?.operation_id, 3_301);
+    assert_eq!(session.await_result().await?.operation_id, 3_302);
+    session.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn server_specialized_receivers_drain_retained_inputs_in_wire_order(
+) -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        let first = session.receive_submit().await?;
+        assert_eq!(first.operation_id(), 3_401);
+
+        let second = session.receive_submit().await?;
+        assert_eq!(second.operation_id(), 3_402);
+
+        assert!(matches!(
+            session.receive_ping().await,
+            Err(RuntimeError::UnexpectedMessage("server expected PING"))
+        ));
+        let scheduling = session.receive_scheduling_update().await?;
+        assert_eq!(scheduling.message_type, MessageType::PriorityUpdate);
+        assert_eq!(scheduling.metadata.operation_id, first.operation_id());
+        assert_eq!(scheduling.metadata.priority_class, 8);
+
+        assert!(matches!(
+            session.receive_scheduling_update().await,
+            Err(RuntimeError::UnexpectedMessage(
+                "server expected PRIORITY_UPDATE, DEADLINE, or EXPIRE_AT"
+            ))
+        ));
+        let pressure = session.receive_pressure_update().await?;
+        assert_eq!(pressure.message_type, MessageType::Backpressure);
+        assert_eq!(pressure.metadata, soft_backpressure());
+
+        assert!(matches!(
+            session.receive_pressure_update().await,
+            Err(RuntimeError::UnexpectedMessage(
+                "server expected BACKPRESSURE or CREDIT_UPDATE"
+            ))
+        ));
+        let control = session.receive_runtime_control().await?;
+        assert_eq!(control.message_type, MessageType::Cancel);
+        assert_eq!(control.metadata.operation_id, first.operation_id());
+        assert_eq!(control.metadata.reason_code, 7);
+        assert!(control.body.is_empty());
+
+        session.receive_ping().await?;
+        let close = session.receive_close().await?;
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let mut session = client.open_session().await?;
+    session
+        .submit_encoded_nowait(token_submit(3_401), b"first".to_vec())
+        .await?;
+    session.update_priority(3_401, 8, 0).await?;
+    session.send_backpressure(soft_backpressure()).await?;
+    session.cancel_operation(3_401, 7).await?;
+    session.send_ping().await?;
+    session
+        .submit_encoded_nowait(token_submit(3_402), b"second".to_vec())
+        .await?;
+    session.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn server_receive_submit_retains_session_close_for_the_event_pump() -> Result<(), RuntimeError>
+{
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        assert!(matches!(
+            session.receive_submit().await,
+            Err(RuntimeError::UnexpectedMessage(_))
+        ));
+        assert!(matches!(
+            session.receive_submit().await,
+            Err(RuntimeError::UnexpectedMessage(_))
+        ));
+        let close = match session.await_event().await? {
+            NnrpServerEvent::Runtime(NnrpRuntimeEvent {
+                header,
+                metadata: NnrpRuntimeEventMetadata::SessionClose(close),
+                tail: NnrpRuntimeEventTail::None,
+            }) if header.message_type == MessageType::SessionClose => close,
+            event => panic!("expected retained session close, got {event:?}"),
+        };
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    client.open_session().await?.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn server_event_pump_retains_a_direct_role_packet_for_its_receiver(
+) -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        assert!(matches!(
+            session.await_event().await,
+            Err(RuntimeError::UnexpectedMessage(
+                "server event pump received a dedicated role message"
+            ))
+        ));
+        session.receive_ping().await?;
+        let close = session.receive_close().await?;
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let mut session = client.open_session().await?;
+    session.send_ping().await?;
+    session.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn server_receive_submit_bounds_retained_role_packets() -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        let error = session
+            .receive_submit()
+            .await
+            .expect_err("pending role packets must be bounded");
+        assert!(matches!(
+            error,
+            RuntimeError::UnexpectedMessage("server session exceeded the pending input limit")
+        ));
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let mut session = client.open_session().await?;
+    for _ in 0..=1_024 {
+        session.send_ping().await?;
+    }
+    session.close_transport().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), RuntimeError> {
     let server = NnrpServer::bind_tcp(
         "127.0.0.1:0",
@@ -759,6 +1028,7 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
         session
             .send_result(submit.frame_id, token_result(), b"done".to_vec())
             .await?;
+        expect_completed_lifecycle(&mut session, submit.operation_id).await?;
 
         let close = session.receive_close().await?;
         session.ack_close(&close).await?;

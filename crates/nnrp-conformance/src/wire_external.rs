@@ -2,14 +2,15 @@ use std::time::Instant;
 
 use nnrp_core::{
     CacheMissMetadata, CacheMissReason, CacheReferenceMetadata, CacheReuseScope,
-    CapabilityMetadata, MessageType, PartialResultMetadata, PayloadKindBitmap, PressureMetadata,
-    ProgressMetadata, ResultClass, ResultDropReasonMetadata, ResultPushMetadata, RouteHintMetadata,
-    TraceContextMetadata, RESULT_DROP_REASON_DEADLINE_EXPIRED, STANDARD_PROFILE_TOKEN,
+    CapabilityMetadata, MessageType, OperationState, PartialResultMetadata, PayloadKindBitmap,
+    PressureMetadata, ProgressMetadata, ResultClass, ResultDropReasonMetadata, ResultPushMetadata,
+    RouteHintMetadata, TraceContextMetadata, RESULT_DROP_REASON_DEADLINE_EXPIRED,
+    STANDARD_PROFILE_TOKEN,
 };
 use nnrp_runtime::{
     FramedListener, NnrpRuntimeEvent, NnrpRuntimeEventMetadata, NnrpRuntimeEventTail, NnrpServer,
-    NnrpSubmitHeaderContext, NnrpSubmitIdentity, NnrpSubmitPolicy, NnrpSubmitRequest,
-    NnrpTokenChunk, NnrpTokenSubmitInput, RuntimeError,
+    NnrpServerEvent, NnrpServerSession, NnrpSubmitHeaderContext, NnrpSubmitIdentity,
+    NnrpSubmitPolicy, NnrpSubmitRequest, NnrpTokenChunk, NnrpTokenSubmitInput, RuntimeError,
 };
 use nnrp_transport_quic::{
     QuicClientEndpointConfig, QuicFramedListener, QuicProvider, QuicServerEndpointConfig,
@@ -26,6 +27,22 @@ const CACHE_BODY: &[u8] = b"ref!";
 const TRACE_BODY: &[u8] = b"trace";
 const PROGRESS_BODY: &[u8] = b"stage";
 const PARTIAL_BODY: &[u8] = b"partial";
+
+async fn expect_completed_lifecycle(
+    session: &mut NnrpServerSession,
+    operation_id: u64,
+) -> Result<(), RuntimeError> {
+    match session.await_event().await? {
+        NnrpServerEvent::Lifecycle(event)
+            if event.operation_id == operation_id && event.state == OperationState::Completed =>
+        {
+            Ok(())
+        }
+        _ => Err(RuntimeError::UnexpectedMessage(
+            "wire external server expected completed operation lifecycle evidence",
+        )),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WireExternalCase {
@@ -436,6 +453,7 @@ async fn run_progress_backpressure_server(
     session
         .send_result(submit.frame_id, token_result(), RESPONSE_BODY.to_vec())
         .await?;
+    expect_completed_lifecycle(&mut session, submit.operation_id).await?;
     let close = session.receive_close().await?;
     session.ack_close(&close).await?;
     session.close().await?;
@@ -469,11 +487,19 @@ async fn run_priority_deadline_proxy(
         let mut downstream = front_server.accept().await?;
         let mut upstream = upstream_endpoint.connect().await?.open_session().await?;
         let submit = downstream.receive_submit().await?;
-        let upstream_frame_id = upstream
-            .submit_encoded_nowait(submit.metadata, submit.body)
-            .await?;
-        upstream.update_priority(submit.operation_id, 10, 0).await?;
-        upstream.expire_at(submit.operation_id, 1).await?;
+        let operation_id = submit.operation_id;
+        let submit = submit.into_submit();
+        let metadata = match submit.metadata {
+            NnrpRuntimeEventMetadata::FrameSubmit(metadata) => metadata,
+            _ => unreachable!("server operation owns a FRAME_SUBMIT event"),
+        };
+        let body = match submit.tail {
+            NnrpRuntimeEventTail::Body(body) => body,
+            _ => unreachable!("FRAME_SUBMIT event owns a body tail"),
+        };
+        let upstream_frame_id = upstream.submit_encoded_nowait(metadata, body).await?;
+        upstream.update_priority(operation_id, 10, 0).await?;
+        upstream.expire_at(operation_id, 1).await?;
         let drop_reason = match upstream.await_event().await? {
             NnrpRuntimeEvent {
                 metadata: NnrpRuntimeEventMetadata::ResultDropReason(metadata),
@@ -486,7 +512,7 @@ async fn run_priority_deadline_proxy(
                 ));
             }
         };
-        if upstream_frame_id == 0 || drop_reason.operation_id != submit.operation_id {
+        if upstream_frame_id == 0 || drop_reason.operation_id != operation_id {
             return Err(RuntimeError::UnexpectedMessage(
                 "priority/deadline proxy received mismatched upstream state",
             ));
@@ -759,16 +785,17 @@ mod tests {
     use std::{net::SocketAddr, str::FromStr, time::Duration};
 
     use nnrp_runtime::{
-        NnrpRuntimeEvent, NnrpRuntimeEventMetadata, NnrpRuntimeEventTail, RuntimeError,
+        NnrpRuntimeEvent, NnrpRuntimeEventMetadata, NnrpRuntimeEventTail, NnrpServerEvent,
+        RuntimeError,
     };
     use nnrp_transport_ipc::IpcEndpoint;
     use nnrp_transport_quic::QuicServerEndpointConfig;
 
     use super::{
         cache_miss, cancel_drop_reason, cancel_trace, canonical_response_body,
-        run_wire_external_case, token_result, token_submit, WireExternalCase, WireExternalMode,
-        WireExternalTerminal, CACHE_BODY, CAPABILITY_BODY, PARTIAL_BODY, PROGRESS_BODY,
-        RESPONSE_BODY, ROUTE_BODY, TRACE_BODY,
+        expect_completed_lifecycle, run_wire_external_case, token_result, token_submit,
+        WireExternalCase, WireExternalMode, WireExternalTerminal, CACHE_BODY, CAPABILITY_BODY,
+        PARTIAL_BODY, PROGRESS_BODY, RESPONSE_BODY, ROUTE_BODY, TRACE_BODY,
     };
     use crate::wire_endpoint::{ReferenceTransport, WireEndpointSecurity, WireReferenceEndpoint};
 
@@ -927,11 +954,11 @@ mod tests {
         let mut session = server.accept().await?;
         let submit = session.receive_submit().await?;
         match session.await_event().await? {
-            NnrpRuntimeEvent {
+            NnrpServerEvent::Runtime(NnrpRuntimeEvent {
                 header,
                 metadata: NnrpRuntimeEventMetadata::ControlRequest(_),
                 tail: NnrpRuntimeEventTail::Diagnostic(_),
-            } if header.message_type == nnrp_core::MessageType::Cancel => {}
+            }) if header.message_type == nnrp_core::MessageType::Cancel => {}
             _ => {
                 return Err(RuntimeError::UnexpectedMessage(
                     "cancel target expected CANCEL",
@@ -951,11 +978,11 @@ mod tests {
         let mut session = server.accept().await?;
         let submit = session.receive_submit().await?;
         match session.await_event().await? {
-            NnrpRuntimeEvent {
+            NnrpServerEvent::Runtime(NnrpRuntimeEvent {
                 metadata: NnrpRuntimeEventMetadata::Capability(_),
                 tail: NnrpRuntimeEventTail::Body(body),
                 ..
-            } if body == CAPABILITY_BODY => {}
+            }) if body == CAPABILITY_BODY => {}
             _ => {
                 return Err(RuntimeError::UnexpectedMessage(
                     "target expected capability",
@@ -963,11 +990,11 @@ mod tests {
             }
         }
         match session.await_event().await? {
-            NnrpRuntimeEvent {
+            NnrpServerEvent::Runtime(NnrpRuntimeEvent {
                 metadata: NnrpRuntimeEventMetadata::RouteHint(_),
                 tail: NnrpRuntimeEventTail::Body(body),
                 ..
-            } if body == ROUTE_BODY => {}
+            }) if body == ROUTE_BODY => {}
             _ => {
                 return Err(RuntimeError::UnexpectedMessage(
                     "target expected route hint",
@@ -975,11 +1002,11 @@ mod tests {
             }
         }
         match session.await_event().await? {
-            NnrpRuntimeEvent {
+            NnrpServerEvent::Runtime(NnrpRuntimeEvent {
                 metadata: NnrpRuntimeEventMetadata::CacheReference(_),
                 tail: NnrpRuntimeEventTail::Body(body),
                 ..
-            } if body == CACHE_BODY => {}
+            }) if body == CACHE_BODY => {}
             _ => {
                 return Err(RuntimeError::UnexpectedMessage(
                     "target expected cache reference",
@@ -990,6 +1017,7 @@ mod tests {
         session
             .send_result(submit.frame_id, token_result(), RESPONSE_BODY.to_vec())
             .await?;
+        expect_completed_lifecycle(&mut session, submit.operation_id).await?;
         close_server_session(&mut session).await
     }
 
@@ -1001,11 +1029,11 @@ mod tests {
             nnrp_core::MessageType::ExpireAt,
         ] {
             match session.await_event().await? {
-                NnrpRuntimeEvent {
+                NnrpServerEvent::Runtime(NnrpRuntimeEvent {
                     header,
                     metadata: NnrpRuntimeEventMetadata::Scheduling(_),
                     tail: NnrpRuntimeEventTail::None,
-                } if header.message_type == expected => {}
+                }) if header.message_type == expected => {}
                 _ => {
                     return Err(RuntimeError::UnexpectedMessage(
                         "priority target received unexpected scheduling frame",

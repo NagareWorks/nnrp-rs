@@ -1,15 +1,15 @@
 use nnrp_core::{
     BackpressureLevel, CacheInvalidateMetadata, CacheInvalidateScope, CacheReferenceMetadata,
     CacheReuseScope, CapabilityMetadata, CommonHeader, FrameSubmitMetadata, InputProfile,
-    MessageType, PartialResultMetadata, PayloadKindBitmap, PressureMetadata, ProgressMetadata,
-    ResultClass, ResultDropReasonMetadata, ResultPushMetadata, RouteHintMetadata, SubmitMode,
-    TileIndexMode, PRESSURE_METADATA_LEN, RESULT_DROP_REASON_DEADLINE_EXPIRED,
+    MessageType, OperationState, PartialResultMetadata, PayloadKindBitmap, PressureMetadata,
+    ProgressMetadata, ResultClass, ResultDropReasonMetadata, ResultPushMetadata, RouteHintMetadata,
+    SubmitMode, TileIndexMode, PRESSURE_METADATA_LEN, RESULT_DROP_REASON_DEADLINE_EXPIRED,
     STANDARD_PROFILE_TOKEN,
 };
 use nnrp_runtime::{
     FramedTransport, NnrpClient, NnrpClientConfig, NnrpResult, NnrpRuntimeEvent,
-    NnrpRuntimeEventMetadata, NnrpRuntimeEventTail, NnrpServer, NnrpServerConfig, RuntimeError,
-    RuntimePacket, TcpTransport,
+    NnrpRuntimeEventMetadata, NnrpRuntimeEventTail, NnrpServer, NnrpServerConfig, NnrpServerEvent,
+    NnrpServerSession, RuntimeError, RuntimePacket, TcpTransport,
 };
 use nnrp_transport_ipc::{IpcEndpoint, IpcProvider};
 use nnrp_transport_quic::{QuicClientEndpointConfig, QuicProvider, QuicServerEndpointConfig};
@@ -21,6 +21,22 @@ pub use crate::wire_endpoint::{ReferenceTransport, WireEndpointSecurity, WireRef
 
 const REQUEST_BODY: &[u8] = b"wire-reference-request";
 const RESPONSE_BODY: &[u8] = b"wire-reference-result";
+
+async fn expect_completed_lifecycle(
+    session: &mut NnrpServerSession,
+    operation_id: u64,
+) -> Result<(), RuntimeError> {
+    match session.await_event().await? {
+        NnrpServerEvent::Lifecycle(event)
+            if event.operation_id == operation_id && event.state == OperationState::Completed =>
+        {
+            Ok(())
+        }
+        _ => Err(RuntimeError::UnexpectedMessage(
+            "wire reference server expected completed operation lifecycle evidence",
+        )),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WireReferenceScenario {
@@ -508,7 +524,7 @@ async fn connect_ipc_client_with_retry(endpoint: &IpcEndpoint) -> Result<NnrpCli
 async fn reference_server_task(server: NnrpServer) -> Result<(), RuntimeError> {
     let mut session = server.accept().await?;
     let submit = session.receive_submit().await?;
-    if submit.body != REQUEST_BODY {
+    if submit.body() != REQUEST_BODY {
         return Err(RuntimeError::UnexpectedMessage(
             "wire reference server received unexpected request body",
         ));
@@ -516,6 +532,7 @@ async fn reference_server_task(server: NnrpServer) -> Result<(), RuntimeError> {
     session
         .send_result(submit.frame_id, token_result(), RESPONSE_BODY.to_vec())
         .await?;
+    expect_completed_lifecycle(&mut session, submit.operation_id).await?;
     let close = session.receive_close().await?;
     session.ack_close(&close).await?;
     session.close().await
@@ -559,10 +576,10 @@ async fn run_reference_server(
             "session_id": session_id,
             "frame_id": submit.frame_id,
             "operation_id": submit.operation_id,
-            "body_bytes": submit.body.len(),
+            "body_bytes": submit.body().len(),
         }),
     );
-    if submit.body != REQUEST_BODY {
+    if submit.body() != REQUEST_BODY {
         return Err(RuntimeError::UnexpectedMessage(
             "wire reference suite received unexpected request body",
         ));
@@ -570,6 +587,7 @@ async fn run_reference_server(
     session
         .send_result(submit.frame_id, token_result(), RESPONSE_BODY.to_vec())
         .await?;
+    expect_completed_lifecycle(&mut session, submit.operation_id).await?;
     frames.push(
         "suite->target",
         "RESULT_PUSH",
@@ -727,7 +745,7 @@ async fn reference_scenario_server_task(
             session.receive_scheduling_update().await?;
             session.receive_runtime_control().await?;
             session.send_backpressure(soft_backpressure()).await?;
-            if abort_submit.body.is_empty() {
+            if abort_submit.body().is_empty() {
                 return Err(RuntimeError::UnexpectedMessage(
                     "wire reference abort scenario received empty abort request",
                 ));
@@ -740,6 +758,7 @@ async fn reference_scenario_server_task(
             session
                 .send_result(submit.frame_id, token_result(), RESPONSE_BODY.to_vec())
                 .await?;
+            expect_completed_lifecycle(&mut session, submit.operation_id).await?;
         }
         WireReferenceScenario::ProgressBackpressure => {
             let submit = session.receive_submit().await?;
@@ -754,6 +773,7 @@ async fn reference_scenario_server_task(
             session
                 .send_result(submit.frame_id, token_result(), RESPONSE_BODY.to_vec())
                 .await?;
+            expect_completed_lifecycle(&mut session, submit.operation_id).await?;
         }
         WireReferenceScenario::CapabilityRouteCache => {
             let submit = session.receive_submit().await?;
@@ -779,6 +799,7 @@ async fn reference_scenario_server_task(
             session
                 .send_result(submit.frame_id, token_result(), RESPONSE_BODY.to_vec())
                 .await?;
+            expect_completed_lifecycle(&mut session, submit.operation_id).await?;
         }
     }
     let close = session.receive_close().await?;
@@ -1284,6 +1305,7 @@ async fn reference_proxy_target_server_task(
     session
         .send_result(submit.frame_id, token_result(), RESPONSE_BODY.to_vec())
         .await?;
+    expect_completed_lifecycle(&mut session, submit.operation_id).await?;
     let close = session.receive_close().await?;
     session.ack_close(&close).await?;
     session.close().await
