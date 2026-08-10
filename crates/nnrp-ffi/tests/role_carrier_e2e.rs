@@ -1873,6 +1873,16 @@ unsafe fn assert_role_handshake(
             state,
         );
         if matches!(message_type, MessageType::Cancel | MessageType::Abort) {
+            if message_type == MessageType::Cancel {
+                let retry_after = retry_after_payload(RuntimeRole::Client);
+                send_runtime_frame(client_session, MessageType::RetryAfter, 0, &retry_after);
+                assert_runtime_event(
+                    poll_server_event(server_session),
+                    MessageType::RetryAfter,
+                    None,
+                    &retry_after,
+                );
+            }
             let drop_reason = drop_reason_payload(operation_id, RuntimeRole::Server);
             let server_control_operation = NnrpHandle {
                 flags: 0xA5A5,
