@@ -5315,7 +5315,16 @@ fn server_role_event(
         )?;
         operation
     } else if let Some(operation_id) = operation_id {
-        find_operation_handle(&store, scope, Some(operation_id), None)?
+        match find_operation_handle(&store, scope, Some(operation_id), None) {
+            Err(status)
+                if header.message_type == MessageType::Deadline
+                    && status
+                        == NnrpFfiStatus::invalid_handle(NnrpHandleKind::Operation as u32) =>
+            {
+                NnrpHandle::invalid()
+            }
+            operation => operation?,
+        }
     } else if wire_frame_id != 0 {
         find_operation_handle(&store, scope, None, Some(wire_frame_id))
             .unwrap_or(NnrpHandle::invalid())

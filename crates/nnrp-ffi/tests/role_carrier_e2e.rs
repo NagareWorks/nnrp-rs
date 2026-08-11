@@ -1246,6 +1246,22 @@ unsafe fn assert_role_handshake(
         NnrpFfiStatus::ok()
     );
 
+    let deadline = SchedulingMetadata {
+        operation_id: id_base + 6,
+        control_sequence: 1,
+        priority_class: 0,
+        priority_delta: 0,
+        deadline_unix_ms: 4_102_444_800_000,
+        flags: 0,
+    }
+    .to_bytes()
+    .expect("pre-submit deadline payload")
+    .to_vec();
+    send_runtime_frame(client_session, MessageType::Deadline, 42, &deadline);
+    let deadline_event = poll_server_event(server_session);
+    assert_runtime_event(deadline_event, MessageType::Deadline, None, &deadline);
+    assert_eq!(deadline_event.operation, NnrpHandle::invalid());
+
     let submit_body = b"role-carrier-submit";
     let mut submit_payload = token_submit(id_base + 6)
         .to_bytes()
