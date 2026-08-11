@@ -1577,28 +1577,30 @@ impl NnrpServerSession {
                     "server received runtime control diagnostic body length mismatch",
                 )?;
                 self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
-                self.ensure_pending_capacity()?;
-                let lifecycle_state = match packet.header.message_type {
-                    MessageType::Cancel => {
-                        let cancelled = self.operations.cancel(OperationCancelRequest {
-                            session_id: self.session_id,
-                            operation_id: metadata.operation_id,
-                            cancel_scope: nnrp_core::CancelScope::Operation,
-                        })?;
-                        if cancelled.is_empty() {
-                            return Err(RuntimeError::UnexpectedMessage(
-                                "server cancel did not transition an active operation",
-                            ));
+                if metadata.operation_id != 0 {
+                    self.ensure_pending_capacity()?;
+                    let lifecycle_state = match packet.header.message_type {
+                        MessageType::Cancel => {
+                            let cancelled = self.operations.cancel(OperationCancelRequest {
+                                session_id: self.session_id,
+                                operation_id: metadata.operation_id,
+                                cancel_scope: nnrp_core::CancelScope::Operation,
+                            })?;
+                            if cancelled.is_empty() {
+                                return Err(RuntimeError::UnexpectedMessage(
+                                    "server cancel did not transition an active operation",
+                                ));
+                            }
+                            nnrp_core::OperationState::Cancelled
                         }
-                        nnrp_core::OperationState::Cancelled
-                    }
-                    MessageType::Abort => {
-                        self.operations.abort(metadata.operation_id)?;
-                        nnrp_core::OperationState::Failed
-                    }
-                    _ => unreachable!("runtime control message type was matched earlier"),
-                };
-                self.queue_lifecycle(metadata.operation_id, lifecycle_state)?;
+                        MessageType::Abort => {
+                            self.operations.abort(metadata.operation_id)?;
+                            nnrp_core::OperationState::Failed
+                        }
+                        _ => unreachable!("runtime control message type was matched earlier"),
+                    };
+                    self.queue_lifecycle(metadata.operation_id, lifecycle_state)?;
+                }
                 Ok(DecodedServerEvent::Control(NnrpRuntimeControl {
                     message_type: packet.header.message_type,
                     metadata,
@@ -2313,6 +2315,16 @@ impl NnrpServerSession {
             "server runtime control diagnostic body length mismatch",
         )?;
         let frame_id = self.correlated_frame_id(metadata.operation_id)?;
+        if metadata.operation_id == 0 {
+            return self
+                .write_runtime_packet(
+                    message_type,
+                    frame_id,
+                    metadata.to_bytes()?.to_vec(),
+                    diagnostics,
+                )
+                .await;
+        }
         let state = match message_type {
             MessageType::Cancel => nnrp_core::OperationState::Cancelled,
             MessageType::Abort => nnrp_core::OperationState::Failed,

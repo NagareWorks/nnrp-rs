@@ -5040,7 +5040,10 @@ fn client_role_event(
         }
     };
     let header = event.header;
-    let operation_id = event.metadata.operation_id();
+    let operation_id = event
+        .metadata
+        .operation_id()
+        .filter(|operation_id| *operation_id != 0);
     let kind = role_event_kind(header.message_type);
     let terminal = matches!(
         header.message_type,
@@ -5288,7 +5291,10 @@ fn server_role_event(
         .or(runtime_event.as_ref())
         .expect("server runtime events retain exactly one payload owner");
     let header = event.header;
-    let operation_id = event.metadata.operation_id();
+    let operation_id = event
+        .metadata
+        .operation_id()
+        .filter(|operation_id| *operation_id != 0);
     let create_operation = header.message_type == MessageType::FrameSubmit;
     let kind = role_event_kind(header.message_type);
     let payload = event
