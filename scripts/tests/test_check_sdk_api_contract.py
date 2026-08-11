@@ -161,10 +161,8 @@ def frozen_contract():
             "rust": copy.deepcopy(checker.EXPECTED_RUST_PROJECTIONS),
         },
         "roleSurfaces": {
-            "serverEventPump": {
-                "canonicalOperation": "server_session.next_event",
-                "submitConvenience": "server_session.receive_submit",
-            }
+            "clientSubmitWait": copy.deepcopy(checker.EXPECTED_CLIENT_SUBMIT_WAIT),
+            "serverEventPump": copy.deepcopy(checker.EXPECTED_SERVER_EVENT_PUMP),
         },
         "roleOperations": {
             "client_session.next_event": {"returns": "ClientEvent"},
@@ -234,6 +232,31 @@ class SdkApiContractTests(unittest.TestCase):
 
     def test_accepts_the_frozen_terminal_result_contract(self):
         self.check(frozen_contract())
+
+    def test_rejects_contract_version_and_role_surface_drift(self):
+        contract = frozen_contract()
+        contract["contractVersion"] = 14
+        with self.assertRaisesRegex(SystemExit, "expected SDK contract version 15"):
+            self.check(contract)
+
+        contract = frozen_contract()
+        contract["roleSurfaces"]["clientSubmitWait"]["timeoutRule"] = (
+            "timeout remains local"
+        )
+        with self.assertRaisesRegex(SystemExit, "client submit-wait semantics drifted"):
+            self.check(contract)
+
+        contract = frozen_contract()
+        contract["roleSurfaces"]["clientSubmitWait"] = None
+        with self.assertRaisesRegex(SystemExit, "client submit-wait contract must be an object"):
+            self.check(contract)
+
+        contract = frozen_contract()
+        contract["roleSurfaces"]["serverEventPump"]["ownershipRule"] = (
+            "submit ownership may be discarded"
+        )
+        with self.assertRaisesRegex(SystemExit, "server event-pump semantics drifted"):
+            self.check(contract)
 
     def test_rejects_terminal_event_variant_drift(self):
         contract = frozen_contract()
