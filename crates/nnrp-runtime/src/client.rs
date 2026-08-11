@@ -1152,13 +1152,15 @@ impl NnrpClientSession {
                     "client received runtime control diagnostic body length mismatch",
                 )?;
                 self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
-                self.ensure_pending_role_capacity()?;
-                let state = match packet.header.message_type {
-                    MessageType::Cancel => nnrp_core::OperationState::Cancelled,
-                    MessageType::Abort => nnrp_core::OperationState::Failed,
-                    _ => unreachable!("runtime control message type was matched earlier"),
-                };
-                self.complete_local_operation(metadata.operation_id, state)?;
+                if metadata.operation_id != 0 {
+                    self.ensure_pending_role_capacity()?;
+                    let state = match packet.header.message_type {
+                        MessageType::Cancel => nnrp_core::OperationState::Cancelled,
+                        MessageType::Abort => nnrp_core::OperationState::Failed,
+                        _ => unreachable!("runtime control message type was matched earlier"),
+                    };
+                    self.complete_local_operation(metadata.operation_id, state)?;
+                }
                 Ok(NnrpClientEvent::Control {
                     message_type: packet.header.message_type,
                     metadata,
@@ -1556,6 +1558,9 @@ impl NnrpClientSession {
     }
 
     fn correlated_frame_id(&self, operation_id: u64) -> Result<u32, RuntimeError> {
+        if operation_id == 0 {
+            return Ok(0);
+        }
         self.operation_frames
             .get(&operation_id)
             .copied()
@@ -1738,7 +1743,9 @@ impl NnrpClientSession {
             metadata.diagnostic_bytes as usize,
             "client runtime control diagnostic body length mismatch",
         )?;
-        self.ensure_pending_role_capacity()?;
+        if metadata.operation_id != 0 {
+            self.ensure_pending_role_capacity()?;
+        }
         let mut header = CommonHeader::new(
             message_type,
             CONTROL_REQUEST_METADATA_LEN as u32,
@@ -1753,6 +1760,9 @@ impl NnrpClientSession {
                 diagnostics,
             )?)
             .await?;
+        if metadata.operation_id == 0 {
+            return Ok(());
+        }
         let state = match message_type {
             MessageType::Cancel => nnrp_core::OperationState::Cancelled,
             MessageType::Abort => nnrp_core::OperationState::Failed,

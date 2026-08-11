@@ -1847,6 +1847,50 @@ unsafe fn assert_role_handshake(
         NnrpFfiStatus::ok()
     );
 
+    let client_session_cancel = control_payload(0, RuntimeRole::Client);
+    send_runtime_frame(
+        client_session,
+        MessageType::Cancel,
+        0,
+        &client_session_cancel,
+    );
+    let server_session_cancel = poll_server_event(server_session);
+    assert_runtime_event(
+        server_session_cancel,
+        MessageType::Cancel,
+        None,
+        &client_session_cancel,
+    );
+    assert_eq!(server_session_cancel.header.frame_id, 0);
+    assert_eq!(server_session_cancel.operation, NnrpHandle::invalid());
+
+    let server_session_abort = control_payload(0, RuntimeRole::Server);
+    send_runtime_frame(server_session, MessageType::Abort, 0, &server_session_abort);
+    let client_session_abort = poll_client_event(client_session);
+    assert_runtime_event(
+        client_session_abort,
+        MessageType::Abort,
+        None,
+        &server_session_abort,
+    );
+    assert_eq!(client_session_abort.header.frame_id, 0);
+    assert_eq!(client_session_abort.operation, NnrpHandle::invalid());
+
+    for (message_type, payload) in [
+        (MessageType::BudgetUpdate, budget_payload(0)),
+        (MessageType::ObjectRef, object_ref_payload(0)),
+        (
+            MessageType::ObjectRelease,
+            object_release_payload(0, RuntimeRole::Client),
+        ),
+    ] {
+        send_runtime_frame(client_session, message_type, 0, &payload);
+        let event = poll_server_event(server_session);
+        assert_runtime_event(event, message_type, None, &payload);
+        assert_eq!(event.header.frame_id, 0);
+        assert_eq!(event.operation, NnrpHandle::invalid());
+    }
+
     for (offset, message_type) in [
         MessageType::Cancel,
         MessageType::Abort,

@@ -16,11 +16,12 @@ use nnrp_core::{
     SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata, SessionPatchRejectReason,
     SessionPriorityClass, SessionStatus, SubmitMode, SupersedeMetadata, TileIndexMode,
     TraceContextMetadata, TransportId, TransportProbeAckMetadata, TransportProbeMetadata,
-    CLIENT_HELLO_METADATA_LEN, FLOW_UPDATE_FLAG_CREDIT_VALID, FRAME_SUBMIT_METADATA_LEN,
-    RESULT_DROP_REASON_DEADLINE_EXPIRED, RESULT_PUSH_METADATA_LEN, RETRY_AFTER_METADATA_LEN,
-    SERVER_HELLO_ACK_METADATA_LEN, SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE,
-    SESSION_OPEN_ACK_METADATA_LEN, SESSION_OPEN_METADATA_LEN, STANDARD_PROFILE_TOKEN,
-    TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
+    CLIENT_HELLO_METADATA_LEN, CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED,
+    FLOW_UPDATE_FLAG_CREDIT_VALID, FRAME_SUBMIT_METADATA_LEN, RESULT_DROP_REASON_DEADLINE_EXPIRED,
+    RESULT_PUSH_METADATA_LEN, RETRY_AFTER_METADATA_LEN, SERVER_HELLO_ACK_METADATA_LEN,
+    SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE, SESSION_OPEN_ACK_METADATA_LEN,
+    SESSION_OPEN_METADATA_LEN, STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID,
+    TOKEN_DELTA_SCHEMA_VERSION,
 };
 use nnrp_runtime::{
     BoxedFramedTransport, FramedListener, FramedTransport, NnrpClient, NnrpClientConfig,
@@ -3699,6 +3700,89 @@ async fn client_accepts_custom_quic_transport_slot() -> Result<(), RuntimeError>
     assert_eq!(writes.len(), 2);
     assert_eq!(writes[0].header.message_type, MessageType::ClientHello);
     assert_eq!(writes[1].header.message_type, MessageType::SessionOpen);
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_scoped_control_bypasses_a_full_local_lifecycle_queue() -> Result<(), RuntimeError>
+{
+    let config = NnrpClientConfig {
+        requested_session_id: 9,
+        ..Default::default()
+    };
+    let ack = open_ack(&SessionOpenMetadata {
+        requested_session_id: config.requested_session_id,
+        profile_id: config.profile_id,
+        priority_class: config.priority_class,
+        session_flags: 0,
+        schema_id: config.schema_id,
+        schema_version: config.schema_version,
+        default_deadline_ms: config.default_deadline_ms,
+        max_in_flight_operations: config.max_in_flight_operations,
+        lease_ttl_hint_ms: config.lease_ttl_hint_ms,
+        resume_token_bytes: 0,
+        auth_bytes: 0,
+        session_extension_bytes: 0,
+        client_session_tag: config.requested_session_id as u64,
+    });
+    let mut ack_header = CommonHeader::new(
+        MessageType::SessionOpenAck,
+        SESSION_OPEN_ACK_METADATA_LEN as u32,
+        0,
+    );
+    ack_header.session_id = ack.session_id;
+    let writes = Arc::new(Mutex::new(Vec::new()));
+    let transport = scripted_client_transport(
+        RuntimeTransportKind::Quic,
+        vec![RuntimePacket::new(
+            ack_header,
+            ack.to_bytes()?.to_vec(),
+            Vec::new(),
+        )?],
+        Arc::clone(&writes),
+    )?;
+
+    let client = NnrpClient::from_transport(transport, config)?;
+    let mut session = client.open_session().await?;
+    for operation_id in 1..=1_024 {
+        session
+            .submit_encoded(token_submit(operation_id), b"prompt".to_vec())
+            .await?;
+        session.cancel_operation(operation_id, 1).await?;
+    }
+
+    session
+        .submit_encoded(token_submit(1_025), b"prompt".to_vec())
+        .await?;
+    assert!(matches!(
+        session.cancel_operation(1_025, 1).await,
+        Err(RuntimeError::UnexpectedMessage(
+            "client local lifecycle event queue exceeded its limit"
+        ))
+    ));
+
+    session
+        .send_control_request(
+            MessageType::Cancel,
+            ControlRequestMetadata {
+                operation_id: 0,
+                control_sequence: 1_026,
+                reason_code: 1,
+                source_role: RuntimeRole::Client as u8,
+                flags: CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED,
+                diagnostic_bytes: 0,
+            },
+        )
+        .await?;
+
+    let writes = writes.lock().expect("writes should lock");
+    let packet = writes.last().expect("session control should be written");
+    assert_eq!(packet.header.message_type, MessageType::Cancel);
+    assert_eq!(packet.header.frame_id, 0);
+    assert_eq!(
+        ControlRequestMetadata::parse(&packet.metadata)?.operation_id,
+        0
+    );
     Ok(())
 }
 
