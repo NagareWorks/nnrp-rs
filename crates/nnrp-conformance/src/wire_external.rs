@@ -4,8 +4,8 @@ use nnrp_core::{
     CacheMissMetadata, CacheMissReason, CacheReferenceMetadata, CacheReuseScope,
     CapabilityMetadata, MessageType, OperationState, PartialResultMetadata, PayloadKindBitmap,
     PressureMetadata, ProgressMetadata, ResultClass, ResultDropReasonMetadata, ResultPushMetadata,
-    RouteHintMetadata, TraceContextMetadata, RESULT_DROP_REASON_DEADLINE_EXPIRED,
-    STANDARD_PROFILE_TOKEN,
+    RouteHintMetadata, SchedulingMetadata, TraceContextMetadata,
+    RESULT_DROP_REASON_DEADLINE_EXPIRED, STANDARD_PROFILE_TOKEN,
 };
 use nnrp_runtime::{
     FramedListener, NnrpClientRoleEvent, NnrpRuntimeEvent, NnrpRuntimeEventMetadata,
@@ -76,6 +76,7 @@ async fn expect_completed_lifecycle(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WireExternalCase {
     CancelAbortClient,
+    DeadlineBeforeSubmitClient,
     PriorityDeadlineProxy,
     ProgressBackpressureServer,
     CapabilityRouteCacheClient,
@@ -110,6 +111,7 @@ pub enum WireExternalDirection {
 pub enum WireExternalFrame {
     Request,
     Cancel,
+    Deadline,
     PriorityUpdate,
     ExpireAt,
     Progress,
@@ -149,6 +151,7 @@ impl WireExternalCase {
     pub fn scenario_id(self) -> &'static str {
         match self {
             Self::CancelAbortClient => "wire.control.cancel-abort.client",
+            Self::DeadlineBeforeSubmitClient => "wire.control.deadline-before-submit.client",
             Self::PriorityDeadlineProxy => "wire.control.priority-deadline.proxy",
             Self::ProgressBackpressureServer => "wire.control.progress-backpressure.server",
             Self::CapabilityRouteCacheClient => "wire.control.capability-route-cache.client",
@@ -162,6 +165,7 @@ impl WireExternalCase {
     pub fn mode(self) -> WireExternalMode {
         match self {
             Self::CancelAbortClient
+            | Self::DeadlineBeforeSubmitClient
             | Self::CapabilityRouteCacheClient
             | Self::CancelAbortIpcClient => WireExternalMode::SuiteAsClient,
             Self::ProgressBackpressureServer | Self::ProgressBackpressureWebSocketServer => {
@@ -173,7 +177,9 @@ impl WireExternalCase {
 
     pub fn transport(self) -> ReferenceTransport {
         match self {
-            Self::CancelAbortClient | Self::ProgressBackpressureServer => ReferenceTransport::Tcp,
+            Self::CancelAbortClient
+            | Self::DeadlineBeforeSubmitClient
+            | Self::ProgressBackpressureServer => ReferenceTransport::Tcp,
             Self::PriorityDeadlineProxy | Self::CapabilityRouteCacheClient => {
                 ReferenceTransport::Quic
             }
@@ -222,6 +228,9 @@ pub async fn run_wire_external_case(
         WireExternalCase::CancelAbortClient | WireExternalCase::CancelAbortIpcClient => {
             run_cancel_abort_client(case, endpoint).await
         }
+        WireExternalCase::DeadlineBeforeSubmitClient => {
+            run_deadline_before_submit_client(case, endpoint).await
+        }
         WireExternalCase::CapabilityRouteCacheClient => {
             run_capability_route_cache_client(case, endpoint).await
         }
@@ -233,6 +242,66 @@ pub async fn run_wire_external_case(
             run_priority_deadline_proxy(case, endpoint).await
         }
     }
+}
+
+async fn run_deadline_before_submit_client(
+    case: WireExternalCase,
+    endpoint: &WireReferenceEndpoint,
+) -> Result<WireExternalCaseReport, RuntimeError> {
+    let started = Instant::now();
+    let mut observed = ObservedFrames::new(started);
+    let mut session = endpoint.connect().await?.open_session().await?;
+    let session_id = session.session_id();
+    let operation_id = 151;
+    let frame_id = 1;
+    let deadline = canonical_pre_submit_deadline(operation_id);
+
+    session
+        .send_runtime_frame(MessageType::Deadline, frame_id, &deadline.to_bytes()?)
+        .await?;
+    observed.push(
+        WireExternalDirection::SuiteToTarget,
+        WireExternalFrame::Deadline,
+        json!({
+            "session_id": session_id,
+            "frame_id": frame_id,
+            "operation_id": operation_id,
+            "deadline_unix_ms": deadline.deadline_unix_ms,
+        }),
+    );
+
+    let request = token_submit(operation_id)?;
+    session
+        .submit_encoded_with_frame_id(frame_id, request.metadata, request.body)
+        .await?;
+    observed.push(
+        WireExternalDirection::SuiteToTarget,
+        WireExternalFrame::Request,
+        json!({ "session_id": session_id, "frame_id": frame_id, "operation_id": operation_id }),
+    );
+
+    let result = session.await_result().await?;
+    if result.operation_id != operation_id {
+        return Err(RuntimeError::UnexpectedMessage(
+            "deadline-before-submit target returned another operation",
+        ));
+    }
+    observed.push(
+        WireExternalDirection::TargetToSuite,
+        WireExternalFrame::ResultPush,
+        json!({ "session_id": session_id, "frame_id": frame_id, "operation_id": operation_id }),
+    );
+    session.close().await?;
+
+    Ok(report(
+        case,
+        started,
+        WireExternalTerminal::Success,
+        observed.frames,
+        None,
+        None,
+        None,
+    ))
 }
 
 async fn run_cancel_abort_client(
@@ -809,6 +878,17 @@ pub fn canonical_cache_miss() -> CacheMissMetadata {
     cache_miss()
 }
 
+pub fn canonical_pre_submit_deadline(operation_id: u64) -> SchedulingMetadata {
+    SchedulingMetadata {
+        operation_id,
+        control_sequence: 1,
+        priority_class: 0,
+        priority_delta: 0,
+        deadline_unix_ms: 4_000_000_000_000,
+        flags: 0,
+    }
+}
+
 pub fn canonical_result() -> ResultPushMetadata {
     token_result()
 }
@@ -833,11 +913,11 @@ mod tests {
     use nnrp_transport_quic::QuicServerEndpointConfig;
 
     use super::{
-        cache_miss, cancel_drop_reason, cancel_trace, canonical_response_body,
-        expect_client_runtime_event, expect_completed_lifecycle, run_wire_external_case,
-        token_result, token_submit, WireExternalCase, WireExternalMode, WireExternalTerminal,
-        CACHE_BODY, CAPABILITY_BODY, PARTIAL_BODY, PROGRESS_BODY, RESPONSE_BODY, ROUTE_BODY,
-        TRACE_BODY,
+        cache_miss, cancel_drop_reason, cancel_trace, canonical_pre_submit_deadline,
+        canonical_response_body, expect_client_runtime_event, expect_completed_lifecycle,
+        run_wire_external_case, token_result, token_submit, WireExternalCase, WireExternalMode,
+        WireExternalTerminal, CACHE_BODY, CAPABILITY_BODY, PARTIAL_BODY, PROGRESS_BODY,
+        RESPONSE_BODY, ROUTE_BODY, TRACE_BODY,
     };
     use crate::wire_endpoint::{ReferenceTransport, WireEndpointSecurity, WireReferenceEndpoint};
 
@@ -890,6 +970,58 @@ mod tests {
             .expect("target should complete");
         assert_eq!(report.transport, ReferenceTransport::Ipc);
         cleanup_ipc_endpoint(&ipc);
+    }
+
+    #[tokio::test]
+    async fn external_deadline_before_submit_case_preserves_wire_order_and_applies_deadline() {
+        let endpoint =
+            WireReferenceEndpoint::plain(ReferenceTransport::Tcp, free_tcp_address().to_string());
+        let server = endpoint
+            .bind()
+            .await
+            .expect("target TCP listener should bind");
+        let target = tokio::spawn(deadline_before_submit_target(server));
+
+        let report =
+            run_wire_external_case(WireExternalCase::DeadlineBeforeSubmitClient, &endpoint)
+                .await
+                .expect("deadline-before-submit case should pass");
+        target
+            .await
+            .expect("target task should join")
+            .expect("target should complete");
+        assert_eq!(report.terminal, WireExternalTerminal::Success);
+        assert_eq!(report.mode, WireExternalMode::SuiteAsClient);
+        assert_eq!(report.transport, ReferenceTransport::Tcp);
+    }
+
+    #[tokio::test]
+    async fn deadline_before_submit_target_rejects_submit_first() {
+        let endpoint =
+            WireReferenceEndpoint::plain(ReferenceTransport::Tcp, free_tcp_address().to_string());
+        let server = endpoint
+            .bind()
+            .await
+            .expect("target TCP listener should bind");
+        let target = tokio::spawn(deadline_before_submit_target(server));
+        let mut session = endpoint
+            .connect()
+            .await
+            .expect("test client should connect")
+            .open_session()
+            .await
+            .expect("test session should open");
+        let request = token_submit(151).expect("submit fixture should encode");
+        session
+            .submit_encoded_with_frame_id(1, request.metadata, request.body)
+            .await
+            .expect("submit-first probe should reach the target");
+
+        let error = target
+            .await
+            .expect("target task should join")
+            .expect_err("target must reject FRAME_SUBMIT before DEADLINE");
+        assert!(matches!(error, RuntimeError::UnexpectedMessage(_)));
     }
 
     #[tokio::test]
@@ -1026,6 +1158,64 @@ mod tests {
                 Vec::new(),
             )
             .await?;
+        close_server_session(&mut session).await
+    }
+
+    async fn deadline_before_submit_target(
+        server: nnrp_runtime::NnrpServer,
+    ) -> Result<(), RuntimeError> {
+        let mut session = server.accept().await?;
+        let deadline = canonical_pre_submit_deadline(151);
+        match session.await_event().await? {
+            NnrpServerEvent::Runtime(NnrpRuntimeEvent {
+                header,
+                metadata: NnrpRuntimeEventMetadata::Scheduling(metadata),
+                tail: NnrpRuntimeEventTail::None,
+            }) if header.message_type == nnrp_core::MessageType::Deadline
+                && header.frame_id == 1
+                && metadata == deadline =>
+            {
+                if session
+                    .operations()
+                    .operation(deadline.operation_id)
+                    .is_some()
+                {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "deadline-before-submit target registered the operation too early",
+                    ));
+                }
+            }
+            _ => {
+                return Err(RuntimeError::UnexpectedMessage(
+                    "deadline-before-submit target expected DEADLINE before FRAME_SUBMIT",
+                ));
+            }
+        }
+
+        let submit = match session.await_event().await? {
+            NnrpServerEvent::Submit(operation) => operation,
+            _ => {
+                return Err(RuntimeError::UnexpectedMessage(
+                    "deadline-before-submit target expected FRAME_SUBMIT after DEADLINE",
+                ));
+            }
+        };
+        if submit.frame_id != 1
+            || submit.operation_id != deadline.operation_id
+            || session
+                .operations()
+                .operation(submit.operation_id)
+                .map(|operation| operation.schedule.deadline_unix_ms)
+                != Some(deadline.deadline_unix_ms)
+        {
+            return Err(RuntimeError::UnexpectedMessage(
+                "deadline-before-submit target did not apply the reserved deadline",
+            ));
+        }
+        submit
+            .send_result(&mut session, token_result(), RESPONSE_BODY.to_vec())
+            .await?;
+        expect_completed_lifecycle(&mut session, submit.operation_id).await?;
         close_server_session(&mut session).await
     }
 
@@ -1255,6 +1445,10 @@ mod tests {
         assert_eq!(
             WireExternalCase::ProgressBackpressureServer.mode(),
             WireExternalMode::SuiteAsServer
+        );
+        assert_eq!(
+            WireExternalCase::DeadlineBeforeSubmitClient.scenario_id(),
+            "wire.control.deadline-before-submit.client"
         );
         assert_eq!(
             WireExternalCase::CapabilityRouteCacheClient.mode(),
