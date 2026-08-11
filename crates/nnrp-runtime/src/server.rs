@@ -56,6 +56,7 @@ use tokio::net::TcpListener;
 use crate::TcpFramedListener;
 use crate::{
     multiplex::{spawn_runtime_task, MultiplexedConnection},
+    pre_submit::PreSubmitDeadlineReservations,
     server_provider::{bind_server, BoundServerProvider},
     BoxedFramedListener, BoxedFramedTransport, FramedListener, NnrpRuntimeEvent, NnrpServerOptions,
     NnrpServerProvider, ProviderEndpoint, RuntimeError, RuntimeFrameHeader, RuntimePacket,
@@ -274,6 +275,7 @@ pub struct NnrpServerSession {
     operations: OperationRegistry,
     frame_operations: BTreeMap<u32, u64>,
     operation_frames: BTreeMap<u64, u32>,
+    pre_submit_deadlines: PreSubmitDeadlineReservations,
     pressure: RuntimePressureState,
     cache_objects: Vec<CacheObjectId>,
     supported_cache_objects: Vec<CacheObjectKind>,
@@ -1084,6 +1086,7 @@ async fn accept_connection_session(
         operations: OperationRegistry::new(),
         frame_operations: BTreeMap::new(),
         operation_frames: BTreeMap::new(),
+        pre_submit_deadlines: PreSubmitDeadlineReservations::new(open.max_in_flight_operations),
         pressure: RuntimePressureState::default(),
         cache_objects: Vec::new(),
         supported_cache_objects: config.supported_cache_objects.clone(),
@@ -1393,10 +1396,22 @@ impl NnrpServerSession {
                 "server received duplicate FRAME_SUBMIT frame id",
             ));
         }
+        let reserved_deadline = self.pre_submit_deadlines.take_for_submit(
+            metadata.operation_id,
+            packet.header.frame_id,
+            current_unix_ms(),
+        )?;
         self.operations.register(OperationDescriptor::new(
             self.session_id,
             metadata.operation_id,
         ))?;
+        if let Some(deadline) = reserved_deadline {
+            self.operations.apply_scheduling_update(
+                self.session_id,
+                MessageType::Deadline,
+                deadline,
+            )?;
+        }
         self.frame_operations
             .insert(packet.header.frame_id, metadata.operation_id);
         self.operation_frames
@@ -1436,6 +1451,8 @@ impl NnrpServerSession {
 
     async fn read_next_input(&mut self) -> Result<PendingServerInput, RuntimeError> {
         let packet = self.transport.read_packet().await?;
+        self.pre_submit_deadlines
+            .reject_expired(current_unix_ms())?;
         if is_dedicated_role_message(packet.header.message_type) {
             return Ok(PendingServerInput::RolePacket(packet));
         }
@@ -1600,12 +1617,35 @@ impl NnrpServerSession {
                 }
                 let metadata = SchedulingMetadata::parse(&packet.metadata)?;
                 validate_scheduling_semantics(packet.header.message_type, &metadata)?;
-                self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
-                self.operations.apply_scheduling_update(
-                    self.session_id,
-                    packet.header.message_type,
-                    metadata,
-                )?;
+                if let Some(expected_frame_id) =
+                    self.operation_frames.get(&metadata.operation_id).copied()
+                {
+                    if expected_frame_id != packet.header.frame_id {
+                        return Err(RuntimeError::UnexpectedMessage(
+                            "server runtime event frame id does not match its operation",
+                        ));
+                    }
+                    self.operations.apply_scheduling_update(
+                        self.session_id,
+                        packet.header.message_type,
+                        metadata,
+                    )?;
+                } else if packet.header.message_type == MessageType::Deadline {
+                    if self.frame_operations.contains_key(&packet.header.frame_id) {
+                        return Err(RuntimeError::UnexpectedMessage(
+                            "server received pre-submit DEADLINE for a reused frame id",
+                        ));
+                    }
+                    self.pre_submit_deadlines.reserve(
+                        packet.header.frame_id,
+                        metadata,
+                        current_unix_ms(),
+                    )?;
+                } else {
+                    return Err(
+                        nnrp_core::NnrpError::UnknownOperation(metadata.operation_id).into(),
+                    );
+                }
                 Ok(DecodedServerEvent::Scheduling(NnrpSchedulingUpdate {
                     message_type: packet.header.message_type,
                     metadata,
@@ -3364,6 +3404,7 @@ mod accept_tests {
             operations,
             frame_operations: BTreeMap::from([(frame_id, operation_id)]),
             operation_frames: BTreeMap::from([(operation_id, frame_id)]),
+            pre_submit_deadlines: PreSubmitDeadlineReservations::new(4),
             pressure: RuntimePressureState::default(),
             cache_objects: Vec::new(),
             supported_cache_objects: Vec::new(),
