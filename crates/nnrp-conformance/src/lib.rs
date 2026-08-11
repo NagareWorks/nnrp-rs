@@ -1,5 +1,4 @@
 pub mod adapter_conformance;
-#[cfg(test)]
 mod nnrp1_baseline;
 pub mod preview4_vectors;
 pub mod wire_conformance;

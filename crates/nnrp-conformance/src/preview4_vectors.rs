@@ -31,6 +31,27 @@ pub const PREVIEW4_PROTOCOL_VERSION: &str = "nnrp-1-preview4";
 pub fn preview4_public_case_ids() -> &'static [&'static str] {
     &[
         "l0.header.fixed_shape.golden",
+        "l0.control.client_hello.golden",
+        "l0.control.session_patch_ack.golden",
+        "l0.flow_update.packet.golden",
+        "l0.result_hint.packet.golden",
+        "l0.frame_submit.metadata.golden",
+        "l0.result_push.metadata.golden",
+        "l0.body_region.prelude.golden",
+        "l0.object_reference.block.golden",
+        "l0.typed_payload.descriptor.golden",
+        "l0.typed_payload.frame_regions.golden",
+        "l1.flow_update.metadata.validation",
+        "l1.result_hint.metadata.validation",
+        "l1.cache.lifecycle.roundtrip",
+        "l1.transport_probe.metadata.roundtrip",
+        "l1.frame_submit.message.parse_emit",
+        "l1.result_push.message.parse_emit",
+        "l1.result_push.object_reference.resolve",
+        "l1.typed_payload.region.pack",
+        "l3.transport.probe.selection",
+        "l3.transport.tcp.session_smoke",
+        "l3.transport.quic.session_smoke",
         "l0.typed_payload.descriptor.current.golden",
         "l1.control.cancel-abort",
         "l1.control.priority-deadline",
@@ -48,6 +69,15 @@ pub fn preview4_public_case_ids() -> &'static [&'static str] {
 
 pub fn preview4_capability_tokens() -> &'static [&'static str] {
     &[
+        "handshake.basic",
+        "session.open_close",
+        "session.resume",
+        "flow_update",
+        "frame_submit.tensor.inline",
+        "result_push.basic",
+        "cache.lifecycle",
+        "transport.tcp",
+        "transport.quic",
         "payload.typed",
         CONTROL_CANCEL_ABORT,
         CONTROL_SUPERSEDE,
@@ -71,8 +101,13 @@ pub fn preview4_capability_tokens() -> &'static [&'static str] {
 }
 
 pub fn execute_preview4_public_case(case_id: &str) -> Option<Result<(), String>> {
+    if case_id == "l0.header.fixed_shape.golden" {
+        return Some(current_header_golden_validation());
+    }
+    if let Some(result) = crate::nnrp1_baseline::execute_nnrp1_baseline_case(case_id) {
+        return Some(result);
+    }
     let result = match case_id {
-        "l0.header.fixed_shape.golden" => current_header_golden_validation(),
         "l0.typed_payload.descriptor.current.golden" => {
             current_typed_payload_descriptor_golden_validation()
         }
