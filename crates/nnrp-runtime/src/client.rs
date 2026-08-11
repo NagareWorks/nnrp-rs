@@ -37,6 +37,7 @@ use crate::TcpTransport;
 use crate::{
     client_provider::{connect_client, NnrpClientOptions, NnrpClientProvider},
     multiplex::MultiplexedConnection,
+    pre_submit::{current_unix_ms, PreSubmitDeadlineReservations},
     BoxedFramedTransport, FramedTransport, NnrpClientRoleEvent, NnrpRuntimeEvent,
     NnrpRuntimeEventMetadata, NnrpRuntimeEventTail, NnrpSubmitRequest, NnrpTerminalEvent,
     OperationLifecycleEvent, RuntimeError, RuntimeFrameHeader, RuntimePacket, RuntimePressureState,
@@ -109,6 +110,7 @@ pub struct NnrpClientSession {
     frame_operations: BTreeMap<u32, u64>,
     local_operation_states: BTreeMap<u64, nnrp_core::OperationState>,
     seen_operation_ids: BTreeSet<u64>,
+    pre_submit_deadlines: PreSubmitDeadlineReservations,
     last_operation_id: u64,
     transport: BoxedFramedTransport,
     lifecycle: ConnectionLifecycle,
@@ -570,6 +572,7 @@ impl NnrpClient {
             frame_operations: BTreeMap::new(),
             local_operation_states: BTreeMap::new(),
             seen_operation_ids: BTreeSet::new(),
+            pre_submit_deadlines: PreSubmitDeadlineReservations::new(ack.max_in_flight_operations),
             last_operation_id: 0,
             transport: Box::new(transport),
             lifecycle,
@@ -776,6 +779,11 @@ impl NnrpClientSession {
         let next_frame_id = frame_id
             .checked_add(1)
             .ok_or(RuntimeError::FrameIdOverflow)?;
+        let _reserved_deadline = self.pre_submit_deadlines.take_for_submit(
+            metadata.operation_id,
+            frame_id,
+            current_unix_ms(),
+        )?;
 
         let mut header = CommonHeader::new(
             MessageType::FrameSubmit,
@@ -839,8 +847,12 @@ impl NnrpClientSession {
                     .await
             }
             MessageType::PriorityUpdate | MessageType::Deadline | MessageType::ExpireAt => {
-                self.send_scheduling_update(message_type, SchedulingMetadata::parse(payload)?)
-                    .await
+                self.send_scheduling_update_for_frame(
+                    message_type,
+                    frame_id,
+                    SchedulingMetadata::parse(payload)?,
+                )
+                .await
             }
             MessageType::Supersede => {
                 let (metadata, body) = SupersedeMetadata::parse_with_diagnostics(payload)?;
@@ -1823,6 +1835,56 @@ impl NnrpClientSession {
                 Vec::new(),
             )?)
             .await
+    }
+
+    async fn send_scheduling_update_for_frame(
+        &mut self,
+        message_type: MessageType,
+        frame_id: u32,
+        metadata: SchedulingMetadata,
+    ) -> Result<(), RuntimeError> {
+        validate_scheduling_semantics(message_type, &metadata)?;
+        if let Some(expected_frame_id) = self.operation_frames.get(&metadata.operation_id).copied()
+        {
+            if expected_frame_id != frame_id {
+                return Err(RuntimeError::UnexpectedMessage(
+                    "client scheduling frame id does not match its operation",
+                ));
+            }
+            return self.send_scheduling_update(message_type, metadata).await;
+        }
+        if message_type != MessageType::Deadline {
+            return Err(nnrp_core::NnrpError::UnknownOperation(metadata.operation_id).into());
+        }
+        if frame_id == 0 || frame_id < self.next_frame_id {
+            return Err(RuntimeError::UnexpectedMessage(
+                "client frame id must not be zero, reused, or moved backward",
+            ));
+        }
+        if metadata.operation_id == 0 || self.seen_operation_ids.contains(&metadata.operation_id) {
+            return Err(RuntimeError::UnexpectedMessage(
+                "client operation id must not be zero or reused",
+            ));
+        }
+
+        self.pre_submit_deadlines
+            .reserve(frame_id, metadata, current_unix_ms())?;
+        let mut header = CommonHeader::new(message_type, SCHEDULING_METADATA_LEN as u32, 0);
+        header.session_id = self.session_id;
+        header.frame_id = frame_id;
+        let result = self
+            .transport
+            .write_packet(&RuntimePacket::new(
+                header,
+                metadata.to_bytes()?.to_vec(),
+                Vec::new(),
+            )?)
+            .await;
+        if result.is_err() {
+            self.pre_submit_deadlines
+                .discard(metadata.operation_id, frame_id);
+        }
+        result
     }
 
     pub async fn send_credit_update(

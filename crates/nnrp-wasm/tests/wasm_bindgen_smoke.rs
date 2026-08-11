@@ -7,10 +7,10 @@ use js_sys::{Array, Function, Promise, Reflect, Uint8Array};
 use nnrp_core::{
     BudgetMetadata, ClientHelloMetadata, CommonHeader, ControlRequestMetadata, FrameSubmitMetadata,
     HeaderFlags, InputProfile, MessageType, OperationState, PayloadKindBitmap, ProgressMetadata,
-    ResultClass, ResultPushMetadata, RuntimeRole, ServerHelloAckMetadata, SessionCloseAckMetadata,
-    SessionCloseMetadata, SessionCloseStatus, SessionOpenAckMetadata, SessionOpenMetadata,
-    SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata, SessionPatchRejectReason,
-    SessionPriorityClass, SessionStatus, SubmitMode, TileIndexMode,
+    ResultClass, ResultPushMetadata, RuntimeRole, SchedulingMetadata, ServerHelloAckMetadata,
+    SessionCloseAckMetadata, SessionCloseMetadata, SessionCloseStatus, SessionOpenAckMetadata,
+    SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata,
+    SessionPatchRejectReason, SessionPriorityClass, SessionStatus, SubmitMode, TileIndexMode,
     CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED, CURRENT_VERSION_MAJOR, CURRENT_WIRE_FORMAT,
     PROGRESS_METADATA_LEN, RESULT_PUSH_METADATA_LEN, SERVER_HELLO_ACK_METADATA_LEN,
     SESSION_ACK_FLAG_RESUME_ENABLED, SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE,
@@ -267,6 +267,23 @@ async fn wasm_bindgen_browser_role_runs_real_session_submit_and_close() {
         .expect("browser role should open a real NNRP session");
 
     let submit = token_submit(42);
+    let deadline = SchedulingMetadata {
+        operation_id: submit.operation_id,
+        control_sequence: 1,
+        priority_class: 0,
+        priority_delta: 0,
+        deadline_unix_ms: 4_000_000_000_000,
+        flags: 0,
+    };
+    role.send_runtime_frame(
+        MessageType::Deadline as u8,
+        9,
+        &deadline
+            .to_bytes()
+            .expect("deadline metadata should encode"),
+    )
+    .await
+    .expect("browser role should reserve a deadline before submit");
     let mut payload = Vec::from(submit.to_bytes().expect("submit metadata should encode"));
     payload.extend_from_slice(b"prompt");
     assert_eq!(
@@ -883,6 +900,13 @@ fn browser_role_responses(packet: &[u8]) -> Vec<Vec<u8>> {
                 resume_token,
                 SESSION_OPEN_ACK_METADATA_LEN,
             )]
+        }
+        MessageType::Deadline => {
+            let deadline = SchedulingMetadata::parse(metadata).expect("deadline should parse");
+            assert_eq!(header.session_id, 7);
+            assert_eq!(header.frame_id, 9);
+            assert_eq!(deadline.operation_id, 42);
+            Vec::new()
         }
         MessageType::FrameSubmit => {
             FrameSubmitMetadata::parse(metadata).expect("frame submit should parse");

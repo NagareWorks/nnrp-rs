@@ -283,6 +283,225 @@ async fn tcp_loopback_submits_frame_receives_result_and_closes() -> Result<(), R
 }
 
 #[tokio::test]
+async fn tcp_loopback_applies_deadline_reserved_before_submit() -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+    let deadline = SchedulingMetadata {
+        operation_id: 1_011,
+        control_sequence: 1,
+        priority_class: 0,
+        priority_delta: 0,
+        deadline_unix_ms: 4_000_000_000_000,
+        flags: 0,
+    };
+
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        let submit = session.receive_submit().await?;
+        assert_eq!(submit.frame_id, 1);
+        assert_eq!(submit.operation_id, deadline.operation_id);
+        assert_eq!(
+            session
+                .operations()
+                .operation(submit.operation_id)
+                .expect("operation should be registered with its reserved deadline")
+                .schedule
+                .deadline_unix_ms,
+            deadline.deadline_unix_ms
+        );
+
+        let retained_deadline = session.receive_scheduling_update().await?;
+        assert_eq!(retained_deadline.message_type, MessageType::Deadline);
+        assert_eq!(retained_deadline.metadata, deadline);
+        submit
+            .send_result(&mut session, token_result(), b"delta".to_vec())
+            .await?;
+        expect_completed_lifecycle(&mut session, submit.operation_id).await?;
+        let close = session.receive_close().await?;
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let mut session = client.open_session().await?;
+    session
+        .send_runtime_frame(MessageType::Deadline, 1, &deadline.to_bytes()?)
+        .await?;
+    session
+        .submit_encoded_with_frame_id(1, token_submit(deadline.operation_id), b"prompt".to_vec())
+        .await?;
+    assert_eq!(
+        session.await_result().await?.operation_id,
+        deadline.operation_id
+    );
+    session.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn tcp_loopback_preserves_pre_submit_deadline_wire_order() -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+    let deadline = SchedulingMetadata {
+        operation_id: 1_012,
+        control_sequence: 1,
+        priority_class: 0,
+        priority_delta: 0,
+        deadline_unix_ms: 4_000_000_000_000,
+        flags: 0,
+    };
+
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        match session.await_event().await? {
+            NnrpServerEvent::Runtime(NnrpRuntimeEvent {
+                header,
+                metadata: NnrpRuntimeEventMetadata::Scheduling(metadata),
+                tail: NnrpRuntimeEventTail::None,
+            }) if header.message_type == MessageType::Deadline => {
+                assert_eq!(header.frame_id, 1);
+                assert_eq!(metadata, deadline);
+                assert!(session
+                    .operations()
+                    .operation(deadline.operation_id)
+                    .is_none());
+            }
+            event => panic!("expected pre-submit deadline event, got {event:?}"),
+        }
+
+        let submit = match session.await_event().await? {
+            NnrpServerEvent::Submit(operation) => operation,
+            event => panic!("expected submit after pre-submit deadline, got {event:?}"),
+        };
+        assert_eq!(submit.frame_id, 1);
+        assert_eq!(submit.operation_id, deadline.operation_id);
+        assert_eq!(
+            session
+                .operations()
+                .operation(submit.operation_id)
+                .expect("submit should register its reserved operation")
+                .schedule
+                .deadline_unix_ms,
+            deadline.deadline_unix_ms
+        );
+        submit
+            .send_result(&mut session, token_result(), b"delta".to_vec())
+            .await?;
+        expect_completed_lifecycle(&mut session, submit.operation_id).await?;
+        let close = session.receive_close().await?;
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let mut session = client.open_session().await?;
+    session
+        .send_runtime_frame(MessageType::Deadline, 1, &deadline.to_bytes()?)
+        .await?;
+    session
+        .submit_encoded_with_frame_id(1, token_submit(deadline.operation_id), b"prompt".to_vec())
+        .await?;
+    assert_eq!(
+        session.await_result().await?.operation_id,
+        deadline.operation_id
+    );
+    session.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn client_rejects_pre_submit_deadline_for_reused_identity() -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        let submit = session.receive_submit().await?;
+        submit
+            .send_result(&mut session, token_result(), b"done".to_vec())
+            .await?;
+        expect_completed_lifecycle(&mut session, submit.operation_id).await?;
+        let close = session.receive_close().await?;
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let mut session = client.open_session().await?;
+    session
+        .submit_encoded_with_frame_id(2, token_submit(1_013), b"prompt".to_vec())
+        .await?;
+    assert_eq!(session.await_result().await?.operation_id, 1_013);
+
+    let reused_frame = SchedulingMetadata {
+        operation_id: 1_014,
+        control_sequence: 1,
+        priority_class: 0,
+        priority_delta: 0,
+        deadline_unix_ms: 4_000_000_000_000,
+        flags: 0,
+    };
+    assert!(matches!(
+        session
+            .send_runtime_frame(MessageType::Deadline, 2, &reused_frame.to_bytes()?)
+            .await,
+        Err(RuntimeError::UnexpectedMessage(
+            "client frame id must not be zero, reused, or moved backward"
+        ))
+    ));
+
+    let reused_operation = SchedulingMetadata {
+        operation_id: 1_013,
+        ..reused_frame
+    };
+    assert!(matches!(
+        session
+            .send_runtime_frame(MessageType::Deadline, 3, &reused_operation.to_bytes()?)
+            .await,
+        Err(RuntimeError::UnexpectedMessage(
+            "client operation id must not be zero or reused"
+        ))
+    ));
+
+    session.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn server_rejects_pre_submit_deadline_for_submitted_frame() -> Result<(), RuntimeError> {
+    let deadline = SchedulingMetadata {
+        operation_id: 2,
+        control_sequence: 1,
+        priority_class: 0,
+        priority_delta: 0,
+        deadline_unix_ms: 4_000_000_000_000,
+        flags: 0,
+    };
+    let error = server_receive_error_after_submit(
+        operation_event_packet(
+            MessageType::Deadline,
+            1,
+            deadline.to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        |mut session| async move { session.receive_scheduling_update().await.map(|_| ()) },
+    )
+    .await;
+    assert!(
+        matches!(
+            error,
+            RuntimeError::UnexpectedMessage(
+                "server received pre-submit DEADLINE for a reused frame id"
+            )
+        ),
+        "unexpected duplicate-frame error: {error:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn tcp_loopback_preserves_explicit_frame_ids_and_advances_allocator(
 ) -> Result<(), RuntimeError> {
     let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
