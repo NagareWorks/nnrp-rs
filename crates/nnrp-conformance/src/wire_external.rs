@@ -4,8 +4,7 @@ use nnrp_core::{
     CacheMissMetadata, CacheMissReason, CacheReferenceMetadata, CacheReuseScope,
     CapabilityMetadata, MessageType, OperationState, PartialResultMetadata, PayloadKindBitmap,
     PressureMetadata, ProgressMetadata, ResultClass, ResultDropReasonMetadata, ResultPushMetadata,
-    RouteHintMetadata, SchedulingMetadata, TraceContextMetadata,
-    RESULT_DROP_REASON_DEADLINE_EXPIRED, STANDARD_PROFILE_TOKEN,
+    RouteHintMetadata, SchedulingMetadata, TraceContextMetadata, STANDARD_PROFILE_TOKEN,
 };
 use nnrp_runtime::{
     FramedListener, NnrpClientRoleEvent, NnrpRuntimeEvent, NnrpRuntimeEventMetadata,
@@ -28,6 +27,7 @@ const CACHE_BODY: &[u8] = b"ref!";
 const TRACE_BODY: &[u8] = b"trace";
 const PROGRESS_BODY: &[u8] = b"stage";
 const PARTIAL_BODY: &[u8] = b"partial";
+const CONTROL_REASON_USER_CANCELLED: u16 = 0x0001;
 const RESULT_DROP_REASON_PEER_CANCELLED: u16 = 0x0003;
 
 fn expect_client_runtime_event(
@@ -324,7 +324,7 @@ async fn run_cancel_abort_client(
         json!({ "session_id": session_id, "frame_id": frame_id, "operation_id": operation_id }),
     );
     session
-        .cancel_operation(operation_id, RESULT_DROP_REASON_DEADLINE_EXPIRED)
+        .cancel_operation(operation_id, CONTROL_REASON_USER_CANCELLED)
         .await?;
     observed.push(
         WireExternalDirection::SuiteToTarget,
