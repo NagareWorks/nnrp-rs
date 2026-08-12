@@ -11,12 +11,12 @@ use nnrp_core::{
     OwnershipHint, PartialResultMetadata, PayloadKindBitmap, PressureMetadata, ProgressMetadata,
     ResultClass, ResultDropReasonMetadata, ResultPushMetadata, ResultTerminalState,
     RetryAfterMetadata, RouteHintMetadata, RuntimeObjectKind, RuntimeRole, SchedulingMetadata,
-    SchemaRegistry, ServerHelloAckMetadata, SessionCloseMetadata, SessionCloseReason,
-    SessionMigrateAckMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
-    SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata, SessionPatchRejectReason,
-    SessionPriorityClass, SessionStatus, SubmitMode, SupersedeMetadata, TileIndexMode,
-    TraceContextMetadata, TransportId, TransportProbeAckMetadata, TransportProbeMetadata,
-    CLIENT_HELLO_METADATA_LEN, CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED,
+    SchemaRegistry, ServerHelloAckMetadata, SessionCloseAckMetadata, SessionCloseMetadata,
+    SessionCloseReason, SessionCloseStatus, SessionMigrateAckMetadata, SessionOpenAckMetadata,
+    SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata,
+    SessionPatchRejectReason, SessionPriorityClass, SessionStatus, SubmitMode, SupersedeMetadata,
+    TileIndexMode, TraceContextMetadata, TransportId, TransportProbeAckMetadata,
+    TransportProbeMetadata, CLIENT_HELLO_METADATA_LEN, CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED,
     FLOW_UPDATE_FLAG_CREDIT_VALID, FRAME_SUBMIT_METADATA_LEN, RESULT_DROP_REASON_DEADLINE_EXPIRED,
     RESULT_PUSH_METADATA_LEN, RETRY_AFTER_METADATA_LEN, SERVER_HELLO_ACK_METADATA_LEN,
     SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE, SESSION_OPEN_ACK_METADATA_LEN,
@@ -2468,23 +2468,128 @@ async fn client_close_rejects_wrong_ack_session_and_shape() -> Result<(), Runtim
         header.session_id = 2;
         RuntimePacket::new(header, vec![0; SESSION_CLOSE_ACK_METADATA_LEN], Vec::new())?
     };
-    let mut session = scripted_client_session(wrong_session).await?;
-    let result = session.close_with(close_request()).await;
-    assert!(result.is_err(), "close should reject wrong ack session");
+    let (mut session, server_task) =
+        scripted_client_close_session_packets(vec![wrong_session]).await?;
+    let error = session
+        .close_with(close_request())
+        .await
+        .expect_err("close should reject an acknowledgement for another session");
+    assert!(
+        matches!(
+            error,
+            RuntimeError::TransportClosed {
+                transport: RuntimeTransportKind::Tcp,
+                ref detail,
+            } if detail == "received packet for unknown session 2"
+        ),
+        "unexpected close error: {error:?}"
+    );
     session.close_transport().await?;
+    server_task
+        .await
+        .expect("scripted close server should join")?;
 
     let malformed = {
         let mut header = CommonHeader::new(MessageType::SessionCloseAck, 1, 0);
         header.session_id = 1;
         RuntimePacket::new(header, vec![0], Vec::new())?
     };
-    let mut session = scripted_client_session(malformed).await?;
-    let result = session.close_with(close_request()).await;
-    assert!(
-        result.is_err(),
-        "close should reject malformed ack metadata"
+    let (mut session, server_task) = scripted_client_close_session_packets(vec![malformed]).await?;
+    assert!(matches!(
+        session.close_with(close_request()).await,
+        Err(RuntimeError::UnexpectedMessage(
+            "client received malformed SESSION_CLOSE_ACK metadata length"
+        ))
+    ));
+    session.close_transport().await?;
+    server_task
+        .await
+        .expect("scripted close server should join")
+}
+
+#[tokio::test]
+async fn client_close_retains_runtime_events_until_the_final_ack() -> Result<(), RuntimeError> {
+    let trace = TraceContextMetadata {
+        trace_id: 7,
+        span_id: 8,
+        parent_span_id: 9,
+        stage_code: 1,
+        flags: 0,
+        body_bytes: 2,
+    };
+    let mut trace_header = CommonHeader::new(MessageType::TraceContext, 0, 2);
+    trace_header.session_id = 1;
+    let trace_packet = RuntimePacket::new(trace_header, trace.to_bytes()?.to_vec(), vec![10, 11])?;
+    let (mut session, server_task) = scripted_client_close_session_packets(vec![
+        close_ack_packet(SessionCloseStatus::Acknowledged),
+        trace_packet,
+        close_ack_packet(SessionCloseStatus::Draining),
+        close_ack_packet(SessionCloseStatus::Closed),
+    ])
+    .await?;
+
+    let ack = session.close_with(close_request()).await?;
+    assert_eq!(ack.close_status, SessionCloseStatus::Closed);
+    let retained = expect_client_runtime_event(session.await_event().await?);
+    assert_eq!(retained.header.message_type, MessageType::TraceContext);
+    assert_eq!(
+        retained.metadata,
+        NnrpRuntimeEventMetadata::TraceContext(trace)
     );
-    session.close_transport().await
+    assert_eq!(retained.tail, NnrpRuntimeEventTail::Body(vec![10, 11]));
+    session.close_transport().await?;
+    server_task
+        .await
+        .expect("scripted close server should join")
+}
+
+#[tokio::test]
+async fn client_close_rejection_does_not_report_success() -> Result<(), RuntimeError> {
+    let (mut session, server_task) =
+        scripted_client_close_session_packets(vec![close_ack_packet(SessionCloseStatus::Rejected)])
+            .await?;
+
+    assert!(matches!(
+        session.close_with(close_request()).await,
+        Err(RuntimeError::UnexpectedMessage(
+            "server rejected SESSION_CLOSE"
+        ))
+    ));
+    session.close_transport().await?;
+    server_task
+        .await
+        .expect("scripted close server should join")
+}
+
+#[tokio::test]
+async fn client_close_bounds_runtime_events_before_acknowledgement() -> Result<(), RuntimeError> {
+    let trace = TraceContextMetadata {
+        trace_id: 7,
+        span_id: 8,
+        parent_span_id: 9,
+        stage_code: 1,
+        flags: 0,
+        body_bytes: 0,
+    };
+    let packets = (0..=1_024)
+        .map(|_| {
+            let mut header = CommonHeader::new(MessageType::TraceContext, 0, 0);
+            header.session_id = 1;
+            RuntimePacket::new(header, trace.to_bytes()?.to_vec(), Vec::new())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let (mut session, server_task) = scripted_client_close_session_packets(packets).await?;
+
+    assert!(matches!(
+        session.close_with(close_request()).await,
+        Err(RuntimeError::UnexpectedMessage(
+            "client session close exceeded the pending event limit before acknowledgement"
+        ))
+    ));
+    session.close_transport().await?;
+    server_task
+        .await
+        .expect("scripted close server should join")
 }
 
 #[tokio::test]
@@ -4192,7 +4297,11 @@ async fn scripted_client_session_packets(
             }
         }
         for packet in packets {
-            transport.write_packet(&packet).await?;
+            match transport.write_packet(&packet).await {
+                Ok(()) => {}
+                Err(RuntimeError::TransportClosed { .. }) => return Ok(()),
+                Err(error) => return Err(error),
+            }
         }
         Ok(())
     });
@@ -4206,6 +4315,54 @@ async fn scripted_client_session_packets(
     }
     server_task.await.expect("scripted server should join")?;
     Ok(session)
+}
+
+async fn scripted_client_close_session_packets(
+    packets: Vec<RuntimePacket>,
+) -> Result<
+    (
+        nnrp_runtime::NnrpClientSession,
+        tokio::task::JoinHandle<Result<(), RuntimeError>>,
+    ),
+    RuntimeError,
+> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let server_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await?;
+        let mut transport = TcpTransport::new(stream);
+        accept_scripted_client_hello(&mut transport).await?;
+        let open_packet = transport.read_packet().await?;
+        let open = SessionOpenMetadata::parse(&open_packet.metadata)?;
+        let ack = open_ack(&open);
+        let mut header = CommonHeader::new(
+            MessageType::SessionOpenAck,
+            SESSION_OPEN_ACK_METADATA_LEN as u32,
+            0,
+        );
+        header.session_id = ack.session_id;
+        transport
+            .write_packet(&RuntimePacket::new(
+                header,
+                ack.to_bytes()?.to_vec(),
+                Vec::new(),
+            )?)
+            .await?;
+
+        let close = transport.read_packet().await?;
+        if close.header.message_type != MessageType::SessionClose {
+            return Err(RuntimeError::UnexpectedMessage(
+                "scripted close client did not send SESSION_CLOSE",
+            ));
+        }
+        for packet in packets {
+            transport.write_packet(&packet).await?;
+        }
+        Ok(())
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    Ok((client.open_session().await?, server_task))
 }
 
 async fn client_patch_error(packet: RuntimePacket) -> RuntimeError {
@@ -4515,6 +4672,29 @@ fn close_request() -> SessionCloseMetadata {
         session_error_code: SESSION_ERROR_NONE,
         session_close_tag: 1,
     }
+}
+
+fn close_ack_packet(close_status: SessionCloseStatus) -> RuntimePacket {
+    let metadata = SessionCloseAckMetadata {
+        close_status,
+        last_operation_id: 1,
+        session_error_code: SESSION_ERROR_NONE,
+    };
+    let mut header = CommonHeader::new(
+        MessageType::SessionCloseAck,
+        SESSION_CLOSE_ACK_METADATA_LEN as u32,
+        0,
+    );
+    header.session_id = 1;
+    RuntimePacket::new(
+        header,
+        metadata
+            .to_bytes()
+            .expect("close ack should encode")
+            .to_vec(),
+        Vec::new(),
+    )
+    .expect("close ack packet should build")
 }
 
 fn cache_object_id(cache_key_lo: u64) -> CacheObjectId {
