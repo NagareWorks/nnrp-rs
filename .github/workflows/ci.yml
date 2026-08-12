@@ -236,6 +236,35 @@ jobs:
           path: artifacts/native
           if-no-files-found: error
 
+  native-artifact-windows-x86:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-pc-windows-msvc
+
+      - name: Build and verify Windows x86 native artifact
+        run: >-
+          python scripts/package_native_artifacts.py
+          --target i686-pc-windows-msvc
+          --package-name windows-x86
+          --out artifacts/native
+
+      - name: Inspect Windows x86 native artifact boundaries
+        run: python scripts/inspect_release_artifacts.py --native-dir artifacts/native
+
+      - name: Upload Windows x86 native artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: nnrp-ffi-native-Windows-X86
+          path: artifacts/native
+          if-no-files-found: error
+
   wasm-artifact:
     runs-on: ubuntu-latest
 
@@ -328,6 +357,7 @@ jobs:
       - commit-policy
       - test
       - native-artifact
+      - native-artifact-windows-x86
       - wasm-artifact
       - conformance
     if: always()
@@ -354,6 +384,11 @@ jobs:
 
           if [ "${{ needs.native-artifact.result }}" != "success" ]; then
             echo "Native artifact validation failed."
+            exit 1
+          fi
+
+          if [ "${{ needs.native-artifact-windows-x86.result }}" != "success" ]; then
+            echo "Windows x86 native artifact validation failed."
             exit 1
           fi
 

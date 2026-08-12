@@ -6,6 +6,14 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 
 class ConformanceWorkflowSyncTests(unittest.TestCase):
+    def test_ci_publishes_and_requires_windows_x86_native_artifacts(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+        self.assertIn("native-artifact-windows-x86:", workflow)
+        self.assertIn("--target i686-pc-windows-msvc", workflow)
+        self.assertIn("name: nnrp-ffi-native-Windows-X86", workflow)
+        self.assertIn("needs.native-artifact-windows-x86.result", workflow)
+
     def test_ci_and_release_run_only_the_current_suite_adapter(self) -> None:
         for relative_path in (
             pathlib.Path(".github/workflows/ci.yml"),
