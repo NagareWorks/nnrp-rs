@@ -46,7 +46,7 @@ use futures_util::lock::Mutex as AsyncMutex;
 use nnrp_transport_provider::TransportSelection;
 use std::sync::Arc;
 
-const MAX_PENDING_EVENTS_DURING_SESSION_PATCH: usize = 1_024;
+const MAX_PENDING_CLIENT_EVENTS: usize = 1_024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NnrpClientConfig {
@@ -2342,7 +2342,7 @@ impl NnrpClientSession {
     }
 
     fn ensure_pending_role_capacity(&self) -> Result<(), RuntimeError> {
-        if self.pending_role_events.len() >= MAX_PENDING_EVENTS_DURING_SESSION_PATCH {
+        if self.pending_role_events.len() >= MAX_PENDING_CLIENT_EVENTS {
             return Err(RuntimeError::UnexpectedMessage(
                 "client local lifecycle event queue exceeded its limit",
             ));
@@ -2377,7 +2377,7 @@ impl NnrpClientSession {
             let ack_packet = self.transport.read_packet().await?;
             if ack_packet.header.message_type != MessageType::SessionPatchAck {
                 let event = self.decode_event_packet(ack_packet)?;
-                if self.pending_events.len() >= MAX_PENDING_EVENTS_DURING_SESSION_PATCH {
+                if self.pending_events.len() >= MAX_PENDING_CLIENT_EVENTS {
                     return Err(RuntimeError::UnexpectedMessage(
                         "client session patch exceeded the pending event limit before acknowledgement",
                     ));
@@ -2486,27 +2486,38 @@ impl NnrpClientSession {
             )?)
             .await?;
 
-        let ack_packet = self.transport.read_packet().await?;
-        if ack_packet.header.message_type != MessageType::SessionCloseAck {
-            return Err(RuntimeError::UnexpectedMessage(
-                "client expected SESSION_CLOSE_ACK",
-            ));
-        }
-        if ack_packet.header.session_id != self.session_id {
-            return Err(RuntimeError::UnexpectedMessage(
-                "client received close ack for another session",
-            ));
-        }
-        if ack_packet.metadata.len() != SESSION_CLOSE_ACK_METADATA_LEN {
-            return Err(RuntimeError::UnexpectedMessage(
-                "client received malformed SESSION_CLOSE_ACK metadata length",
-            ));
-        }
+        loop {
+            let ack_packet = self.transport.read_packet().await?;
+            if ack_packet.header.message_type != MessageType::SessionCloseAck {
+                let event = self.decode_event_packet(ack_packet)?;
+                if self.pending_events.len() >= MAX_PENDING_CLIENT_EVENTS {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "client session close exceeded the pending event limit before acknowledgement",
+                    ));
+                }
+                self.pending_events.push_back(event);
+                continue;
+            }
+            if ack_packet.metadata.len() != SESSION_CLOSE_ACK_METADATA_LEN {
+                return Err(RuntimeError::UnexpectedMessage(
+                    "client received malformed SESSION_CLOSE_ACK metadata length",
+                ));
+            }
 
-        let ack = SessionCloseAckMetadata::parse(&ack_packet.metadata)?;
-        self.lifecycle
-            .apply_session_close_ack(&ack_packet.header, &ack)?;
-        Ok(ack)
+            let ack = SessionCloseAckMetadata::parse(&ack_packet.metadata)?;
+            self.lifecycle
+                .apply_session_close_ack(&ack_packet.header, &ack)?;
+            match ack.close_status {
+                nnrp_core::SessionCloseStatus::Closed => return Ok(ack),
+                nnrp_core::SessionCloseStatus::Rejected => {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "server rejected SESSION_CLOSE",
+                    ));
+                }
+                nnrp_core::SessionCloseStatus::Acknowledged
+                | nnrp_core::SessionCloseStatus::Draining => {}
+            }
+        }
     }
 
     pub async fn close_transport(mut self) -> Result<(), RuntimeError> {
