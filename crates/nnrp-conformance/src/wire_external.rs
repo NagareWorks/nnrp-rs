@@ -28,6 +28,7 @@ const CACHE_BODY: &[u8] = b"ref!";
 const TRACE_BODY: &[u8] = b"trace";
 const PROGRESS_BODY: &[u8] = b"stage";
 const PARTIAL_BODY: &[u8] = b"partial";
+const RESULT_DROP_REASON_PEER_CANCELLED: u16 = 0x0003;
 
 fn expect_client_runtime_event(
     event: NnrpClientRoleEvent,
@@ -864,10 +865,14 @@ pub fn cancel_trace() -> TraceContextMetadata {
 }
 
 pub fn cancel_drop_reason(operation_id: u64) -> ResultDropReasonMetadata {
+    drop_reason(operation_id, RESULT_DROP_REASON_PEER_CANCELLED)
+}
+
+fn drop_reason(operation_id: u64, drop_reason_code: u16) -> ResultDropReasonMetadata {
     ResultDropReasonMetadata {
         operation_id,
         result_sequence: 1,
-        drop_reason_code: RESULT_DROP_REASON_DEADLINE_EXPIRED,
+        drop_reason_code,
         source_role: 2,
         flags: 0,
         diagnostic_bytes: 0,
@@ -914,12 +919,15 @@ mod tests {
 
     use super::{
         cache_miss, cancel_drop_reason, cancel_trace, canonical_pre_submit_deadline,
-        canonical_response_body, expect_client_runtime_event, expect_completed_lifecycle,
-        run_wire_external_case, token_result, token_submit, WireExternalCase, WireExternalMode,
-        WireExternalTerminal, CACHE_BODY, CAPABILITY_BODY, PARTIAL_BODY, PROGRESS_BODY,
-        RESPONSE_BODY, ROUTE_BODY, TRACE_BODY,
+        canonical_response_body, drop_reason, expect_client_runtime_event,
+        expect_completed_lifecycle, run_wire_external_case, token_result, token_submit,
+        WireExternalCase, WireExternalMode, WireExternalTerminal, CACHE_BODY, CAPABILITY_BODY,
+        PARTIAL_BODY, PROGRESS_BODY, RESPONSE_BODY, RESULT_DROP_REASON_PEER_CANCELLED, ROUTE_BODY,
+        TRACE_BODY,
     };
     use crate::wire_endpoint::{ReferenceTransport, WireEndpointSecurity, WireReferenceEndpoint};
+
+    const RESULT_DROP_REASON_SUPERSEDED: u16 = 0x0002;
 
     #[test]
     fn external_wire_expectation_rejects_headerless_client_lifecycle() {
@@ -949,6 +957,13 @@ mod tests {
             .expect("target should complete");
         assert_eq!(report.terminal, WireExternalTerminal::Cancelled);
         assert_eq!(report.mode, WireExternalMode::SuiteAsClient);
+        assert_eq!(
+            report
+                .result_drop_reason
+                .expect("cancel target should return a typed drop reason")
+                .drop_reason_code,
+            RESULT_DROP_REASON_PEER_CANCELLED
+        );
     }
 
     #[tokio::test]
@@ -1131,6 +1146,13 @@ mod tests {
             .expect("target should complete");
         assert_eq!(report.terminal, WireExternalTerminal::Dropped);
         assert_eq!(report.mode, WireExternalMode::SuiteAsProxy);
+        assert_eq!(
+            report
+                .result_drop_reason
+                .expect("superseded target should return a typed drop reason")
+                .drop_reason_code,
+            RESULT_DROP_REASON_SUPERSEDED
+        );
     }
 
     async fn cancel_target(server: nnrp_runtime::NnrpServer) -> Result<(), RuntimeError> {
@@ -1289,7 +1311,7 @@ mod tests {
         submit
             .send_result_drop(
                 &mut session,
-                cancel_drop_reason(submit.operation_id),
+                drop_reason(submit.operation_id, RESULT_DROP_REASON_SUPERSEDED),
                 Vec::new(),
             )
             .await?;
