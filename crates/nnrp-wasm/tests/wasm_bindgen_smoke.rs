@@ -471,6 +471,25 @@ async fn browser_role_routes_control_and_patch_while_event_receive_is_pending() 
             }
             MessageType::FrameSubmit => {
                 FrameSubmitMetadata::parse(metadata).expect("frame submit should parse");
+                let progress = ProgressMetadata {
+                    operation_id: 42,
+                    progress_sequence: 0,
+                    stage_code: 6,
+                    percent_x100: 2_500,
+                    object_id: 0,
+                    body_bytes: 0,
+                };
+                send_responses.borrow_mut().push_back(response_packet(
+                    MessageType::Progress,
+                    header.session_id,
+                    header.frame_id,
+                    progress
+                        .to_bytes()
+                        .expect("post-submit progress should encode")
+                        .to_vec(),
+                    Vec::new(),
+                    PROGRESS_METADATA_LEN,
+                ));
             }
             MessageType::Cancel => {
                 let cancel = ControlRequestMetadata::parse(metadata)
@@ -600,9 +619,22 @@ async fn browser_role_routes_control_and_patch_while_event_receive_is_pending() 
     let submit = token_submit(42);
     let mut submit_payload = Vec::from(submit.to_bytes().expect("submit metadata should encode"));
     submit_payload.extend_from_slice(b"prompt");
-    role.submit_no_wait(9, NnrpSubmitHeaderContext::default(), &submit_payload)
-        .await
-        .expect("concurrent browser role should submit");
+    let event_future = role.await_event();
+    let submit_future = role.submit_no_wait(9, NnrpSubmitHeaderContext::default(), &submit_payload);
+    let (event, submitted_frame_id) = drive_scripted_operation(
+        &connection,
+        &responses,
+        futures_util::future::join(event_future, submit_future),
+    )
+    .await;
+    assert_eq!(
+        submitted_frame_id.expect("concurrent browser role should submit"),
+        9
+    );
+    let event = event.expect("submit should wake a pending browser event receive");
+    assert_eq!(event.event_kind(), 13);
+    assert_eq!(event.header_present(), 1);
+    assert_eq!(event.message_type(), MessageType::Progress as u8);
 
     let cancel = ControlRequestMetadata {
         operation_id: 42,
