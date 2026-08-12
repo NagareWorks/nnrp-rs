@@ -2464,7 +2464,7 @@ impl NnrpClientSession {
             session_close_tag: self.session_id,
         };
         self.close_with(close).await?;
-        self.transport.close().await
+        normalize_transport_close_after_ack(self.transport.close().await)
     }
 
     pub async fn close_with(
@@ -2568,6 +2568,15 @@ impl fmt::Debug for NnrpClient {
     }
 }
 
+fn normalize_transport_close_after_ack(
+    result: Result<(), RuntimeError>,
+) -> Result<(), RuntimeError> {
+    match result {
+        Err(RuntimeError::TransportClosed { .. }) => Ok(()),
+        result => result,
+    }
+}
+
 impl fmt::Debug for NnrpClientSession {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -2599,6 +2608,20 @@ mod config_tests {
         assert!(!config.allow_resume);
         assert_eq!(config.resume_token_bytes, 0);
         assert!(config.cache_hints.is_empty());
+    }
+
+    #[test]
+    fn acknowledged_session_close_accepts_an_already_closed_carrier() {
+        let closed = RuntimeError::TransportClosed {
+            transport: crate::RuntimeTransportKind::Ipc,
+            detail: "peer closed after SESSION_CLOSE_ACK".to_owned(),
+        };
+
+        assert!(normalize_transport_close_after_ack(Err(closed)).is_ok());
+        assert!(matches!(
+            normalize_transport_close_after_ack(Err(RuntimeError::Internal("close failed"))),
+            Err(RuntimeError::Internal("close failed"))
+        ));
     }
 
     #[test]
