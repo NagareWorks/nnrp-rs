@@ -1057,6 +1057,7 @@ impl BrowserClientRoleState {
             .await
             .map_err(js_runtime_error)?;
         self.recovery_ticket.replace(session.recovery_ticket());
+        self.carrier.notify_event_waiters();
         Ok(submitted_frame_id)
     }
 
