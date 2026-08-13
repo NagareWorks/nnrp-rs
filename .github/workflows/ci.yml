@@ -1,5 +1,9 @@
 name: CI
 
+env:
+  NNRP_CONFORMANCE_SOURCE_COMMIT: 624d554d56cf9dfd31d06b489337fbb738b7fa94
+  NNRP_DOC_SOURCE_COMMIT: dcd36a73ef74f62a23575c1a06fe0eb9f3a0bcbb
+
 on:
   push:
   pull_request:
@@ -140,6 +144,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: ${{ github.repository_owner }}/nnrp-conformance
+          ref: ${{ env.NNRP_CONFORMANCE_SOURCE_COMMIT }}
           path: nnrp-conformance-action
           fetch-depth: 1
 
@@ -147,6 +152,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: ${{ github.repository_owner }}/nnrp-doc
+          ref: ${{ env.NNRP_DOC_SOURCE_COMMIT }}
           path: nnrp-doc-contract
           fetch-depth: 1
 
@@ -330,6 +336,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: ${{ github.repository_owner }}/nnrp-conformance
+          ref: ${{ env.NNRP_CONFORMANCE_SOURCE_COMMIT }}
           path: nnrp-conformance-action
           fetch-depth: 1
 

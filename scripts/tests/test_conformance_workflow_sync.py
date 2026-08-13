@@ -3,9 +3,34 @@ import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+CONFORMANCE_REVISION = "624d554d56cf9dfd31d06b489337fbb738b7fa94"
+DOC_REVISION = "dcd36a73ef74f62a23575c1a06fe0eb9f3a0bcbb"
 
 
 class ConformanceWorkflowSyncTests(unittest.TestCase):
+    def test_ci_and_release_pin_frozen_contract_inputs(self) -> None:
+        ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+
+        for workflow in (ci, release):
+            with self.subTest(workflow=workflow.splitlines()[0]):
+                self.assertIn(
+                    f"NNRP_CONFORMANCE_SOURCE_COMMIT: {CONFORMANCE_REVISION}", workflow
+                )
+                self.assertIn(f"NNRP_DOC_SOURCE_COMMIT: {DOC_REVISION}", workflow)
+                self.assertIn("ref: ${{ env.NNRP_CONFORMANCE_SOURCE_COMMIT }}", workflow)
+                self.assertIn("ref: ${{ env.NNRP_DOC_SOURCE_COMMIT }}", workflow)
+                self.assertIn("python scripts/check_sdk_api_contract.py", workflow)
+
+        self.assertEqual(
+            ci.count("ref: ${{ env.NNRP_CONFORMANCE_SOURCE_COMMIT }}"), 2
+        )
+        self.assertEqual(
+            release.count("ref: ${{ env.NNRP_CONFORMANCE_SOURCE_COMMIT }}"), 1
+        )
+        self.assertEqual(ci.count("ref: ${{ env.NNRP_DOC_SOURCE_COMMIT }}"), 1)
+        self.assertEqual(release.count("ref: ${{ env.NNRP_DOC_SOURCE_COMMIT }}"), 1)
+
     def test_ci_publishes_and_requires_windows_x86_native_artifacts(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 
