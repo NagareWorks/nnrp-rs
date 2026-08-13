@@ -3,7 +3,7 @@ import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-CONFORMANCE_REVISION = "624d554d56cf9dfd31d06b489337fbb738b7fa94"
+CONFORMANCE_REVISION = "95daf385184312c13d66fa18a7e1ecf0b6ff4558"
 DOC_REVISION = "dcd36a73ef74f62a23575c1a06fe0eb9f3a0bcbb"
 
 
