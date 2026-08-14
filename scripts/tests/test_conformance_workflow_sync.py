@@ -3,8 +3,8 @@ import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-CONFORMANCE_REVISION = "95daf385184312c13d66fa18a7e1ecf0b6ff4558"
-DOC_REVISION = "dcd36a73ef74f62a23575c1a06fe0eb9f3a0bcbb"
+CONFORMANCE_REVISION = "0ae3bd5d8ecaa387822888868e8676f0a3596bcd"
+DOC_REVISION = "3439ded0d318bd736f6485b17f2563fae77627bf"
 
 
 class ConformanceWorkflowSyncTests(unittest.TestCase):
@@ -21,6 +21,9 @@ class ConformanceWorkflowSyncTests(unittest.TestCase):
                 self.assertIn("ref: ${{ env.NNRP_CONFORMANCE_SOURCE_COMMIT }}", workflow)
                 self.assertIn("ref: ${{ env.NNRP_DOC_SOURCE_COMMIT }}", workflow)
                 self.assertIn("python scripts/check_sdk_api_contract.py", workflow)
+                self.assertIn(
+                    'require-complete-capability-coverage: "true"', workflow
+                )
 
         self.assertEqual(
             ci.count("ref: ${{ env.NNRP_CONFORMANCE_SOURCE_COMMIT }}"), 2

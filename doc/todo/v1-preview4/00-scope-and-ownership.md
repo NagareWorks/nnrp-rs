@@ -4,7 +4,7 @@
 
 - [x] Keep `nnrp-core` as the canonical Rust model for preview4 runtime control frames, runtime objects, cache references, trace context, and result drop reasons.
 - [x] Keep `nnrp-runtime` as the host-facing client/server orchestration layer over transport providers.
-- [x] Keep `nnrp-transport-provider` as the shared provider contract for TCP, QUIC, IPC, and WebSocket transports.
+- [x] Keep `nnrp-transport-provider` as the shared provider contract for TCP, QUIC, IPC, and WebSocket transports, with provider-owned names distinct from protocol transport ids.
 - [x] Keep each concrete transport in its own crate with real connection behavior and owned tests.
 - [x] Keep `nnrp-ffi` and `nnrp-wasm` as downstream integration surfaces, not as protocol owners.
 - [x] Keep `nnrp-conformance` consumption as the release gate for preview4 protocol behavior.

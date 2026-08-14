@@ -14,6 +14,7 @@ fn preview4_public_suite_manifest_capabilities_and_adapter_stay_equal() {
     let protocol_root = suite_root.join("protocol").join(PREVIEW4_PROTOCOL_VERSION);
     let manifest: Value = read_json(protocol_root.join("manifest.json"));
     let mut suite_case_ids = Vec::new();
+    let mut suite_cases = Vec::new();
     let mut required_capabilities = BTreeSet::new();
 
     for relative_path in manifest["case_manifests"]
@@ -31,6 +32,7 @@ fn preview4_public_suite_manifest_capabilities_and_adapter_stay_equal() {
             .as_array()
             .expect("case manifest should contain cases")
         {
+            suite_cases.push(case.clone());
             suite_case_ids.push(
                 case["id"]
                     .as_str()
@@ -86,13 +88,9 @@ fn preview4_public_suite_manifest_capabilities_and_adapter_stay_equal() {
     assert_eq!(declared_capabilities, code_capabilities);
     assert!(required_capabilities.is_subset(&declared_capabilities.into_iter().collect()));
 
-    let cases: Vec<Value> = suite_case_ids
-        .iter()
-        .map(|id| json!({ "id": id }))
-        .collect();
     let report = build_results_report(&json!({
         "protocol_version": PREVIEW4_PROTOCOL_VERSION,
-        "cases": cases
+        "cases": suite_cases
     }))
     .expect("adapter report should build for public suite cases");
     for result in report["results"].as_array().expect("results array") {

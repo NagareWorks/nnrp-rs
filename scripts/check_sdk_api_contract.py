@@ -8,6 +8,33 @@ from typing import Any
 
 
 EXPECTED_CONTRACT_VERSION = 15
+EXPECTED_BODY_REGION_VALIDATION = {
+    "objectReferenceBlockBytesMultiple": 24,
+    "typedPayloadDescriptorBytesMultiple": 24,
+    "extensionDescriptorBytesMultiple": 16,
+    "typedPayloadDescriptorCountRule": (
+        "typed_payload_descriptor_bytes equals payload_frame_count * 24 for "
+        "FRAME_SUBMIT and RESULT_PUSH"
+    ),
+}
+EXPECTED_RESULT_PUSH_FLAG_BITS = {"stale": 1, "fallback": 2, "partial": 4}
+EXPECTED_RESULT_PUSH_VALIDATION = {
+    "staleReuseRule": (
+        "(result_class is stale_reuse or result_flags contains stale) if and only if "
+        "reused_frame_id is non-zero"
+    ),
+    "tensorPartialRule": (
+        "(result_class is partial or result_flags contains partial) requires dropped_tile_count "
+        "greater than zero for tensor payloads"
+    ),
+    "tensorCoverageRule": (
+        "covered_tile_count plus dropped_tile_count equals tile_count for tensor payloads"
+    ),
+    "nonTensorCoverageRule": (
+        "section_count, tile_count, tile_base_id, tile_index_bytes, covered_tile_count, "
+        "and dropped_tile_count are zero when payload_kind_bitmap contains no tensor payload"
+    ),
+}
 EXPECTED_CLIENT_SUBMIT_WAIT = {
     "scopeRule": (
         "These rules apply when an SDK exposes a cancellable or time-bounded "
@@ -189,6 +216,71 @@ EXPECTED_RUST_PROJECTIONS = {
     "serverSessionOptions": "nnrp_runtime::NnrpServerConfig",
     "serverAcceptOptions": "nnrp_runtime::NnrpServerAcceptOptions",
     "serverSessionPolicy": "nnrp_runtime::NnrpServerPolicy",
+    "baselineMetadataCodecs": {
+        "ClientHelloMetadata": [
+            "ClientHelloMetadata::to_bytes",
+            "ClientHelloMetadata::parse",
+        ],
+        "SessionPatchAckMetadata": [
+            "SessionPatchAckMetadata::to_bytes",
+            "SessionPatchAckMetadata::parse",
+        ],
+        "FlowUpdateMetadata": [
+            "FlowUpdateMetadata::to_bytes",
+            "FlowUpdateMetadata::parse",
+        ],
+        "ResultHintMetadata": [
+            "ResultHintMetadata::to_bytes",
+            "ResultHintMetadata::parse",
+        ],
+        "FrameSubmitMetadata": [
+            "FrameSubmitMetadata::to_bytes",
+            "FrameSubmitMetadata::parse",
+        ],
+        "ResultPushMetadata": [
+            "ResultPushMetadata::to_bytes",
+            "ResultPushMetadata::parse",
+        ],
+        "CachePutMetadata": [
+            "CachePutMetadata::to_bytes",
+            "CachePutMetadata::parse",
+        ],
+        "CacheAckMetadata": [
+            "CacheAckMetadata::to_bytes",
+            "CacheAckMetadata::parse",
+        ],
+        "CacheInvalidateMetadata": [
+            "CacheInvalidateMetadata::to_bytes",
+            "CacheInvalidateMetadata::parse",
+        ],
+        "TransportProbeMetadata": [
+            "TransportProbeMetadata::to_bytes",
+            "TransportProbeMetadata::parse",
+        ],
+        "TransportProbeAckMetadata": [
+            "TransportProbeAckMetadata::to_bytes",
+            "TransportProbeAckMetadata::parse",
+        ],
+        "ObjectReferenceBlock": [
+            "ObjectReferenceBlock::to_bytes",
+            "ObjectReferenceBlock::parse",
+        ],
+    },
+}
+
+RUST_BASELINE_METADATA_CODEC_SOURCES = {
+    "ClientHelloMetadata": "control",
+    "SessionPatchAckMetadata": "control",
+    "FlowUpdateMetadata": "flow",
+    "ResultHintMetadata": "control",
+    "FrameSubmitMetadata": "data",
+    "ResultPushMetadata": "data",
+    "CachePutMetadata": "cache",
+    "CacheAckMetadata": "cache",
+    "CacheInvalidateMetadata": "cache",
+    "TransportProbeMetadata": "control",
+    "TransportProbeAckMetadata": "control",
+    "ObjectReferenceBlock": "data",
 }
 
 
@@ -200,6 +292,39 @@ def require(condition: bool, message: str) -> None:
 def require_mapping(value: Any, message: str) -> dict[str, Any]:
     require(isinstance(value, dict), message)
     return value
+
+
+def rust_impl_body(source: str, type_name: str) -> str | None:
+    match = re.search(rf"\bimpl\s+{re.escape(type_name)}\s*\{{", source)
+    if match is None:
+        return None
+    opening_brace = source.find("{", match.start())
+    depth = 0
+    for index in range(opening_brace, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[opening_brace + 1 : index]
+    return None
+
+
+def require_rust_baseline_metadata_codec(source: str, type_name: str) -> None:
+    require(
+        re.search(rf"\bpub\s+struct\s+{re.escape(type_name)}\b", source) is not None,
+        f"Rust baseline metadata codec {type_name} public type is missing",
+    )
+    impl_body = rust_impl_body(source, type_name)
+    require(
+        impl_body is not None,
+        f"Rust baseline metadata codec {type_name} implementation is missing",
+    )
+    for method in ("to_bytes", "parse"):
+        require(
+            re.search(rf"\bpub\s+fn\s+{method}\s*\(", impl_body) is not None,
+            f"Rust baseline metadata codec {type_name}::{method} is missing",
+        )
 
 
 def require_list(value: Any, message: str) -> list[Any]:
@@ -239,7 +364,43 @@ def check_contract(contract_path: Path) -> None:
         f"expected SDK contract version {EXPECTED_CONTRACT_VERSION}",
     )
 
+    wire_layouts = require_mapping(
+        contract.get("wireLayouts"), "SDK wire layouts must be an object"
+    )
+    body_region_prelude = require_mapping(
+        wire_layouts.get("BodyRegionPrelude"),
+        "BodyRegionPrelude wire layout must be an object",
+    )
+    require(
+        body_region_prelude.get("validation") == EXPECTED_BODY_REGION_VALIDATION,
+        "BodyRegionPrelude validation contract drifted",
+    )
+
     types = require_mapping(contract.get("types"), "SDK contract types must be an object")
+    provider_descriptor = require_mapping(
+        types.get("TransportProviderDescriptor"),
+        "TransportProviderDescriptor SDK type contract must be an object",
+    )
+    require(
+        provider_descriptor.get("nameSemantics")
+        == (
+            "provider-owned package or display name; protocol transport identity is "
+            "transport_id and selection must not derive it from name"
+        ),
+        "TransportProviderDescriptor name semantics drifted",
+    )
+    result_push = require_mapping(
+        types.get("ResultPushMetadata"),
+        "ResultPushMetadata SDK type contract must be an object",
+    )
+    require(
+        result_push.get("resultFlagBits") == EXPECTED_RESULT_PUSH_FLAG_BITS,
+        "ResultPushMetadata result flag assignments drifted",
+    )
+    require(
+        result_push.get("validation") == EXPECTED_RESULT_PUSH_VALIDATION,
+        "ResultPushMetadata validation contract drifted",
+    )
     required_type_names = (
         "OperationLifecycleEvent",
         "ClientEvent",
@@ -555,6 +716,18 @@ def check_contract(contract_path: Path) -> None:
     runtime_event_source = (
         repository_root / "crates" / "nnrp-runtime" / "src" / "event.rs"
     ).read_text(encoding="utf-8")
+    data_source = (
+        repository_root / "crates" / "nnrp-core" / "src" / "data.rs"
+    ).read_text(encoding="utf-8")
+    control_source = (
+        repository_root / "crates" / "nnrp-core" / "src" / "control.rs"
+    ).read_text(encoding="utf-8")
+    flow_source = (
+        repository_root / "crates" / "nnrp-core" / "src" / "flow.rs"
+    ).read_text(encoding="utf-8")
+    cache_source = (
+        repository_root / "crates" / "nnrp-core" / "src" / "cache.rs"
+    ).read_text(encoding="utf-8")
     runtime_client_source = (
         repository_root / "crates" / "nnrp-runtime" / "src" / "client.rs"
     ).read_text(encoding="utf-8")
@@ -567,6 +740,30 @@ def check_contract(contract_path: Path) -> None:
     wasm_source = (
         repository_root / "crates" / "nnrp-wasm" / "src" / "browser_role.rs"
     ).read_text(encoding="utf-8")
+    core_sources = {
+        "control": control_source,
+        "flow": flow_source,
+        "data": data_source,
+        "cache": cache_source,
+    }
+    for type_name, source_name in RUST_BASELINE_METADATA_CODEC_SOURCES.items():
+        require_rust_baseline_metadata_codec(core_sources[source_name], type_name)
+    require(
+        "pub const EXTENSION_FRAME_DESCRIPTOR_LEN: usize = 16;" in data_source
+        and "self.typed_payload_descriptor_bytes as usize % TYPED_PAYLOAD_DESCRIPTOR_LEN"
+        in data_source
+        and "self.extension_descriptor_bytes as usize % EXTENSION_FRAME_DESCRIPTOR_LEN"
+        in data_source,
+        "Rust BodyRegionPrelude validation implementation drifted",
+    )
+    require(
+        "self.result_class == ResultClass::StaleReuse" in data_source
+        and "is_stale != (self.reused_frame_id != 0)" in data_source
+        and "self.result_class == ResultClass::Partial" in data_source
+        and "u32::from(self.covered_tile_count) + u32::from(self.dropped_tile_count)"
+        in data_source,
+        "Rust ResultPushMetadata validation implementation drifted",
+    )
     require(
         "pub enum NnrpClientRoleEvent" in runtime_event_source
         and "Runtime(NnrpRuntimeEvent)" in runtime_event_source

@@ -1,8 +1,8 @@
 name: CI
 
 env:
-  NNRP_CONFORMANCE_SOURCE_COMMIT: 95daf385184312c13d66fa18a7e1ecf0b6ff4558
-  NNRP_DOC_SOURCE_COMMIT: dcd36a73ef74f62a23575c1a06fe0eb9f3a0bcbb
+  NNRP_CONFORMANCE_SOURCE_COMMIT: 0ae3bd5d8ecaa387822888868e8676f0a3596bcd
+  NNRP_DOC_SOURCE_COMMIT: 3439ded0d318bd736f6485b17f2563fae77627bf
 
 on:
   push:
@@ -345,6 +345,7 @@ jobs:
         with:
           protocol-version: nnrp-1-preview4
           capabilities-path: conformance/nnrp-1-preview4.capabilities.json
+          require-complete-capability-coverage: "true"
           working-directory: .
           artifact-name: nnrp-rs-preview4-conformance
           adapter-command: >-
