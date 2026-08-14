@@ -7,19 +7,19 @@ use nnrp_core::{
     CacheReuseScope, CapabilityMetadata, CommonHeader, ControlRequestMetadata, ErrorScope,
     MemoryLocationHint, MessageType, ObjectDeltaMetadata, ObjectDescriptorMetadata,
     ObjectReferenceMetadata, ObjectReleaseMetadata, ObjectReleaseReason, OwnershipHint,
-    PartialResultMetadata, PayloadKind, PressureMetadata, ProgressMetadata,
-    RecoverableErrorMetadata, ResultDropReasonMetadata, RouteHintMetadata, RuntimeObjectKind,
-    RuntimeRole, SchedulingMetadata, SupersedeMetadata, TraceContextMetadata,
-    TypedPayloadDescriptor, CACHE_REFERENCE, CONTROL_BUDGET_UPDATE, CONTROL_CANCEL_ABORT,
-    CONTROL_CAPABILITY_COSTS, CONTROL_CREDIT_BACKPRESSURE, CONTROL_DEADLINE_EXPIRE,
-    CONTROL_DEGRADE_PROFILE, CONTROL_PRIORITY_UPDATE, CONTROL_PROGRESS_PARTIAL,
-    CONTROL_RECOVERABLE_ERROR, CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED,
-    CONTROL_REQUEST_FLAG_HARD_ABORT_ALLOWED, CONTROL_RESULT_DROP_REASON,
-    CONTROL_ROUTE_EXECUTION_HINT, CONTROL_SUPERSEDE, CONTROL_TRACE_CONTEXT, OBJECT_COST,
-    OBJECT_DELTA, OBJECT_LIFECYCLE, OBJECT_OWNERSHIP, RECOVERABLE_ERROR_FLAGS_KNOWN_MASK,
-    SCHEDULING_FLAG_DISCARD_STALE, SCHEDULING_FLAG_EMIT_DROP_REASON, SUPERSEDE_FLAGS_KNOWN_MASK,
+    PartialResultMetadata, PressureMetadata, ProgressMetadata, RecoverableErrorMetadata,
+    ResultDropReasonMetadata, RouteHintMetadata, RuntimeObjectKind, RuntimeRole,
+    SchedulingMetadata, SupersedeMetadata, TraceContextMetadata, TypedPayloadDescriptor,
+    CACHE_REFERENCE, CONTROL_BUDGET_UPDATE, CONTROL_CANCEL_ABORT, CONTROL_CAPABILITY_COSTS,
+    CONTROL_CREDIT_BACKPRESSURE, CONTROL_DEADLINE_EXPIRE, CONTROL_DEGRADE_PROFILE,
+    CONTROL_PRIORITY_UPDATE, CONTROL_PROGRESS_PARTIAL, CONTROL_RECOVERABLE_ERROR,
+    CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED, CONTROL_REQUEST_FLAG_HARD_ABORT_ALLOWED,
+    CONTROL_RESULT_DROP_REASON, CONTROL_ROUTE_EXECUTION_HINT, CONTROL_SUPERSEDE,
+    CONTROL_TRACE_CONTEXT, OBJECT_COST, OBJECT_DELTA, OBJECT_LIFECYCLE, OBJECT_OWNERSHIP,
+    RECOVERABLE_ERROR_FLAGS_KNOWN_MASK, SCHEDULING_FLAG_DISCARD_STALE,
+    SCHEDULING_FLAG_EMIT_DROP_REASON, SUPERSEDE_FLAGS_KNOWN_MASK,
 };
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use nnrp_core::object::{
     object_delta_packet_bytes, object_reference_packet_bytes, parse_object_delta_packet,
@@ -101,15 +101,42 @@ pub fn preview4_capability_tokens() -> &'static [&'static str] {
 }
 
 pub fn execute_preview4_public_case(case_id: &str) -> Option<Result<(), String>> {
-    if case_id == "l0.header.fixed_shape.golden" {
-        return Some(current_header_golden_validation());
+    execute_preview4_public_case_with_parameters(case_id, None)
+}
+
+pub fn preview4_case_parameter_keys(case_id: &str) -> &'static [&'static str] {
+    match case_id {
+        "l0.header.fixed_shape.golden" => &["header_hex"],
+        "l0.control.client_hello.golden"
+        | "l0.control.session_patch_ack.golden"
+        | "l0.frame_submit.metadata.golden"
+        | "l0.result_push.metadata.golden"
+        | "l0.body_region.prelude.golden"
+        | "l0.object_reference.block.golden" => &["metadata_hex"],
+        "l0.flow_update.packet.golden" | "l0.result_hint.packet.golden" => &["packet_hex"],
+        "l0.typed_payload.descriptor.golden" | "l0.typed_payload.descriptor.current.golden" => {
+            &["descriptor_hex"]
+        }
+        "l0.typed_payload.frame_regions.golden" => &["descriptor_region_hex", "payload_hex"],
+        _ => &[],
     }
-    if let Some(result) = crate::nnrp1_baseline::execute_nnrp1_baseline_case(case_id) {
+}
+
+pub fn execute_preview4_public_case_with_parameters(
+    case_id: &str,
+    parameters: Option<&Map<String, Value>>,
+) -> Option<Result<(), String>> {
+    if case_id == "l0.header.fixed_shape.golden" {
+        return Some(current_header_golden_validation(parameters));
+    }
+    if let Some(result) =
+        crate::nnrp1_baseline::execute_nnrp1_baseline_case_with_parameters(case_id, parameters)
+    {
         return Some(result);
     }
     let result = match case_id {
         "l0.typed_payload.descriptor.current.golden" => {
-            current_typed_payload_descriptor_golden_validation()
+            current_typed_payload_descriptor_golden_validation(parameters)
         }
         "l1.control.cancel-abort" => control_cancel_abort_public_validation(),
         "l1.control.priority-deadline" => control_priority_deadline_public_validation(),
@@ -127,36 +154,31 @@ pub fn execute_preview4_public_case(case_id: &str) -> Option<Result<(), String>>
     Some(result)
 }
 
-fn current_header_golden_validation() -> Result<(), String> {
+fn current_header_golden_validation(parameters: Option<&Map<String, Value>>) -> Result<(), String> {
     const EXPECTED: [u8; 40] = [
         0x4e, 0x4e, 0x52, 0x50, 0x01, 0x00, 0x10, 0x28, 0x21, 0x00, 0x00, 0x00, 0x30, 0x00, 0x00,
         0x00, 0x00, 0x10, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x00, 0x00, 0x02, 0x00,
         0x00, 0x00, 0x15, 0xcd, 0x5b, 0x07, 0x00, 0x00, 0x00, 0x00,
     ];
-    let header = CommonHeader::parse(&EXPECTED).map_err(to_string)?;
-    if header.to_bytes().map_err(to_string)? != EXPECTED {
+    let bytes = parameter_hex(parameters, "header_hex", &EXPECTED)?;
+    let header = CommonHeader::parse(&bytes).map_err(to_string)?;
+    if header.to_bytes().map_err(to_string)?.as_slice() != bytes {
         return Err("current common header golden bytes changed".to_string());
     }
     Ok(())
 }
 
-fn current_typed_payload_descriptor_golden_validation() -> Result<(), String> {
+fn current_typed_payload_descriptor_golden_validation(
+    parameters: Option<&Map<String, Value>>,
+) -> Result<(), String> {
     const EXPECTED: [u8; 24] = [
         0x02, 0x00, 0x02, 0x02, 0x01, 0x10, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
         0x00, 0x08, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00,
     ];
-    let descriptor = TypedPayloadDescriptor {
-        profile_id: 2,
-        payload_kind: PayloadKind::TokenChunk,
-        descriptor_flags: 0x02,
-        schema_id: 0x1001,
-        schema_version: 3,
-        stream_semantics: 2,
-        offset: 8,
-        length: 24,
-    };
+    let bytes = parameter_hex(parameters, "descriptor_hex", &EXPECTED)?;
+    let descriptor = TypedPayloadDescriptor::parse(&bytes).map_err(to_string)?;
     let encoded = descriptor.to_bytes().map_err(to_string)?;
-    if encoded != EXPECTED {
+    if encoded.as_slice() != bytes {
         return Err("current typed payload descriptor golden bytes changed".to_string());
     }
     let parsed = TypedPayloadDescriptor::parse(&encoded).map_err(to_string)?;
@@ -164,6 +186,34 @@ fn current_typed_payload_descriptor_golden_validation() -> Result<(), String> {
         return Err("current typed payload descriptor roundtrip changed".to_string());
     }
     Ok(())
+}
+
+pub(crate) fn parameter_hex(
+    parameters: Option<&Map<String, Value>>,
+    name: &str,
+    default: &[u8],
+) -> Result<Vec<u8>, String> {
+    let Some(parameters) = parameters else {
+        return Ok(default.to_vec());
+    };
+    let value = parameters
+        .get(name)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("missing string parameter {name}"))?;
+    if value.len() % 2 != 0 {
+        return Err(format!(
+            "parameter {name} must contain an even number of hex digits"
+        ));
+    }
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let pair = std::str::from_utf8(pair)
+                .map_err(|_| format!("parameter {name} must be valid ASCII hex"))?;
+            u8::from_str_radix(pair, 16).map_err(|_| format!("parameter {name} must be valid hex"))
+        })
+        .collect()
 }
 
 pub fn preview4_fixture_manifest() -> Value {

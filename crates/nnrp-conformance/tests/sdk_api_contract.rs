@@ -14,10 +14,13 @@ use nnrp_runtime::{
     ServerTransportSecurity,
 };
 use nnrp_transport_provider::{
-    TransportCandidateDiagnostic, TransportProviderDescriptor, TransportProviderMetadata,
-    TransportSelection, TransportSelectionError, TransportSelectionErrorCode,
-    TransportSelectionOptions,
+    ProbeMetrics, ProbeState, ProviderCost, ProviderLimitation, ProviderLimits,
+    TransportCandidateDiagnostic, TransportCandidateReadiness, TransportProbeObservation,
+    TransportProviderDescriptor, TransportProviderKind, TransportProviderMetadata,
+    TransportRejectionReason, TransportSelection, TransportSelectionError,
+    TransportSelectionErrorCode, TransportSelectionOptions,
 };
+use std::path::PathBuf;
 
 fn assert_type<T>() {}
 
@@ -55,13 +58,113 @@ fn assert_selection_options_fields(value: TransportSelectionOptions) {
         candidate_readiness,
         probe_observations,
     } = value;
-    drop((
-        peer_supported_transports,
-        policy,
-        requested_max_frame_bytes,
-        candidate_readiness,
-        probe_observations,
-    ));
+    let _: Vec<nnrp_core::TransportId> = peer_supported_transports;
+    let _: nnrp_core::TransportPolicy = policy;
+    let _: Option<u64> = requested_max_frame_bytes;
+    let _: Vec<TransportCandidateReadiness> = candidate_readiness;
+    let _: Vec<TransportProbeObservation> = probe_observations;
+}
+
+fn assert_provider_cost_fields(value: ProviderCost) {
+    let ProviderCost { model_id, units } = value;
+    let _: u16 = model_id;
+    let _: u64 = units;
+}
+
+fn assert_provider_limits_fields(value: ProviderLimits) {
+    let ProviderLimits { max_frame_bytes } = value;
+    let _: u64 = max_frame_bytes;
+}
+
+fn assert_provider_metadata_fields(value: TransportProviderMetadata) {
+    let TransportProviderMetadata {
+        id,
+        cost,
+        preference_rank,
+        limits,
+        limitations,
+    } = value;
+    let _: String = id;
+    let _: ProviderCost = cost;
+    let _: u16 = preference_rank;
+    let _: ProviderLimits = limits;
+    let _: Vec<ProviderLimitation> = limitations;
+}
+
+fn assert_provider_descriptor_fields(value: TransportProviderDescriptor) {
+    let TransportProviderDescriptor {
+        name,
+        version,
+        transport_id,
+        kind,
+        available,
+        library_path,
+        metadata,
+        diagnostic,
+    } = value;
+    let _: String = name;
+    let _: String = version;
+    let _: nnrp_core::TransportId = transport_id;
+    let _: TransportProviderKind = kind;
+    let _: bool = available;
+    let _: Option<PathBuf> = library_path;
+    let _: TransportProviderMetadata = metadata;
+    let _: Option<String> = diagnostic;
+}
+
+fn assert_candidate_readiness_fields(value: TransportCandidateReadiness) {
+    let TransportCandidateReadiness {
+        transport_id,
+        provider_id,
+        route_resolved,
+        security_satisfied,
+        diagnostic,
+    } = value;
+    let _: nnrp_core::TransportId = transport_id;
+    let _: String = provider_id;
+    let _: bool = route_resolved;
+    let _: bool = security_satisfied;
+    let _: Option<String> = diagnostic;
+}
+
+fn assert_probe_observation_fields(value: TransportProbeObservation) {
+    let TransportProbeObservation {
+        transport_id,
+        provider_id,
+        state,
+        metrics,
+        diagnostic,
+    } = value;
+    let _: nnrp_core::TransportId = transport_id;
+    let _: String = provider_id;
+    let _: ProbeState = state;
+    let _: Option<ProbeMetrics> = metrics;
+    let _: Option<String> = diagnostic;
+}
+
+fn assert_candidate_diagnostic_fields(value: TransportCandidateDiagnostic) {
+    let TransportCandidateDiagnostic {
+        transport_id,
+        provider,
+        local_available,
+        peer_supported,
+        within_limits,
+        probe_state,
+        probe,
+        selection_rank,
+        rejection_reason,
+        diagnostic,
+    } = value;
+    let _: nnrp_core::TransportId = transport_id;
+    let _: TransportProviderMetadata = provider;
+    let _: bool = local_available;
+    let _: bool = peer_supported;
+    let _: bool = within_limits;
+    let _: ProbeState = probe_state;
+    let _: Option<ProbeMetrics> = probe;
+    let _: Option<u32> = selection_rank;
+    let _: Option<TransportRejectionReason> = rejection_reason;
+    let _: Option<String> = diagnostic;
 }
 
 fn assert_selection_fields(value: TransportSelection) {
@@ -296,6 +399,13 @@ fn frozen_rust_projection_resolves_every_public_target() {
     let _ = assert_cache_result_fields;
     let _ = assert_cache_policy_fields;
     let _ = assert_selection_options_fields;
+    let _ = assert_provider_cost_fields;
+    let _ = assert_provider_limits_fields;
+    let _ = assert_provider_metadata_fields;
+    let _ = assert_provider_descriptor_fields;
+    let _ = assert_candidate_readiness_fields;
+    let _ = assert_probe_observation_fields;
+    let _ = assert_candidate_diagnostic_fields;
     let _ = assert_selection_fields;
     let _ = assert_selection_failure_fields;
     let _ = assert_server_policy_decision_fields;

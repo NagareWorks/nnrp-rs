@@ -23,8 +23,21 @@ def frozen_contract():
     checker = load_checker()
     return {
         "contractVersion": checker.EXPECTED_CONTRACT_VERSION,
+        "wireLayouts": {
+            "BodyRegionPrelude": {
+                "validation": copy.deepcopy(
+                    checker.EXPECTED_BODY_REGION_VALIDATION
+                )
+            }
+        },
         "apiDomains": {name: {} for name in checker.EXPECTED_API_DOMAINS},
         "types": {
+            "TransportProviderDescriptor": {
+                "nameSemantics": (
+                    "provider-owned package or display name; protocol transport identity is "
+                    "transport_id and selection must not derive it from name"
+                ),
+            },
             "OperationLifecycleEvent": {
                 "fields": [
                     {"name": "operation_id", "type": "u64", "required": True},
@@ -152,6 +165,14 @@ def frozen_contract():
             "RuntimeEventMetadata": {
                 "variants": checker.EXPECTED_RUNTIME_EVENT_METADATA_VARIANTS.copy(),
             },
+            "ResultPushMetadata": {
+                "resultFlagBits": copy.deepcopy(
+                    checker.EXPECTED_RESULT_PUSH_FLAG_BITS
+                ),
+                "validation": copy.deepcopy(
+                    checker.EXPECTED_RESULT_PUSH_VALIDATION
+                ),
+            },
         },
         "roleMethodMessages": [
             {"messageType": name}
@@ -232,6 +253,42 @@ class SdkApiContractTests(unittest.TestCase):
 
     def test_accepts_the_frozen_terminal_result_contract(self):
         self.check(frozen_contract())
+
+    def test_rejects_transport_provider_name_semantics_drift(self):
+        contract = frozen_contract()
+        contract["types"]["TransportProviderDescriptor"]["nameSemantics"] = (
+            "provider name is transport identity"
+        )
+        with self.assertRaisesRegex(
+            SystemExit, "TransportProviderDescriptor name semantics drifted"
+        ):
+            self.check(contract)
+
+    def test_rejects_data_plane_validation_drift(self):
+        contract = frozen_contract()
+        contract["wireLayouts"]["BodyRegionPrelude"]["validation"][
+            "typedPayloadDescriptorBytesMultiple"
+        ] = 16
+        with self.assertRaisesRegex(
+            SystemExit, "BodyRegionPrelude validation contract drifted"
+        ):
+            self.check(contract)
+
+        contract = frozen_contract()
+        contract["types"]["ResultPushMetadata"]["resultFlagBits"]["partial"] = 2
+        with self.assertRaisesRegex(
+            SystemExit, "ResultPushMetadata result flag assignments drifted"
+        ):
+            self.check(contract)
+
+        contract = frozen_contract()
+        contract["types"]["ResultPushMetadata"]["validation"][
+            "tensorCoverageRule"
+        ] = "coverage may be incomplete"
+        with self.assertRaisesRegex(
+            SystemExit, "ResultPushMetadata validation contract drifted"
+        ):
+            self.check(contract)
 
     def test_rejects_contract_version_and_role_surface_drift(self):
         contract = frozen_contract()
@@ -411,6 +468,31 @@ class SdkApiContractTests(unittest.TestCase):
         contract["languageProjections"]["rust"]["terminalEvent"] = "LegacyEvent"
         with self.assertRaisesRegex(SystemExit, "Rust SDK projection map drifted"):
             self.check(contract)
+
+        contract = frozen_contract()
+        del contract["languageProjections"]["rust"]["baselineMetadataCodecs"][
+            "ObjectReferenceBlock"
+        ]
+        with self.assertRaisesRegex(SystemExit, "Rust SDK projection map drifted"):
+            self.check(contract)
+
+    def test_rejects_missing_rust_baseline_metadata_codec_surface(self):
+        source = """
+pub struct ExampleMetadata;
+impl ExampleMetadata {
+    pub fn parse(source: &[u8]) -> Result<Self, Error> { todo!() }
+    pub fn to_bytes(&self) -> Result<Vec<u8>, Error> { todo!() }
+}
+"""
+        self.checker.require_rust_baseline_metadata_codec(source, "ExampleMetadata")
+
+        without_parse = source.replace("pub fn parse", "fn parse")
+        with self.assertRaisesRegex(
+            SystemExit, "Rust baseline metadata codec ExampleMetadata::parse is missing"
+        ):
+            self.checker.require_rust_baseline_metadata_codec(
+                without_parse, "ExampleMetadata"
+            )
 
     def test_rejects_missing_api_domain(self):
         contract = frozen_contract()
