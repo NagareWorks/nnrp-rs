@@ -84,6 +84,14 @@ class ConformanceWorkflowSyncTests(unittest.TestCase):
         self.assertIn('--source-commit "${{ needs.prepare.outputs.source_commit }}"', workflow)
         self.assertNotIn("steps.version.outputs", workflow.split("package:", 1)[1])
 
+    def test_release_marks_prerelease_versions_as_prereleases(self) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "prerelease: ${{ contains(needs.prepare.outputs.package_version, '-') }}",
+            workflow,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -498,6 +498,7 @@ jobs:
         with:
           tag_name: ${{ needs.prepare.outputs.tag_name }}
           name: nnrp-rs v${{ needs.prepare.outputs.package_version }}
+          prerelease: ${{ contains(needs.prepare.outputs.package_version, '-') }}
           files: artifacts/release-assets/*
 
       - name: Publish crates to crates.io
