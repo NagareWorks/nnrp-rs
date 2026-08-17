@@ -1,6 +1,17 @@
 # NNRP/1 Preview4 Release Notes
 
-## Unreleased SDK Server Event Alignment
+## 1.0.0-preview.4.23
+
+Preview4.23 is the coordinated contract-version-15 baseline. It includes the server-event and
+browser-connection work below without changing native FFI ABI `4.4.0` or introducing finer FFI
+calls.
+
+Release inputs and outputs are now bound to one immutable source commit. Native and WASM manifests
+record the SDK version and source commit; the release rejects reused versions whose tag or registry
+identity differs; and `release-bom.json` records the exact source, Conformance and SDK-contract
+inputs, artifact sizes, and SHA-256 digests before publication.
+
+### SDK Server Event Alignment
 
 The Rust server role now exposes a closed `NnrpServerEvent` union. `FRAME_SUBMIT` is delivered as
 an `NnrpServerOperation` that owns the complete submit event, reply identity, streaming sends, and
@@ -13,7 +24,7 @@ session methods.
 so control, object, cache, and lifecycle evidence cannot be silently discarded. Native polling
 keeps the existing coarse batch boundary and does not add per-field FFI calls.
 
-## Browser Connection Multiplexing And Recovery
+### Browser Connection Multiplexing And Recovery
 
 The browser WASM role boundary now separates a WebSocket-owning client connection from its protocol sessions. One
 connection can open and resume multiple sessions, each session exposes a runtime-issued canonical recovery ticket, and

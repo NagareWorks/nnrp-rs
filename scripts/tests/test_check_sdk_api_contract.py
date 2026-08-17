@@ -245,6 +245,22 @@ class SdkApiContractTests(unittest.TestCase):
     def setUp(self):
         self.checker = load_checker()
 
+    def test_rust_impl_body_preserves_methods_after_nested_blocks(self):
+        source = """
+impl NnrpServerOperation {
+    pub fn first(&self) {
+        if true {
+            let _nested = 1;
+        }
+    }
+
+    pub async fn send_result(&self) {}
+}
+"""
+        body = self.checker.rust_impl_body(source, "NnrpServerOperation")
+        self.assertIsNotNone(body)
+        self.assertIn("pub async fn send_result", body)
+
     def check(self, contract):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "contract.json"

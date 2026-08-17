@@ -2503,6 +2503,11 @@ impl NnrpClientSession {
                     "client received malformed SESSION_CLOSE_ACK metadata length",
                 ));
             }
+            Self::require_packet_session(
+                self.session_id,
+                &ack_packet,
+                "client received SESSION_CLOSE_ACK for another session",
+            )?;
 
             let ack = SessionCloseAckMetadata::parse(&ack_packet.metadata)?;
             self.lifecycle
@@ -2529,7 +2534,15 @@ impl NnrpClientSession {
         packet: &RuntimePacket,
         message: &'static str,
     ) -> Result<(), RuntimeError> {
-        if packet.header.session_id != self.session_id {
+        Self::require_packet_session(self.session_id, packet, message)
+    }
+
+    fn require_packet_session(
+        session_id: u32,
+        packet: &RuntimePacket,
+        message: &'static str,
+    ) -> Result<(), RuntimeError> {
+        if packet.header.session_id != session_id {
             return Err(RuntimeError::UnexpectedMessage(message));
         }
         Ok(())
@@ -2632,6 +2645,36 @@ mod config_tests {
         assert!(matches!(
             normalize_transport_close_after_ack(Err(RuntimeError::Internal("close failed"))),
             Err(RuntimeError::Internal("close failed"))
+        ));
+    }
+
+    #[test]
+    fn session_packet_validation_rejects_cross_session_close_ack() {
+        let mut matching_header = CommonHeader::new(
+            MessageType::SessionCloseAck,
+            SESSION_CLOSE_ACK_METADATA_LEN as u32,
+            0,
+        );
+        matching_header.session_id = 7;
+        let matching = RuntimePacket::new(
+            matching_header,
+            vec![0; SESSION_CLOSE_ACK_METADATA_LEN],
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(NnrpClientSession::require_packet_session(7, &matching, "wrong session",).is_ok());
+
+        let mut foreign_header = matching.header;
+        foreign_header.session_id = 9;
+        let foreign = RuntimePacket::new(
+            foreign_header,
+            vec![0; SESSION_CLOSE_ACK_METADATA_LEN],
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(matches!(
+            NnrpClientSession::require_packet_session(7, &foreign, "wrong session"),
+            Err(RuntimeError::UnexpectedMessage("wrong session"))
         ));
     }
 

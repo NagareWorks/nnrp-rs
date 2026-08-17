@@ -14,6 +14,7 @@ import urllib.request
 
 
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
+SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 
 
 def normalize_commit(value: str, label: str) -> str:
@@ -105,6 +106,50 @@ def file_sha256(path: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
+def resolve_artifact_path(
+    artifacts_dir: pathlib.Path, artifact_path: pathlib.Path
+) -> pathlib.Path:
+    artifacts_root = artifacts_dir.resolve()
+    resolved = artifact_path.resolve()
+    try:
+        resolved.relative_to(artifacts_root)
+    except ValueError as error:
+        raise ValueError(
+            f"release artifact path escapes release directory: {artifact_path}"
+        ) from error
+    return resolved
+
+
+def require_object(value: object, label: str) -> dict:
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be an object")
+    return value
+
+
+def require_array(value: object, label: str) -> list:
+    if not isinstance(value, list):
+        raise ValueError(f"{label} must be an array")
+    return value
+
+
+def require_string_field(value: dict, field: str, label: str) -> str:
+    field_value = value.get(field)
+    if not isinstance(field_value, str) or not field_value:
+        raise ValueError(f"{label} {field!r} must be a non-empty string")
+    return field_value
+
+
+def require_size_field(value: dict, field: str, label: str) -> int:
+    field_value = value.get(field)
+    if (
+        isinstance(field_value, bool)
+        or not isinstance(field_value, int)
+        or field_value < 0
+    ):
+        raise ValueError(f"{label} {field!r} must be a non-negative integer")
+    return field_value
+
+
 def build_bom(
     artifacts_dir: pathlib.Path,
     output: pathlib.Path,
@@ -120,13 +165,16 @@ def build_bom(
     output_resolved = output.resolve()
     artifacts = []
     for path in sorted(artifacts_dir.rglob("*")):
-        if not path.is_file() or path.resolve() == output_resolved or path.name == "SHA256SUMS":
+        if not path.is_file() or path.name == "SHA256SUMS":
+            continue
+        resolved_path = resolve_artifact_path(artifacts_dir, path)
+        if resolved_path == output_resolved:
             continue
         artifacts.append(
             {
                 "path": path.relative_to(artifacts_dir).as_posix(),
-                "sha256": file_sha256(path),
-                "size": path.stat().st_size,
+                "sha256": file_sha256(resolved_path),
+                "size": resolved_path.stat().st_size,
             }
         )
     if not artifacts:
@@ -150,27 +198,43 @@ def build_bom(
 
 
 def verify_bom(path: pathlib.Path, artifacts_dir: pathlib.Path) -> dict:
-    bom = json.loads(path.read_text(encoding="utf-8"))
-    normalize_commit(bom["source_commit"], "BOM source commit")
+    bom = require_object(json.loads(path.read_text(encoding="utf-8")), "BOM")
     normalize_commit(
-        bom["inputs"]["nnrp_conformance_commit"], "BOM Conformance source commit"
+        require_string_field(bom, "source_commit", "BOM"), "BOM source commit"
     )
-    normalize_commit(bom["inputs"]["nnrp_doc_commit"], "BOM documentation source commit")
+    inputs = require_object(bom.get("inputs"), "BOM 'inputs'")
+    normalize_commit(
+        require_string_field(inputs, "nnrp_conformance_commit", "BOM 'inputs'"),
+        "BOM Conformance source commit",
+    )
+    normalize_commit(
+        require_string_field(inputs, "nnrp_doc_commit", "BOM 'inputs'"),
+        "BOM documentation source commit",
+    )
     declared_paths = set()
-    for artifact in bom["artifacts"]:
-        relative = pathlib.PurePosixPath(artifact["path"])
+    artifacts = require_array(bom.get("artifacts"), "BOM 'artifacts'")
+    for index, artifact_value in enumerate(artifacts):
+        label = f"BOM artifact {index}"
+        artifact = require_object(artifact_value, label)
+        artifact_path_value = require_string_field(artifact, "path", label)
+        artifact_digest = require_string_field(artifact, "sha256", label)
+        if SHA256_PATTERN.fullmatch(artifact_digest) is None:
+            raise ValueError(f"{label} 'sha256' must be a lowercase SHA-256 digest")
+        artifact_size = require_size_field(artifact, "size", label)
+        relative = pathlib.PurePosixPath(artifact_path_value)
         if relative.is_absolute() or ".." in relative.parts:
             raise ValueError(f"BOM artifact path escapes release directory: {relative}")
-        if artifact["path"] in declared_paths:
-            raise ValueError(f"duplicate BOM artifact path: {artifact['path']}")
-        declared_paths.add(artifact["path"])
+        if artifact_path_value in declared_paths:
+            raise ValueError(f"duplicate BOM artifact path: {artifact_path_value}")
+        declared_paths.add(artifact_path_value)
         artifact_path = artifacts_dir.joinpath(*relative.parts)
-        if not artifact_path.is_file():
-            raise ValueError(f"BOM artifact is missing: {artifact['path']}")
-        if artifact_path.stat().st_size != artifact["size"]:
-            raise ValueError(f"BOM artifact size mismatch: {artifact['path']}")
-        if file_sha256(artifact_path) != artifact["sha256"]:
-            raise ValueError(f"BOM artifact digest mismatch: {artifact['path']}")
+        resolved_path = resolve_artifact_path(artifacts_dir, artifact_path)
+        if not resolved_path.is_file():
+            raise ValueError(f"BOM artifact is missing: {artifact_path_value}")
+        if resolved_path.stat().st_size != artifact_size:
+            raise ValueError(f"BOM artifact size mismatch: {artifact_path_value}")
+        if file_sha256(resolved_path) != artifact_digest:
+            raise ValueError(f"BOM artifact digest mismatch: {artifact_path_value}")
     if not declared_paths:
         raise ValueError("BOM does not declare any artifacts")
     return bom

@@ -779,13 +779,8 @@ def check_contract(contract_path: Path) -> None:
         is not None,
         "NnrpClientSession::await_event no longer returns the frozen client event union",
     )
-    operation_impl = re.search(
-        r"impl\s+NnrpServerOperation\s*\{(?P<body>.*?)\n\}",
-        runtime_server_source,
-        re.DOTALL,
-    )
-    require(operation_impl is not None, "Rust server operation implementation is missing")
-    operation_body = operation_impl.group("body")
+    operation_body = rust_impl_body(runtime_server_source, "NnrpServerOperation")
+    require(operation_body is not None, "Rust server operation implementation is missing")
     operation_signatures = {
         "send_result": "ResultPushMetadata",
         "send_result_drop": "ResultDropReasonMetadata",
