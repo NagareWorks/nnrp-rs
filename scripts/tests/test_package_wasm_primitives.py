@@ -59,6 +59,20 @@ export class BrowserClientRole {
                 ("recoveryTicket",),
             )
 
+    def test_artifact_identity_prefers_release_environment(self):
+        package = load_package_script()
+        with mock.patch.dict(
+            os.environ,
+            {
+                "NNRP_RELEASE_VERSION": "1.0.0-preview.4.23",
+                "NNRP_SOURCE_COMMIT": "a" * 40,
+            },
+        ):
+            self.assertEqual(
+                package.artifact_identity(),
+                ("1.0.0-preview.4.23", "a" * 40),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

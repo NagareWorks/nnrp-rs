@@ -1,5 +1,9 @@
 name: CI
 
+env:
+  NNRP_CONFORMANCE_SOURCE_COMMIT: 685505dc0624f68ff4d660c78d24ea7e9b1b0290
+  NNRP_DOC_SOURCE_COMMIT: 3439ded0d318bd736f6485b17f2563fae77627bf
+
 on:
   push:
   pull_request:
@@ -140,6 +144,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: ${{ github.repository_owner }}/nnrp-conformance
+          ref: ${{ env.NNRP_CONFORMANCE_SOURCE_COMMIT }}
           path: nnrp-conformance-action
           fetch-depth: 1
 
@@ -147,6 +152,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: ${{ github.repository_owner }}/nnrp-doc
+          ref: ${{ env.NNRP_DOC_SOURCE_COMMIT }}
           path: nnrp-doc-contract
           fetch-depth: 1
 
@@ -236,6 +242,35 @@ jobs:
           path: artifacts/native
           if-no-files-found: error
 
+  native-artifact-windows-x86:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-pc-windows-msvc
+
+      - name: Build and verify Windows x86 native artifact
+        run: >-
+          python scripts/package_native_artifacts.py
+          --target i686-pc-windows-msvc
+          --package-name windows-x86
+          --out artifacts/native
+
+      - name: Inspect Windows x86 native artifact boundaries
+        run: python scripts/inspect_release_artifacts.py --native-dir artifacts/native
+
+      - name: Upload Windows x86 native artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: nnrp-ffi-native-Windows-X86
+          path: artifacts/native
+          if-no-files-found: error
+
   wasm-artifact:
     runs-on: ubuntu-latest
 
@@ -301,6 +336,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: ${{ github.repository_owner }}/nnrp-conformance
+          ref: ${{ env.NNRP_CONFORMANCE_SOURCE_COMMIT }}
           path: nnrp-conformance-action
           fetch-depth: 1
 
@@ -309,6 +345,7 @@ jobs:
         with:
           protocol-version: nnrp-1-preview4
           capabilities-path: conformance/nnrp-1-preview4.capabilities.json
+          require-complete-capability-coverage: "true"
           working-directory: .
           artifact-name: nnrp-rs-preview4-conformance
           adapter-command: >-
@@ -328,6 +365,7 @@ jobs:
       - commit-policy
       - test
       - native-artifact
+      - native-artifact-windows-x86
       - wasm-artifact
       - conformance
     if: always()
@@ -354,6 +392,11 @@ jobs:
 
           if [ "${{ needs.native-artifact.result }}" != "success" ]; then
             echo "Native artifact validation failed."
+            exit 1
+          fi
+
+          if [ "${{ needs.native-artifact-windows-x86.result }}" != "success" ]; then
+            echo "Windows x86 native artifact validation failed."
             exit 1
           fi
 

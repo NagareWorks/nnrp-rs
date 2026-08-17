@@ -475,12 +475,13 @@ mod tests {
 
     use nnrp_core::TransportPolicy;
     use nnrp_core::{
-        CommonHeader, FrameSubmitMetadata, InputProfile, MessageType, PayloadKindBitmap,
-        ResultClass, ResultPushMetadata, SessionCloseReason, SubmitMode, TileIndexMode,
+        CommonHeader, FrameSubmitMetadata, InputProfile, MessageType, OperationState,
+        PayloadKindBitmap, ResultClass, ResultPushMetadata, SessionCloseReason, SubmitMode,
+        TileIndexMode,
     };
     use nnrp_runtime::{
         ClientProviderRoute, ClientProviderRoutes, ClientTransportSecurity, NnrpClientOptions,
-        NnrpClientProvider, RuntimePacket, RuntimeTransportKind,
+        NnrpClientProvider, NnrpServerEvent, RuntimePacket, RuntimeTransportKind,
     };
 
     #[test]
@@ -538,10 +539,16 @@ mod tests {
             let mut session = server.accept().await?;
             let submit = session.receive_submit().await?;
             assert_eq!(submit.frame_id, 1);
-            assert_eq!(submit.body, b"prompt".to_vec());
-            session
-                .send_result(submit.frame_id, token_result(), b"delta".to_vec())
+            assert_eq!(submit.body(), b"prompt");
+            submit
+                .send_result(&mut session, token_result(), b"delta".to_vec())
                 .await?;
+            assert!(matches!(
+                session.await_event().await?,
+                NnrpServerEvent::Lifecycle(event)
+                    if event.operation_id == submit.operation_id
+                        && event.state == OperationState::Completed
+            ));
             let close = session.receive_close().await?;
             assert_eq!(close.close_reason, SessionCloseReason::ClientShutdown);
             session.ack_close(&close).await?;

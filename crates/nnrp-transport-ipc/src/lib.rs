@@ -770,8 +770,8 @@ mod tests {
         let server_task = tokio::spawn(async move {
             let mut session = server.accept().await?;
             let submit = session.receive_submit().await?;
-            session
-                .send_result(submit.frame_id, token_result(), b"ipc-ok".to_vec())
+            submit
+                .send_result(&mut session, token_result(), b"ipc-ok".to_vec())
                 .await
         });
 
@@ -960,8 +960,8 @@ mod tests {
 
             let control = session.receive_runtime_control().await?;
             assert_eq!(control.metadata.operation_id, submit.frame_id as u64);
-            session
-                .send_result_drop_reason(drop_reason(submit.frame_id as u64))
+            submit
+                .send_result_drop(&mut session, drop_reason(submit.operation_id), Vec::new())
                 .await
         });
 
@@ -974,22 +974,29 @@ mod tests {
         session.cancel_operation(frame_id as u64, 7).await?;
 
         match session.await_event().await? {
-            nnrp_runtime::NnrpRuntimeEvent {
+            nnrp_runtime::NnrpClientRoleEvent::Lifecycle(event) => {
+                assert_eq!(event.operation_id, frame_id as u64);
+                assert_eq!(event.state, nnrp_core::OperationState::Cancelled);
+            }
+            event => panic!("expected cancelled lifecycle event, got {event:?}"),
+        }
+        match session.await_event().await? {
+            nnrp_runtime::NnrpClientRoleEvent::Runtime(nnrp_runtime::NnrpRuntimeEvent {
                 metadata: NnrpRuntimeEventMetadata::Pressure(pressure),
                 tail: NnrpRuntimeEventTail::None,
                 ..
-            } => {
+            }) => {
                 assert_eq!(pressure.pressure_level, BackpressureLevel::Soft as u16);
                 assert_eq!(pressure.credit_window, 2);
             }
             event => panic!("expected backpressure event, got {event:?}"),
         }
         match session.await_event().await? {
-            nnrp_runtime::NnrpRuntimeEvent {
+            nnrp_runtime::NnrpClientRoleEvent::Runtime(nnrp_runtime::NnrpRuntimeEvent {
                 metadata: NnrpRuntimeEventMetadata::ResultDropReason(reason),
                 tail: NnrpRuntimeEventTail::Diagnostic(body),
                 ..
-            } => {
+            }) => {
                 assert_eq!(reason.operation_id, frame_id as u64);
                 assert_eq!(reason.drop_reason_code, 7);
                 assert!(body.is_empty());

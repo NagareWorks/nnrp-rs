@@ -2,7 +2,10 @@ use std::{fs, path::Path};
 
 use serde_json::{json, Value};
 
-use crate::preview4_vectors::{execute_preview4_public_case, PREVIEW4_PROTOCOL_VERSION};
+use crate::preview4_vectors::{
+    execute_preview4_public_case_with_parameters, preview4_case_parameter_keys,
+    PREVIEW4_PROTOCOL_VERSION,
+};
 
 pub const RESULTS_SCHEMA_URL: &str =
     "https://raw.githubusercontent.com/NagareWorks/nnrp-conformance/main/schemas/adapter-case-results.schema.json";
@@ -82,24 +85,37 @@ pub fn build_results_report(plan: &Value) -> Result<Value, String> {
                 "adapter execution plan case field 'id' must be a non-empty string".to_string()
             })?;
 
-        results.push(match execute_preview4_public_case(case_id) {
-            Some(Ok(())) => json!({
-                "id": case_id,
-                "outcome": "pass",
-            }),
-            Some(Err(message)) => json!({
+        let parameters = case_object.get("parameters").and_then(Value::as_object);
+        if let Err(message) = validate_case_parameters(case_id, parameters) {
+            results.push(json!({
                 "id": case_id,
                 "outcome": "fail",
-                "failure_kind": "assertion_failed",
+                "failure_kind": "invalid_frozen_parameters",
                 "message": message,
-            }),
-            None => json!({
-                "id": case_id,
-                "outcome": "error",
-                "failure_kind": "not_implemented",
-                "message": NOT_IMPLEMENTED_MESSAGE,
-            }),
-        });
+            }));
+            continue;
+        }
+
+        results.push(
+            match execute_preview4_public_case_with_parameters(case_id, parameters) {
+                Some(Ok(())) => json!({
+                    "id": case_id,
+                    "outcome": "pass",
+                }),
+                Some(Err(message)) => json!({
+                    "id": case_id,
+                    "outcome": "fail",
+                    "failure_kind": "assertion_failed",
+                    "message": message,
+                }),
+                None => json!({
+                    "id": case_id,
+                    "outcome": "error",
+                    "failure_kind": "not_implemented",
+                    "message": NOT_IMPLEMENTED_MESSAGE,
+                }),
+            },
+        );
     }
 
     Ok(json!({
@@ -108,6 +124,33 @@ pub fn build_results_report(plan: &Value) -> Result<Value, String> {
         "implementation_name": DEFAULT_IMPLEMENTATION_NAME,
         "results": results,
     }))
+}
+
+fn validate_case_parameters(
+    case_id: &str,
+    parameters: Option<&serde_json::Map<String, Value>>,
+) -> Result<(), String> {
+    let expected = preview4_case_parameter_keys(case_id);
+    if expected.is_empty() {
+        if parameters.is_some_and(|actual| !actual.is_empty()) {
+            return Err(format!("{case_id} does not accept parameters"));
+        }
+        return Ok(());
+    }
+
+    let actual = parameters.ok_or_else(|| format!("{case_id} requires its parameters object"))?;
+    if actual.len() != expected.len() {
+        return Err(format!(
+            "{case_id} requires exactly {} parameter(s)",
+            expected.len()
+        ));
+    }
+    for name in expected {
+        if actual.get(*name).and_then(Value::as_str).is_none() {
+            return Err(format!("{case_id} requires the string {name} parameter"));
+        }
+    }
+    Ok(())
 }
 
 pub fn parse_arguments(
@@ -198,7 +241,7 @@ mod tests {
     fn build_results_report_passes_preview4_public_suite_cases() {
         let cases: Vec<Value> = crate::preview4_public_case_ids()
             .iter()
-            .map(|id| json!({ "id": id }))
+            .map(|id| public_case(id))
             .collect();
 
         let report = build_results_report(&json!({
@@ -213,6 +256,117 @@ mod tests {
             assert_eq!(result["outcome"], Value::String("pass".to_string()));
             assert!(result.get("failure_kind").is_none());
         }
+    }
+
+    fn public_case(id: &str) -> Value {
+        let parameters = match id {
+            "l0.control.client_hello.golden" => {
+                json!({ "metadata_hex": "01010100010000000100000003000000030000002100000003000000010007000100020040000000000001007017640002000000000000006000000000000000" })
+            }
+            "l0.control.session_patch_ack.golden" => {
+                json!({ "metadata_hex": "010003001100000044000000000000000200000028230000680105000300000000000000010000000300000010000000" })
+            }
+            "l0.flow_update.packet.golden" => {
+                json!({ "packet_hex": "4e4e5250010017280000000020000000000000001500000000000000000006000d000000000000000104020000000100000000000000000000000000280000000500000003000000" })
+            }
+            "l0.result_hint.packet.golden" => {
+                json!({ "packet_hex": "4e4e525001001828000000001000000000000000150000002f010000000007000e000000000000000300000003000000030000003c000000" })
+            }
+            "l0.frame_submit.metadata.golden" => {
+                json!({ "metadata_hex": "80026801200020005400020001020000640070170700000000000000c000000000000000000000000807060504030201000000000205ff0003000000290000001100000002000000" })
+            }
+            "l0.result_push.metadata.golden" => {
+                json!({ "metadata_hex": "0000050001005400020000004b0302004e030000000000001000000000000000000000000000000000000000010100002900000035001f000300000003000000" })
+            }
+            "l0.body_region.prelude.golden" => {
+                json!({ "metadata_hex": "1800000018000000180000000e00000010000000050000000000000000000000" })
+            }
+            "l0.object_reference.block.golden" => {
+                json!({ "metadata_hex": "020000000700000044332211000000008877665500000000" })
+            }
+            "l0.typed_payload.descriptor.golden" => {
+                json!({ "descriptor_hex": "10000300040000000700000000000000" })
+            }
+            "l0.header.fixed_shape.golden" => {
+                json!({ "header_hex": "4e4e525001001028210000003000000000100000070000000b0000000200000015cd5b0700000000" })
+            }
+            "l0.typed_payload.frame_regions.golden" => json!({
+                "descriptor_region_hex": "020001000000000003000000000000000400020003000000020000000000000008000300050000000500000000000000100004000a0000000300000000000000",
+                "payload_hex": "746f6b6175766964656f657674"
+            }),
+            "l0.typed_payload.descriptor.current.golden" => {
+                json!({ "descriptor_hex": "020002020110000003000000020000000800000018000000" })
+            }
+            _ => json!({}),
+        };
+        json!({ "id": id, "parameters": parameters })
+    }
+
+    #[test]
+    fn build_results_report_rejects_missing_extra_or_unusable_case_parameters() {
+        let missing = build_results_report(&json!({
+            "protocol_version": "nnrp-1-preview4",
+            "cases": [{ "id": "l0.frame_submit.metadata.golden" }]
+        }))
+        .expect("report should build");
+        assert_eq!(missing["results"][0]["outcome"], "fail");
+        assert_eq!(
+            missing["results"][0]["failure_kind"],
+            "invalid_frozen_parameters"
+        );
+
+        let changed = build_results_report(&json!({
+            "protocol_version": "nnrp-1-preview4",
+            "cases": [{
+                "id": "l0.result_push.metadata.golden",
+                "parameters": { "metadata_hex": "00" }
+            }]
+        }))
+        .expect("report should build");
+        assert_eq!(changed["results"][0]["outcome"], "fail");
+        assert_eq!(changed["results"][0]["failure_kind"], "assertion_failed");
+
+        let invalid_hex = build_results_report(&json!({
+            "protocol_version": "nnrp-1-preview4",
+            "cases": [{
+                "id": "l0.header.fixed_shape.golden",
+                "parameters": { "header_hex": "not-hex" }
+            }]
+        }))
+        .expect("report should build");
+        assert_eq!(invalid_hex["results"][0]["outcome"], "fail");
+        assert_eq!(
+            invalid_hex["results"][0]["failure_kind"],
+            "assertion_failed"
+        );
+
+        let extra = build_results_report(&json!({
+            "protocol_version": "nnrp-1-preview4",
+            "cases": [{
+                "id": "l0.typed_payload.frame_regions.golden",
+                "parameters": {
+                    "descriptor_region_hex": "020001000000000003000000000000000400020003000000020000000000000008000300050000000500000000000000100004000a0000000300000000000000",
+                    "payload_hex": "746f6b6175766964656f657674",
+                    "hidden_default": true
+                }
+            }]
+        }))
+        .expect("report should build");
+        assert_eq!(extra["results"][0]["outcome"], "fail");
+
+        let unexpected = build_results_report(&json!({
+            "protocol_version": "nnrp-1-preview4",
+            "cases": [{
+                "id": "l1.control.cancel-abort",
+                "parameters": { "hidden_default": true }
+            }]
+        }))
+        .expect("report should build");
+        assert_eq!(unexpected["results"][0]["outcome"], "fail");
+        assert_eq!(
+            unexpected["results"][0]["failure_kind"],
+            "invalid_frozen_parameters"
+        );
     }
 
     #[test]

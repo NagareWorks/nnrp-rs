@@ -28,6 +28,8 @@ class WasmArtifactInspectionTests(unittest.TestCase):
 
         scope = self.inspector.BROWSER_WASM_SCOPE
         manifest = {
+            "sdk_version": "1.0.0-preview.4.23",
+            "source_commit": "a" * 40,
             "transport_scope": scope["scope"],
             "transport_name": scope["scope"],
             "package": scope["package"],
@@ -59,7 +61,15 @@ class WasmArtifactInspectionTests(unittest.TestCase):
         self.temporary_directory.cleanup()
 
     def test_accepts_browser_loadable_wasm_package(self):
-        self.inspector.inspect_wasm(self.wasm_dir)
+        self.inspector.inspect_wasm(
+            self.wasm_dir, "1.0.0-preview.4.23", "a" * 40
+        )
+
+    def test_rejects_source_identity_mismatch(self):
+        with self.assertRaisesRegex(SystemExit, "source_commit"):
+            self.inspector.inspect_wasm(
+                self.wasm_dir, "1.0.0-preview.4.23", "b" * 40
+            )
 
     def test_rejects_manifest_export_missing_from_glue(self):
         missing = self.inspector.BROWSER_WASM_SCOPE["exports"][0]

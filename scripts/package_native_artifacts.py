@@ -3,9 +3,11 @@ import argparse
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -140,6 +142,20 @@ TRANSPORT_SCOPES = {
         "limitations": ["requires-tcp", "native-host-only"],
     },
 }
+
+
+def artifact_identity() -> tuple[str, str]:
+    workspace = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+    version = os.environ.get("NNRP_RELEASE_VERSION") or workspace["workspace"]["package"]["version"]
+    source_commit = os.environ.get("NNRP_SOURCE_COMMIT")
+    if source_commit is None:
+        source_commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+        ).strip()
+    source_commit = source_commit.lower()
+    if re.fullmatch(r"[0-9a-f]{40}", source_commit) is None:
+        raise SystemExit("NNRP source commit must be a full 40-character Git SHA")
+    return version, source_commit
 
 
 def host_os_name() -> str:
@@ -435,12 +451,15 @@ def package_artifact(
     package_dir.mkdir(parents=True, exist_ok=True)
     libraries = copy_library_artifacts(library, package_dir, os_name)
     headers = copy_headers(package_dir)
+    sdk_version, source_commit = artifact_identity()
     manifest = {
         "package": TRANSPORT_SCOPES[transport_scope]["package"],
         "transport_name": transport_scope,
         "transport_scope": transport_scope,
         "transport_slots": TRANSPORT_SCOPES[transport_scope]["slots"],
         "protocol_version": PROTOCOL_VERSION,
+        "sdk_version": sdk_version,
+        "source_commit": source_commit,
         "abi_version": FFI_ABI_VERSION,
         "enabled_features": TRANSPORT_SCOPES[transport_scope]["features"],
         "provider": provider_manifest(transport_scope, os_name),

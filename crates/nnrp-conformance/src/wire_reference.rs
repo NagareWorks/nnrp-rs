@@ -1,15 +1,15 @@
 use nnrp_core::{
     BackpressureLevel, CacheInvalidateMetadata, CacheInvalidateScope, CacheReferenceMetadata,
     CacheReuseScope, CapabilityMetadata, CommonHeader, FrameSubmitMetadata, InputProfile,
-    MessageType, PartialResultMetadata, PayloadKindBitmap, PressureMetadata, ProgressMetadata,
-    ResultClass, ResultDropReasonMetadata, ResultPushMetadata, RouteHintMetadata, SubmitMode,
-    TileIndexMode, PRESSURE_METADATA_LEN, RESULT_DROP_REASON_DEADLINE_EXPIRED,
+    MessageType, OperationState, PartialResultMetadata, PayloadKindBitmap, PressureMetadata,
+    ProgressMetadata, ResultClass, ResultDropReasonMetadata, ResultPushMetadata, RouteHintMetadata,
+    SubmitMode, TileIndexMode, PRESSURE_METADATA_LEN, RESULT_DROP_REASON_DEADLINE_EXPIRED,
     STANDARD_PROFILE_TOKEN,
 };
 use nnrp_runtime::{
-    FramedTransport, NnrpClient, NnrpClientConfig, NnrpResult, NnrpRuntimeEvent,
-    NnrpRuntimeEventMetadata, NnrpRuntimeEventTail, NnrpServer, NnrpServerConfig, RuntimeError,
-    RuntimePacket, TcpTransport,
+    FramedTransport, NnrpClient, NnrpClientConfig, NnrpClientRoleEvent, NnrpResult,
+    NnrpRuntimeEvent, NnrpRuntimeEventMetadata, NnrpRuntimeEventTail, NnrpServer, NnrpServerConfig,
+    NnrpServerEvent, NnrpServerSession, RuntimeError, RuntimePacket, TcpTransport,
 };
 use nnrp_transport_ipc::{IpcEndpoint, IpcProvider};
 use nnrp_transport_quic::{QuicClientEndpointConfig, QuicProvider, QuicServerEndpointConfig};
@@ -21,6 +21,50 @@ pub use crate::wire_endpoint::{ReferenceTransport, WireEndpointSecurity, WireRef
 
 const REQUEST_BODY: &[u8] = b"wire-reference-request";
 const RESPONSE_BODY: &[u8] = b"wire-reference-result";
+
+fn expect_client_runtime_event(
+    event: NnrpClientRoleEvent,
+) -> Result<NnrpRuntimeEvent, RuntimeError> {
+    match event {
+        NnrpClientRoleEvent::Runtime(event) => Ok(event),
+        NnrpClientRoleEvent::Lifecycle(_) => Err(RuntimeError::UnexpectedMessage(
+            "wire reference case expected a client wire event",
+        )),
+    }
+}
+
+fn expect_client_lifecycle(
+    event: NnrpClientRoleEvent,
+    operation_id: u64,
+    state: OperationState,
+) -> Result<(), RuntimeError> {
+    match event {
+        NnrpClientRoleEvent::Lifecycle(event)
+            if event.operation_id == operation_id && event.state == state =>
+        {
+            Ok(())
+        }
+        _ => Err(RuntimeError::UnexpectedMessage(
+            "wire reference case expected client lifecycle evidence",
+        )),
+    }
+}
+
+async fn expect_completed_lifecycle(
+    session: &mut NnrpServerSession,
+    operation_id: u64,
+) -> Result<(), RuntimeError> {
+    match session.await_event().await? {
+        NnrpServerEvent::Lifecycle(event)
+            if event.operation_id == operation_id && event.state == OperationState::Completed =>
+        {
+            Ok(())
+        }
+        _ => Err(RuntimeError::UnexpectedMessage(
+            "wire reference server expected completed operation lifecycle evidence",
+        )),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WireReferenceScenario {
@@ -508,14 +552,15 @@ async fn connect_ipc_client_with_retry(endpoint: &IpcEndpoint) -> Result<NnrpCli
 async fn reference_server_task(server: NnrpServer) -> Result<(), RuntimeError> {
     let mut session = server.accept().await?;
     let submit = session.receive_submit().await?;
-    if submit.body != REQUEST_BODY {
+    if submit.body() != REQUEST_BODY {
         return Err(RuntimeError::UnexpectedMessage(
             "wire reference server received unexpected request body",
         ));
     }
-    session
-        .send_result(submit.frame_id, token_result(), RESPONSE_BODY.to_vec())
+    submit
+        .send_result(&mut session, token_result(), RESPONSE_BODY.to_vec())
         .await?;
+    expect_completed_lifecycle(&mut session, submit.operation_id).await?;
     let close = session.receive_close().await?;
     session.ack_close(&close).await?;
     session.close().await
@@ -559,17 +604,18 @@ async fn run_reference_server(
             "session_id": session_id,
             "frame_id": submit.frame_id,
             "operation_id": submit.operation_id,
-            "body_bytes": submit.body.len(),
+            "body_bytes": submit.body().len(),
         }),
     );
-    if submit.body != REQUEST_BODY {
+    if submit.body() != REQUEST_BODY {
         return Err(RuntimeError::UnexpectedMessage(
             "wire reference suite received unexpected request body",
         ));
     }
-    session
-        .send_result(submit.frame_id, token_result(), RESPONSE_BODY.to_vec())
+    submit
+        .send_result(&mut session, token_result(), RESPONSE_BODY.to_vec())
         .await?;
+    expect_completed_lifecycle(&mut session, submit.operation_id).await?;
     frames.push(
         "suite->target",
         "RESULT_PUSH",
@@ -719,15 +765,15 @@ async fn reference_scenario_server_task(
         WireReferenceScenario::CancelAbort => {
             let submit = session.receive_submit().await?;
             session.receive_runtime_control().await?;
-            session
-                .send_result_drop_reason(drop_reason(submit.operation_id))
+            submit
+                .send_result_drop(&mut session, drop_reason(submit.operation_id), Vec::new())
                 .await?;
 
             let abort_submit = session.receive_submit().await?;
             session.receive_scheduling_update().await?;
             session.receive_runtime_control().await?;
             session.send_backpressure(soft_backpressure()).await?;
-            if abort_submit.body.is_empty() {
+            if abort_submit.body().is_empty() {
                 return Err(RuntimeError::UnexpectedMessage(
                     "wire reference abort scenario received empty abort request",
                 ));
@@ -737,23 +783,33 @@ async fn reference_scenario_server_task(
             let submit = session.receive_submit().await?;
             session.receive_scheduling_update().await?;
             session.receive_scheduling_update().await?;
-            session
-                .send_result(submit.frame_id, token_result(), RESPONSE_BODY.to_vec())
+            submit
+                .send_result(&mut session, token_result(), RESPONSE_BODY.to_vec())
                 .await?;
+            expect_completed_lifecycle(&mut session, submit.operation_id).await?;
         }
         WireReferenceScenario::ProgressBackpressure => {
             let submit = session.receive_submit().await?;
             session.receive_pressure_update().await?;
             session.send_backpressure(soft_backpressure()).await?;
-            session
-                .send_progress(progress(submit.operation_id), b"stage".to_vec())
+            submit
+                .send_progress(
+                    &mut session,
+                    progress(submit.operation_id),
+                    b"stage".to_vec(),
+                )
                 .await?;
-            session
-                .send_partial_result(partial_result(submit.operation_id), b"partial".to_vec())
+            submit
+                .send_partial_result(
+                    &mut session,
+                    partial_result(submit.operation_id),
+                    b"partial".to_vec(),
+                )
                 .await?;
-            session
-                .send_result(submit.frame_id, token_result(), RESPONSE_BODY.to_vec())
+            submit
+                .send_result(&mut session, token_result(), RESPONSE_BODY.to_vec())
                 .await?;
+            expect_completed_lifecycle(&mut session, submit.operation_id).await?;
         }
         WireReferenceScenario::CapabilityRouteCache => {
             let submit = session.receive_submit().await?;
@@ -776,9 +832,10 @@ async fn reference_scenario_server_task(
                 .send_cache_reference(cache_reference(), b"hint".to_vec())
                 .await?;
             session.send_cache_invalidate(cache_invalidate()).await?;
-            session
-                .send_result(submit.frame_id, token_result(), RESPONSE_BODY.to_vec())
+            submit
+                .send_result(&mut session, token_result(), RESPONSE_BODY.to_vec())
                 .await?;
+            expect_completed_lifecycle(&mut session, submit.operation_id).await?;
         }
     }
     let close = session.receive_close().await?;
@@ -832,7 +889,14 @@ async fn run_reference_scenario_client(
                     "reason_code": RESULT_DROP_REASON_DEADLINE_EXPIRED,
                 }),
             );
-            let drop_reason = expect_result_drop_reason(session.await_event().await?)?;
+            expect_client_lifecycle(
+                session.await_event().await?,
+                operation_id,
+                OperationState::Cancelled,
+            )?;
+            let drop_reason = expect_result_drop_reason(expect_client_runtime_event(
+                session.await_event().await?,
+            )?)?;
             frames.push(
                 "target->suite",
                 "RESULT_DROP_REASON",
@@ -881,7 +945,13 @@ async fn run_reference_scenario_client(
                     "reason_code": RESULT_DROP_REASON_DEADLINE_EXPIRED,
                 }),
             );
-            let pressure = expect_backpressure(session.await_event().await?)?;
+            expect_client_lifecycle(
+                session.await_event().await?,
+                abort_operation_id,
+                OperationState::Failed,
+            )?;
+            let pressure =
+                expect_backpressure(expect_client_runtime_event(session.await_event().await?)?)?;
             frames.push(
                 "target->suite",
                 "BACKPRESSURE",
@@ -967,7 +1037,8 @@ async fn run_reference_scenario_client(
                     "credit_window": 9,
                 }),
             );
-            let pressure = expect_backpressure(session.await_event().await?)?;
+            let pressure =
+                expect_backpressure(expect_client_runtime_event(session.await_event().await?)?)?;
             frames.push(
                 "target->suite",
                 "BACKPRESSURE",
@@ -977,7 +1048,8 @@ async fn run_reference_scenario_client(
                     "pressure_level": pressure.pressure_level,
                 }),
             );
-            let (progress, progress_body) = expect_progress(session.await_event().await?)?;
+            let (progress, progress_body) =
+                expect_progress(expect_client_runtime_event(session.await_event().await?)?)?;
             frames.push(
                 "target->suite",
                 "PROGRESS",
@@ -988,7 +1060,8 @@ async fn run_reference_scenario_client(
                     "body_bytes": progress_body.len(),
                 }),
             );
-            let (partial, partial_body) = expect_partial_result(session.await_event().await?)?;
+            let (partial, partial_body) =
+                expect_partial_result(expect_client_runtime_event(session.await_event().await?)?)?;
             frames.push(
                 "target->suite",
                 "PARTIAL_RESULT",
@@ -1027,7 +1100,8 @@ async fn run_reference_scenario_client(
                     "body_bytes": REQUEST_BODY.len(),
                 }),
             );
-            let capability = expect_capability(session.await_event().await?)?;
+            let capability =
+                expect_capability(expect_client_runtime_event(session.await_event().await?)?)?;
             frames.push(
                 "target->suite",
                 "CAPABILITY_NEGOTIATION",
@@ -1037,7 +1111,8 @@ async fn run_reference_scenario_client(
                     "capability_count": capability.capability_count,
                 }),
             );
-            let route = expect_route_hint(session.await_event().await?)?;
+            let route =
+                expect_route_hint(expect_client_runtime_event(session.await_event().await?)?)?;
             frames.push(
                 "target->suite",
                 "ROUTE_HINT",
@@ -1047,7 +1122,8 @@ async fn run_reference_scenario_client(
                     "route_id": route.route_id,
                 }),
             );
-            let cache_ref = expect_cache_reference(session.await_event().await?)?;
+            let cache_ref =
+                expect_cache_reference(expect_client_runtime_event(session.await_event().await?)?)?;
             frames.push(
                 "target->suite",
                 "CACHE_REFERENCE",
@@ -1057,7 +1133,9 @@ async fn run_reference_scenario_client(
                     "cache_key_lo": cache_ref.cache_key_lo,
                 }),
             );
-            let cache_invalidate = expect_cache_invalidate(session.await_event().await?)?;
+            let cache_invalidate = expect_cache_invalidate(expect_client_runtime_event(
+                session.await_event().await?,
+            )?)?;
             frames.push(
                 "target->suite",
                 "CACHE_INVALIDATE",
@@ -1274,16 +1352,25 @@ async fn reference_proxy_target_server_task(
         Err(error) => return Err(error),
     };
     if action == ReferenceProxyAction::PerturbPartialBeforeProgress {
-        session
-            .send_progress(progress(submit.operation_id), b"stage".to_vec())
+        submit
+            .send_progress(
+                &mut session,
+                progress(submit.operation_id),
+                b"stage".to_vec(),
+            )
             .await?;
-        session
-            .send_partial_result(partial_result(submit.operation_id), b"partial".to_vec())
+        submit
+            .send_partial_result(
+                &mut session,
+                partial_result(submit.operation_id),
+                b"partial".to_vec(),
+            )
             .await?;
     }
-    session
-        .send_result(submit.frame_id, token_result(), RESPONSE_BODY.to_vec())
+    submit
+        .send_result(&mut session, token_result(), RESPONSE_BODY.to_vec())
         .await?;
+    expect_completed_lifecycle(&mut session, submit.operation_id).await?;
     let close = session.receive_close().await?;
     session.ack_close(&close).await?;
     session.close().await
@@ -1299,7 +1386,7 @@ async fn run_reference_proxy_client(
         .await?;
     match action {
         ReferenceProxyAction::InjectBackpressure => {
-            expect_backpressure(session.await_event().await?)?;
+            expect_backpressure(expect_client_runtime_event(session.await_event().await?)?)?;
             let result = session.await_result().await?;
             let (_, _, body) = expect_result_push(result)?;
             if body != RESPONSE_BODY {
@@ -1309,13 +1396,14 @@ async fn run_reference_proxy_client(
             }
         }
         ReferenceProxyAction::PerturbPartialBeforeProgress => {
-            let (_, partial_body) = expect_partial_result(session.await_event().await?)?;
+            let (_, partial_body) =
+                expect_partial_result(expect_client_runtime_event(session.await_event().await?)?)?;
             if partial_body != b"partial" {
                 return Err(RuntimeError::UnexpectedMessage(
                     "wire proxy perturbation client received unexpected partial body",
                 ));
             }
-            expect_progress(session.await_event().await?)?;
+            expect_progress(expect_client_runtime_event(session.await_event().await?)?)?;
             let result = session.await_result().await?;
             let (_, _, body) = expect_result_push(result)?;
             if body != RESPONSE_BODY {
@@ -1700,11 +1788,12 @@ fn cache_invalidate() -> CacheInvalidateMetadata {
 #[cfg(test)]
 mod tests {
     use super::{
-        run_suite_as_client_reference, run_suite_as_client_scenario_reference,
-        run_suite_as_proxy_reference, run_suite_as_server_reference,
-        validate_wire_reference_report, ReferenceProxyAction, ReferenceTransport,
-        WireReferenceScenario, WireReportExpectation, WireTraceExpectation,
+        expect_client_runtime_event, run_suite_as_client_reference,
+        run_suite_as_client_scenario_reference, run_suite_as_proxy_reference,
+        run_suite_as_server_reference, validate_wire_reference_report, ReferenceProxyAction,
+        ReferenceTransport, WireReferenceScenario, WireReportExpectation, WireTraceExpectation,
     };
+    use nnrp_runtime::{NnrpClientRoleEvent, OperationLifecycleEvent, RuntimeError};
     use serde_json::json;
 
     const REQUIRED_LOOPBACK_FRAMES: &[&str] = &[
@@ -1713,6 +1802,15 @@ mod tests {
         "RESULT_PUSH",
         "SESSION_CLOSE",
     ];
+
+    #[test]
+    fn reference_wire_expectation_rejects_headerless_client_lifecycle() {
+        let event = OperationLifecycleEvent::new(41, nnrp_core::OperationState::Cancelled)
+            .expect("lifecycle event should be valid");
+        let error = expect_client_runtime_event(NnrpClientRoleEvent::Lifecycle(event))
+            .expect_err("wire-only expectation must reject local lifecycle");
+        assert!(matches!(error, RuntimeError::UnexpectedMessage(_)));
+    }
 
     #[tokio::test]
     async fn suite_as_client_reference_runs_tcp_endpoint() {

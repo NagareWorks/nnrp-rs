@@ -38,6 +38,29 @@ export type TransportRejectionReason =
         with self.assertRaisesRegex(SystemExit, "missing TypeScript string union"):
             self.checker.declared_typescript_string_union("", "Missing")
 
+    def test_reads_matching_rust_and_header_enums(self):
+        rust = "pub enum NnrpEventKind { RuntimeFrame = 13, OperationLifecycle = 14 }"
+        header = """
+typedef enum NnrpEventKind {
+  NNRP_EVENT_RUNTIME_FRAME = 13,
+  NNRP_EVENT_OPERATION_LIFECYCLE = 14
+} NnrpEventKind;
+"""
+
+        rust_values = self.checker.declared_rust_enum(rust, "NnrpEventKind")
+        header_values = self.checker.declared_header_enum(header, "NnrpEventKind")
+        expected_header = {
+            f"NNRP_EVENT_{self.checker.screaming_snake(variant)}": value
+            for variant, value in rust_values.items()
+        }
+        self.assertEqual(header_values, expected_header)
+
+    def test_rejects_missing_enum_declarations(self):
+        with self.assertRaisesRegex(SystemExit, "missing Rust enum"):
+            self.checker.declared_rust_enum("", "Missing")
+        with self.assertRaisesRegex(SystemExit, "missing header enum"):
+            self.checker.declared_header_enum("", "Missing")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -118,7 +118,28 @@ def expected_native_provider(scope: str, os_name: str) -> dict:
     }
 
 
-def inspect_native(native_dir: Path) -> None:
+def require_identity(
+    manifest: dict,
+    manifest_path: Path,
+    sdk_version: str | None,
+    source_commit: str | None,
+) -> None:
+    if sdk_version is not None:
+        require_equal(manifest.get("sdk_version"), sdk_version, "sdk_version", manifest_path)
+    if source_commit is not None:
+        require_equal(
+            manifest.get("source_commit"),
+            source_commit.lower(),
+            "source_commit",
+            manifest_path,
+        )
+
+
+def inspect_native(
+    native_dir: Path,
+    sdk_version: str | None = None,
+    source_commit: str | None = None,
+) -> None:
     manifest_paths = sorted(native_dir.glob("*/manifest.json"))
     if not manifest_paths:
         raise SystemExit(f"no native artifact manifests found under {native_dir}")
@@ -126,6 +147,7 @@ def inspect_native(native_dir: Path) -> None:
     platforms: dict[str, set[str]] = {}
     for manifest_path in manifest_paths:
         manifest = read_manifest(manifest_path)
+        require_identity(manifest, manifest_path, sdk_version, source_commit)
         scope = manifest.get("transport_scope")
         if scope not in NATIVE_TRANSPORTS:
             raise SystemExit(
@@ -168,13 +190,18 @@ def inspect_native(native_dir: Path) -> None:
         raise SystemExit(f"native artifact transport matrix is incomplete: {details}")
 
 
-def inspect_wasm(wasm_dir: Path) -> None:
+def inspect_wasm(
+    wasm_dir: Path,
+    sdk_version: str | None = None,
+    source_commit: str | None = None,
+) -> None:
     manifest_paths = sorted(wasm_dir.glob("*/manifest.json"))
     if not manifest_paths:
         raise SystemExit(f"no WASM artifact manifests found under {wasm_dir}")
 
     for manifest_path in manifest_paths:
         manifest = read_manifest(manifest_path)
+        require_identity(manifest, manifest_path, sdk_version, source_commit)
         require_equal(
             manifest.get("transport_scope"),
             BROWSER_WASM_SCOPE["scope"],
@@ -264,15 +291,17 @@ def main() -> None:
     )
     parser.add_argument("--native-dir", type=Path)
     parser.add_argument("--wasm-dir", type=Path)
+    parser.add_argument("--sdk-version")
+    parser.add_argument("--source-commit")
     args = parser.parse_args()
 
     if args.native_dir is None and args.wasm_dir is None:
         raise SystemExit("provide --native-dir, --wasm-dir, or both")
 
     if args.native_dir is not None:
-        inspect_native(args.native_dir)
+        inspect_native(args.native_dir, args.sdk_version, args.source_commit)
     if args.wasm_dir is not None:
-        inspect_wasm(args.wasm_dir)
+        inspect_wasm(args.wasm_dir, args.sdk_version, args.source_commit)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,9 @@
 name: Release
 
+env:
+  NNRP_CONFORMANCE_SOURCE_COMMIT: 685505dc0624f68ff4d660c78d24ea7e9b1b0290
+  NNRP_DOC_SOURCE_COMMIT: 3439ded0d318bd736f6485b17f2563fae77627bf
+
 on:
   push:
     tags:
@@ -30,9 +34,64 @@ permissions:
   contents: write
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      package_version: ${{ steps.version.outputs.package_version }}
+      source_commit: ${{ steps.source.outputs.source_commit }}
+      tag_name: ${{ steps.version.outputs.tag_name }}
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
+
+      - name: Resolve version
+        id: version
+        run: python scripts/resolve_version.py show --github-output --run-number ""
+
+      - name: Resolve immutable source commit
+        id: source
+        run: python scripts/release_identity.py resolve --github-output
+
+      - name: Validate release source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --force --tags
+          python scripts/release_identity.py verify-tag \
+            --tag "${{ steps.version.outputs.tag_name }}" \
+            --source-commit "${{ steps.source.outputs.source_commit }}" \
+            --allow-missing
+          python scripts/release_identity.py verify-registry \
+            --version "${{ steps.version.outputs.package_version }}" \
+            --tag "${{ steps.version.outputs.tag_name }}" \
+            --source-commit "${{ steps.source.outputs.source_commit }}"
+
+          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref_name }}" != "${{ steps.version.outputs.tag_name }}" ]; then
+            echo "Release tag mismatch: expected ${{ steps.version.outputs.tag_name }} but workflow was triggered by ${{ github.ref_name }}."
+            exit 1
+          fi
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ inputs.publish_github_release }}" = "true" ] && [ "${{ inputs.create_tag }}" != "true" ]; then
+              echo "Manual GitHub Release publishing requires create_tag=true."
+              exit 1
+            fi
+            if [ "${{ inputs.publish_to_crates }}" = "true" ] && [ "${{ inputs.create_tag }}" != "true" ]; then
+              echo "Manual crates.io publishing requires create_tag=true."
+              exit 1
+            fi
+          fi
+
   native-artifacts:
     name: Native artifact (${{ matrix.name }})
+    needs: prepare
     runs-on: ${{ matrix.runner }}
+    env:
+      NNRP_RELEASE_VERSION: ${{ needs.prepare.outputs.package_version }}
+      NNRP_SOURCE_COMMIT: ${{ needs.prepare.outputs.source_commit }}
     strategy:
       fail-fast: false
       matrix:
@@ -102,7 +161,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
+          ref: ${{ needs.prepare.outputs.source_commit }}
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -185,7 +244,11 @@ jobs:
           --transport-scope websocket
 
       - name: Inspect native artifact boundaries
-        run: python scripts/inspect_release_artifacts.py --native-dir artifacts/native
+        run: >-
+          python scripts/inspect_release_artifacts.py
+          --native-dir artifacts/native
+          --sdk-version "${{ needs.prepare.outputs.package_version }}"
+          --source-commit "${{ needs.prepare.outputs.source_commit }}"
 
       - name: Upload native artifact
         uses: actions/upload-artifact@v6
@@ -195,7 +258,7 @@ jobs:
           if-no-files-found: error
 
   package:
-    needs: native-artifacts
+    needs: [prepare, native-artifacts]
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -203,13 +266,15 @@ jobs:
       id-token: write
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      NNRP_RELEASE_VERSION: ${{ needs.prepare.outputs.package_version }}
+      NNRP_SOURCE_COMMIT: ${{ needs.prepare.outputs.source_commit }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
+          ref: ${{ needs.prepare.outputs.source_commit }}
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -225,43 +290,17 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: ${{ github.repository_owner }}/nnrp-conformance
+          ref: ${{ env.NNRP_CONFORMANCE_SOURCE_COMMIT }}
           path: nnrp-conformance-action
           fetch-depth: 1
 
-      - name: Resolve version
-        id: version
-        run: |
-          python scripts/resolve_version.py show --github-output --run-number ""
-
-      - name: Validate pushed tag
-        if: github.event_name == 'push'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          expected_tag="${{ steps.version.outputs.tag_name }}"
-          actual_tag="${{ github.ref_name }}"
-
-          if [ "$actual_tag" != "$expected_tag" ]; then
-            echo "Release tag mismatch: expected $expected_tag but workflow was triggered by $actual_tag."
-            exit 1
-          fi
-
-      - name: Validate manual release options
-        if: github.event_name == 'workflow_dispatch'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [ "${{ inputs.publish_github_release }}" = "true" ] && [ "${{ inputs.create_tag }}" != "true" ]; then
-            echo "Manual GitHub Release publishing requires create_tag=true so the release is anchored to an explicit tag."
-            exit 1
-          fi
-
-          if [ "${{ inputs.publish_to_crates }}" = "true" ] && [ "${{ inputs.create_tag }}" != "true" ]; then
-            echo "Manual crates.io publishing requires create_tag=true so crate publication cannot start from an untagged ref."
-            exit 1
-          fi
+      - name: Checkout frozen SDK API contract
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ github.repository_owner }}/nnrp-doc
+          ref: ${{ env.NNRP_DOC_SOURCE_COMMIT }}
+          path: nnrp-doc-contract
+          fetch-depth: 1
 
       - name: Create git tag
         if: github.event_name == 'workflow_dispatch' && inputs.create_tag
@@ -269,21 +308,31 @@ jobs:
         run: |
           set -euo pipefail
 
-          git fetch --tags
-          tag="${{ steps.version.outputs.tag_name }}"
+          git fetch --force --tags
+          tag="${{ needs.prepare.outputs.tag_name }}"
+          source_commit="${{ needs.prepare.outputs.source_commit }}"
           if [ -z "$(git tag --list "$tag")" ]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git tag "$tag"
+            git tag "$tag" "$source_commit"
             git push origin "$tag"
           fi
+          git fetch --force --tags
+          python scripts/release_identity.py verify-tag \
+            --tag "$tag" \
+            --source-commit "$source_commit"
 
       - name: Apply build version
         run: |
-          python scripts/resolve_version.py apply --package-version "${{ steps.version.outputs.package_version }}"
+          python scripts/resolve_version.py apply --package-version "${{ needs.prepare.outputs.package_version }}"
 
       - name: Format check
         run: cargo fmt --all --check
+
+      - name: SDK API contract parity
+        run: >-
+          python scripts/check_sdk_api_contract.py
+          --contract nnrp-doc-contract/docs/public/contracts/nnrp-1-preview4-sdk-api.json
 
       - name: Test
         env:
@@ -295,6 +344,7 @@ jobs:
         with:
           protocol-version: nnrp-1-preview4
           capabilities-path: conformance/nnrp-1-preview4.capabilities.json
+          require-complete-capability-coverage: "true"
           working-directory: .
           artifact-name: nnrp-rs-preview4-conformance
           adapter-command: >-
@@ -327,18 +377,21 @@ jobs:
 
       - name: Inspect release artifact boundaries
         run: |
-          python scripts/inspect_release_artifacts.py --native-dir artifacts/native --wasm-dir artifacts/wasm
+          python scripts/inspect_release_artifacts.py \
+            --native-dir artifacts/native \
+            --wasm-dir artifacts/wasm \
+            --sdk-version "${{ needs.prepare.outputs.package_version }}" \
+            --source-commit "${{ needs.prepare.outputs.source_commit }}"
 
       - name: Bundle release artifacts
         run: |
           python - <<'PY'
-          import hashlib
           import json
           import pathlib
           import shutil
           import zipfile
 
-          version = '${{ steps.version.outputs.package_version }}'
+          version = '${{ needs.prepare.outputs.package_version }}'
           dist_dir = pathlib.Path('artifacts')
           dist_dir.mkdir(exist_ok=True)
           release_dir = dist_dir / 'release-assets'
@@ -346,7 +399,7 @@ jobs:
             shutil.rmtree(release_dir)
           release_dir.mkdir(exist_ok=True)
 
-          source_artifact = dist_dir / f'nnrp-rs-source-{version}.zip'
+          source_artifact = release_dir / f'nnrp-rs-source-{version}.zip'
           with zipfile.ZipFile(source_artifact, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
             include_paths = [
               pathlib.Path('Cargo.toml'),
@@ -400,21 +453,42 @@ jobs:
               artifact = manifest.get('artifact', manifest.get('package', wasm_dir.name))
               zip_dir(wasm_dir, release_dir / f'{artifact}-{version}.zip')
 
+          PY
+
+      - name: Create and verify release BOM
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_dir="artifacts/release-assets"
+          python scripts/release_identity.py create-bom \
+            --artifacts-dir "$release_dir" \
+            --output "$release_dir/release-bom.json" \
+            --version "${{ needs.prepare.outputs.package_version }}" \
+            --tag "${{ needs.prepare.outputs.tag_name }}" \
+            --source-commit "${{ needs.prepare.outputs.source_commit }}" \
+            --conformance-source-commit "${{ env.NNRP_CONFORMANCE_SOURCE_COMMIT }}" \
+            --doc-source-commit "${{ env.NNRP_DOC_SOURCE_COMMIT }}"
+          python scripts/release_identity.py verify-bom \
+            --bom "$release_dir/release-bom.json" \
+            --artifacts-dir "$release_dir"
+          python - <<'PY'
+          import hashlib
+          import pathlib
+
+          release_dir = pathlib.Path('artifacts/release-assets')
           checksums = []
           for artifact in sorted(release_dir.glob('*')):
-            if artifact.is_file():
-              digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
-              checksums.append(f'{digest}  {artifact.name}')
+              if artifact.is_file() and artifact.name != 'SHA256SUMS':
+                  digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+                  checksums.append(f'{digest}  {artifact.name}')
           (release_dir / 'SHA256SUMS').write_text('\n'.join(checksums) + '\n')
           PY
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v6
         with:
-          name: nnrp-rs-release-${{ steps.version.outputs.package_version }}
-          path: |
-            artifacts/nnrp-rs-source-${{ steps.version.outputs.package_version }}.zip
-            artifacts/release-assets/**
+          name: nnrp-rs-release-${{ needs.prepare.outputs.package_version }}
+          path: artifacts/release-assets/**
           if-no-files-found: error
           retention-days: 14
 
@@ -422,8 +496,8 @@ jobs:
         if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.create_tag && inputs.publish_github_release)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.version.outputs.tag_name }}
-          name: nnrp-rs v${{ steps.version.outputs.package_version }}
+          tag_name: ${{ needs.prepare.outputs.tag_name }}
+          name: nnrp-rs v${{ needs.prepare.outputs.package_version }}
           files: artifacts/release-assets/*
 
       - name: Publish crates to crates.io
@@ -432,7 +506,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          version="${{ steps.version.outputs.package_version }}"
+          version="${{ needs.prepare.outputs.package_version }}"
+          python scripts/release_identity.py verify-tag \
+            --tag "${{ needs.prepare.outputs.tag_name }}" \
+            --source-commit "${{ needs.prepare.outputs.source_commit }}"
 
           crate_version_exists() {
             local crate="$1"

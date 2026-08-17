@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -20,34 +20,34 @@ use futures_util::{
 use nnrp_core::{
     validate_control_request_semantics, validate_partial_result_semantics,
     validate_pressure_semantics, validate_profile_assignment, validate_progress_semantics,
-    validate_result_drop_header, validate_result_drop_reason_semantics,
-    validate_scheduling_semantics, validate_trace_context_semantics, BudgetMetadata,
-    CacheAckMetadata, CacheInvalidateMetadata, CacheMissMetadata, CacheObjectId, CacheObjectKind,
-    CachePutMetadata, CacheReferenceMetadata, CapabilityMetadata, ClientHelloMetadata,
-    CommonHeader, ConnectionLifecycle, ControlRequestMetadata, FlowUpdateMetadata,
-    FrameSubmitMetadata, MessageType, ObjectDeltaMetadata, ObjectDescriptorMetadata,
-    ObjectReferenceMetadata, ObjectReleaseMetadata, OperationCancelRequest, OperationDescriptor,
-    OperationRegistry, PartialResultMetadata, PressureMetadata, ProgressMetadata,
-    RecoverableErrorMetadata, ResultDropReasonMetadata, ResultHintMetadata, ResultPushMetadata,
-    RetryAfterMetadata, RouteHintMetadata, RuntimeRole, SchedulingMetadata, SchemaRegistry,
-    ServerHelloAckMetadata, SessionCloseAckMetadata, SessionCloseMetadata, SessionCloseStatus,
-    SessionMigrateAckMetadata, SessionMigrateMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
-    SessionPatchAckMetadata, SessionPatchMetadata, SessionStatus, SupersedeMetadata,
-    TraceContextMetadata, TransportProbeAckMetadata, TransportProbeMetadata, BUDGET_METADATA_LEN,
-    CACHE_ACK_METADATA_LEN, CACHE_INVALIDATE_METADATA_LEN, CACHE_MISS_METADATA_LEN,
-    CACHE_PUT_METADATA_LEN, CACHE_REFERENCE_METADATA_LEN, CAPABILITY_METADATA_LEN,
-    CLIENT_HELLO_METADATA_LEN, CONTROL_REQUEST_METADATA_LEN, FLOW_UPDATE_METADATA_LEN,
-    FRAME_SUBMIT_METADATA_LEN, OBJECT_DELTA_METADATA_LEN, OBJECT_DESCRIPTOR_METADATA_LEN,
-    OBJECT_REFERENCE_METADATA_LEN, OBJECT_RELEASE_METADATA_LEN, PARTIAL_RESULT_METADATA_LEN,
-    PRESSURE_METADATA_LEN, PROGRESS_METADATA_LEN, RECOVERABLE_ERROR_METADATA_LEN,
-    RESULT_DROP_REASON_DEADLINE_EXPIRED, RESULT_DROP_REASON_METADATA_LEN, RESULT_PUSH_METADATA_LEN,
-    RETRY_AFTER_METADATA_LEN, ROUTE_HINT_METADATA_LEN, SCHEDULING_FLAG_EMIT_DROP_REASON,
-    SCHEDULING_METADATA_LEN, SERVER_HELLO_ACK_METADATA_LEN, SESSION_ACK_FLAG_RESUME_ENABLED,
-    SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_LIMIT_REACHED, SESSION_ERROR_NONE,
-    SESSION_ERROR_PROFILE_UNSUPPORTED, SESSION_ERROR_RESUME_REJECTED,
-    SESSION_ERROR_SCHEMA_UNSUPPORTED, SESSION_FLAG_ALLOW_RESUME, SESSION_MIGRATE_ACK_METADATA_LEN,
-    SESSION_MIGRATE_METADATA_LEN, SESSION_OPEN_ACK_METADATA_LEN, SESSION_PATCH_ACK_METADATA_LEN,
-    SESSION_PATCH_METADATA_LEN, SUPERSEDE_METADATA_LEN, TRACE_CONTEXT_METADATA_LEN,
+    validate_result_drop_reason_semantics, validate_scheduling_semantics,
+    validate_trace_context_semantics, BudgetMetadata, CacheAckMetadata, CacheInvalidateMetadata,
+    CacheMissMetadata, CacheObjectId, CacheObjectKind, CachePutMetadata, CacheReferenceMetadata,
+    CapabilityMetadata, ClientHelloMetadata, CommonHeader, ConnectionLifecycle,
+    ControlRequestMetadata, FlowUpdateMetadata, FrameSubmitMetadata, MessageType,
+    ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata, ObjectReleaseMetadata,
+    OperationCancelRequest, OperationDescriptor, OperationRegistry, PartialResultMetadata,
+    PressureMetadata, ProgressMetadata, RecoverableErrorMetadata, ResultDropReasonMetadata,
+    ResultHintMetadata, ResultPushMetadata, RetryAfterMetadata, RouteHintMetadata, RuntimeRole,
+    SchedulingMetadata, SchemaRegistry, ServerHelloAckMetadata, SessionCloseAckMetadata,
+    SessionCloseMetadata, SessionCloseStatus, SessionMigrateAckMetadata, SessionMigrateMetadata,
+    SessionOpenAckMetadata, SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchMetadata,
+    SessionStatus, SupersedeMetadata, TraceContextMetadata, TransportProbeAckMetadata,
+    TransportProbeMetadata, BUDGET_METADATA_LEN, CACHE_ACK_METADATA_LEN,
+    CACHE_INVALIDATE_METADATA_LEN, CACHE_MISS_METADATA_LEN, CACHE_PUT_METADATA_LEN,
+    CACHE_REFERENCE_METADATA_LEN, CAPABILITY_METADATA_LEN, CLIENT_HELLO_METADATA_LEN,
+    CONTROL_REQUEST_METADATA_LEN, FLOW_UPDATE_METADATA_LEN, FRAME_SUBMIT_METADATA_LEN,
+    OBJECT_DELTA_METADATA_LEN, OBJECT_DESCRIPTOR_METADATA_LEN, OBJECT_REFERENCE_METADATA_LEN,
+    OBJECT_RELEASE_METADATA_LEN, PARTIAL_RESULT_METADATA_LEN, PRESSURE_METADATA_LEN,
+    PROGRESS_METADATA_LEN, RECOVERABLE_ERROR_METADATA_LEN, RESULT_DROP_REASON_DEADLINE_EXPIRED,
+    RESULT_DROP_REASON_METADATA_LEN, RESULT_PUSH_METADATA_LEN, RETRY_AFTER_METADATA_LEN,
+    ROUTE_HINT_METADATA_LEN, SCHEDULING_FLAG_EMIT_DROP_REASON, SCHEDULING_METADATA_LEN,
+    SERVER_HELLO_ACK_METADATA_LEN, SESSION_ACK_FLAG_RESUME_ENABLED, SESSION_CLOSE_ACK_METADATA_LEN,
+    SESSION_ERROR_LIMIT_REACHED, SESSION_ERROR_NONE, SESSION_ERROR_PROFILE_UNSUPPORTED,
+    SESSION_ERROR_RESUME_REJECTED, SESSION_ERROR_SCHEMA_UNSUPPORTED, SESSION_FLAG_ALLOW_RESUME,
+    SESSION_MIGRATE_ACK_METADATA_LEN, SESSION_MIGRATE_METADATA_LEN, SESSION_OPEN_ACK_METADATA_LEN,
+    SESSION_PATCH_ACK_METADATA_LEN, SESSION_PATCH_METADATA_LEN, SUPERSEDE_METADATA_LEN,
+    TRACE_CONTEXT_METADATA_LEN,
 };
 #[cfg(all(feature = "native-tcp", not(target_arch = "wasm32")))]
 use tokio::net::TcpListener;
@@ -56,11 +56,26 @@ use tokio::net::TcpListener;
 use crate::TcpFramedListener;
 use crate::{
     multiplex::{spawn_runtime_task, MultiplexedConnection},
+    pre_submit::PreSubmitDeadlineReservations,
     server_provider::{bind_server, BoundServerProvider},
     BoxedFramedListener, BoxedFramedTransport, FramedListener, NnrpRuntimeEvent, NnrpServerOptions,
     NnrpServerProvider, ProviderEndpoint, RuntimeError, RuntimeFrameHeader, RuntimePacket,
     RuntimePressureState,
 };
+
+const MAX_PENDING_SERVER_INPUTS: usize = 1_024;
+
+fn is_dedicated_role_message(message_type: MessageType) -> bool {
+    matches!(
+        message_type,
+        MessageType::SessionPatch
+            | MessageType::CachePut
+            | MessageType::CacheAck
+            | MessageType::SessionMigrate
+            | MessageType::Ping
+            | MessageType::Pong
+    )
+}
 
 #[derive(Clone)]
 pub struct NnrpServerConfig {
@@ -260,6 +275,7 @@ pub struct NnrpServerSession {
     operations: OperationRegistry,
     frame_operations: BTreeMap<u32, u64>,
     operation_frames: BTreeMap<u64, u32>,
+    pre_submit_deadlines: PreSubmitDeadlineReservations,
     pressure: RuntimePressureState,
     cache_objects: Vec<CacheObjectId>,
     supported_cache_objects: Vec<CacheObjectKind>,
@@ -268,6 +284,7 @@ pub struct NnrpServerSession {
     connection_nonce: u64,
     sessions: SharedSessionRegistry,
     pending_close: Option<SessionCloseMetadata>,
+    pending_inputs: VecDeque<PendingServerInput>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -289,12 +306,167 @@ static NEXT_CONNECTION_NONCE: AtomicU64 = AtomicU64::new(1);
 
 type SharedSessionRegistry = Arc<Mutex<BTreeMap<u32, RuntimeSessionRecord>>>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NnrpSubmit {
+#[derive(Debug, PartialEq, Eq)]
+pub struct NnrpServerOperation {
     pub operation_id: u64,
     pub frame_id: u32,
-    pub metadata: FrameSubmitMetadata,
-    pub body: Vec<u8>,
+    pub submit: NnrpRuntimeEvent,
+}
+
+impl NnrpServerOperation {
+    fn new(submit: NnrpRuntimeEvent) -> Result<Self, RuntimeError> {
+        if submit.header.message_type != MessageType::FrameSubmit
+            || !matches!(
+                submit.metadata,
+                crate::NnrpRuntimeEventMetadata::FrameSubmit(_)
+            )
+        {
+            return Err(RuntimeError::UnexpectedMessage(
+                "server operation requires a FRAME_SUBMIT runtime event",
+            ));
+        }
+        let operation_id = match &submit.metadata {
+            crate::NnrpRuntimeEventMetadata::FrameSubmit(metadata) => metadata.operation_id,
+            _ => unreachable!("server operation constructor validates FRAME_SUBMIT metadata"),
+        };
+        let frame_id = submit.header.frame_id;
+        Ok(Self {
+            operation_id,
+            frame_id,
+            submit,
+        })
+    }
+
+    pub fn operation_id(&self) -> u64 {
+        self.operation_id
+    }
+
+    pub fn frame_id(&self) -> u32 {
+        self.frame_id
+    }
+
+    pub fn metadata(&self) -> &FrameSubmitMetadata {
+        match &self.submit.metadata {
+            crate::NnrpRuntimeEventMetadata::FrameSubmit(metadata) => metadata,
+            _ => unreachable!("server operation constructor validates FRAME_SUBMIT metadata"),
+        }
+    }
+
+    pub fn body(&self) -> &[u8] {
+        match &self.submit.tail {
+            crate::NnrpRuntimeEventTail::Body(body) => body,
+            _ => unreachable!("FRAME_SUBMIT runtime events always carry a body tail"),
+        }
+    }
+
+    pub fn submit(&self) -> &NnrpRuntimeEvent {
+        &self.submit
+    }
+
+    pub fn into_submit(self) -> NnrpRuntimeEvent {
+        self.submit
+    }
+
+    pub async fn send_result(
+        &self,
+        session: &mut NnrpServerSession,
+        metadata: ResultPushMetadata,
+        body: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        self.require_session(session)?;
+        session
+            .send_operation_result_for_binding(self.frame_id, metadata, body)
+            .await
+    }
+
+    pub async fn send_result_drop(
+        &self,
+        session: &mut NnrpServerSession,
+        metadata: ResultDropReasonMetadata,
+        diagnostic: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        self.require_session(session)?;
+        self.require_operation_id(metadata.operation_id)?;
+        session
+            .send_operation_result_drop_for_binding(metadata, diagnostic)
+            .await
+    }
+
+    pub async fn send_progress(
+        &self,
+        session: &mut NnrpServerSession,
+        metadata: ProgressMetadata,
+        body: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        self.require_session(session)?;
+        self.require_operation_id(metadata.operation_id)?;
+        session
+            .send_operation_progress_for_binding(metadata, body)
+            .await
+    }
+
+    pub async fn send_partial_result(
+        &self,
+        session: &mut NnrpServerSession,
+        metadata: PartialResultMetadata,
+        body: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        self.require_session(session)?;
+        self.require_operation_id(metadata.operation_id)?;
+        session
+            .send_operation_partial_result_for_binding(metadata, body)
+            .await
+    }
+
+    fn require_session(&self, session: &NnrpServerSession) -> Result<(), RuntimeError> {
+        if self.submit.header.session_id != session.session_id
+            || session.operation_id_for_frame(self.frame_id)? != self.operation_id
+        {
+            return Err(RuntimeError::UnexpectedMessage(
+                "server operation does not belong to this session",
+            ));
+        }
+        Ok(())
+    }
+
+    fn require_operation_id(&self, operation_id: u64) -> Result<(), RuntimeError> {
+        if operation_id != self.operation_id {
+            return Err(RuntimeError::UnexpectedMessage(
+                "server operation metadata operation id mismatch",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum NnrpServerEvent {
+    Submit(NnrpServerOperation),
+    Runtime(NnrpRuntimeEvent),
+    Lifecycle(crate::OperationLifecycleEvent),
+}
+
+enum PendingServerInput {
+    Event(NnrpServerEvent),
+    RolePacket(RuntimePacket),
+}
+
+impl NnrpServerEvent {
+    pub fn runtime_event(&self) -> Option<&NnrpRuntimeEvent> {
+        match self {
+            Self::Submit(operation) => Some(operation.submit()),
+            Self::Runtime(event) => Some(event),
+            Self::Lifecycle(_) => None,
+        }
+    }
+
+    pub fn into_runtime_event(self) -> Option<NnrpRuntimeEvent> {
+        match self {
+            Self::Submit(operation) => Some(operation.into_submit()),
+            Self::Runtime(event) => Some(event),
+            Self::Lifecycle(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -327,8 +499,8 @@ pub struct NnrpPressureUpdate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum NnrpServerEvent {
-    Submit(NnrpSubmit),
+pub(crate) enum DecodedServerEvent {
+    Submit(DecodedSubmit),
     FrameCancel(NnrpCancel),
     PartialResult {
         metadata: PartialResultMetadata,
@@ -401,6 +573,14 @@ pub(crate) enum NnrpServerEvent {
     },
     CacheInvalidate(CacheInvalidateMetadata),
     Close(SessionCloseMetadata),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DecodedSubmit {
+    pub operation_id: u64,
+    pub frame_id: u32,
+    pub metadata: FrameSubmitMetadata,
+    pub body: Vec<u8>,
 }
 
 impl NnrpServer {
@@ -906,6 +1086,7 @@ async fn accept_connection_session(
         operations: OperationRegistry::new(),
         frame_operations: BTreeMap::new(),
         operation_frames: BTreeMap::new(),
+        pre_submit_deadlines: PreSubmitDeadlineReservations::new(open.max_in_flight_operations),
         pressure: RuntimePressureState::default(),
         cache_objects: Vec::new(),
         supported_cache_objects: config.supported_cache_objects.clone(),
@@ -914,6 +1095,7 @@ async fn accept_connection_session(
         connection_nonce,
         sessions: Arc::clone(sessions),
         pending_close: None,
+        pending_inputs: VecDeque::new(),
     };
     if accepted_sessions.unbounded_send(session).is_err() {
         mark_session_inactive(sessions, session_id, connection_nonce)?;
@@ -1146,15 +1328,52 @@ impl NnrpServerSession {
         self.cache_objects.len()
     }
 
-    pub async fn receive_submit(&mut self) -> Result<NnrpSubmit, RuntimeError> {
-        let packet = self.transport.read_packet().await?;
-        self.handle_frame_submit_packet(packet)
+    pub async fn receive_submit(&mut self) -> Result<NnrpServerOperation, RuntimeError> {
+        for index in 0..self.pending_inputs.len() {
+            match self.pending_inputs.get(index) {
+                Some(PendingServerInput::Event(NnrpServerEvent::Submit(_))) => {
+                    return match self.pending_inputs.remove(index) {
+                        Some(PendingServerInput::Event(NnrpServerEvent::Submit(operation))) => {
+                            Ok(operation)
+                        }
+                        _ => unreachable!("pending input index was selected as submit"),
+                    };
+                }
+                Some(PendingServerInput::Event(NnrpServerEvent::Runtime(event)))
+                    if event.header.message_type == MessageType::SessionClose =>
+                {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "server session closed while waiting for FRAME_SUBMIT",
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        loop {
+            match self.read_next_input().await? {
+                PendingServerInput::Event(NnrpServerEvent::Submit(operation)) => {
+                    return Ok(operation);
+                }
+                PendingServerInput::Event(NnrpServerEvent::Runtime(event))
+                    if event.header.message_type == MessageType::SessionClose =>
+                {
+                    self.retain_pending_input(PendingServerInput::Event(
+                        NnrpServerEvent::Runtime(event),
+                    ))?;
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "server session closed while waiting for FRAME_SUBMIT",
+                    ));
+                }
+                input => self.retain_pending_input(input)?,
+            }
+        }
     }
 
     fn handle_frame_submit_packet(
         &mut self,
         packet: RuntimePacket,
-    ) -> Result<NnrpSubmit, RuntimeError> {
+    ) -> Result<DecodedSubmit, RuntimeError> {
         if packet.header.message_type != MessageType::FrameSubmit {
             return Err(RuntimeError::UnexpectedMessage(
                 "server expected FRAME_SUBMIT",
@@ -1177,17 +1396,29 @@ impl NnrpServerSession {
                 "server received duplicate FRAME_SUBMIT frame id",
             ));
         }
+        let reserved_deadline = self.pre_submit_deadlines.take_for_submit(
+            metadata.operation_id,
+            packet.header.frame_id,
+            current_unix_ms(),
+        )?;
         self.operations.register(OperationDescriptor::new(
             self.session_id,
             metadata.operation_id,
         ))?;
+        if let Some(deadline) = reserved_deadline {
+            self.operations.apply_scheduling_update(
+                self.session_id,
+                MessageType::Deadline,
+                deadline,
+            )?;
+        }
         self.frame_operations
             .insert(packet.header.frame_id, metadata.operation_id);
         self.operation_frames
             .insert(metadata.operation_id, packet.header.frame_id);
         self.update_registry_last_operation(metadata.operation_id)?;
 
-        Ok(NnrpSubmit {
+        Ok(DecodedSubmit {
             operation_id: metadata.operation_id,
             frame_id: packet.header.frame_id,
             metadata,
@@ -1195,13 +1426,49 @@ impl NnrpServerSession {
         })
     }
 
-    pub async fn await_event(&mut self) -> Result<NnrpRuntimeEvent, RuntimeError> {
+    pub async fn await_event(&mut self) -> Result<NnrpServerEvent, RuntimeError> {
+        if let Some(input) = self.pending_inputs.front() {
+            return match input {
+                PendingServerInput::Event(_) => match self.pending_inputs.pop_front() {
+                    Some(PendingServerInput::Event(event)) => Ok(event),
+                    _ => unreachable!("pending input front was selected as a server event"),
+                },
+                PendingServerInput::RolePacket(_) => Err(RuntimeError::UnexpectedMessage(
+                    "server event pump is blocked by a dedicated role message",
+                )),
+            };
+        }
+        match self.read_next_input().await? {
+            PendingServerInput::Event(event) => Ok(event),
+            input @ PendingServerInput::RolePacket(_) => {
+                self.retain_pending_input(input)?;
+                Err(RuntimeError::UnexpectedMessage(
+                    "server event pump received a dedicated role message",
+                ))
+            }
+        }
+    }
+
+    async fn read_next_input(&mut self) -> Result<PendingServerInput, RuntimeError> {
         let packet = self.transport.read_packet().await?;
+        self.pre_submit_deadlines
+            .reject_expired(current_unix_ms())?;
+        if is_dedicated_role_message(packet.header.message_type) {
+            return Ok(PendingServerInput::RolePacket(packet));
+        }
+        self.decode_server_event(packet)
+            .map(PendingServerInput::Event)
+    }
+
+    fn decode_server_event(
+        &mut self,
+        packet: RuntimePacket,
+    ) -> Result<NnrpServerEvent, RuntimeError> {
         let header = RuntimeFrameHeader::from(&packet.header);
         let event = match packet.header.message_type {
             MessageType::FrameSubmit => self
                 .handle_frame_submit_packet(packet)
-                .map(NnrpServerEvent::Submit),
+                .map(DecodedServerEvent::Submit),
             MessageType::FrameCancel => {
                 self.require_session_packet(&packet, "server received cancel for another session")?;
                 if !packet.metadata.is_empty() || !packet.body.is_empty() {
@@ -1210,12 +1477,16 @@ impl NnrpServerSession {
                     ));
                 }
                 let operation_id = self.operation_id_for_frame(packet.header.frame_id)?;
-                self.operations.cancel(OperationCancelRequest {
+                self.ensure_pending_capacity()?;
+                let cancelled = self.operations.cancel(OperationCancelRequest {
                     session_id: self.session_id,
                     operation_id,
                     cancel_scope: nnrp_core::CancelScope::Operation,
                 })?;
-                Ok(NnrpServerEvent::FrameCancel(NnrpCancel {
+                for operation_id in cancelled {
+                    self.queue_lifecycle(operation_id, nnrp_core::OperationState::Cancelled)?;
+                }
+                Ok(DecodedServerEvent::FrameCancel(NnrpCancel {
                     frame_id: packet.header.frame_id,
                 }))
             }
@@ -1237,7 +1508,7 @@ impl NnrpServerSession {
                     "server received PARTIAL_RESULT body length mismatch",
                 )?;
                 self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
-                Ok(NnrpServerEvent::PartialResult {
+                Ok(DecodedServerEvent::PartialResult {
                     metadata,
                     body: packet.body,
                 })
@@ -1260,7 +1531,7 @@ impl NnrpServerSession {
                     "server received PROGRESS body length mismatch",
                 )?;
                 self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
-                Ok(NnrpServerEvent::Progress {
+                Ok(DecodedServerEvent::Progress {
                     metadata,
                     body: packet.body,
                 })
@@ -1283,7 +1554,7 @@ impl NnrpServerSession {
                     "server received RESULT_DROP_REASON body length mismatch",
                 )?;
                 self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
-                Ok(NnrpServerEvent::ResultDropReason {
+                Ok(DecodedServerEvent::ResultDropReason {
                     metadata,
                     body: packet.body,
                 })
@@ -1306,18 +1577,31 @@ impl NnrpServerSession {
                     "server received runtime control diagnostic body length mismatch",
                 )?;
                 self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
-                match packet.header.message_type {
-                    MessageType::Cancel => {
-                        self.operations.cancel(OperationCancelRequest {
-                            session_id: self.session_id,
-                            operation_id: metadata.operation_id,
-                            cancel_scope: nnrp_core::CancelScope::Operation,
-                        })?;
-                    }
-                    MessageType::Abort => self.operations.abort(metadata.operation_id)?,
-                    _ => unreachable!("runtime control message type was matched earlier"),
+                if metadata.operation_id != 0 {
+                    self.ensure_pending_capacity()?;
+                    let lifecycle_state = match packet.header.message_type {
+                        MessageType::Cancel => {
+                            let cancelled = self.operations.cancel(OperationCancelRequest {
+                                session_id: self.session_id,
+                                operation_id: metadata.operation_id,
+                                cancel_scope: nnrp_core::CancelScope::Operation,
+                            })?;
+                            if cancelled.is_empty() {
+                                return Err(RuntimeError::UnexpectedMessage(
+                                    "server cancel did not transition an active operation",
+                                ));
+                            }
+                            nnrp_core::OperationState::Cancelled
+                        }
+                        MessageType::Abort => {
+                            self.operations.abort(metadata.operation_id)?;
+                            nnrp_core::OperationState::Failed
+                        }
+                        _ => unreachable!("runtime control message type was matched earlier"),
+                    };
+                    self.queue_lifecycle(metadata.operation_id, lifecycle_state)?;
                 }
-                Ok(NnrpServerEvent::Control(NnrpRuntimeControl {
+                Ok(DecodedServerEvent::Control(NnrpRuntimeControl {
                     message_type: packet.header.message_type,
                     metadata,
                     body: packet.body,
@@ -1335,13 +1619,36 @@ impl NnrpServerSession {
                 }
                 let metadata = SchedulingMetadata::parse(&packet.metadata)?;
                 validate_scheduling_semantics(packet.header.message_type, &metadata)?;
-                self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
-                self.operations.apply_scheduling_update(
-                    self.session_id,
-                    packet.header.message_type,
-                    metadata,
-                )?;
-                Ok(NnrpServerEvent::Scheduling(NnrpSchedulingUpdate {
+                if let Some(expected_frame_id) =
+                    self.operation_frames.get(&metadata.operation_id).copied()
+                {
+                    if expected_frame_id != packet.header.frame_id {
+                        return Err(RuntimeError::UnexpectedMessage(
+                            "server runtime event frame id does not match its operation",
+                        ));
+                    }
+                    self.operations.apply_scheduling_update(
+                        self.session_id,
+                        packet.header.message_type,
+                        metadata,
+                    )?;
+                } else if packet.header.message_type == MessageType::Deadline {
+                    if self.frame_operations.contains_key(&packet.header.frame_id) {
+                        return Err(RuntimeError::UnexpectedMessage(
+                            "server received pre-submit DEADLINE for a reused frame id",
+                        ));
+                    }
+                    self.pre_submit_deadlines.reserve(
+                        packet.header.frame_id,
+                        metadata,
+                        current_unix_ms(),
+                    )?;
+                } else {
+                    return Err(
+                        nnrp_core::NnrpError::UnknownOperation(metadata.operation_id).into(),
+                    );
+                }
+                Ok(DecodedServerEvent::Scheduling(NnrpSchedulingUpdate {
                     message_type: packet.header.message_type,
                     metadata,
                 }))
@@ -1363,7 +1670,16 @@ impl NnrpServerSession {
                     "server received SUPERSEDE diagnostic body length mismatch",
                 )?;
                 self.require_operation_frame(metadata.old_operation_id, packet.header.frame_id)?;
-                Ok(NnrpServerEvent::Supersede {
+                self.ensure_pending_capacity()?;
+                self.operations.transition(
+                    metadata.old_operation_id,
+                    nnrp_core::OperationState::Superseded,
+                )?;
+                self.queue_lifecycle(
+                    metadata.old_operation_id,
+                    nnrp_core::OperationState::Superseded,
+                )?;
+                Ok(DecodedServerEvent::Supersede {
                     metadata,
                     body: packet.body,
                 })
@@ -1380,7 +1696,7 @@ impl NnrpServerSession {
                 }
                 let metadata = BudgetMetadata::parse(&packet.metadata)?;
                 self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
-                Ok(NnrpServerEvent::Budget(metadata))
+                Ok(DecodedServerEvent::Budget(metadata))
             }
             MessageType::FlowUpdate => {
                 if packet.metadata.len() != FLOW_UPDATE_METADATA_LEN || !packet.body.is_empty() {
@@ -1391,7 +1707,7 @@ impl NnrpServerSession {
                 let metadata = FlowUpdateMetadata::parse(&packet.metadata)?;
                 self.lifecycle
                     .validate_flow_update(&packet.header, &metadata)?;
-                Ok(NnrpServerEvent::FlowUpdate(metadata))
+                Ok(DecodedServerEvent::FlowUpdate(metadata))
             }
             MessageType::Backpressure | MessageType::CreditUpdate => {
                 self.require_optional_session_packet(
@@ -1407,7 +1723,7 @@ impl NnrpServerSession {
                 validate_pressure_semantics(packet.header.message_type, &metadata)?;
                 self.pressure
                     .apply_inbound(packet.header.message_type, metadata)?;
-                Ok(NnrpServerEvent::Pressure(NnrpPressureUpdate {
+                Ok(DecodedServerEvent::Pressure(NnrpPressureUpdate {
                     message_type: packet.header.message_type,
                     metadata,
                 }))
@@ -1428,7 +1744,7 @@ impl NnrpServerSession {
                     metadata.body_bytes as usize,
                     "server received capability body length mismatch",
                 )?;
-                Ok(NnrpServerEvent::Capability {
+                Ok(DecodedServerEvent::Capability {
                     message_type: packet.header.message_type,
                     metadata,
                     body: packet.body,
@@ -1451,7 +1767,7 @@ impl NnrpServerSession {
                     "server received route hint body length mismatch",
                 )?;
                 self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
-                Ok(NnrpServerEvent::RouteHint {
+                Ok(DecodedServerEvent::RouteHint {
                     message_type: packet.header.message_type,
                     metadata,
                     body: packet.body,
@@ -1474,7 +1790,7 @@ impl NnrpServerSession {
                     metadata.body_bytes as usize,
                     "server received TRACE_CONTEXT body length mismatch",
                 )?;
-                Ok(NnrpServerEvent::TraceContext {
+                Ok(DecodedServerEvent::TraceContext {
                     frame_id: packet.header.frame_id,
                     metadata,
                     body: packet.body,
@@ -1496,7 +1812,7 @@ impl NnrpServerSession {
                     metadata.diagnostic_bytes as usize,
                     "server received ERROR_RECOVERABLE diagnostic body length mismatch",
                 )?;
-                Ok(NnrpServerEvent::RecoverableError {
+                Ok(DecodedServerEvent::RecoverableError {
                     metadata,
                     body: packet.body,
                 })
@@ -1517,7 +1833,7 @@ impl NnrpServerSession {
                     metadata.diagnostic_bytes as usize,
                     "server received RETRY_AFTER diagnostic body length mismatch",
                 )?;
-                Ok(NnrpServerEvent::RetryAfter {
+                Ok(DecodedServerEvent::RetryAfter {
                     metadata,
                     body: packet.body,
                 })
@@ -1538,7 +1854,7 @@ impl NnrpServerSession {
                     metadata.metadata_bytes as usize,
                     "server received OBJECT_DECLARE body length mismatch",
                 )?;
-                Ok(NnrpServerEvent::ObjectDeclare {
+                Ok(DecodedServerEvent::ObjectDeclare {
                     metadata,
                     body: packet.body,
                 })
@@ -1560,7 +1876,7 @@ impl NnrpServerSession {
                     "server received OBJECT_REF body length mismatch",
                 )?;
                 self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
-                Ok(NnrpServerEvent::ObjectRef {
+                Ok(DecodedServerEvent::ObjectRef {
                     metadata,
                     body: packet.body,
                 })
@@ -1582,7 +1898,7 @@ impl NnrpServerSession {
                     "server received OBJECT_RELEASE body length mismatch",
                 )?;
                 self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
-                Ok(NnrpServerEvent::ObjectRelease {
+                Ok(DecodedServerEvent::ObjectRelease {
                     metadata,
                     body: packet.body,
                 })
@@ -1603,7 +1919,7 @@ impl NnrpServerSession {
                     metadata.metadata_bytes.saturating_add(metadata.delta_bytes) as usize,
                     "server received object delta body length mismatch",
                 )?;
-                Ok(NnrpServerEvent::ObjectDelta {
+                Ok(DecodedServerEvent::ObjectDelta {
                     message_type: packet.header.message_type,
                     metadata,
                     body: packet.body,
@@ -1625,7 +1941,7 @@ impl NnrpServerSession {
                     metadata.metadata_bytes as usize,
                     "server received CACHE_REFERENCE body length mismatch",
                 )?;
-                Ok(NnrpServerEvent::CacheReference {
+                Ok(DecodedServerEvent::CacheReference {
                     metadata,
                     body: packet.body,
                 })
@@ -1646,7 +1962,7 @@ impl NnrpServerSession {
                     metadata.diagnostic_bytes as usize,
                     "server received CACHE_MISS diagnostic body length mismatch",
                 )?;
-                Ok(NnrpServerEvent::CacheMiss {
+                Ok(DecodedServerEvent::CacheMiss {
                     metadata,
                     body: packet.body,
                 })
@@ -1662,7 +1978,7 @@ impl NnrpServerSession {
                         "server received malformed CACHE_INVALIDATE lengths",
                     ));
                 }
-                Ok(NnrpServerEvent::CacheInvalidate(
+                Ok(DecodedServerEvent::CacheInvalidate(
                     CacheInvalidateMetadata::parse(&packet.metadata)?,
                 ))
             }
@@ -1672,16 +1988,162 @@ impl NnrpServerSession {
                 self.lifecycle
                     .begin_session_close(&packet.header, &metadata)?;
                 self.pending_close = Some(metadata);
-                Ok(NnrpServerEvent::Close(metadata))
+                Ok(DecodedServerEvent::Close(metadata))
             }
             _ => Err(RuntimeError::UnexpectedMessage(
                 "server expected a submit, control, object, cache, or close event",
             )),
         }?;
-        Ok(NnrpRuntimeEvent::from_server(header, event))
+        let event = NnrpRuntimeEvent::from_server(header, event);
+        if event.header.message_type == MessageType::FrameSubmit {
+            return NnrpServerOperation::new(event).map(NnrpServerEvent::Submit);
+        }
+        Ok(NnrpServerEvent::Runtime(event))
     }
 
-    pub async fn send_result(
+    fn retain_pending_input(&mut self, input: PendingServerInput) -> Result<(), RuntimeError> {
+        self.ensure_pending_capacity()?;
+        self.pending_inputs.push_back(input);
+        Ok(())
+    }
+
+    fn ensure_pending_capacity(&self) -> Result<(), RuntimeError> {
+        if self.pending_inputs.len() >= MAX_PENDING_SERVER_INPUTS {
+            return Err(RuntimeError::UnexpectedMessage(
+                "server session exceeded the pending input limit",
+            ));
+        }
+        Ok(())
+    }
+
+    fn queue_lifecycle(
+        &mut self,
+        operation_id: u64,
+        state: nnrp_core::OperationState,
+    ) -> Result<(), RuntimeError> {
+        self.ensure_pending_capacity()?;
+        self.pending_inputs
+            .push_back(PendingServerInput::Event(NnrpServerEvent::Lifecycle(
+                crate::OperationLifecycleEvent::new(operation_id, state)?,
+            )));
+        Ok(())
+    }
+
+    fn operation_transition_required(
+        &self,
+        operation_id: u64,
+        state: nnrp_core::OperationState,
+    ) -> Result<bool, RuntimeError> {
+        let current = self
+            .operations
+            .operation(operation_id)
+            .ok_or(nnrp_core::NnrpError::UnknownOperation(operation_id))?
+            .state;
+        if current.is_terminal() {
+            return Ok(false);
+        }
+        if !current.can_transition_to(state) {
+            return Err(nnrp_core::NnrpError::InvalidOperationTransition {
+                from: current,
+                to: state,
+            }
+            .into());
+        }
+        Ok(true)
+    }
+
+    fn require_operation_transition(
+        &self,
+        operation_id: u64,
+        state: nnrp_core::OperationState,
+    ) -> Result<(), RuntimeError> {
+        if !self.operation_transition_required(operation_id, state)? {
+            let current = self
+                .operations
+                .operation(operation_id)
+                .expect("operation transition lookup already succeeded")
+                .state;
+            return Err(nnrp_core::NnrpError::InvalidOperationTransition {
+                from: current,
+                to: state,
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    fn require_operation_completion(&self, operation_id: u64) -> Result<(), RuntimeError> {
+        let current = self
+            .operations
+            .operation(operation_id)
+            .ok_or(nnrp_core::NnrpError::UnknownOperation(operation_id))?
+            .state;
+        if current.is_terminal()
+            || (current != nnrp_core::OperationState::Accepted
+                && !current.can_transition_to(nnrp_core::OperationState::Completed))
+        {
+            return Err(nnrp_core::NnrpError::InvalidOperationTransition {
+                from: current,
+                to: nnrp_core::OperationState::Completed,
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    fn take_pending_specialized_input(&mut self) -> Option<PendingServerInput> {
+        let index = self.pending_inputs.iter().position(|input| {
+            !matches!(
+                input,
+                PendingServerInput::Event(NnrpServerEvent::Lifecycle(_))
+            )
+        })?;
+        self.pending_inputs.remove(index)
+    }
+
+    async fn receive_runtime_event(
+        &mut self,
+        expected: MessageType,
+        error: &'static str,
+    ) -> Result<NnrpRuntimeEvent, RuntimeError> {
+        let input = match self.take_pending_specialized_input() {
+            Some(input) => input,
+            None => self.read_next_input().await?,
+        };
+        match input {
+            PendingServerInput::Event(NnrpServerEvent::Runtime(event))
+                if event.header.message_type == expected =>
+            {
+                Ok(event)
+            }
+            input => {
+                self.pending_inputs.push_front(input);
+                Err(RuntimeError::UnexpectedMessage(error))
+            }
+        }
+    }
+
+    async fn receive_role_packet(
+        &mut self,
+        expected: MessageType,
+        error: &'static str,
+    ) -> Result<RuntimePacket, RuntimeError> {
+        let input = match self.take_pending_specialized_input() {
+            Some(input) => input,
+            None => self.read_next_input().await?,
+        };
+        match input {
+            PendingServerInput::RolePacket(packet) if packet.header.message_type == expected => {
+                Ok(packet)
+            }
+            input => {
+                self.pending_inputs.push_front(input);
+                Err(RuntimeError::UnexpectedMessage(error))
+            }
+        }
+    }
+
+    pub(crate) async fn send_operation_result_for_binding(
         &mut self,
         frame_id: u32,
         metadata: ResultPushMetadata,
@@ -1692,24 +2154,27 @@ impl NnrpServerSession {
             .operations
             .expire_if_stale(operation_id, current_unix_ms())?
         {
+            self.ensure_pending_capacity()?;
             if schedule.flags & SCHEDULING_FLAG_EMIT_DROP_REASON != 0 {
-                self.send_result_drop_reason(ResultDropReasonMetadata {
+                let metadata = ResultDropReasonMetadata {
                     operation_id,
                     result_sequence: schedule.update_sequence,
                     drop_reason_code: RESULT_DROP_REASON_DEADLINE_EXPIRED,
                     source_role: RuntimeRole::Server as u8,
                     flags: 0,
                     diagnostic_bytes: 0,
-                })
-                .await?;
+                };
+                self.write_result_drop_reason(metadata, Vec::new()).await?;
             }
+            self.queue_lifecycle(operation_id, nnrp_core::OperationState::Superseded)?;
             return Err(nnrp_core::NnrpError::InvalidOperationTransition {
                 from: nnrp_core::OperationState::Superseded,
                 to: nnrp_core::OperationState::Completed,
             }
             .into());
         }
-        self.operations.complete(operation_id)?;
+        self.ensure_pending_capacity()?;
+        self.require_operation_completion(operation_id)?;
         let mut header = CommonHeader::new(
             MessageType::ResultPush,
             RESULT_PUSH_METADATA_LEN as u32,
@@ -1724,22 +2189,18 @@ impl NnrpServerSession {
                 body,
             )?)
             .await?;
+        self.operations.complete(operation_id)?;
+        self.pending_inputs
+            .push_back(PendingServerInput::Event(NnrpServerEvent::Lifecycle(
+                crate::OperationLifecycleEvent::new(
+                    operation_id,
+                    nnrp_core::OperationState::Completed,
+                )?,
+            )));
         Ok(())
     }
 
-    pub async fn send_result_drop(&mut self, frame_id: u32) -> Result<(), RuntimeError> {
-        self.operation_id_for_frame(frame_id)?;
-        let mut header = CommonHeader::new(MessageType::ResultDrop, 0, 0);
-        header.session_id = self.session_id;
-        header.frame_id = frame_id;
-        validate_result_drop_header(&header)?;
-        self.transport
-            .write_packet(&RuntimePacket::new(header, Vec::new(), Vec::new())?)
-            .await?;
-        Ok(())
-    }
-
-    pub async fn send_partial_result(
+    pub(crate) async fn send_operation_partial_result_for_binding(
         &mut self,
         metadata: PartialResultMetadata,
         body: Vec<u8>,
@@ -1766,7 +2227,7 @@ impl NnrpServerSession {
             .await
     }
 
-    pub async fn send_progress(
+    pub(crate) async fn send_operation_progress_for_binding(
         &mut self,
         metadata: ProgressMetadata,
         body: Vec<u8>,
@@ -1793,15 +2254,7 @@ impl NnrpServerSession {
             .await
     }
 
-    pub async fn send_result_drop_reason(
-        &mut self,
-        metadata: ResultDropReasonMetadata,
-    ) -> Result<(), RuntimeError> {
-        self.send_result_drop_reason_with_diagnostics(metadata, Vec::new())
-            .await
-    }
-
-    pub async fn send_result_drop_reason_with_diagnostics(
+    pub(crate) async fn send_operation_result_drop_for_binding(
         &mut self,
         metadata: ResultDropReasonMetadata,
         diagnostics: Vec<u8>,
@@ -1812,6 +2265,27 @@ impl NnrpServerSession {
             metadata.diagnostic_bytes as usize,
             "server RESULT_DROP_REASON diagnostic body length mismatch",
         )?;
+        let transition = self.operation_transition_required(
+            metadata.operation_id,
+            nnrp_core::OperationState::Superseded,
+        )?;
+        if transition {
+            self.ensure_pending_capacity()?;
+        }
+        self.write_result_drop_reason(metadata, diagnostics).await?;
+        if transition {
+            self.operations
+                .transition(metadata.operation_id, nnrp_core::OperationState::Superseded)?;
+            self.queue_lifecycle(metadata.operation_id, nnrp_core::OperationState::Superseded)?;
+        }
+        Ok(())
+    }
+
+    async fn write_result_drop_reason(
+        &mut self,
+        metadata: ResultDropReasonMetadata,
+        diagnostics: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
         let mut header = CommonHeader::new(
             MessageType::ResultDropReason,
             RESULT_DROP_REASON_METADATA_LEN as u32,
@@ -1841,13 +2315,32 @@ impl NnrpServerSession {
             "server runtime control diagnostic body length mismatch",
         )?;
         let frame_id = self.correlated_frame_id(metadata.operation_id)?;
+        if metadata.operation_id == 0 {
+            return self
+                .write_runtime_packet(
+                    message_type,
+                    frame_id,
+                    metadata.to_bytes()?.to_vec(),
+                    diagnostics,
+                )
+                .await;
+        }
+        let state = match message_type {
+            MessageType::Cancel => nnrp_core::OperationState::Cancelled,
+            MessageType::Abort => nnrp_core::OperationState::Failed,
+            _ => unreachable!("validated server control request is cancel or abort"),
+        };
+        self.require_operation_transition(metadata.operation_id, state)?;
+        self.ensure_pending_capacity()?;
         self.write_runtime_packet(
             message_type,
             frame_id,
             metadata.to_bytes()?.to_vec(),
             diagnostics,
         )
-        .await
+        .await?;
+        self.operations.transition(metadata.operation_id, state)?;
+        self.queue_lifecycle(metadata.operation_id, state)
     }
 
     pub async fn send_scheduling_update(
@@ -1877,13 +2370,26 @@ impl NnrpServerSession {
             "server SUPERSEDE diagnostic body length mismatch",
         )?;
         let frame_id = self.correlated_frame_id(metadata.old_operation_id)?;
+        self.require_operation_transition(
+            metadata.old_operation_id,
+            nnrp_core::OperationState::Superseded,
+        )?;
+        self.ensure_pending_capacity()?;
         self.write_runtime_packet(
             MessageType::Supersede,
             frame_id,
             metadata.to_bytes()?.to_vec(),
             diagnostics,
         )
-        .await
+        .await?;
+        self.operations.transition(
+            metadata.old_operation_id,
+            nnrp_core::OperationState::Superseded,
+        )?;
+        self.queue_lifecycle(
+            metadata.old_operation_id,
+            nnrp_core::OperationState::Superseded,
+        )
     }
 
     pub async fn update_budget(&mut self, metadata: BudgetMetadata) -> Result<(), RuntimeError> {
@@ -2119,11 +2625,11 @@ impl NnrpServerSession {
     }
 
     pub async fn receive_cache_put(&mut self) -> Result<(CachePutMetadata, Vec<u8>), RuntimeError> {
-        let packet = self.transport.read_packet().await?;
+        let packet = self
+            .receive_role_packet(MessageType::CachePut, "server expected CACHE_PUT")
+            .await?;
         self.require_session_packet(&packet, "server received cache put for another session")?;
-        if packet.header.message_type != MessageType::CachePut
-            || packet.metadata.len() != CACHE_PUT_METADATA_LEN
-        {
+        if packet.metadata.len() != CACHE_PUT_METADATA_LEN {
             return Err(RuntimeError::UnexpectedMessage(
                 "server expected a well-formed CACHE_PUT",
             ));
@@ -2140,12 +2646,11 @@ impl NnrpServerSession {
     }
 
     pub async fn receive_cache_ack(&mut self) -> Result<CacheAckMetadata, RuntimeError> {
-        let packet = self.transport.read_packet().await?;
+        let packet = self
+            .receive_role_packet(MessageType::CacheAck, "server expected CACHE_ACK")
+            .await?;
         self.require_session_packet(&packet, "server received cache ack for another session")?;
-        if packet.header.message_type != MessageType::CacheAck
-            || packet.metadata.len() != CACHE_ACK_METADATA_LEN
-            || !packet.body.is_empty()
-        {
+        if packet.metadata.len() != CACHE_ACK_METADATA_LEN || !packet.body.is_empty() {
             return Err(RuntimeError::UnexpectedMessage(
                 "server expected a well-formed CACHE_ACK",
             ));
@@ -2187,12 +2692,9 @@ impl NnrpServerSession {
         expected: MessageType,
         error: &'static str,
     ) -> Result<(), RuntimeError> {
-        let packet = self.transport.read_packet().await?;
+        let packet = self.receive_role_packet(expected, error).await?;
         self.require_session_packet(&packet, error)?;
-        if packet.header.message_type != expected
-            || !packet.metadata.is_empty()
-            || !packet.body.is_empty()
-        {
+        if !packet.metadata.is_empty() || !packet.body.is_empty() {
             return Err(RuntimeError::UnexpectedMessage(error));
         }
         Ok(())
@@ -2268,136 +2770,113 @@ impl NnrpServerSession {
     }
 
     pub async fn receive_cancel(&mut self) -> Result<NnrpCancel, RuntimeError> {
-        let packet = self.transport.read_packet().await?;
-        if packet.header.message_type != MessageType::FrameCancel {
-            return Err(RuntimeError::UnexpectedMessage(
-                "server expected FRAME_CANCEL",
-            ));
-        }
-        self.require_session_packet(&packet, "server received cancel for another session")?;
-        if packet.header.meta_len != 0 || packet.header.body_len != 0 {
-            return Err(RuntimeError::UnexpectedMessage(
-                "server received malformed FRAME_CANCEL lengths",
-            ));
-        }
-        let operation_id = self.operation_id_for_frame(packet.header.frame_id)?;
-        self.operations.cancel(OperationCancelRequest {
-            session_id: self.session_id,
-            operation_id,
-            cancel_scope: nnrp_core::CancelScope::Operation,
-        })?;
+        let event = self
+            .receive_runtime_event(MessageType::FrameCancel, "server expected FRAME_CANCEL")
+            .await?;
         Ok(NnrpCancel {
-            frame_id: packet.header.frame_id,
+            frame_id: event.header.frame_id,
         })
     }
 
     pub async fn receive_runtime_control(&mut self) -> Result<NnrpRuntimeControl, RuntimeError> {
-        let packet = self.transport.read_packet().await?;
-        if !matches!(
-            packet.header.message_type,
-            MessageType::Cancel | MessageType::Abort
-        ) {
-            return Err(RuntimeError::UnexpectedMessage(
-                "server expected CANCEL or ABORT",
-            ));
-        }
-        self.require_session_packet(&packet, "server received control for another session")?;
-        if packet.metadata.len() != CONTROL_REQUEST_METADATA_LEN {
-            return Err(RuntimeError::UnexpectedMessage(
-                "server received malformed runtime control lengths",
-            ));
-        }
-
-        let metadata = ControlRequestMetadata::parse(&packet.metadata)?;
-        validate_control_request_semantics(packet.header.message_type, &metadata)?;
-        require_body_len(
-            packet.body.len(),
-            metadata.diagnostic_bytes as usize,
-            "server received runtime control diagnostic body length mismatch",
-        )?;
-        self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
-        match packet.header.message_type {
-            MessageType::Cancel => {
-                self.operations.cancel(OperationCancelRequest {
-                    session_id: self.session_id,
-                    operation_id: metadata.operation_id,
-                    cancel_scope: nnrp_core::CancelScope::Operation,
-                })?;
+        let input = match self.take_pending_specialized_input() {
+            Some(input) => input,
+            None => self.read_next_input().await?,
+        };
+        let event = match input {
+            PendingServerInput::Event(NnrpServerEvent::Runtime(event))
+                if matches!(
+                    event.header.message_type,
+                    MessageType::Cancel | MessageType::Abort
+                ) =>
+            {
+                event
             }
-            MessageType::Abort => {
-                self.operations.abort(metadata.operation_id)?;
+            input => {
+                self.pending_inputs.push_front(input);
+                return Err(RuntimeError::UnexpectedMessage(
+                    "server expected CANCEL or ABORT",
+                ));
             }
-            _ => unreachable!("runtime control message type was validated earlier"),
-        }
+        };
+        let message_type = event.header.message_type;
+        let metadata = match event.metadata {
+            crate::NnrpRuntimeEventMetadata::ControlRequest(metadata) => metadata,
+            _ => unreachable!("runtime control event has control metadata"),
+        };
+        let body = match event.tail {
+            crate::NnrpRuntimeEventTail::Diagnostic(body) => body,
+            _ => unreachable!("runtime control event has a diagnostic tail"),
+        };
         Ok(NnrpRuntimeControl {
-            message_type: packet.header.message_type,
+            message_type,
             metadata,
-            body: packet.body,
+            body,
         })
     }
 
     pub async fn receive_scheduling_update(
         &mut self,
     ) -> Result<NnrpSchedulingUpdate, RuntimeError> {
-        let packet = self.transport.read_packet().await?;
-        if !matches!(
-            packet.header.message_type,
-            MessageType::PriorityUpdate | MessageType::Deadline | MessageType::ExpireAt
-        ) {
-            return Err(RuntimeError::UnexpectedMessage(
-                "server expected PRIORITY_UPDATE, DEADLINE, or EXPIRE_AT",
-            ));
-        }
-        self.require_session_packet(
-            &packet,
-            "server received scheduling update for another session",
-        )?;
-        if packet.metadata.len() != SCHEDULING_METADATA_LEN || !packet.body.is_empty() {
-            return Err(RuntimeError::UnexpectedMessage(
-                "server received malformed scheduling metadata length",
-            ));
-        }
-
-        let metadata = SchedulingMetadata::parse(&packet.metadata)?;
-        validate_scheduling_semantics(packet.header.message_type, &metadata)?;
-        self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
-        self.operations.apply_scheduling_update(
-            self.session_id,
-            packet.header.message_type,
-            metadata,
-        )?;
+        let input = match self.take_pending_specialized_input() {
+            Some(input) => input,
+            None => self.read_next_input().await?,
+        };
+        let event = match input {
+            PendingServerInput::Event(NnrpServerEvent::Runtime(event))
+                if matches!(
+                    event.header.message_type,
+                    MessageType::PriorityUpdate | MessageType::Deadline | MessageType::ExpireAt
+                ) =>
+            {
+                event
+            }
+            input => {
+                self.pending_inputs.push_front(input);
+                return Err(RuntimeError::UnexpectedMessage(
+                    "server expected PRIORITY_UPDATE, DEADLINE, or EXPIRE_AT",
+                ));
+            }
+        };
+        let message_type = event.header.message_type;
+        let metadata = match event.metadata {
+            crate::NnrpRuntimeEventMetadata::Scheduling(metadata) => metadata,
+            _ => unreachable!("scheduling event has scheduling metadata"),
+        };
         Ok(NnrpSchedulingUpdate {
-            message_type: packet.header.message_type,
+            message_type,
             metadata,
         })
     }
 
     pub async fn receive_pressure_update(&mut self) -> Result<NnrpPressureUpdate, RuntimeError> {
-        let packet = self.transport.read_packet().await?;
-        if !matches!(
-            packet.header.message_type,
-            MessageType::Backpressure | MessageType::CreditUpdate
-        ) {
-            return Err(RuntimeError::UnexpectedMessage(
-                "server expected BACKPRESSURE or CREDIT_UPDATE",
-            ));
-        }
-        self.require_optional_session_packet(
-            &packet,
-            "server received pressure update for another session",
-        )?;
-        if packet.metadata.len() != PRESSURE_METADATA_LEN || !packet.body.is_empty() {
-            return Err(RuntimeError::UnexpectedMessage(
-                "server received malformed pressure metadata length",
-            ));
-        }
-
-        let metadata = PressureMetadata::parse(&packet.metadata)?;
-        validate_pressure_semantics(packet.header.message_type, &metadata)?;
-        self.pressure
-            .apply_inbound(packet.header.message_type, metadata)?;
+        let input = match self.take_pending_specialized_input() {
+            Some(input) => input,
+            None => self.read_next_input().await?,
+        };
+        let event = match input {
+            PendingServerInput::Event(NnrpServerEvent::Runtime(event))
+                if matches!(
+                    event.header.message_type,
+                    MessageType::Backpressure | MessageType::CreditUpdate
+                ) =>
+            {
+                event
+            }
+            input => {
+                self.pending_inputs.push_front(input);
+                return Err(RuntimeError::UnexpectedMessage(
+                    "server expected BACKPRESSURE or CREDIT_UPDATE",
+                ));
+            }
+        };
+        let message_type = event.header.message_type;
+        let metadata = match event.metadata {
+            crate::NnrpRuntimeEventMetadata::Pressure(metadata) => metadata,
+            _ => unreachable!("pressure event has pressure metadata"),
+        };
         Ok(NnrpPressureUpdate {
-            message_type: packet.header.message_type,
+            message_type,
             metadata,
         })
     }
@@ -2553,12 +3032,9 @@ impl NnrpServerSession {
     }
 
     pub async fn receive_patch(&mut self) -> Result<SessionPatchMetadata, RuntimeError> {
-        let packet = self.transport.read_packet().await?;
-        if packet.header.message_type != MessageType::SessionPatch {
-            return Err(RuntimeError::UnexpectedMessage(
-                "server expected SESSION_PATCH",
-            ));
-        }
+        let packet = self
+            .receive_role_packet(MessageType::SessionPatch, "server expected SESSION_PATCH")
+            .await?;
         self.require_session_packet(&packet, "server received patch for another session")?;
         if packet.metadata.len() != SESSION_PATCH_METADATA_LEN {
             return Err(RuntimeError::UnexpectedMessage(
@@ -2607,12 +3083,12 @@ impl NnrpServerSession {
     }
 
     pub async fn receive_migrate(&mut self) -> Result<NnrpMigration, RuntimeError> {
-        let packet = self.transport.read_packet().await?;
-        if packet.header.message_type != MessageType::SessionMigrate {
-            return Err(RuntimeError::UnexpectedMessage(
+        let packet = self
+            .receive_role_packet(
+                MessageType::SessionMigrate,
                 "server expected SESSION_MIGRATE",
-            ));
-        }
+            )
+            .await?;
         self.require_session_packet(&packet, "server received migrate for another session")?;
         if packet.metadata.len() != SESSION_MIGRATE_METADATA_LEN {
             return Err(RuntimeError::UnexpectedMessage(
@@ -2646,21 +3122,13 @@ impl NnrpServerSession {
     }
 
     pub async fn receive_close(&mut self) -> Result<SessionCloseMetadata, RuntimeError> {
-        let packet = self.transport.read_packet().await?;
-        if packet.header.message_type != MessageType::SessionClose {
-            return Err(RuntimeError::UnexpectedMessage(
-                "server expected SESSION_CLOSE",
-            ));
+        let event = self
+            .receive_runtime_event(MessageType::SessionClose, "server expected SESSION_CLOSE")
+            .await?;
+        match event.metadata {
+            crate::NnrpRuntimeEventMetadata::SessionClose(close) => Ok(close),
+            _ => unreachable!("session close event has close metadata"),
         }
-        if packet.header.session_id != self.session_id {
-            return Err(RuntimeError::UnexpectedMessage(
-                "server received close for another session",
-            ));
-        }
-        let close = SessionCloseMetadata::parse(&packet.metadata)?;
-        self.lifecycle.begin_session_close(&packet.header, &close)?;
-        self.pending_close = Some(close);
-        Ok(close)
     }
 
     pub async fn ack_close(&mut self, close: &SessionCloseMetadata) -> Result<(), RuntimeError> {
@@ -2808,6 +3276,40 @@ mod accept_tests {
     use super::*;
     use crate::RuntimeTransportKind;
 
+    struct FailOnceResultTransport {
+        failed: bool,
+        writes: Arc<Mutex<Vec<MessageType>>>,
+    }
+
+    #[async_trait]
+    impl crate::FramedTransport for FailOnceResultTransport {
+        fn transport_kind(&self) -> RuntimeTransportKind {
+            RuntimeTransportKind::Tcp
+        }
+
+        async fn read_packet(&mut self) -> Result<RuntimePacket, RuntimeError> {
+            std::future::pending().await
+        }
+
+        async fn write_packet(&mut self, packet: &RuntimePacket) -> Result<(), RuntimeError> {
+            if !self.failed && packet.header.message_type == MessageType::ResultPush {
+                self.failed = true;
+                return Err(RuntimeError::Internal(
+                    "scripted transport rejected one packet",
+                ));
+            }
+            self.writes
+                .lock()
+                .expect("writes should lock")
+                .push(packet.header.message_type);
+            Ok(())
+        }
+
+        async fn close(&mut self) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn session_id_allocation_finds_first_gap_in_sorted_registry_keys() {
         assert_eq!(first_available_session_id([]), Some(1));
@@ -2842,6 +3344,146 @@ mod accept_tests {
         assert_eq!(config.granted_operation_credit, 2);
         assert_eq!(config.lease_ttl_ms, 30_000);
         assert_eq!(config.resume_window_ms, 120_000);
+    }
+
+    #[test]
+    fn server_event_projection_preserves_runtime_and_lifecycle_variants() {
+        let runtime = NnrpRuntimeEvent {
+            header: RuntimeFrameHeader::from(&CommonHeader::new(MessageType::Ping, 0, 0)),
+            metadata: crate::NnrpRuntimeEventMetadata::None,
+            tail: crate::NnrpRuntimeEventTail::None,
+        };
+        let runtime_event = NnrpServerEvent::Runtime(runtime.clone());
+        assert_eq!(runtime_event.runtime_event(), Some(&runtime));
+        assert_eq!(runtime_event.into_runtime_event(), Some(runtime));
+
+        let lifecycle = NnrpServerEvent::Lifecycle(
+            crate::OperationLifecycleEvent::new(7, nnrp_core::OperationState::Completed).unwrap(),
+        );
+        assert!(lifecycle.runtime_event().is_none());
+        assert!(lifecycle.into_runtime_event().is_none());
+    }
+
+    #[test]
+    fn server_operation_rejects_non_submit_runtime_events() {
+        let event = NnrpRuntimeEvent {
+            header: RuntimeFrameHeader::from(&CommonHeader::new(MessageType::Ping, 0, 0)),
+            metadata: crate::NnrpRuntimeEventMetadata::None,
+            tail: crate::NnrpRuntimeEventTail::None,
+        };
+
+        assert!(matches!(
+            NnrpServerOperation::new(event),
+            Err(RuntimeError::UnexpectedMessage(
+                "server operation requires a FRAME_SUBMIT runtime event"
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn failed_result_write_keeps_the_server_operation_retryable() {
+        let session_id = 1;
+        let operation_id = 7_100;
+        let frame_id = 71;
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let mut operations = OperationRegistry::new();
+        operations
+            .register(OperationDescriptor::new(session_id, operation_id))
+            .expect("operation should register");
+        let mut session = NnrpServerSession {
+            session_id,
+            active_transport_id: nnrp_core::TransportId::Tcp,
+            client_open: SessionOpenMetadata {
+                requested_session_id: session_id,
+                profile_id: nnrp_core::STANDARD_PROFILE_TOKEN,
+                priority_class: nnrp_core::SessionPriorityClass::Balanced,
+                session_flags: 0,
+                schema_id: nnrp_core::TOKEN_DELTA_SCHEMA_ID,
+                schema_version: nnrp_core::TOKEN_DELTA_SCHEMA_VERSION,
+                default_deadline_ms: 500,
+                max_in_flight_operations: 4,
+                lease_ttl_hint_ms: 30_000,
+                resume_token_bytes: 0,
+                auth_bytes: 0,
+                session_extension_bytes: 0,
+                client_session_tag: 1,
+            },
+            transport: Box::new(FailOnceResultTransport {
+                failed: false,
+                writes: Arc::clone(&writes),
+            }),
+            lifecycle: ConnectionLifecycle::new(),
+            operations,
+            frame_operations: BTreeMap::from([(frame_id, operation_id)]),
+            operation_frames: BTreeMap::from([(operation_id, frame_id)]),
+            pre_submit_deadlines: PreSubmitDeadlineReservations::new(4),
+            pressure: RuntimePressureState::default(),
+            cache_objects: Vec::new(),
+            supported_cache_objects: Vec::new(),
+            max_cache_objects: 0,
+            max_cache_object_bytes: 0,
+            connection_nonce: 1,
+            sessions: Arc::new(Mutex::new(BTreeMap::new())),
+            pending_close: None,
+            pending_inputs: VecDeque::new(),
+        };
+        let metadata = ResultPushMetadata {
+            status_code: 200,
+            result_flags: 0,
+            section_count: 0,
+            tile_count: 0,
+            active_profile_id: nnrp_core::STANDARD_PROFILE_TOKEN,
+            inference_ms: 3,
+            queue_ms: 1,
+            server_total_ms: 4,
+            tile_base_id: 0,
+            tile_index_bytes: 0,
+            result_class: nnrp_core::ResultClass::Complete,
+            applied_budget_policy: 0,
+            reused_frame_id: 0,
+            covered_tile_count: 0,
+            dropped_tile_count: 0,
+            payload_kind_bitmap: nnrp_core::PayloadKindBitmap(
+                nnrp_core::PayloadKindBitmap::TOKEN_CHUNK,
+            ),
+            payload_frame_count: 1,
+        };
+
+        assert!(matches!(
+            session
+                .send_operation_result_for_binding(frame_id, metadata, b"first".to_vec())
+                .await,
+            Err(RuntimeError::Internal(
+                "scripted transport rejected one packet"
+            ))
+        ));
+        assert_eq!(
+            session
+                .operations
+                .operation(operation_id)
+                .expect("operation should remain registered")
+                .state,
+            nnrp_core::OperationState::Accepted
+        );
+        assert!(session.pending_inputs.is_empty());
+
+        session
+            .send_operation_result_for_binding(frame_id, metadata, b"second".to_vec())
+            .await
+            .expect("retry should succeed");
+        assert_eq!(
+            session
+                .operations
+                .operation(operation_id)
+                .expect("operation should remain registered")
+                .state,
+            nnrp_core::OperationState::Completed
+        );
+        assert_eq!(session.pending_inputs.len(), 1);
+        assert_eq!(
+            writes.lock().expect("writes should lock").as_slice(),
+            [MessageType::ResultPush]
+        );
     }
 
     #[async_trait]

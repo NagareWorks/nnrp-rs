@@ -11,13 +11,14 @@ use nnrp_core::{
     CapabilityMetadata, ControlRequestMetadata, ErrorScope, FlowScopeKind, FlowUpdateMetadata,
     FlowUpdateReason, FrameSubmitMetadata, InputProfile, MemoryLocationHint, MessageType,
     ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata, ObjectReleaseMetadata,
-    ObjectReleaseReason, OwnershipHint, PartialResultMetadata, PayloadKindBitmap, PressureMetadata,
-    ProgressMetadata, RecoverableErrorMetadata, ResultClass, ResultDropReasonMetadata,
-    ResultHintBudgetPolicy, ResultHintCongestionState, ResultHintMetadata, ResultHintReason,
-    ResultPushMetadata, RetryAfterMetadata, RouteHintMetadata, RuntimeObjectKind, RuntimeRole,
-    SchedulingMetadata, SessionOpenMetadata, SessionPriorityClass, SubmitMode, SupersedeMetadata,
-    TileIndexMode, TraceContextMetadata, TransportId, FLOW_UPDATE_FLAG_CREDIT_VALID, PROFILE_TOKEN,
-    SESSION_FLAG_ALLOW_RESUME, TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
+    ObjectReleaseReason, OperationState, OwnershipHint, PartialResultMetadata, PayloadKindBitmap,
+    PressureMetadata, ProgressMetadata, RecoverableErrorMetadata, ResultClass,
+    ResultDropReasonMetadata, ResultHintBudgetPolicy, ResultHintCongestionState,
+    ResultHintMetadata, ResultHintReason, ResultPushMetadata, RetryAfterMetadata,
+    RouteHintMetadata, RuntimeObjectKind, RuntimeRole, SchedulingMetadata, SessionOpenMetadata,
+    SessionPriorityClass, SubmitMode, SupersedeMetadata, TileIndexMode, TraceContextMetadata,
+    TransportId, FLOW_UPDATE_FLAG_CREDIT_VALID, PROFILE_TOKEN, SESSION_FLAG_ALLOW_RESUME,
+    TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
 };
 use nnrp_ffi::{
     nnrp_buffer_release, nnrp_client_await_event, nnrp_client_await_events, nnrp_client_cancel,
@@ -285,24 +286,58 @@ unsafe fn assert_runtime_event(
     assert_eq!(event.header.version_major, 1);
     assert_eq!(event.header.wire_format, 0);
     assert_eq!(event.header.message_type, message_type as u8);
-    assert_eq!(
-        event.kind,
-        if message_type == MessageType::ResultDropReason {
-            NnrpEventKind::ResultDropped as u32
-        } else if message_type == MessageType::FlowUpdate {
-            NnrpEventKind::FlowUpdated as u32
-        } else if message_type == MessageType::ResultHint {
-            NnrpEventKind::ResultHint as u32
-        } else {
-            NnrpEventKind::RuntimeFrame as u32
-        }
-    );
+    let expected_kind = match message_type {
+        MessageType::ResultDropReason => NnrpEventKind::ResultDropped,
+        MessageType::FlowUpdate => NnrpEventKind::FlowUpdated,
+        MessageType::ResultHint => NnrpEventKind::ResultHint,
+        MessageType::PartialResult => NnrpEventKind::PartialResult,
+        MessageType::FrameCancel
+        | MessageType::Cancel
+        | MessageType::Abort
+        | MessageType::PriorityUpdate
+        | MessageType::Deadline
+        | MessageType::ExpireAt
+        | MessageType::Supersede
+        | MessageType::BudgetUpdate
+        | MessageType::Progress
+        | MessageType::Backpressure
+        | MessageType::CreditUpdate
+        | MessageType::CapabilityNegotiation
+        | MessageType::DegradeProfile
+        | MessageType::RouteHint
+        | MessageType::ExecutionHint
+        | MessageType::TraceContext
+        | MessageType::ErrorRecoverable
+        | MessageType::RetryAfter => NnrpEventKind::Control,
+        _ => NnrpEventKind::RuntimeFrame,
+    };
+    assert_eq!(event.kind, expected_kind as u32);
     if let Some(operation) = expected_operation {
         assert_eq!(event.operation, operation);
     }
     assert_eq!(
         slice::from_raw_parts(event.payload.ptr, event.payload.len),
         payload
+    );
+    assert_eq!(
+        nnrp_buffer_release(event.payload_owner),
+        NnrpFfiStatus::ok()
+    );
+}
+
+unsafe fn assert_lifecycle_event(
+    event: NnrpEvent,
+    operation_id: u64,
+    frame_id: u32,
+    state: OperationState,
+) {
+    assert_eq!(event.kind, NnrpEventKind::OperationLifecycle as u32);
+    assert_eq!(event.header.present, 0);
+    assert_eq!(event.diagnostic.related_operation_id, operation_id);
+    assert_eq!(event.diagnostic.related_frame_id, frame_id);
+    assert_eq!(
+        slice::from_raw_parts(event.payload.ptr, event.payload.len),
+        [state as u8]
     );
     assert_eq!(
         nnrp_buffer_release(event.payload_owner),
@@ -684,12 +719,6 @@ fn bidirectional_runtime_frames(
             .to_bytes()
             .expect("expire-at payload")
             .to_vec(),
-        },
-        RuntimeFrameCase {
-            message_type: MessageType::Supersede,
-            frame_id,
-            operation_scoped: true,
-            payload: supersede_payload(operation_id),
         },
         RuntimeFrameCase {
             message_type: MessageType::BudgetUpdate,
@@ -1217,6 +1246,22 @@ unsafe fn assert_role_handshake(
         NnrpFfiStatus::ok()
     );
 
+    let deadline = SchedulingMetadata {
+        operation_id: id_base + 6,
+        control_sequence: 1,
+        priority_class: 0,
+        priority_delta: 0,
+        deadline_unix_ms: 4_102_444_800_000,
+        flags: 0,
+    }
+    .to_bytes()
+    .expect("pre-submit deadline payload")
+    .to_vec();
+    send_runtime_frame(client_session, MessageType::Deadline, 42, &deadline);
+    let deadline_event = poll_server_event(server_session);
+    assert_runtime_event(deadline_event, MessageType::Deadline, None, &deadline);
+    assert_eq!(deadline_event.operation, NnrpHandle::invalid());
+
     let submit_body = b"role-carrier-submit";
     let mut submit_payload = token_submit(id_base + 6)
         .to_bytes()
@@ -1533,19 +1578,47 @@ unsafe fn assert_role_handshake(
         &result_hint,
     );
 
-    for message_type in [MessageType::Cancel, MessageType::Abort] {
-        let payload = control_payload(submit_request.operation_id, RuntimeRole::Server);
-        send_runtime_frame(
-            server_event.operation,
-            message_type,
-            submit_request.frame_id,
-            &payload,
-        );
+    for (offset, message_type) in [
+        MessageType::Cancel,
+        MessageType::Abort,
+        MessageType::Supersede,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let operation_id = id_base + 10 + offset as u64;
+        let frame_id = 44 + offset as u32;
+        let (client_control_operation, server_control_operation) =
+            submit_role_operation(client_session, server_session, operation_id, frame_id);
+        let payload = if message_type == MessageType::Supersede {
+            supersede_payload(operation_id)
+        } else {
+            control_payload(operation_id, RuntimeRole::Server)
+        };
+        send_runtime_frame(server_control_operation, message_type, frame_id, &payload);
         assert_runtime_event(
             poll_client_event(client_session),
             message_type,
-            Some(client_operation),
+            Some(client_control_operation),
             &payload,
+        );
+        let state = match message_type {
+            MessageType::Cancel => OperationState::Cancelled,
+            MessageType::Abort => OperationState::Failed,
+            MessageType::Supersede => OperationState::Superseded,
+            _ => unreachable!("terminal control list is closed"),
+        };
+        assert_lifecycle_event(
+            poll_client_event(client_session),
+            operation_id,
+            frame_id,
+            state,
+        );
+        assert_lifecycle_event(
+            poll_server_event(server_session),
+            operation_id,
+            frame_id,
+            state,
         );
     }
 
@@ -1562,6 +1635,16 @@ unsafe fn assert_role_handshake(
     .expect("partial metadata")
     .to_vec();
     partial_payload.extend_from_slice(partial_body);
+    assert_ne!(
+        nnrp_runtime_frame_send(NnrpRuntimeFrameSendRequest {
+            handle: server_session,
+            message_type: nnrp_core::MessageType::PartialResult as u32,
+            frame_id: server_event.header.frame_id,
+            payload: view(&partial_payload),
+        }),
+        NnrpFfiStatus::ok(),
+        "operation-scoped server frames must reject a session handle"
+    );
     assert_eq!(
         nnrp_runtime_frame_send(NnrpRuntimeFrameSendRequest {
             handle: server_event.operation,
@@ -1583,7 +1666,7 @@ unsafe fn assert_role_handshake(
         NnrpFfiStatus::ok()
     );
     assert_eq!(partial_event_count, 1);
-    assert_eq!(partial_event.kind, NnrpEventKind::RuntimeFrame as u32);
+    assert_eq!(partial_event.kind, NnrpEventKind::PartialResult as u32);
     assert_eq!(partial_event.operation, client_operation);
     assert_eq!(partial_event.header.frame_id, submit_request.frame_id);
     assert_eq!(
@@ -1636,7 +1719,7 @@ unsafe fn assert_role_handshake(
     assert_eq!(direct_partial_event_count, 1);
     assert_eq!(
         direct_partial_event.kind,
-        NnrpEventKind::RuntimeFrame as u32
+        NnrpEventKind::PartialResult as u32
     );
     assert_eq!(direct_partial_event.operation, client_operation);
     assert_eq!(
@@ -1686,6 +1769,47 @@ unsafe fn assert_role_handshake(
         }),
         NnrpFfiStatus::ok()
     );
+    assert_ne!(
+        nnrp_server_send_result(NnrpServerSendResultRequest {
+            operation: server_event.operation,
+            payload: view(&result_payload),
+        }),
+        NnrpFfiStatus::ok(),
+        "terminal result must reject operation reuse before lifecycle delivery"
+    );
+
+    let lifecycle_event = poll_server_event(server_session);
+    assert_eq!(
+        lifecycle_event.kind,
+        NnrpEventKind::OperationLifecycle as u32
+    );
+    assert_eq!(lifecycle_event.header.present, 0);
+    assert_eq!(lifecycle_event.operation, NnrpHandle::invalid());
+    assert_eq!(
+        lifecycle_event.diagnostic.related_operation_id,
+        submit_request.operation_id
+    );
+    assert_eq!(
+        lifecycle_event.diagnostic.related_frame_id,
+        submit_request.frame_id
+    );
+    assert_eq!(
+        slice::from_raw_parts(lifecycle_event.payload.ptr, lifecycle_event.payload.len),
+        [OperationState::Completed as u8]
+    );
+    assert_eq!(
+        nnrp_buffer_release(lifecycle_event.payload_owner),
+        NnrpFfiStatus::ok()
+    );
+    assert_eq!(
+        nnrp_server_send_result(NnrpServerSendResultRequest {
+            operation: server_event.operation,
+            payload: view(&result_payload),
+        })
+        .status_code,
+        nnrp_ffi::NnrpFfiStatusCode::InvalidHandle as u32,
+        "lifecycle delivery must release the terminal server operation handle"
+    );
 
     let mut client_events = [NnrpEvent::none(); 2];
     let mut client_event_count = 0usize;
@@ -1723,15 +1847,67 @@ unsafe fn assert_role_handshake(
         NnrpFfiStatus::ok()
     );
 
-    for (offset, message_type) in [MessageType::Cancel, MessageType::Abort]
-        .into_iter()
-        .enumerate()
+    let client_session_cancel = control_payload(0, RuntimeRole::Client);
+    send_runtime_frame(
+        client_session,
+        MessageType::Cancel,
+        0,
+        &client_session_cancel,
+    );
+    let server_session_cancel = poll_server_event(server_session);
+    assert_runtime_event(
+        server_session_cancel,
+        MessageType::Cancel,
+        None,
+        &client_session_cancel,
+    );
+    assert_eq!(server_session_cancel.header.frame_id, 0);
+    assert_eq!(server_session_cancel.operation, NnrpHandle::invalid());
+
+    let server_session_abort = control_payload(0, RuntimeRole::Server);
+    send_runtime_frame(server_session, MessageType::Abort, 0, &server_session_abort);
+    let client_session_abort = poll_client_event(client_session);
+    assert_runtime_event(
+        client_session_abort,
+        MessageType::Abort,
+        None,
+        &server_session_abort,
+    );
+    assert_eq!(client_session_abort.header.frame_id, 0);
+    assert_eq!(client_session_abort.operation, NnrpHandle::invalid());
+
+    for (message_type, payload) in [
+        (MessageType::BudgetUpdate, budget_payload(0)),
+        (MessageType::ObjectRef, object_ref_payload(0)),
+        (
+            MessageType::ObjectRelease,
+            object_release_payload(0, RuntimeRole::Client),
+        ),
+    ] {
+        send_runtime_frame(client_session, message_type, 0, &payload);
+        let event = poll_server_event(server_session);
+        assert_runtime_event(event, message_type, None, &payload);
+        assert_eq!(event.header.frame_id, 0);
+        assert_eq!(event.operation, NnrpHandle::invalid());
+    }
+
+    for (offset, message_type) in [
+        MessageType::Cancel,
+        MessageType::Abort,
+        MessageType::Supersede,
+    ]
+    .into_iter()
+    .enumerate()
     {
         let operation_id = id_base + 20 + offset as u64;
         let frame_id = 50 + offset as u32;
         let (client_control_operation, server_control_operation) =
             submit_role_operation(client_session, server_session, operation_id, frame_id);
-        let payload = control_payload(operation_id, RuntimeRole::Client);
+        let payload = if message_type == MessageType::Supersede {
+            supersede_payload(operation_id)
+        } else {
+            control_payload(operation_id, RuntimeRole::Client)
+        };
         send_runtime_frame(client_control_operation, message_type, frame_id, &payload);
         assert_runtime_event(
             poll_server_event(server_session),
@@ -1739,6 +1915,63 @@ unsafe fn assert_role_handshake(
             Some(server_control_operation),
             &payload,
         );
+        let state = match message_type {
+            MessageType::Cancel => OperationState::Cancelled,
+            MessageType::Abort => OperationState::Failed,
+            MessageType::Supersede => OperationState::Superseded,
+            _ => unreachable!("terminal control list is closed"),
+        };
+        let server_lifecycle = poll_server_event(server_session);
+        assert_lifecycle_event(server_lifecycle, operation_id, frame_id, state);
+        if matches!(message_type, MessageType::Cancel | MessageType::Abort) {
+            assert_eq!(server_lifecycle.operation, server_control_operation);
+        }
+        assert_lifecycle_event(
+            poll_client_event(client_session),
+            operation_id,
+            frame_id,
+            state,
+        );
+        if matches!(message_type, MessageType::Cancel | MessageType::Abort) {
+            if message_type == MessageType::Cancel {
+                let retry_after = retry_after_payload(RuntimeRole::Client);
+                send_runtime_frame(client_session, MessageType::RetryAfter, 0, &retry_after);
+                assert_runtime_event(
+                    poll_server_event(server_session),
+                    MessageType::RetryAfter,
+                    None,
+                    &retry_after,
+                );
+            }
+            let drop_reason = drop_reason_payload(operation_id, RuntimeRole::Server);
+            let server_control_operation = NnrpHandle {
+                flags: 0xA5A5,
+                ..server_control_operation
+            };
+            send_runtime_frame(
+                server_control_operation,
+                MessageType::ResultDropReason,
+                frame_id,
+                &drop_reason,
+            );
+            assert_runtime_event(
+                poll_client_event(client_session),
+                MessageType::ResultDropReason,
+                Some(client_control_operation),
+                &drop_reason,
+            );
+            assert_eq!(
+                nnrp_runtime_frame_send(NnrpRuntimeFrameSendRequest {
+                    handle: server_control_operation,
+                    message_type: MessageType::ResultDropReason as u32,
+                    frame_id,
+                    payload: view(&drop_reason),
+                })
+                .status_code,
+                nnrp_ffi::NnrpFfiStatusCode::InvalidHandle as u32,
+                "successful terminal drop must release the server operation handle"
+            );
+        }
     }
 
     let frame_cancel_id = 59;
@@ -1764,6 +1997,18 @@ unsafe fn assert_role_handshake(
     assert_eq!(frame_cancel_event.operation, server_frame_cancel_operation);
     assert_eq!(frame_cancel_event.header.frame_id, frame_cancel_id);
     assert_eq!(frame_cancel_event.payload.len, 0);
+    assert_lifecycle_event(
+        poll_server_event(server_session),
+        id_base + 29,
+        frame_cancel_id,
+        OperationState::Cancelled,
+    );
+    assert_lifecycle_event(
+        poll_client_event(client_session),
+        id_base + 29,
+        frame_cancel_id,
+        OperationState::Cancelled,
+    );
 
     let drop_operation_id = id_base + 30;
     let drop_frame_id = 60;
@@ -1785,6 +2030,12 @@ unsafe fn assert_role_handshake(
         MessageType::ResultDropReason,
         Some(client_drop_operation),
         &server_drop_reason,
+    );
+    assert_lifecycle_event(
+        poll_server_event(server_session),
+        drop_operation_id,
+        drop_frame_id,
+        OperationState::Superseded,
     );
 
     let client_close = thread::spawn(move || nnrp_client_close(client_session));

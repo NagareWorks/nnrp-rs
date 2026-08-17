@@ -2,16 +2,19 @@ use nnrp_core::{
     BackpressureLevel, BodyRegionPrelude, CacheAckMetadata, CacheInvalidateMetadata,
     CacheObjectKind, CachePutMetadata, CommonHeader, FlowScopeKind, FlowUpdateMetadata,
     FlowUpdateReason, FrameSubmitMetadata, InputProfile, MessageType, ObjectReferenceBlock,
-    ObjectReferenceRegion, PayloadKindBitmap, ResultClass, ResultHintMetadata, ResultPushMetadata,
-    SessionPatchAckMetadata, SubmitMode, TileIndexMode, TransportId, TransportProbeAckMetadata,
-    TransportProbeMetadata, TypedPayloadDescriptor, TypedPayloadRegion, CACHE_ACK_METADATA_LEN,
-    CACHE_INVALIDATE_METADATA_LEN, CACHE_PUT_METADATA_LEN, CLIENT_HELLO_METADATA_LEN,
-    FLOW_UPDATE_FLAG_CREDIT_VALID, FLOW_UPDATE_FLAG_RETRY_AFTER_VALID, FRAME_SUBMIT_METADATA_LEN,
-    OBJECT_REFERENCE_BLOCK_LEN, PAYLOAD_KIND_KNOWN_MASK, RESULT_PUSH_METADATA_LEN,
-    SESSION_PATCH_ACK_METADATA_LEN, STANDARD_PROFILE_TOKEN,
+    ObjectReferenceRegion, OperationState, PayloadKindBitmap, ResultClass, ResultHintMetadata,
+    ResultPushMetadata, SessionPatchAckMetadata, SubmitMode, TileIndexMode, TransportId,
+    TransportProbeAckMetadata, TransportProbeMetadata, TypedPayloadDescriptor, TypedPayloadRegion,
+    CACHE_ACK_METADATA_LEN, CACHE_INVALIDATE_METADATA_LEN, CACHE_PUT_METADATA_LEN,
+    CLIENT_HELLO_METADATA_LEN, FLOW_UPDATE_FLAG_CREDIT_VALID, FLOW_UPDATE_FLAG_RETRY_AFTER_VALID,
+    FRAME_SUBMIT_METADATA_LEN, OBJECT_REFERENCE_BLOCK_LEN, PAYLOAD_KIND_KNOWN_MASK,
+    RESULT_PUSH_METADATA_LEN, SESSION_PATCH_ACK_METADATA_LEN, STANDARD_PROFILE_TOKEN,
 };
 use nnrp_core::{ClientHelloMetadata, ResultHintReason, TransportPolicy};
-use nnrp_runtime::{NnrpClient, NnrpClientConfig, NnrpServerConfig, RuntimeError};
+use nnrp_runtime::{
+    NnrpClient, NnrpClientConfig, NnrpServerConfig, NnrpServerEvent, NnrpServerSession,
+    RuntimeError,
+};
 use nnrp_transport_provider::{
     select_transport_with_probe, summarize_provider_probe, ProbeSample,
     TransportCandidateReadiness, TransportProbeObservation, TransportProviderDescriptor,
@@ -19,56 +22,44 @@ use nnrp_transport_provider::{
 };
 use nnrp_transport_quic::{QuicClientEndpointConfig, QuicProvider, QuicServerEndpointConfig};
 use nnrp_transport_tcp::TcpProvider;
+use serde_json::{Map, Value};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Preview3FrameSubmitMetadata {
-    bytes: [u8; FRAME_SUBMIT_METADATA_LEN],
-    submit_mode: SubmitMode,
-    object_ref_mask: u32,
-}
+use crate::preview4_vectors::parameter_hex;
 
-impl Preview3FrameSubmitMetadata {
-    fn parse(source: &[u8]) -> Result<Self, nnrp_core::NnrpError> {
-        if source.len() < FRAME_SUBMIT_METADATA_LEN {
-            return Err(nnrp_core::NnrpError::SourceTooShort {
-                expected: FRAME_SUBMIT_METADATA_LEN,
-                actual: source.len(),
-            });
+async fn expect_completed_lifecycle(
+    session: &mut NnrpServerSession,
+    operation_id: u64,
+) -> Result<(), RuntimeError> {
+    match session.await_event().await? {
+        NnrpServerEvent::Lifecycle(event)
+            if event.operation_id == operation_id && event.state == OperationState::Completed =>
+        {
+            Ok(())
         }
-        let mut bytes = [0u8; FRAME_SUBMIT_METADATA_LEN];
-        bytes.copy_from_slice(&source[..FRAME_SUBMIT_METADATA_LEN]);
-        Ok(Self {
-            submit_mode: SubmitMode::try_from_u8(bytes[52])?,
-            object_ref_mask: u32::from_le_bytes(bytes[56..60].try_into().expect("fixed range")),
-            bytes,
-        })
-    }
-
-    fn write(&self, destination: &mut [u8]) -> Result<(), nnrp_core::NnrpError> {
-        if destination.len() < FRAME_SUBMIT_METADATA_LEN {
-            return Err(nnrp_core::NnrpError::DestinationTooShort {
-                expected: FRAME_SUBMIT_METADATA_LEN,
-                actual: destination.len(),
-            });
-        }
-        destination[..FRAME_SUBMIT_METADATA_LEN].copy_from_slice(&self.bytes);
-        Ok(())
+        _ => Err(RuntimeError::UnexpectedMessage(
+            "baseline server expected completed operation lifecycle evidence",
+        )),
     }
 }
 
-pub fn execute_nnrp1_baseline_case(case_id: &str) -> Option<Result<(), String>> {
+pub fn execute_nnrp1_baseline_case_with_parameters(
+    case_id: &str,
+    parameters: Option<&Map<String, Value>>,
+) -> Option<Result<(), String>> {
     let result = match case_id {
-        "l0.header.fixed_shape.golden" => l0_header_fixed_shape(),
-        "l0.control.client_hello.golden" => l0_client_hello(),
-        "l0.control.session_patch_ack.golden" => l0_session_patch_ack(),
-        "l0.flow_update.packet.golden" => l0_flow_update_packet(),
-        "l0.result_hint.packet.golden" => l0_result_hint_packet(),
-        "l0.frame_submit.metadata.golden" => l0_frame_submit_metadata(),
-        "l0.result_push.metadata.golden" => l0_result_push_metadata(),
-        "l0.body_region.prelude.golden" => l0_body_region_prelude(),
-        "l0.object_reference.block.golden" => l0_object_reference_block(),
-        "l0.typed_payload.descriptor.golden" => l0_baseline_typed_payload_descriptor(),
-        "l0.typed_payload.frame_regions.golden" => l0_baseline_typed_payload_frame_regions(),
+        "l0.header.fixed_shape.golden" => l0_header_fixed_shape(parameters),
+        "l0.control.client_hello.golden" => l0_client_hello(parameters),
+        "l0.control.session_patch_ack.golden" => l0_session_patch_ack(parameters),
+        "l0.flow_update.packet.golden" => l0_flow_update_packet(parameters),
+        "l0.result_hint.packet.golden" => l0_result_hint_packet(parameters),
+        "l0.frame_submit.metadata.golden" => l0_frame_submit_metadata(parameters),
+        "l0.result_push.metadata.golden" => l0_result_push_metadata(parameters),
+        "l0.body_region.prelude.golden" => l0_body_region_prelude(parameters),
+        "l0.object_reference.block.golden" => l0_object_reference_block(parameters),
+        "l0.typed_payload.descriptor.golden" => l0_baseline_typed_payload_descriptor(parameters),
+        "l0.typed_payload.frame_regions.golden" => {
+            l0_baseline_typed_payload_frame_regions(parameters)
+        }
         "l1.flow_update.metadata.validation" => l1_flow_update_validation(),
         "l1.result_hint.metadata.validation" => l1_result_hint_validation(),
         "l1.cache.lifecycle.roundtrip" => l1_cache_lifecycle_roundtrip(),
@@ -85,32 +76,36 @@ pub fn execute_nnrp1_baseline_case(case_id: &str) -> Option<Result<(), String>> 
     Some(result)
 }
 
-fn l0_header_fixed_shape() -> Result<(), String> {
-    round_trip_header(&hex_to_bytes(
+fn l0_header_fixed_shape(parameters: Option<&Map<String, Value>>) -> Result<(), String> {
+    let default = hex_to_bytes(
         "4e4e525001001028210000003000000000100000070000000b0000000200000015cd5b0700000000",
-    ))
+    );
+    round_trip_header(&parameter_hex(parameters, "header_hex", &default)?)
 }
 
-fn l0_client_hello() -> Result<(), String> {
+fn l0_client_hello(parameters: Option<&Map<String, Value>>) -> Result<(), String> {
+    let default = hex_to_bytes("01010100010000000100000003000000030000002100000003000000010007000100020040000000000001007017640002000000000000006000000000000000");
     round_trip_metadata(
         CLIENT_HELLO_METADATA_LEN,
-        &hex_to_bytes("01010100010000000100000003000000030000002100000003000000010007000100020040000000000001007017640002000000000000006000000000000000"),
+        &parameter_hex(parameters, "metadata_hex", &default)?,
         ClientHelloMetadata::parse,
         |metadata, destination| metadata.write(destination),
     )
 }
 
-fn l0_session_patch_ack() -> Result<(), String> {
+fn l0_session_patch_ack(parameters: Option<&Map<String, Value>>) -> Result<(), String> {
+    let default = hex_to_bytes("010003001100000044000000000000000200000028230000680105000300000000000000010000000300000010000000");
     round_trip_metadata(
         SESSION_PATCH_ACK_METADATA_LEN,
-        &hex_to_bytes("010003001100000044000000000000000200000028230000680105000300000000000000010000000300000010000000"),
+        &parameter_hex(parameters, "metadata_hex", &default)?,
         SessionPatchAckMetadata::parse,
         |metadata, destination| metadata.write(destination),
     )
 }
 
-fn l0_flow_update_packet() -> Result<(), String> {
-    let packet = hex_to_bytes("4e4e5250010017280000000020000000000000001500000000000000000006000d000000000000000104020000000100000000000000000000000000280000000500000003000000");
+fn l0_flow_update_packet(parameters: Option<&Map<String, Value>>) -> Result<(), String> {
+    let default = hex_to_bytes("4e4e5250010017280000000020000000000000001500000000000000000006000d000000000000000104020000000100000000000000000000000000280000000500000003000000");
+    let packet = parameter_hex(parameters, "packet_hex", &default)?;
     let (header, metadata, body) = CommonHeader::parse_packet(&packet).map_err(to_string)?;
     if !body.is_empty() {
         return Err("FLOW_UPDATE golden packet must not carry a body".to_string());
@@ -120,8 +115,9 @@ fn l0_flow_update_packet() -> Result<(), String> {
     assert_packet_round_trip(&header, metadata, body, &packet)
 }
 
-fn l0_result_hint_packet() -> Result<(), String> {
-    let packet = hex_to_bytes("4e4e525001001828000000001000000000000000150000002f010000000007000e000000000000000300000003000000030000003c000000");
+fn l0_result_hint_packet(parameters: Option<&Map<String, Value>>) -> Result<(), String> {
+    let default = hex_to_bytes("4e4e525001001828000000001000000000000000150000002f010000000007000e000000000000000300000003000000030000003c000000");
+    let packet = parameter_hex(parameters, "packet_hex", &default)?;
     let (header, metadata, body) = CommonHeader::parse_packet(&packet).map_err(to_string)?;
     if header.message_type != MessageType::ResultHint || !body.is_empty() {
         return Err("RESULT_HINT golden packet has an invalid envelope".to_string());
@@ -133,44 +129,51 @@ fn l0_result_hint_packet() -> Result<(), String> {
     assert_packet_round_trip(&header, metadata, body, &packet)
 }
 
-fn l0_frame_submit_metadata() -> Result<(), String> {
+fn l0_frame_submit_metadata(parameters: Option<&Map<String, Value>>) -> Result<(), String> {
+    let default = hex_to_bytes("80026801200020005400020001020000640070170700000000000000c000000000000000000000000807060504030201000000000205ff0003000000290000001100000002000000");
     round_trip_metadata(
         FRAME_SUBMIT_METADATA_LEN,
-        &hex_to_bytes("80026801200020005400020001020000640070170700000000000000c000000000000000000000000000000000000000000000000205ff0003000000290000001100000002000000"),
-        Preview3FrameSubmitMetadata::parse,
+        &parameter_hex(parameters, "metadata_hex", &default)?,
+        FrameSubmitMetadata::parse,
         |metadata, destination| metadata.write(destination),
     )
 }
 
-fn l0_result_push_metadata() -> Result<(), String> {
+fn l0_result_push_metadata(parameters: Option<&Map<String, Value>>) -> Result<(), String> {
+    let default = hex_to_bytes("0000050001005400020000004b0302004e030000000000001000000000000000000000000000000000000000010100002900000035001f000300000003000000");
     round_trip_metadata(
         RESULT_PUSH_METADATA_LEN,
-        &hex_to_bytes("0000040001005400020000004b0302004e030000000000001000000000000000000000000000000000000000010100002900000035001f000300000003000000"),
+        &parameter_hex(parameters, "metadata_hex", &default)?,
         ResultPushMetadata::parse,
         |metadata, destination| metadata.write(destination),
     )
 }
 
-fn l0_body_region_prelude() -> Result<(), String> {
+fn l0_body_region_prelude(parameters: Option<&Map<String, Value>>) -> Result<(), String> {
+    let default = hex_to_bytes("1800000018000000180000000e00000010000000050000000000000000000000");
     round_trip_metadata(
         32,
-        &hex_to_bytes("1800000018000000100000000e00000010000000050000000000000000000000"),
+        &parameter_hex(parameters, "metadata_hex", &default)?,
         BodyRegionPrelude::parse,
         |metadata, destination| metadata.write(destination),
     )
 }
 
-fn l0_object_reference_block() -> Result<(), String> {
+fn l0_object_reference_block(parameters: Option<&Map<String, Value>>) -> Result<(), String> {
+    let default = hex_to_bytes("020000000700000044332211000000008877665500000000");
     round_trip_metadata(
         OBJECT_REFERENCE_BLOCK_LEN,
-        &hex_to_bytes("020000000700000044332211000000008877665500000000"),
+        &parameter_hex(parameters, "metadata_hex", &default)?,
         ObjectReferenceBlock::parse,
         |metadata, destination| metadata.write(destination),
     )
 }
 
-fn l0_baseline_typed_payload_descriptor() -> Result<(), String> {
-    let bytes = hex_to_bytes("10000300040000000700000000000000");
+fn l0_baseline_typed_payload_descriptor(
+    parameters: Option<&Map<String, Value>>,
+) -> Result<(), String> {
+    let default = hex_to_bytes("10000300040000000700000000000000");
+    let bytes = parameter_hex(parameters, "descriptor_hex", &default)?;
     let descriptor = BaselineTypedPayloadDescriptor::parse(&bytes)?;
     if descriptor.payload_kind != PayloadKindBitmap::STRUCTURED_EVENT
         || descriptor.profile_id != 3
@@ -185,11 +188,14 @@ fn l0_baseline_typed_payload_descriptor() -> Result<(), String> {
     Ok(())
 }
 
-fn l0_baseline_typed_payload_frame_regions() -> Result<(), String> {
-    let descriptors = hex_to_bytes(
+fn l0_baseline_typed_payload_frame_regions(
+    parameters: Option<&Map<String, Value>>,
+) -> Result<(), String> {
+    let default_descriptors = hex_to_bytes(
         "020001000000000003000000000000000400020003000000020000000000000008000300050000000500000000000000100004000a0000000300000000000000",
     );
-    let payload = b"tokauvideoevt";
+    let descriptors = parameter_hex(parameters, "descriptor_region_hex", &default_descriptors)?;
+    let payload = parameter_hex(parameters, "payload_hex", b"tokauvideoevt")?;
     validate_baseline_typed_payload_region(
         PayloadKindBitmap::TOKEN_CHUNK
             | PayloadKindBitmap::AUDIO_CHUNK
@@ -197,7 +203,7 @@ fn l0_baseline_typed_payload_frame_regions() -> Result<(), String> {
             | PayloadKindBitmap::STRUCTURED_EVENT,
         4,
         &descriptors,
-        payload,
+        &payload,
     )
 }
 
@@ -294,7 +300,7 @@ fn l1_transport_probe_roundtrip() -> Result<(), String> {
 }
 
 fn l1_frame_submit_parse_emit() -> Result<(), String> {
-    let metadata = Preview3FrameSubmitMetadata::parse(&hex_to_bytes("80026801200020005400020001020000640070170700000000000000c000000000000000000000000000000000000000000000000205ff0003000000290000001100000002000000")).map_err(to_string)?;
+    let metadata = FrameSubmitMetadata::parse(&hex_to_bytes("80026801200020005400020001020000640070170700000000000000c000000000000000000000000807060504030201000000000205ff0003000000290000001100000002000000")).map_err(to_string)?;
     validate_submit_object_reference(metadata.submit_mode, metadata.object_ref_mask)?;
 
     let typed_descriptor = TypedPayloadDescriptor {
@@ -320,7 +326,7 @@ fn l1_frame_submit_parse_emit() -> Result<(), String> {
 }
 
 fn l1_result_push_parse_emit() -> Result<(), String> {
-    let metadata = ResultPushMetadata::parse(&hex_to_bytes("0000040001005400020000004b0302004e030000000000001000000000000000000000000000000000000000010100002900000035001f000300000003000000")).map_err(to_string)?;
+    let metadata = ResultPushMetadata::parse(&hex_to_bytes("0000050001005400020000004b0302004e030000000000001000000000000000000000000000000000000000010100002900000035001f000300000003000000")).map_err(to_string)?;
     if metadata.payload_frame_count != 3 || !metadata.payload_kind_bitmap.contains_tensor() {
         return Err("RESULT_PUSH baseline metadata lost tensor payload bookkeeping".to_string());
     }
@@ -525,9 +531,10 @@ async fn tcp_session_smoke() -> Result<(), RuntimeError> {
     let server_task = tokio::spawn(async move {
         let mut session = server.accept().await?;
         let submit = session.receive_submit().await?;
-        session
-            .send_result(submit.frame_id, token_result(), b"delta".to_vec())
+        submit
+            .send_result(&mut session, token_result(), b"delta".to_vec())
             .await?;
+        expect_completed_lifecycle(&mut session, submit.operation_id).await?;
         let close = session.receive_close().await?;
         session.ack_close(&close).await?;
         session.close().await
@@ -565,9 +572,10 @@ async fn quic_session_smoke() -> Result<(), RuntimeError> {
     let server_task = tokio::spawn(async move {
         let mut session = server.accept().await?;
         let submit = session.receive_submit().await?;
-        session
-            .send_result(submit.frame_id, token_result(), b"delta".to_vec())
+        submit
+            .send_result(&mut session, token_result(), b"delta".to_vec())
             .await?;
+        expect_completed_lifecycle(&mut session, submit.operation_id).await?;
         let close = session.receive_close().await?;
         session.ack_close(&close).await?;
         session.close().await
@@ -847,30 +855,10 @@ mod tests {
 
     #[test]
     fn baseline_typed_payload_descriptor_round_trips() {
-        l0_baseline_typed_payload_descriptor().expect("baseline descriptor should match fixture");
-        l0_baseline_typed_payload_frame_regions()
+        l0_baseline_typed_payload_descriptor(None)
+            .expect("baseline descriptor should match fixture");
+        l0_baseline_typed_payload_frame_regions(None)
             .expect("baseline typed-payload region should match fixture");
-    }
-
-    #[test]
-    fn preview3_submit_fixture_rejects_short_source_and_destination() {
-        assert_eq!(
-            Preview3FrameSubmitMetadata::parse(&[0; FRAME_SUBMIT_METADATA_LEN - 1]),
-            Err(nnrp_core::NnrpError::SourceTooShort {
-                expected: FRAME_SUBMIT_METADATA_LEN,
-                actual: FRAME_SUBMIT_METADATA_LEN - 1,
-            })
-        );
-
-        let metadata = Preview3FrameSubmitMetadata::parse(&[0; FRAME_SUBMIT_METADATA_LEN])
-            .expect("zeroed Preview3 submit metadata should parse");
-        assert_eq!(
-            metadata.write(&mut [0; FRAME_SUBMIT_METADATA_LEN - 1]),
-            Err(nnrp_core::NnrpError::DestinationTooShort {
-                expected: FRAME_SUBMIT_METADATA_LEN,
-                actual: FRAME_SUBMIT_METADATA_LEN - 1,
-            })
-        );
     }
 
     #[test]
@@ -950,7 +938,10 @@ mod tests {
             "l3.transport.tcp.session_smoke",
             "l3.transport.quic.session_smoke",
         ] {
-            assert_eq!(execute_nnrp1_baseline_case(case_id), Some(Ok(())));
+            assert_eq!(
+                execute_nnrp1_baseline_case_with_parameters(case_id, None),
+                Some(Ok(()))
+            );
         }
     }
 }

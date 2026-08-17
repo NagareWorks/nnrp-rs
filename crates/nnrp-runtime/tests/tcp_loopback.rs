@@ -11,29 +11,65 @@ use nnrp_core::{
     OwnershipHint, PartialResultMetadata, PayloadKindBitmap, PressureMetadata, ProgressMetadata,
     ResultClass, ResultDropReasonMetadata, ResultPushMetadata, ResultTerminalState,
     RetryAfterMetadata, RouteHintMetadata, RuntimeObjectKind, RuntimeRole, SchedulingMetadata,
-    SchemaRegistry, ServerHelloAckMetadata, SessionCloseMetadata, SessionCloseReason,
-    SessionMigrateAckMetadata, SessionOpenAckMetadata, SessionOpenMetadata,
-    SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata, SessionPatchRejectReason,
-    SessionPriorityClass, SessionStatus, SubmitMode, SupersedeMetadata, TileIndexMode,
-    TraceContextMetadata, TransportId, TransportProbeAckMetadata, TransportProbeMetadata,
-    CLIENT_HELLO_METADATA_LEN, FLOW_UPDATE_FLAG_CREDIT_VALID, FRAME_SUBMIT_METADATA_LEN,
-    RESULT_DROP_REASON_DEADLINE_EXPIRED, RESULT_PUSH_METADATA_LEN, RETRY_AFTER_METADATA_LEN,
-    SERVER_HELLO_ACK_METADATA_LEN, SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE,
-    SESSION_OPEN_ACK_METADATA_LEN, SESSION_OPEN_METADATA_LEN, STANDARD_PROFILE_TOKEN,
-    TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
+    SchemaRegistry, ServerHelloAckMetadata, SessionCloseAckMetadata, SessionCloseMetadata,
+    SessionCloseReason, SessionCloseStatus, SessionMigrateAckMetadata, SessionOpenAckMetadata,
+    SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata,
+    SessionPatchRejectReason, SessionPriorityClass, SessionStatus, SubmitMode, SupersedeMetadata,
+    TileIndexMode, TraceContextMetadata, TransportId, TransportProbeAckMetadata,
+    TransportProbeMetadata, CLIENT_HELLO_METADATA_LEN, CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED,
+    FLOW_UPDATE_FLAG_CREDIT_VALID, FRAME_SUBMIT_METADATA_LEN, RESULT_DROP_REASON_DEADLINE_EXPIRED,
+    RESULT_PUSH_METADATA_LEN, RETRY_AFTER_METADATA_LEN, SERVER_HELLO_ACK_METADATA_LEN,
+    SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE, SESSION_OPEN_ACK_METADATA_LEN,
+    SESSION_OPEN_METADATA_LEN, STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID,
+    TOKEN_DELTA_SCHEMA_VERSION,
 };
 use nnrp_runtime::{
     BoxedFramedTransport, FramedListener, FramedTransport, NnrpClient, NnrpClientConfig,
-    NnrpRuntimeEvent, NnrpRuntimeEventMetadata, NnrpRuntimeEventTail, NnrpServer,
-    NnrpServerAcceptOptions, NnrpServerConfig, NnrpServerPolicy, NnrpServerPolicyDecision,
-    NnrpTerminalEvent, RuntimeError, RuntimeFrameLimits, RuntimePacket, RuntimeTransportKind,
-    TcpFramedListener, TcpTransport,
+    NnrpClientRoleEvent, NnrpRuntimeEvent, NnrpRuntimeEventMetadata, NnrpRuntimeEventTail,
+    NnrpServer, NnrpServerAcceptOptions, NnrpServerConfig, NnrpServerEvent, NnrpServerPolicy,
+    NnrpServerPolicyDecision, NnrpServerSession, NnrpTerminalEvent, RuntimeError,
+    RuntimeFrameLimits, RuntimePacket, RuntimeTransportKind, TcpFramedListener, TcpTransport,
 };
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
+
+fn expect_client_runtime_event(event: NnrpClientRoleEvent) -> NnrpRuntimeEvent {
+    match event {
+        NnrpClientRoleEvent::Runtime(event) => event,
+        NnrpClientRoleEvent::Lifecycle(event) => {
+            panic!("expected a client wire event, got lifecycle {event:?}")
+        }
+    }
+}
+
+fn expect_client_lifecycle(event: NnrpClientRoleEvent, operation_id: u64, state: OperationState) {
+    match event {
+        NnrpClientRoleEvent::Lifecycle(event) => {
+            assert_eq!(event.operation_id, operation_id);
+            assert_eq!(event.state, state);
+        }
+        event => panic!("expected client lifecycle event, got {event:?}"),
+    }
+}
+
+async fn expect_completed_lifecycle(
+    session: &mut NnrpServerSession,
+    operation_id: u64,
+) -> Result<(), RuntimeError> {
+    let event = session.await_event().await?;
+    assert!(event.runtime_event().is_none());
+    match event {
+        NnrpServerEvent::Lifecycle(event) => {
+            assert_eq!(event.operation_id, operation_id);
+            assert_eq!(event.state, OperationState::Completed);
+        }
+        event => panic!("expected completed lifecycle event, got {event:?}"),
+    }
+    Ok(())
+}
 
 #[tokio::test]
 async fn tcp_packet_read_preserves_partial_bytes_across_timeouts() -> Result<(), RuntimeError> {
@@ -199,13 +235,13 @@ async fn tcp_loopback_submits_frame_receives_result_and_closes() -> Result<(), R
         let submit = session.receive_submit().await?;
         assert_eq!(submit.frame_id, 1);
         assert_eq!(
-            submit.metadata.payload_kind_bitmap.0,
+            submit.metadata().payload_kind_bitmap.0,
             PayloadKindBitmap::TOKEN_CHUNK
         );
-        assert_eq!(submit.body, b"prompt".to_vec());
+        assert_eq!(submit.body(), b"prompt");
 
-        session
-            .send_result(submit.frame_id, token_result(), b"delta".to_vec())
+        submit
+            .send_result(&mut session, token_result(), b"delta".to_vec())
             .await?;
         assert_eq!(
             session
@@ -215,6 +251,7 @@ async fn tcp_loopback_submits_frame_receives_result_and_closes() -> Result<(), R
                 .state,
             OperationState::Completed
         );
+        expect_completed_lifecycle(&mut session, submit.operation_id).await?;
         let close = session.receive_close().await?;
         assert_eq!(close.last_operation_id, 101);
         session.ack_close(&close).await?;
@@ -247,6 +284,225 @@ async fn tcp_loopback_submits_frame_receives_result_and_closes() -> Result<(), R
 }
 
 #[tokio::test]
+async fn tcp_loopback_applies_deadline_reserved_before_submit() -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+    let deadline = SchedulingMetadata {
+        operation_id: 1_011,
+        control_sequence: 1,
+        priority_class: 0,
+        priority_delta: 0,
+        deadline_unix_ms: 4_000_000_000_000,
+        flags: 0,
+    };
+
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        let submit = session.receive_submit().await?;
+        assert_eq!(submit.frame_id, 1);
+        assert_eq!(submit.operation_id, deadline.operation_id);
+        assert_eq!(
+            session
+                .operations()
+                .operation(submit.operation_id)
+                .expect("operation should be registered with its reserved deadline")
+                .schedule
+                .deadline_unix_ms,
+            deadline.deadline_unix_ms
+        );
+
+        let retained_deadline = session.receive_scheduling_update().await?;
+        assert_eq!(retained_deadline.message_type, MessageType::Deadline);
+        assert_eq!(retained_deadline.metadata, deadline);
+        submit
+            .send_result(&mut session, token_result(), b"delta".to_vec())
+            .await?;
+        expect_completed_lifecycle(&mut session, submit.operation_id).await?;
+        let close = session.receive_close().await?;
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let mut session = client.open_session().await?;
+    session
+        .send_runtime_frame(MessageType::Deadline, 1, &deadline.to_bytes()?)
+        .await?;
+    session
+        .submit_encoded_with_frame_id(1, token_submit(deadline.operation_id), b"prompt".to_vec())
+        .await?;
+    assert_eq!(
+        session.await_result().await?.operation_id,
+        deadline.operation_id
+    );
+    session.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn tcp_loopback_preserves_pre_submit_deadline_wire_order() -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+    let deadline = SchedulingMetadata {
+        operation_id: 1_012,
+        control_sequence: 1,
+        priority_class: 0,
+        priority_delta: 0,
+        deadline_unix_ms: 4_000_000_000_000,
+        flags: 0,
+    };
+
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        match session.await_event().await? {
+            NnrpServerEvent::Runtime(NnrpRuntimeEvent {
+                header,
+                metadata: NnrpRuntimeEventMetadata::Scheduling(metadata),
+                tail: NnrpRuntimeEventTail::None,
+            }) if header.message_type == MessageType::Deadline => {
+                assert_eq!(header.frame_id, 1);
+                assert_eq!(metadata, deadline);
+                assert!(session
+                    .operations()
+                    .operation(deadline.operation_id)
+                    .is_none());
+            }
+            event => panic!("expected pre-submit deadline event, got {event:?}"),
+        }
+
+        let submit = match session.await_event().await? {
+            NnrpServerEvent::Submit(operation) => operation,
+            event => panic!("expected submit after pre-submit deadline, got {event:?}"),
+        };
+        assert_eq!(submit.frame_id, 1);
+        assert_eq!(submit.operation_id, deadline.operation_id);
+        assert_eq!(
+            session
+                .operations()
+                .operation(submit.operation_id)
+                .expect("submit should register its reserved operation")
+                .schedule
+                .deadline_unix_ms,
+            deadline.deadline_unix_ms
+        );
+        submit
+            .send_result(&mut session, token_result(), b"delta".to_vec())
+            .await?;
+        expect_completed_lifecycle(&mut session, submit.operation_id).await?;
+        let close = session.receive_close().await?;
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let mut session = client.open_session().await?;
+    session
+        .send_runtime_frame(MessageType::Deadline, 1, &deadline.to_bytes()?)
+        .await?;
+    session
+        .submit_encoded_with_frame_id(1, token_submit(deadline.operation_id), b"prompt".to_vec())
+        .await?;
+    assert_eq!(
+        session.await_result().await?.operation_id,
+        deadline.operation_id
+    );
+    session.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn client_rejects_pre_submit_deadline_for_reused_identity() -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        let submit = session.receive_submit().await?;
+        submit
+            .send_result(&mut session, token_result(), b"done".to_vec())
+            .await?;
+        expect_completed_lifecycle(&mut session, submit.operation_id).await?;
+        let close = session.receive_close().await?;
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let mut session = client.open_session().await?;
+    session
+        .submit_encoded_with_frame_id(2, token_submit(1_013), b"prompt".to_vec())
+        .await?;
+    assert_eq!(session.await_result().await?.operation_id, 1_013);
+
+    let reused_frame = SchedulingMetadata {
+        operation_id: 1_014,
+        control_sequence: 1,
+        priority_class: 0,
+        priority_delta: 0,
+        deadline_unix_ms: 4_000_000_000_000,
+        flags: 0,
+    };
+    assert!(matches!(
+        session
+            .send_runtime_frame(MessageType::Deadline, 2, &reused_frame.to_bytes()?)
+            .await,
+        Err(RuntimeError::UnexpectedMessage(
+            "client frame id must not be zero, reused, or moved backward"
+        ))
+    ));
+
+    let reused_operation = SchedulingMetadata {
+        operation_id: 1_013,
+        ..reused_frame
+    };
+    assert!(matches!(
+        session
+            .send_runtime_frame(MessageType::Deadline, 3, &reused_operation.to_bytes()?)
+            .await,
+        Err(RuntimeError::UnexpectedMessage(
+            "client operation id must not be zero or reused"
+        ))
+    ));
+
+    session.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn server_rejects_pre_submit_deadline_for_submitted_frame() -> Result<(), RuntimeError> {
+    let deadline = SchedulingMetadata {
+        operation_id: 2,
+        control_sequence: 1,
+        priority_class: 0,
+        priority_delta: 0,
+        deadline_unix_ms: 4_000_000_000_000,
+        flags: 0,
+    };
+    let error = server_receive_error_after_submit(
+        operation_event_packet(
+            MessageType::Deadline,
+            1,
+            deadline.to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        |mut session| async move { session.receive_scheduling_update().await.map(|_| ()) },
+    )
+    .await;
+    assert!(
+        matches!(
+            error,
+            RuntimeError::UnexpectedMessage(
+                "server received pre-submit DEADLINE for a reused frame id"
+            )
+        ),
+        "unexpected duplicate-frame error: {error:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn tcp_loopback_preserves_explicit_frame_ids_and_advances_allocator(
 ) -> Result<(), RuntimeError> {
     let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
@@ -258,9 +514,10 @@ async fn tcp_loopback_preserves_explicit_frame_ids_and_advances_allocator(
             let submit = session.receive_submit().await?;
             assert_eq!(submit.frame_id, expected_frame_id);
             assert_eq!(submit.operation_id, expected_operation_id);
-            session
-                .send_result(submit.frame_id, token_result(), b"delta".to_vec())
+            submit
+                .send_result(&mut session, token_result(), b"delta".to_vec())
                 .await?;
+            expect_completed_lifecycle(&mut session, submit.operation_id).await?;
         }
         let close = session.receive_close().await?;
         assert_eq!(close.last_operation_id, 4_300);
@@ -356,8 +613,8 @@ async fn tcp_loopback_handles_cancel_drop_flow_and_patch() -> Result<(), Runtime
             OperationState::Cancelled
         );
         assert!(matches!(
-            session
-                .send_result(submit.frame_id, token_result(), b"late".to_vec())
+            submit
+                .send_result(&mut session, token_result(), b"late".to_vec())
                 .await,
             Err(RuntimeError::Protocol(_))
         ));
@@ -366,7 +623,17 @@ async fn tcp_loopback_handles_cancel_drop_flow_and_patch() -> Result<(), Runtime
         assert_eq!(patch.patch_mask, 1);
         session.send_flow_update(session_flow_update()).await?;
         session.send_patch_ack(patch_ack()).await?;
-        session.send_result_drop(submit.frame_id).await?;
+        submit
+            .send_result_drop(&mut session, drop_reason(submit.operation_id), Vec::new())
+            .await?;
+
+        match session.await_event().await? {
+            NnrpServerEvent::Lifecycle(event) => {
+                assert_eq!(event.operation_id, submit.operation_id);
+                assert_eq!(event.state, OperationState::Cancelled);
+            }
+            event => panic!("expected cancelled server lifecycle, got {event:?}"),
+        }
 
         let close = session.receive_close().await?;
         session.ack_close(&close).await?;
@@ -390,7 +657,9 @@ async fn tcp_loopback_handles_cancel_drop_flow_and_patch() -> Result<(), Runtime
     let patch_ack = session.patch_session(session_patch()).await?;
     assert_eq!(patch_ack.ack_status, SessionPatchAckStatus::Accepted);
 
-    match session.await_event().await? {
+    expect_client_lifecycle(session.await_event().await?, 201, OperationState::Cancelled);
+
+    match expect_client_runtime_event(session.await_event().await?) {
         NnrpRuntimeEvent {
             metadata: NnrpRuntimeEventMetadata::FlowUpdate(flow),
             tail: NnrpRuntimeEventTail::None,
@@ -401,15 +670,17 @@ async fn tcp_loopback_handles_cancel_drop_flow_and_patch() -> Result<(), Runtime
         }
         event => panic!("expected flow update, got {event:?}"),
     }
-    match session.await_event().await? {
+    match expect_client_runtime_event(session.await_event().await?) {
         NnrpRuntimeEvent {
             header,
-            metadata: NnrpRuntimeEventMetadata::None,
-            tail: NnrpRuntimeEventTail::None,
-        } if header.message_type == MessageType::ResultDrop => {
-            assert_eq!(header.frame_id, frame_id)
+            metadata: NnrpRuntimeEventMetadata::ResultDropReason(reason),
+            tail: NnrpRuntimeEventTail::Diagnostic(diagnostics),
+        } if header.message_type == MessageType::ResultDropReason => {
+            assert_eq!(header.frame_id, frame_id);
+            assert_eq!(reason, drop_reason(201));
+            assert!(diagnostics.is_empty());
         }
-        event => panic!("expected result drop, got {event:?}"),
+        event => panic!("expected result drop reason, got {event:?}"),
     }
 
     session.close().await?;
@@ -460,11 +731,19 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
             BackpressureLevel::Soft as u16
         );
         assert_eq!(session.pressure_state().inbound_credit_window, 2);
-        session
-            .send_progress(progress(submit.operation_id), b"stage".to_vec())
+        submit
+            .send_progress(
+                &mut session,
+                progress(submit.operation_id),
+                b"stage".to_vec(),
+            )
             .await?;
-        session
-            .send_partial_result(partial_result(submit.operation_id), b"partial".to_vec())
+        submit
+            .send_partial_result(
+                &mut session,
+                partial_result(submit.operation_id),
+                b"partial".to_vec(),
+            )
             .await?;
 
         let control = session.receive_runtime_control().await?;
@@ -479,8 +758,8 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
                 .state,
             OperationState::Cancelled
         );
-        session
-            .send_result_drop_reason(drop_reason(submit.operation_id))
+        submit
+            .send_result_drop(&mut session, drop_reason(submit.operation_id), Vec::new())
             .await?;
 
         let abort_submit = session.receive_submit().await?;
@@ -511,6 +790,21 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
             OperationState::Failed
         );
         session.send_backpressure(soft_backpressure()).await?;
+
+        match session.await_event().await? {
+            NnrpServerEvent::Lifecycle(event) => {
+                assert_eq!(event.operation_id, submit.operation_id);
+                assert_eq!(event.state, OperationState::Cancelled);
+            }
+            event => panic!("expected cancelled server lifecycle, got {event:?}"),
+        }
+        match session.await_event().await? {
+            NnrpServerEvent::Lifecycle(event) => {
+                assert_eq!(event.operation_id, abort_submit.operation_id);
+                assert_eq!(event.state, OperationState::Failed);
+            }
+            event => panic!("expected failed server lifecycle, got {event:?}"),
+        }
 
         let close = session.receive_close().await?;
         session.ack_close(&close).await?;
@@ -545,7 +839,13 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
         )
         .await?;
 
-    match session.await_event().await? {
+    expect_client_lifecycle(
+        session.await_event().await?,
+        operation_id,
+        OperationState::Cancelled,
+    );
+
+    match expect_client_runtime_event(session.await_event().await?) {
         NnrpRuntimeEvent {
             header,
             metadata: NnrpRuntimeEventMetadata::Pressure(pressure),
@@ -561,7 +861,7 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
         }
         event => panic!("expected backpressure, got {event:?}"),
     }
-    match session.await_event().await? {
+    match expect_client_runtime_event(session.await_event().await?) {
         NnrpRuntimeEvent {
             metadata: NnrpRuntimeEventMetadata::Progress(metadata),
             tail: NnrpRuntimeEventTail::Body(body),
@@ -574,7 +874,7 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
         }
         event => panic!("expected progress, got {event:?}"),
     }
-    match session.await_event().await? {
+    match expect_client_runtime_event(session.await_event().await?) {
         NnrpRuntimeEvent {
             metadata: NnrpRuntimeEventMetadata::PartialResult(metadata),
             tail: NnrpRuntimeEventTail::Body(body),
@@ -585,7 +885,7 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
         }
         event => panic!("expected partial result, got {event:?}"),
     }
-    match session.await_event().await? {
+    match expect_client_runtime_event(session.await_event().await?) {
         NnrpRuntimeEvent {
             metadata: NnrpRuntimeEventMetadata::ResultDropReason(reason),
             tail: NnrpRuntimeEventTail::Diagnostic(body),
@@ -607,7 +907,13 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
         .await?;
     session.abort_operation(abort_operation_id, 9).await?;
 
-    match session.await_event().await? {
+    expect_client_lifecycle(
+        session.await_event().await?,
+        abort_operation_id,
+        OperationState::Failed,
+    );
+
+    match expect_client_runtime_event(session.await_event().await?) {
         NnrpRuntimeEvent {
             header,
             metadata: NnrpRuntimeEventMetadata::Pressure(pressure),
@@ -635,20 +941,23 @@ async fn tcp_loopback_preserves_partial_result_order_with_interleaving() -> Resu
         let first = session.receive_submit().await?;
         let second = session.receive_submit().await?;
 
-        session
+        first
             .send_partial_result(
+                &mut session,
                 partial_result_sequence(first.operation_id, 1, 7),
                 b"op1-one".to_vec(),
             )
             .await?;
-        session
+        second
             .send_partial_result(
+                &mut session,
                 partial_result_sequence(second.operation_id, 1, 7),
                 b"op2-one".to_vec(),
             )
             .await?;
-        session
+        first
             .send_partial_result(
+                &mut session,
                 partial_result_sequence(first.operation_id, 2, 7),
                 b"op1-two".to_vec(),
             )
@@ -671,22 +980,762 @@ async fn tcp_loopback_preserves_partial_result_order_with_interleaving() -> Resu
         .await?;
 
     assert_partial_result_event(
-        session.await_event().await?,
+        expect_client_runtime_event(session.await_event().await?),
         first_operation_id,
         1,
         b"op1-one",
     );
     assert_partial_result_event(
-        session.await_event().await?,
+        expect_client_runtime_event(session.await_event().await?),
         second_operation_id,
         1,
         b"op2-one",
     );
     assert_partial_result_event(
-        session.await_event().await?,
+        expect_client_runtime_event(session.await_event().await?),
         first_operation_id,
         2,
         b"op1-two",
+    );
+
+    session.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn server_event_pump_preserves_submit_ownership_and_skipped_control_order(
+) -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        let first_event = session.await_event().await?;
+        assert_eq!(
+            first_event
+                .runtime_event()
+                .expect("submit event should expose its runtime event")
+                .header
+                .message_type,
+            MessageType::FrameSubmit
+        );
+        let first = match first_event {
+            NnrpServerEvent::Submit(operation) => operation,
+            event => panic!("expected submit operation, got {event:?}"),
+        };
+        assert_eq!(first.operation_id, 3_301);
+        assert_eq!(first.operation_id(), 3_301);
+        assert_eq!(first.frame_id(), first.frame_id);
+        assert_eq!(first.metadata().operation_id, 3_301);
+        assert_eq!(first.body(), b"first");
+        assert_eq!(first.submit().header.message_type, MessageType::FrameSubmit);
+        assert_eq!(first.submit.header.message_type, MessageType::FrameSubmit);
+
+        let second = session.receive_submit().await?;
+        assert_eq!(second.operation_id, 3_302);
+        assert!(matches!(
+            session.receive_runtime_control().await,
+            Err(RuntimeError::UnexpectedMessage(_))
+        ));
+        match session.await_event().await? {
+            NnrpServerEvent::Runtime(NnrpRuntimeEvent {
+                header,
+                metadata: NnrpRuntimeEventMetadata::Scheduling(update),
+                tail: NnrpRuntimeEventTail::None,
+            }) if header.message_type == MessageType::PriorityUpdate => {
+                assert_eq!(update.operation_id, first.operation_id);
+                assert_eq!(update.priority_class, 9);
+            }
+            event => panic!("expected retained priority update, got {event:?}"),
+        }
+        assert!(matches!(
+            session.await_event().await,
+            Err(RuntimeError::UnexpectedMessage(_))
+        ));
+        session.receive_ping().await?;
+
+        first
+            .send_result(&mut session, token_result(), b"first".to_vec())
+            .await?;
+        expect_completed_lifecycle(&mut session, first.operation_id).await?;
+        second
+            .send_result(&mut session, token_result(), b"second".to_vec())
+            .await?;
+        expect_completed_lifecycle(&mut session, second.operation_id).await?;
+        let close = session.receive_close().await?;
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let mut session = client.open_session().await?;
+    session
+        .submit_encoded_nowait(token_submit(3_301), b"first".to_vec())
+        .await?;
+    session.update_priority(3_301, 9, 0).await?;
+    session.send_ping().await?;
+    session
+        .submit_encoded_nowait(token_submit(3_302), b"second".to_vec())
+        .await?;
+
+    assert_eq!(session.await_result().await?.operation_id, 3_301);
+    assert_eq!(session.await_result().await?.operation_id, 3_302);
+    session.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn server_operation_rejects_cross_session_and_metadata_identity_mismatches(
+) -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+
+    let server_task = tokio::spawn(async move {
+        let mut first_session = server.accept().await?;
+        let mut second_session = server.accept().await?;
+        let first = first_session.receive_submit().await?;
+        let second = second_session.receive_submit().await?;
+
+        assert!(matches!(
+            first
+                .send_progress(
+                    &mut second_session,
+                    progress(first.operation_id),
+                    b"stage".to_vec(),
+                )
+                .await,
+            Err(RuntimeError::UnexpectedMessage(
+                "server operation does not belong to this session"
+            ))
+        ));
+
+        let wrong_operation_id = first.operation_id + 100;
+        assert!(matches!(
+            first
+                .send_progress(
+                    &mut first_session,
+                    progress(wrong_operation_id),
+                    b"stage".to_vec(),
+                )
+                .await,
+            Err(RuntimeError::UnexpectedMessage(
+                "server operation metadata operation id mismatch"
+            ))
+        ));
+        assert!(matches!(
+            first
+                .send_partial_result(
+                    &mut first_session,
+                    partial_result(wrong_operation_id),
+                    b"partial".to_vec(),
+                )
+                .await,
+            Err(RuntimeError::UnexpectedMessage(
+                "server operation metadata operation id mismatch"
+            ))
+        ));
+        assert!(matches!(
+            first
+                .send_result_drop(
+                    &mut first_session,
+                    drop_reason(wrong_operation_id),
+                    Vec::new(),
+                )
+                .await,
+            Err(RuntimeError::UnexpectedMessage(
+                "server operation metadata operation id mismatch"
+            ))
+        ));
+
+        first
+            .send_result(&mut first_session, token_result(), b"first".to_vec())
+            .await?;
+        second
+            .send_result(&mut second_session, token_result(), b"second".to_vec())
+            .await?;
+        Ok::<_, RuntimeError>(())
+    });
+
+    let first_client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let mut first_session = first_client.open_session().await?;
+    let second_client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let mut second_session = second_client.open_session().await?;
+    first_session
+        .submit_encoded_nowait(token_submit(3_601), b"first".to_vec())
+        .await?;
+    second_session
+        .submit_encoded_nowait(token_submit(3_602), b"second".to_vec())
+        .await?;
+
+    assert_eq!(first_session.await_result().await?.operation_id, 3_601);
+    assert_eq!(second_session.await_result().await?.operation_id, 3_602);
+    first_session.close_transport().await?;
+    second_session.close_transport().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn server_specialized_receivers_drain_retained_inputs_in_wire_order(
+) -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        let first = session.receive_submit().await?;
+        assert_eq!(first.operation_id(), 3_401);
+
+        let second = session.receive_submit().await?;
+        assert_eq!(second.operation_id(), 3_402);
+
+        assert!(matches!(
+            session.receive_ping().await,
+            Err(RuntimeError::UnexpectedMessage("server expected PING"))
+        ));
+        let scheduling = session.receive_scheduling_update().await?;
+        assert_eq!(scheduling.message_type, MessageType::PriorityUpdate);
+        assert_eq!(scheduling.metadata.operation_id, first.operation_id());
+        assert_eq!(scheduling.metadata.priority_class, 8);
+
+        assert!(matches!(
+            session.receive_scheduling_update().await,
+            Err(RuntimeError::UnexpectedMessage(
+                "server expected PRIORITY_UPDATE, DEADLINE, or EXPIRE_AT"
+            ))
+        ));
+        let pressure = session.receive_pressure_update().await?;
+        assert_eq!(pressure.message_type, MessageType::Backpressure);
+        assert_eq!(pressure.metadata, soft_backpressure());
+
+        assert!(matches!(
+            session.receive_pressure_update().await,
+            Err(RuntimeError::UnexpectedMessage(
+                "server expected BACKPRESSURE or CREDIT_UPDATE"
+            ))
+        ));
+        let control = session.receive_runtime_control().await?;
+        assert_eq!(control.message_type, MessageType::Cancel);
+        assert_eq!(control.metadata.operation_id, first.operation_id());
+        assert_eq!(control.metadata.reason_code, 7);
+        assert!(control.body.is_empty());
+
+        session.receive_ping().await?;
+        match session.await_event().await? {
+            NnrpServerEvent::Lifecycle(event) => {
+                assert_eq!(event.operation_id, first.operation_id());
+                assert_eq!(event.state, OperationState::Cancelled);
+            }
+            event => panic!("expected retained cancelled lifecycle, got {event:?}"),
+        }
+        let close = session.receive_close().await?;
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let mut session = client.open_session().await?;
+    session
+        .submit_encoded_nowait(token_submit(3_401), b"first".to_vec())
+        .await?;
+    session.update_priority(3_401, 8, 0).await?;
+    session.send_backpressure(soft_backpressure()).await?;
+    session.cancel_operation(3_401, 7).await?;
+    session.send_ping().await?;
+    session
+        .submit_encoded_nowait(token_submit(3_402), b"second".to_vec())
+        .await?;
+    session.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn server_receive_submit_retains_session_close_for_the_event_pump() -> Result<(), RuntimeError>
+{
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        assert!(matches!(
+            session.receive_submit().await,
+            Err(RuntimeError::UnexpectedMessage(_))
+        ));
+        assert!(matches!(
+            session.receive_submit().await,
+            Err(RuntimeError::UnexpectedMessage(_))
+        ));
+        let close = match session.await_event().await? {
+            NnrpServerEvent::Runtime(NnrpRuntimeEvent {
+                header,
+                metadata: NnrpRuntimeEventMetadata::SessionClose(close),
+                tail: NnrpRuntimeEventTail::None,
+            }) if header.message_type == MessageType::SessionClose => close,
+            event => panic!("expected retained session close, got {event:?}"),
+        };
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    client.open_session().await?.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn server_event_pump_retains_a_direct_role_packet_for_its_receiver(
+) -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        assert!(matches!(
+            session.await_event().await,
+            Err(RuntimeError::UnexpectedMessage(
+                "server event pump received a dedicated role message"
+            ))
+        ));
+        session.receive_ping().await?;
+        let close = session.receive_close().await?;
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let mut session = client.open_session().await?;
+    session.send_ping().await?;
+    session.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn server_receive_submit_bounds_retained_role_packets() -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        let error = session
+            .receive_submit()
+            .await
+            .expect_err("pending role packets must be bounded");
+        assert!(matches!(
+            error,
+            RuntimeError::UnexpectedMessage("server session exceeded the pending input limit")
+        ));
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let mut session = client.open_session().await?;
+    for _ in 0..=1_024 {
+        session.send_ping().await?;
+    }
+    session.close_transport().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn tcp_loopback_server_control_terminates_both_role_event_pumps() -> Result<(), RuntimeError>
+{
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        let submit = session.receive_submit().await?;
+        session
+            .send_control_request(
+                MessageType::Cancel,
+                ControlRequestMetadata {
+                    operation_id: submit.operation_id,
+                    control_sequence: 1,
+                    reason_code: 7,
+                    source_role: RuntimeRole::Server as u8,
+                    flags: 0,
+                    diagnostic_bytes: 0,
+                },
+                Vec::new(),
+            )
+            .await?;
+        match session.await_event().await? {
+            NnrpServerEvent::Lifecycle(event) => {
+                assert_eq!(event.operation_id, submit.operation_id);
+                assert_eq!(event.state, OperationState::Cancelled);
+            }
+            event => panic!("expected server-local cancelled lifecycle, got {event:?}"),
+        }
+
+        let close = session.receive_close().await?;
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let mut session = client.open_session().await?;
+    let operation_id = 6_006;
+    session
+        .submit_encoded_nowait(token_submit(operation_id), b"cancel-from-server".to_vec())
+        .await?;
+    match expect_client_runtime_event(session.await_event().await?) {
+        NnrpRuntimeEvent {
+            header,
+            metadata: NnrpRuntimeEventMetadata::ControlRequest(metadata),
+            tail: NnrpRuntimeEventTail::Diagnostic(body),
+        } if header.message_type == MessageType::Cancel => {
+            assert_eq!(metadata.operation_id, operation_id);
+            assert!(body.is_empty());
+        }
+        event => panic!("expected server CANCEL wire event, got {event:?}"),
+    }
+    expect_client_lifecycle(
+        session.await_event().await?,
+        operation_id,
+        OperationState::Cancelled,
+    );
+
+    session.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn tcp_loopback_client_terminal_apis_feed_the_role_event_union() -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+    let (progress_sent, progress_visible) = tokio::sync::oneshot::channel();
+
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+
+        let cancelled = session.receive_submit().await?;
+        let cancel = session.receive_runtime_control().await?;
+        assert_eq!(cancel.message_type, MessageType::Cancel);
+        assert_eq!(cancel.metadata.operation_id, cancelled.operation_id);
+        match session.await_event().await? {
+            NnrpServerEvent::Lifecycle(event) => {
+                assert_eq!(event.operation_id, cancelled.operation_id);
+                assert_eq!(event.state, OperationState::Cancelled);
+            }
+            event => panic!("expected cancelled server lifecycle, got {event:?}"),
+        }
+        assert!(matches!(
+            session.receive_runtime_control().await,
+            Err(RuntimeError::Protocol(
+                NnrpError::InvalidOperationTransition {
+                    from: OperationState::Cancelled,
+                    to: OperationState::Failed,
+                }
+            ))
+        ));
+
+        let failed = session.receive_submit().await?;
+        let abort = session.receive_runtime_control().await?;
+        assert_eq!(abort.message_type, MessageType::Abort);
+        assert_eq!(abort.metadata.operation_id, failed.operation_id);
+        match session.await_event().await? {
+            NnrpServerEvent::Lifecycle(event) => {
+                assert_eq!(event.operation_id, failed.operation_id);
+                assert_eq!(event.state, OperationState::Failed);
+            }
+            event => panic!("expected failed server lifecycle, got {event:?}"),
+        }
+
+        let superseded = session.receive_submit().await?;
+        match session.await_event().await? {
+            NnrpServerEvent::Runtime(NnrpRuntimeEvent {
+                header,
+                metadata: NnrpRuntimeEventMetadata::Supersede(metadata),
+                ..
+            }) if header.message_type == MessageType::Supersede => {
+                assert_eq!(metadata.old_operation_id, superseded.operation_id);
+            }
+            event => panic!("expected client supersede wire event, got {event:?}"),
+        }
+        match session.await_event().await? {
+            NnrpServerEvent::Lifecycle(event) => {
+                assert_eq!(event.operation_id, superseded.operation_id);
+                assert_eq!(event.state, OperationState::Superseded);
+            }
+            event => panic!("expected superseded server lifecycle, got {event:?}"),
+        }
+
+        let progressing = session.receive_submit().await?;
+        progressing
+            .send_progress(
+                &mut session,
+                progress(progressing.operation_id),
+                b"stage".to_vec(),
+            )
+            .await?;
+        let _ = progress_sent.send(());
+
+        let close = session.receive_close().await?;
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let mut session = client.open_session().await?;
+
+    let cancelled_operation = 6_101;
+    session
+        .submit_encoded_nowait(token_submit(cancelled_operation), b"cancel".to_vec())
+        .await?;
+    session.cancel_operation(cancelled_operation, 7).await?;
+    assert!(matches!(
+        session.abort_operation(cancelled_operation, 9).await,
+        Err(RuntimeError::Protocol(
+            NnrpError::InvalidOperationTransition {
+                from: OperationState::Cancelled,
+                to: OperationState::Failed,
+            }
+        ))
+    ));
+    let cancelled = session.await_result().await?;
+    assert_eq!(cancelled.operation_id, cancelled_operation);
+    assert_eq!(cancelled.terminal_state, ResultTerminalState::Cancelled);
+    assert!(matches!(cancelled.event, NnrpTerminalEvent::Lifecycle(_)));
+
+    let failed_operation = 6_102;
+    session
+        .submit_encoded_nowait(token_submit(failed_operation), b"abort".to_vec())
+        .await?;
+    session.abort_operation(failed_operation, 9).await?;
+    expect_client_lifecycle(
+        session
+            .poll_event()?
+            .expect("local abort must be immediately pollable"),
+        failed_operation,
+        OperationState::Failed,
+    );
+    assert!(session.poll_event()?.is_none());
+
+    assert!(matches!(
+        session.cancel_frame(u32::MAX).await,
+        Err(RuntimeError::UnexpectedMessage(
+            "client frame cancel references an unknown frame"
+        ))
+    ));
+
+    let superseded_operation = 6_103;
+    session
+        .submit_encoded_nowait(token_submit(superseded_operation), b"supersede".to_vec())
+        .await?;
+    session
+        .supersede_operation(
+            SupersedeMetadata {
+                old_operation_id: superseded_operation,
+                new_operation_id: 6_104,
+                control_sequence: 1,
+                drop_reason_code: 7,
+                flags: 0,
+                diagnostic_bytes: 0,
+            },
+            Vec::new(),
+        )
+        .await?;
+    expect_client_lifecycle(
+        session.await_event().await?,
+        superseded_operation,
+        OperationState::Superseded,
+    );
+
+    let progressing_operation = 6_105;
+    session
+        .submit_encoded_nowait(token_submit(progressing_operation), b"progress".to_vec())
+        .await?;
+    progress_visible
+        .await
+        .expect("server should report that progress was sent");
+    let mut progress_event = None;
+    for _ in 0..100 {
+        if let Some(event) = session.poll_event()? {
+            progress_event = Some(event);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    match expect_client_runtime_event(progress_event.expect("progress must become pollable")) {
+        NnrpRuntimeEvent {
+            metadata: NnrpRuntimeEventMetadata::Progress(metadata),
+            tail: NnrpRuntimeEventTail::Body(body),
+            ..
+        } => {
+            assert_eq!(metadata.operation_id, progressing_operation);
+            assert_eq!(body, b"stage".to_vec());
+        }
+        event => panic!("expected polled progress event, got {event:?}"),
+    }
+
+    session.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn tcp_loopback_server_terminal_apis_emit_wire_and_lifecycle_evidence(
+) -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+
+        let dropped = session.receive_submit().await?;
+        dropped
+            .send_result_drop(&mut session, drop_reason(dropped.operation_id), Vec::new())
+            .await?;
+        match session.await_event().await? {
+            NnrpServerEvent::Lifecycle(event) => {
+                assert_eq!(event.operation_id, dropped.operation_id);
+                assert_eq!(event.state, OperationState::Superseded);
+            }
+            event => panic!("expected dropped server lifecycle, got {event:?}"),
+        }
+
+        let reasoned = session.receive_submit().await?;
+        reasoned
+            .send_result_drop(&mut session, drop_reason(reasoned.operation_id), Vec::new())
+            .await?;
+        match session.await_event().await? {
+            NnrpServerEvent::Lifecycle(event) => {
+                assert_eq!(event.operation_id, reasoned.operation_id);
+                assert_eq!(event.state, OperationState::Superseded);
+            }
+            event => panic!("expected reasoned-drop server lifecycle, got {event:?}"),
+        }
+
+        let aborted = session.receive_submit().await?;
+        session
+            .send_control_request(
+                MessageType::Abort,
+                ControlRequestMetadata {
+                    operation_id: aborted.operation_id,
+                    control_sequence: 1,
+                    reason_code: 9,
+                    source_role: RuntimeRole::Server as u8,
+                    flags: 0,
+                    diagnostic_bytes: 0,
+                },
+                Vec::new(),
+            )
+            .await?;
+        match session.await_event().await? {
+            NnrpServerEvent::Lifecycle(event) => {
+                assert_eq!(event.operation_id, aborted.operation_id);
+                assert_eq!(event.state, OperationState::Failed);
+            }
+            event => panic!("expected aborted server lifecycle, got {event:?}"),
+        }
+        assert!(matches!(
+            session
+                .send_control_request(
+                    MessageType::Cancel,
+                    ControlRequestMetadata {
+                        operation_id: aborted.operation_id,
+                        control_sequence: 2,
+                        reason_code: 7,
+                        source_role: RuntimeRole::Server as u8,
+                        flags: 0,
+                        diagnostic_bytes: 0,
+                    },
+                    Vec::new(),
+                )
+                .await,
+            Err(RuntimeError::Protocol(
+                NnrpError::InvalidOperationTransition {
+                    from: OperationState::Failed,
+                    to: OperationState::Cancelled,
+                }
+            ))
+        ));
+
+        let superseded = session.receive_submit().await?;
+        session
+            .supersede_operation(
+                SupersedeMetadata {
+                    old_operation_id: superseded.operation_id,
+                    new_operation_id: 6_204,
+                    control_sequence: 1,
+                    drop_reason_code: 7,
+                    flags: 0,
+                    diagnostic_bytes: 0,
+                },
+                Vec::new(),
+            )
+            .await?;
+        match session.await_event().await? {
+            NnrpServerEvent::Lifecycle(event) => {
+                assert_eq!(event.operation_id, superseded.operation_id);
+                assert_eq!(event.state, OperationState::Superseded);
+            }
+            event => panic!("expected superseded server lifecycle, got {event:?}"),
+        }
+
+        let close = session.receive_close().await?;
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let mut session = client.open_session().await?;
+
+    for operation_id in [6_201, 6_202] {
+        session
+            .submit_encoded_nowait(token_submit(operation_id), b"drop".to_vec())
+            .await?;
+        let result = session.await_result().await?;
+        assert_eq!(result.operation_id, operation_id);
+        assert_eq!(result.terminal_state, ResultTerminalState::Dropped);
+        assert!(matches!(result.event, NnrpTerminalEvent::Runtime(_)));
+    }
+
+    let aborted_operation = 6_203;
+    session
+        .submit_encoded_nowait(token_submit(aborted_operation), b"abort".to_vec())
+        .await?;
+    match expect_client_runtime_event(session.await_event().await?) {
+        NnrpRuntimeEvent {
+            header,
+            metadata: NnrpRuntimeEventMetadata::ControlRequest(metadata),
+            ..
+        } if header.message_type == MessageType::Abort => {
+            assert_eq!(metadata.operation_id, aborted_operation);
+        }
+        event => panic!("expected server abort wire event, got {event:?}"),
+    }
+    expect_client_lifecycle(
+        session.await_event().await?,
+        aborted_operation,
+        OperationState::Failed,
+    );
+
+    let superseded_operation = 6_204;
+    session
+        .submit_encoded_nowait(token_submit(superseded_operation), b"supersede".to_vec())
+        .await?;
+    match expect_client_runtime_event(session.await_event().await?) {
+        NnrpRuntimeEvent {
+            header,
+            metadata: NnrpRuntimeEventMetadata::Supersede(metadata),
+            ..
+        } if header.message_type == MessageType::Supersede => {
+            assert_eq!(metadata.old_operation_id, superseded_operation);
+        }
+        event => panic!("expected server supersede wire event, got {event:?}"),
+    }
+    expect_client_lifecycle(
+        session.await_event().await?,
+        superseded_operation,
+        OperationState::Superseded,
     );
 
     session.close().await?;
@@ -756,9 +1805,10 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
                 Vec::new(),
             )
             .await?;
-        session
-            .send_result(submit.frame_id, token_result(), b"done".to_vec())
+        submit
+            .send_result(&mut session, token_result(), b"done".to_vec())
             .await?;
+        expect_completed_lifecycle(&mut session, submit.operation_id).await?;
 
         let close = session.receive_close().await?;
         session.ack_close(&close).await?;
@@ -789,7 +1839,7 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
         .await?;
     assert_eq!(session.receive_cache_ack().await?, cache_ack());
 
-    match session.await_event().await? {
+    match expect_client_runtime_event(session.await_event().await?) {
         NnrpRuntimeEvent {
             header,
             metadata: NnrpRuntimeEventMetadata::Capability(metadata),
@@ -803,7 +1853,7 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
         }
         event => panic!("expected capability negotiation, got {event:?}"),
     }
-    match session.await_event().await? {
+    match expect_client_runtime_event(session.await_event().await?) {
         NnrpRuntimeEvent {
             header,
             metadata: NnrpRuntimeEventMetadata::RouteHint(metadata),
@@ -817,7 +1867,7 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
         }
         event => panic!("expected route hint, got {event:?}"),
     }
-    match session.await_event().await? {
+    match expect_client_runtime_event(session.await_event().await?) {
         NnrpRuntimeEvent {
             metadata: NnrpRuntimeEventMetadata::ObjectDescriptor(metadata),
             tail: NnrpRuntimeEventTail::Body(body),
@@ -829,7 +1879,7 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
         }
         event => panic!("expected object declaration, got {event:?}"),
     }
-    match session.await_event().await? {
+    match expect_client_runtime_event(session.await_event().await?) {
         NnrpRuntimeEvent {
             metadata: NnrpRuntimeEventMetadata::ObjectReference(metadata),
             tail: NnrpRuntimeEventTail::Body(body),
@@ -841,7 +1891,7 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
         }
         event => panic!("expected object reference, got {event:?}"),
     }
-    match session.await_event().await? {
+    match expect_client_runtime_event(session.await_event().await?) {
         NnrpRuntimeEvent {
             metadata: NnrpRuntimeEventMetadata::ObjectDelta(metadata),
             tail:
@@ -858,7 +1908,7 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
         }
         event => panic!("expected object delta, got {event:?}"),
     }
-    match session.await_event().await? {
+    match expect_client_runtime_event(session.await_event().await?) {
         NnrpRuntimeEvent {
             metadata: NnrpRuntimeEventMetadata::CacheReference(metadata),
             tail: NnrpRuntimeEventTail::Body(body),
@@ -870,7 +1920,7 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
         }
         event => panic!("expected cache reference, got {event:?}"),
     }
-    match session.await_event().await? {
+    match expect_client_runtime_event(session.await_event().await?) {
         NnrpRuntimeEvent {
             metadata: NnrpRuntimeEventMetadata::CacheInvalidate(metadata),
             tail: NnrpRuntimeEventTail::None,
@@ -884,7 +1934,7 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
         }
         event => panic!("expected cache invalidate, got {event:?}"),
     }
-    match session.await_event().await? {
+    match expect_client_runtime_event(session.await_event().await?) {
         NnrpRuntimeEvent {
             metadata: NnrpRuntimeEventMetadata::ObjectRelease(metadata),
             tail: NnrpRuntimeEventTail::Diagnostic(body),
@@ -896,7 +1946,7 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
         }
         event => panic!("expected object release, got {event:?}"),
     }
-    match session.await_event().await? {
+    match expect_client_runtime_event(session.await_event().await?) {
         NnrpRuntimeEvent {
             header,
             metadata: NnrpRuntimeEventMetadata::ResultPush(_),
@@ -949,7 +1999,13 @@ async fn tcp_loopback_releases_objects_after_cancel_and_reports_cache_miss(
         .await?;
     session.cancel_operation(operation_id, 7).await?;
 
-    match session.await_event().await? {
+    expect_client_lifecycle(
+        session.await_event().await?,
+        operation_id,
+        OperationState::Cancelled,
+    );
+
+    match expect_client_runtime_event(session.await_event().await?) {
         NnrpRuntimeEvent {
             metadata: NnrpRuntimeEventMetadata::ObjectRelease(metadata),
             tail: NnrpRuntimeEventTail::Diagnostic(body),
@@ -961,7 +2017,7 @@ async fn tcp_loopback_releases_objects_after_cancel_and_reports_cache_miss(
         }
         event => panic!("expected cancelled object release, got {event:?}"),
     }
-    match session.await_event().await? {
+    match expect_client_runtime_event(session.await_event().await?) {
         NnrpRuntimeEvent {
             metadata: NnrpRuntimeEventMetadata::CacheMiss(metadata),
             tail: NnrpRuntimeEventTail::Diagnostic(body),
@@ -1223,8 +2279,8 @@ async fn tcp_loopback_suppresses_expired_final_results() -> Result<(), RuntimeEr
         assert_eq!(expire.message_type, MessageType::ExpireAt);
         assert_eq!(expire.metadata.operation_id, submit.operation_id);
 
-        let error = session
-            .send_result(submit.frame_id, token_result(), b"expired".to_vec())
+        let error = submit
+            .send_result(&mut session, token_result(), b"expired".to_vec())
             .await
             .expect_err("expired operation should reject final result delivery");
         assert!(matches!(
@@ -1243,6 +2299,14 @@ async fn tcp_loopback_suppresses_expired_final_results() -> Result<(), RuntimeEr
             OperationState::Superseded
         );
 
+        match session.await_event().await? {
+            NnrpServerEvent::Lifecycle(event) => {
+                assert_eq!(event.operation_id, submit.operation_id);
+                assert_eq!(event.state, OperationState::Superseded);
+            }
+            event => panic!("expected superseded server lifecycle, got {event:?}"),
+        }
+
         let close = session.receive_close().await?;
         session.ack_close(&close).await?;
         session.close().await
@@ -1255,7 +2319,7 @@ async fn tcp_loopback_suppresses_expired_final_results() -> Result<(), RuntimeEr
         .submit_encoded_nowait(token_submit(operation_id), b"prompt".to_vec())
         .await?;
     session.expire_at(operation_id, 1).await?;
-    match session.await_event().await? {
+    match expect_client_runtime_event(session.await_event().await?) {
         NnrpRuntimeEvent {
             metadata: NnrpRuntimeEventMetadata::ResultDropReason(reason),
             tail: NnrpRuntimeEventTail::Diagnostic(body),
@@ -1404,23 +2468,128 @@ async fn client_close_rejects_wrong_ack_session_and_shape() -> Result<(), Runtim
         header.session_id = 2;
         RuntimePacket::new(header, vec![0; SESSION_CLOSE_ACK_METADATA_LEN], Vec::new())?
     };
-    let mut session = scripted_client_session(wrong_session).await?;
-    let result = session.close_with(close_request()).await;
-    assert!(result.is_err(), "close should reject wrong ack session");
+    let (mut session, server_task) =
+        scripted_client_close_session_packets(vec![wrong_session]).await?;
+    let error = session
+        .close_with(close_request())
+        .await
+        .expect_err("close should reject an acknowledgement for another session");
+    assert!(
+        matches!(
+            error,
+            RuntimeError::TransportClosed {
+                transport: RuntimeTransportKind::Tcp,
+                ref detail,
+            } if detail == "received packet for unknown session 2"
+        ),
+        "unexpected close error: {error:?}"
+    );
     session.close_transport().await?;
+    server_task
+        .await
+        .expect("scripted close server should join")?;
 
     let malformed = {
         let mut header = CommonHeader::new(MessageType::SessionCloseAck, 1, 0);
         header.session_id = 1;
         RuntimePacket::new(header, vec![0], Vec::new())?
     };
-    let mut session = scripted_client_session(malformed).await?;
-    let result = session.close_with(close_request()).await;
-    assert!(
-        result.is_err(),
-        "close should reject malformed ack metadata"
+    let (mut session, server_task) = scripted_client_close_session_packets(vec![malformed]).await?;
+    assert!(matches!(
+        session.close_with(close_request()).await,
+        Err(RuntimeError::UnexpectedMessage(
+            "client received malformed SESSION_CLOSE_ACK metadata length"
+        ))
+    ));
+    session.close_transport().await?;
+    server_task
+        .await
+        .expect("scripted close server should join")
+}
+
+#[tokio::test]
+async fn client_close_retains_runtime_events_until_the_final_ack() -> Result<(), RuntimeError> {
+    let trace = TraceContextMetadata {
+        trace_id: 7,
+        span_id: 8,
+        parent_span_id: 9,
+        stage_code: 1,
+        flags: 0,
+        body_bytes: 2,
+    };
+    let mut trace_header = CommonHeader::new(MessageType::TraceContext, 0, 2);
+    trace_header.session_id = 1;
+    let trace_packet = RuntimePacket::new(trace_header, trace.to_bytes()?.to_vec(), vec![10, 11])?;
+    let (mut session, server_task) = scripted_client_close_session_packets(vec![
+        close_ack_packet(SessionCloseStatus::Acknowledged),
+        trace_packet,
+        close_ack_packet(SessionCloseStatus::Draining),
+        close_ack_packet(SessionCloseStatus::Closed),
+    ])
+    .await?;
+
+    let ack = session.close_with(close_request()).await?;
+    assert_eq!(ack.close_status, SessionCloseStatus::Closed);
+    let retained = expect_client_runtime_event(session.await_event().await?);
+    assert_eq!(retained.header.message_type, MessageType::TraceContext);
+    assert_eq!(
+        retained.metadata,
+        NnrpRuntimeEventMetadata::TraceContext(trace)
     );
-    session.close_transport().await
+    assert_eq!(retained.tail, NnrpRuntimeEventTail::Body(vec![10, 11]));
+    session.close_transport().await?;
+    server_task
+        .await
+        .expect("scripted close server should join")
+}
+
+#[tokio::test]
+async fn client_close_rejection_does_not_report_success() -> Result<(), RuntimeError> {
+    let (mut session, server_task) =
+        scripted_client_close_session_packets(vec![close_ack_packet(SessionCloseStatus::Rejected)])
+            .await?;
+
+    assert!(matches!(
+        session.close_with(close_request()).await,
+        Err(RuntimeError::UnexpectedMessage(
+            "server rejected SESSION_CLOSE"
+        ))
+    ));
+    session.close_transport().await?;
+    server_task
+        .await
+        .expect("scripted close server should join")
+}
+
+#[tokio::test]
+async fn client_close_bounds_runtime_events_before_acknowledgement() -> Result<(), RuntimeError> {
+    let trace = TraceContextMetadata {
+        trace_id: 7,
+        span_id: 8,
+        parent_span_id: 9,
+        stage_code: 1,
+        flags: 0,
+        body_bytes: 0,
+    };
+    let packets = (0..=1_024)
+        .map(|_| {
+            let mut header = CommonHeader::new(MessageType::TraceContext, 0, 0);
+            header.session_id = 1;
+            RuntimePacket::new(header, trace.to_bytes()?.to_vec(), Vec::new())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let (mut session, server_task) = scripted_client_close_session_packets(packets).await?;
+
+    assert!(matches!(
+        session.close_with(close_request()).await,
+        Err(RuntimeError::UnexpectedMessage(
+            "client session close exceeded the pending event limit before acknowledgement"
+        ))
+    ));
+    session.close_transport().await?;
+    server_task
+        .await
+        .expect("scripted close server should join")
 }
 
 #[tokio::test]
@@ -2234,42 +3403,6 @@ async fn server_preview4_control_readers_and_senders_reject_mismatches() -> Resu
         .await,
         server_send_control_error(|mut session| async move {
             session
-                .send_partial_result(partial_result(1), Vec::new())
-                .await
-        })
-        .await,
-        server_send_control_error(|mut session| async move {
-            session.send_progress(progress(1), Vec::new()).await
-        })
-        .await,
-        server_send_control_error(|mut session| async move {
-            session
-                .send_result_drop_reason(nnrp_core::ResultDropReasonMetadata {
-                    operation_id: 1,
-                    result_sequence: 1,
-                    drop_reason_code: 0,
-                    source_role: 2,
-                    flags: 0,
-                    diagnostic_bytes: 0,
-                })
-                .await
-        })
-        .await,
-        server_send_control_error(|mut session| async move {
-            session
-                .send_result_drop_reason(nnrp_core::ResultDropReasonMetadata {
-                    operation_id: 1,
-                    result_sequence: 1,
-                    drop_reason_code: 7,
-                    source_role: RuntimeRole::Server as u8,
-                    flags: 0,
-                    diagnostic_bytes: 1,
-                })
-                .await
-        })
-        .await,
-        server_send_control_error(|mut session| async move {
-            session
                 .send_backpressure(nnrp_core::PressureMetadata {
                     scope_id: 1,
                     credit_window: 1,
@@ -2672,6 +3805,89 @@ async fn client_accepts_custom_quic_transport_slot() -> Result<(), RuntimeError>
     assert_eq!(writes.len(), 2);
     assert_eq!(writes[0].header.message_type, MessageType::ClientHello);
     assert_eq!(writes[1].header.message_type, MessageType::SessionOpen);
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_scoped_control_bypasses_a_full_local_lifecycle_queue() -> Result<(), RuntimeError>
+{
+    let config = NnrpClientConfig {
+        requested_session_id: 9,
+        ..Default::default()
+    };
+    let ack = open_ack(&SessionOpenMetadata {
+        requested_session_id: config.requested_session_id,
+        profile_id: config.profile_id,
+        priority_class: config.priority_class,
+        session_flags: 0,
+        schema_id: config.schema_id,
+        schema_version: config.schema_version,
+        default_deadline_ms: config.default_deadline_ms,
+        max_in_flight_operations: config.max_in_flight_operations,
+        lease_ttl_hint_ms: config.lease_ttl_hint_ms,
+        resume_token_bytes: 0,
+        auth_bytes: 0,
+        session_extension_bytes: 0,
+        client_session_tag: config.requested_session_id as u64,
+    });
+    let mut ack_header = CommonHeader::new(
+        MessageType::SessionOpenAck,
+        SESSION_OPEN_ACK_METADATA_LEN as u32,
+        0,
+    );
+    ack_header.session_id = ack.session_id;
+    let writes = Arc::new(Mutex::new(Vec::new()));
+    let transport = scripted_client_transport(
+        RuntimeTransportKind::Quic,
+        vec![RuntimePacket::new(
+            ack_header,
+            ack.to_bytes()?.to_vec(),
+            Vec::new(),
+        )?],
+        Arc::clone(&writes),
+    )?;
+
+    let client = NnrpClient::from_transport(transport, config)?;
+    let mut session = client.open_session().await?;
+    for operation_id in 1..=1_024 {
+        session
+            .submit_encoded(token_submit(operation_id), b"prompt".to_vec())
+            .await?;
+        session.cancel_operation(operation_id, 1).await?;
+    }
+
+    session
+        .submit_encoded(token_submit(1_025), b"prompt".to_vec())
+        .await?;
+    assert!(matches!(
+        session.cancel_operation(1_025, 1).await,
+        Err(RuntimeError::UnexpectedMessage(
+            "client local lifecycle event queue exceeded its limit"
+        ))
+    ));
+
+    session
+        .send_control_request(
+            MessageType::Cancel,
+            ControlRequestMetadata {
+                operation_id: 0,
+                control_sequence: 1_026,
+                reason_code: 1,
+                source_role: RuntimeRole::Client as u8,
+                flags: CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED,
+                diagnostic_bytes: 0,
+            },
+        )
+        .await?;
+
+    let writes = writes.lock().expect("writes should lock");
+    let packet = writes.last().expect("session control should be written");
+    assert_eq!(packet.header.message_type, MessageType::Cancel);
+    assert_eq!(packet.header.frame_id, 0);
+    assert_eq!(
+        ControlRequestMetadata::parse(&packet.metadata)?.operation_id,
+        0
+    );
     Ok(())
 }
 
@@ -3081,7 +4297,11 @@ async fn scripted_client_session_packets(
             }
         }
         for packet in packets {
-            transport.write_packet(&packet).await?;
+            match transport.write_packet(&packet).await {
+                Ok(()) => {}
+                Err(RuntimeError::TransportClosed { .. }) => return Ok(()),
+                Err(error) => return Err(error),
+            }
         }
         Ok(())
     });
@@ -3095,6 +4315,54 @@ async fn scripted_client_session_packets(
     }
     server_task.await.expect("scripted server should join")?;
     Ok(session)
+}
+
+async fn scripted_client_close_session_packets(
+    packets: Vec<RuntimePacket>,
+) -> Result<
+    (
+        nnrp_runtime::NnrpClientSession,
+        tokio::task::JoinHandle<Result<(), RuntimeError>>,
+    ),
+    RuntimeError,
+> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let server_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await?;
+        let mut transport = TcpTransport::new(stream);
+        accept_scripted_client_hello(&mut transport).await?;
+        let open_packet = transport.read_packet().await?;
+        let open = SessionOpenMetadata::parse(&open_packet.metadata)?;
+        let ack = open_ack(&open);
+        let mut header = CommonHeader::new(
+            MessageType::SessionOpenAck,
+            SESSION_OPEN_ACK_METADATA_LEN as u32,
+            0,
+        );
+        header.session_id = ack.session_id;
+        transport
+            .write_packet(&RuntimePacket::new(
+                header,
+                ack.to_bytes()?.to_vec(),
+                Vec::new(),
+            )?)
+            .await?;
+
+        let close = transport.read_packet().await?;
+        if close.header.message_type != MessageType::SessionClose {
+            return Err(RuntimeError::UnexpectedMessage(
+                "scripted close client did not send SESSION_CLOSE",
+            ));
+        }
+        for packet in packets {
+            transport.write_packet(&packet).await?;
+        }
+        Ok(())
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    Ok((client.open_session().await?, server_task))
 }
 
 async fn client_patch_error(packet: RuntimePacket) -> RuntimeError {
@@ -3404,6 +4672,29 @@ fn close_request() -> SessionCloseMetadata {
         session_error_code: SESSION_ERROR_NONE,
         session_close_tag: 1,
     }
+}
+
+fn close_ack_packet(close_status: SessionCloseStatus) -> RuntimePacket {
+    let metadata = SessionCloseAckMetadata {
+        close_status,
+        last_operation_id: 1,
+        session_error_code: SESSION_ERROR_NONE,
+    };
+    let mut header = CommonHeader::new(
+        MessageType::SessionCloseAck,
+        SESSION_CLOSE_ACK_METADATA_LEN as u32,
+        0,
+    );
+    header.session_id = 1;
+    RuntimePacket::new(
+        header,
+        metadata
+            .to_bytes()
+            .expect("close ack should encode")
+            .to_vec(),
+        Vec::new(),
+    )
+    .expect("close ack packet should build")
 }
 
 fn cache_object_id(cache_key_lo: u64) -> CacheObjectId {

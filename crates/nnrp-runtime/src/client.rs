@@ -37,15 +37,16 @@ use crate::TcpTransport;
 use crate::{
     client_provider::{connect_client, NnrpClientOptions, NnrpClientProvider},
     multiplex::MultiplexedConnection,
-    BoxedFramedTransport, FramedTransport, NnrpRuntimeEvent, NnrpRuntimeEventMetadata,
-    NnrpRuntimeEventTail, NnrpSubmitRequest, NnrpTerminalEvent, OperationLifecycleEvent,
-    RuntimeError, RuntimeFrameHeader, RuntimePacket, RuntimePressureState,
+    pre_submit::{current_unix_ms, PreSubmitDeadlineReservations},
+    BoxedFramedTransport, FramedTransport, NnrpClientRoleEvent, NnrpRuntimeEvent,
+    NnrpRuntimeEventMetadata, NnrpRuntimeEventTail, NnrpSubmitRequest, NnrpTerminalEvent,
+    OperationLifecycleEvent, RuntimeError, RuntimeFrameHeader, RuntimePacket, RuntimePressureState,
 };
 use futures_util::lock::Mutex as AsyncMutex;
 use nnrp_transport_provider::TransportSelection;
 use std::sync::Arc;
 
-const MAX_PENDING_EVENTS_DURING_SESSION_PATCH: usize = 1_024;
+const MAX_PENDING_CLIENT_EVENTS: usize = 1_024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NnrpClientConfig {
@@ -107,12 +108,15 @@ pub struct NnrpClientSession {
     next_frame_id: u32,
     operation_frames: BTreeMap<u64, u32>,
     frame_operations: BTreeMap<u32, u64>,
+    local_operation_states: BTreeMap<u64, nnrp_core::OperationState>,
     seen_operation_ids: BTreeSet<u64>,
+    pre_submit_deadlines: PreSubmitDeadlineReservations,
     last_operation_id: u64,
     transport: BoxedFramedTransport,
     lifecycle: ConnectionLifecycle,
     pressure: RuntimePressureState,
     pending_events: VecDeque<(NnrpClientEvent, RuntimePacket)>,
+    pending_role_events: VecDeque<NnrpClientRoleEvent>,
     recovery_ticket: Option<NnrpSessionRecoveryTicket>,
 }
 
@@ -566,12 +570,15 @@ impl NnrpClient {
             next_frame_id: 1,
             operation_frames: BTreeMap::new(),
             frame_operations: BTreeMap::new(),
+            local_operation_states: BTreeMap::new(),
             seen_operation_ids: BTreeSet::new(),
+            pre_submit_deadlines: PreSubmitDeadlineReservations::new(ack.max_in_flight_operations),
             last_operation_id: 0,
             transport: Box::new(transport),
             lifecycle,
             pressure: RuntimePressureState::default(),
             pending_events: VecDeque::new(),
+            pending_role_events: VecDeque::new(),
             recovery_ticket,
         })
     }
@@ -772,6 +779,11 @@ impl NnrpClientSession {
         let next_frame_id = frame_id
             .checked_add(1)
             .ok_or(RuntimeError::FrameIdOverflow)?;
+        let _reserved_deadline = self.pre_submit_deadlines.take_for_submit(
+            metadata.operation_id,
+            frame_id,
+            current_unix_ms(),
+        )?;
 
         let mut header = CommonHeader::new(
             MessageType::FrameSubmit,
@@ -835,8 +847,12 @@ impl NnrpClientSession {
                     .await
             }
             MessageType::PriorityUpdate | MessageType::Deadline | MessageType::ExpireAt => {
-                self.send_scheduling_update(message_type, SchedulingMetadata::parse(payload)?)
-                    .await
+                self.send_scheduling_update_for_frame(
+                    message_type,
+                    frame_id,
+                    SchedulingMetadata::parse(payload)?,
+                )
+                .await
             }
             MessageType::Supersede => {
                 let (metadata, body) = SupersedeMetadata::parse_with_diagnostics(payload)?;
@@ -921,6 +937,14 @@ impl NnrpClientSession {
     }
 
     pub async fn await_result(&mut self) -> Result<NnrpResult, RuntimeError> {
+        if let Some(event) = self.pending_role_events.pop_front() {
+            return match event {
+                NnrpClientRoleEvent::Lifecycle(event) => NnrpResult::from_lifecycle(event),
+                NnrpClientRoleEvent::Runtime(_) => {
+                    unreachable!("client pending role queue contains only local lifecycle events")
+                }
+            };
+        }
         match self.await_client_event_packet().await?.0 {
             NnrpClientEvent::Result(result) => Ok(result),
             _ => Err(RuntimeError::UnexpectedMessage(
@@ -929,8 +953,23 @@ impl NnrpClientSession {
         }
     }
 
-    pub async fn await_event(&mut self) -> Result<NnrpRuntimeEvent, RuntimeError> {
-        Ok(self.await_event_packet().await?.0)
+    pub async fn await_event(&mut self) -> Result<NnrpClientRoleEvent, RuntimeError> {
+        if let Some(event) = self.pending_role_events.pop_front() {
+            return Ok(event);
+        }
+        Ok(NnrpClientRoleEvent::Runtime(
+            self.await_event_packet().await?.0,
+        ))
+    }
+
+    pub fn poll_event(&mut self) -> Result<Option<NnrpClientRoleEvent>, RuntimeError> {
+        if let Some(event) = self.pending_role_events.pop_front() {
+            return Ok(Some(event));
+        }
+        Ok(self
+            .poll_event_packet_batch(1)?
+            .pop()
+            .map(|(event, _)| NnrpClientRoleEvent::Runtime(event)))
     }
 
     pub async fn await_event_packet(
@@ -1113,6 +1152,15 @@ impl NnrpClientSession {
                     "client received runtime control diagnostic body length mismatch",
                 )?;
                 self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
+                if metadata.operation_id != 0 {
+                    self.ensure_pending_role_capacity()?;
+                    let state = match packet.header.message_type {
+                        MessageType::Cancel => nnrp_core::OperationState::Cancelled,
+                        MessageType::Abort => nnrp_core::OperationState::Failed,
+                        _ => unreachable!("runtime control message type was matched earlier"),
+                    };
+                    self.complete_local_operation(metadata.operation_id, state)?;
+                }
                 Ok(NnrpClientEvent::Control {
                     message_type: packet.header.message_type,
                     metadata,
@@ -1154,6 +1202,11 @@ impl NnrpClientSession {
                     "client received SUPERSEDE diagnostic body length mismatch",
                 )?;
                 self.require_operation_frame(metadata.old_operation_id, packet.header.frame_id)?;
+                self.ensure_pending_role_capacity()?;
+                self.complete_local_operation(
+                    metadata.old_operation_id,
+                    nnrp_core::OperationState::Superseded,
+                )?;
                 Ok(NnrpClientEvent::Supersede {
                     metadata,
                     body: packet.body,
@@ -1505,6 +1558,9 @@ impl NnrpClientSession {
     }
 
     fn correlated_frame_id(&self, operation_id: u64) -> Result<u32, RuntimeError> {
+        if operation_id == 0 {
+            return Ok(0);
+        }
         self.operation_frames
             .get(&operation_id)
             .copied()
@@ -1534,6 +1590,7 @@ impl NnrpClientSession {
                     "client terminal event references an unknown frame",
                 ))?;
         self.operation_frames.remove(&operation_id);
+        self.local_operation_states.remove(&operation_id);
         Ok(operation_id)
     }
 
@@ -1541,6 +1598,7 @@ impl NnrpClientSession {
         self.require_operation_frame(operation_id, frame_id)?;
         self.operation_frames.remove(&operation_id);
         self.frame_operations.remove(&frame_id);
+        self.local_operation_states.remove(&operation_id);
         Ok(())
     }
 
@@ -1685,6 +1743,9 @@ impl NnrpClientSession {
             metadata.diagnostic_bytes as usize,
             "client runtime control diagnostic body length mismatch",
         )?;
+        if metadata.operation_id != 0 {
+            self.ensure_pending_role_capacity()?;
+        }
         let mut header = CommonHeader::new(
             message_type,
             CONTROL_REQUEST_METADATA_LEN as u32,
@@ -1698,7 +1759,16 @@ impl NnrpClientSession {
                 metadata.to_bytes()?.to_vec(),
                 diagnostics,
             )?)
-            .await
+            .await?;
+        if metadata.operation_id == 0 {
+            return Ok(());
+        }
+        let state = match message_type {
+            MessageType::Cancel => nnrp_core::OperationState::Cancelled,
+            MessageType::Abort => nnrp_core::OperationState::Failed,
+            _ => unreachable!("validated client control request is cancel or abort"),
+        };
+        self.complete_local_operation(metadata.operation_id, state)
     }
 
     pub async fn update_priority(
@@ -1777,6 +1847,56 @@ impl NnrpClientSession {
             .await
     }
 
+    async fn send_scheduling_update_for_frame(
+        &mut self,
+        message_type: MessageType,
+        frame_id: u32,
+        metadata: SchedulingMetadata,
+    ) -> Result<(), RuntimeError> {
+        validate_scheduling_semantics(message_type, &metadata)?;
+        if let Some(expected_frame_id) = self.operation_frames.get(&metadata.operation_id).copied()
+        {
+            if expected_frame_id != frame_id {
+                return Err(RuntimeError::UnexpectedMessage(
+                    "client scheduling frame id does not match its operation",
+                ));
+            }
+            return self.send_scheduling_update(message_type, metadata).await;
+        }
+        if message_type != MessageType::Deadline {
+            return Err(nnrp_core::NnrpError::UnknownOperation(metadata.operation_id).into());
+        }
+        if frame_id == 0 || frame_id < self.next_frame_id {
+            return Err(RuntimeError::UnexpectedMessage(
+                "client frame id must not be zero, reused, or moved backward",
+            ));
+        }
+        if metadata.operation_id == 0 || self.seen_operation_ids.contains(&metadata.operation_id) {
+            return Err(RuntimeError::UnexpectedMessage(
+                "client operation id must not be zero or reused",
+            ));
+        }
+
+        self.pre_submit_deadlines
+            .reserve(frame_id, metadata, current_unix_ms())?;
+        let mut header = CommonHeader::new(message_type, SCHEDULING_METADATA_LEN as u32, 0);
+        header.session_id = self.session_id;
+        header.frame_id = frame_id;
+        let result = self
+            .transport
+            .write_packet(&RuntimePacket::new(
+                header,
+                metadata.to_bytes()?.to_vec(),
+                Vec::new(),
+            )?)
+            .await;
+        if result.is_err() {
+            self.pre_submit_deadlines
+                .discard(metadata.operation_id, frame_id);
+        }
+        result
+    }
+
     pub async fn send_credit_update(
         &mut self,
         metadata: PressureMetadata,
@@ -1806,6 +1926,7 @@ impl NnrpClientSession {
             metadata.diagnostic_bytes as usize,
             "client supersede diagnostic body length mismatch",
         )?;
+        self.ensure_pending_role_capacity()?;
         let frame_id = self.correlated_frame_id(metadata.old_operation_id)?;
         self.write_runtime_packet(
             MessageType::Supersede,
@@ -1813,7 +1934,11 @@ impl NnrpClientSession {
             metadata.to_bytes()?.to_vec(),
             diagnostics,
         )
-        .await
+        .await?;
+        self.complete_local_operation(
+            metadata.old_operation_id,
+            nnrp_core::OperationState::Superseded,
+        )
     }
 
     pub async fn update_budget(&mut self, metadata: BudgetMetadata) -> Result<(), RuntimeError> {
@@ -2182,12 +2307,47 @@ impl NnrpClientSession {
     }
 
     pub async fn cancel_frame(&mut self, frame_id: u32) -> Result<(), RuntimeError> {
+        self.ensure_pending_role_capacity()?;
+        let operation_id = self.frame_operations.get(&frame_id).copied().ok_or(
+            RuntimeError::UnexpectedMessage("client frame cancel references an unknown frame"),
+        )?;
         let mut header = CommonHeader::new(MessageType::FrameCancel, 0, 0);
         header.session_id = self.session_id;
         header.frame_id = frame_id;
         self.transport
             .write_packet(&RuntimePacket::new(header, Vec::new(), Vec::new())?)
-            .await
+            .await?;
+        self.complete_local_operation(operation_id, nnrp_core::OperationState::Cancelled)
+    }
+
+    fn complete_local_operation(
+        &mut self,
+        operation_id: u64,
+        state: nnrp_core::OperationState,
+    ) -> Result<(), RuntimeError> {
+        self.correlated_frame_id(operation_id)?;
+        if let Some(current) = self.local_operation_states.get(&operation_id).copied() {
+            return Err(nnrp_core::NnrpError::InvalidOperationTransition {
+                from: current,
+                to: state,
+            }
+            .into());
+        }
+        self.local_operation_states.insert(operation_id, state);
+        self.pending_role_events
+            .push_back(NnrpClientRoleEvent::Lifecycle(
+                OperationLifecycleEvent::new(operation_id, state)?,
+            ));
+        Ok(())
+    }
+
+    fn ensure_pending_role_capacity(&self) -> Result<(), RuntimeError> {
+        if self.pending_role_events.len() >= MAX_PENDING_CLIENT_EVENTS {
+            return Err(RuntimeError::UnexpectedMessage(
+                "client local lifecycle event queue exceeded its limit",
+            ));
+        }
+        Ok(())
     }
 
     pub async fn patch_session(
@@ -2217,7 +2377,7 @@ impl NnrpClientSession {
             let ack_packet = self.transport.read_packet().await?;
             if ack_packet.header.message_type != MessageType::SessionPatchAck {
                 let event = self.decode_event_packet(ack_packet)?;
-                if self.pending_events.len() >= MAX_PENDING_EVENTS_DURING_SESSION_PATCH {
+                if self.pending_events.len() >= MAX_PENDING_CLIENT_EVENTS {
                     return Err(RuntimeError::UnexpectedMessage(
                         "client session patch exceeded the pending event limit before acknowledgement",
                     ));
@@ -2304,7 +2464,7 @@ impl NnrpClientSession {
             session_close_tag: self.session_id,
         };
         self.close_with(close).await?;
-        self.transport.close().await
+        normalize_transport_close_after_ack(self.transport.close().await)
     }
 
     pub async fn close_with(
@@ -2326,27 +2486,43 @@ impl NnrpClientSession {
             )?)
             .await?;
 
-        let ack_packet = self.transport.read_packet().await?;
-        if ack_packet.header.message_type != MessageType::SessionCloseAck {
-            return Err(RuntimeError::UnexpectedMessage(
-                "client expected SESSION_CLOSE_ACK",
-            ));
-        }
-        if ack_packet.header.session_id != self.session_id {
-            return Err(RuntimeError::UnexpectedMessage(
-                "client received close ack for another session",
-            ));
-        }
-        if ack_packet.metadata.len() != SESSION_CLOSE_ACK_METADATA_LEN {
-            return Err(RuntimeError::UnexpectedMessage(
-                "client received malformed SESSION_CLOSE_ACK metadata length",
-            ));
-        }
+        loop {
+            let ack_packet = self.transport.read_packet().await?;
+            if ack_packet.header.message_type != MessageType::SessionCloseAck {
+                let event = self.decode_event_packet(ack_packet)?;
+                if self.pending_events.len() >= MAX_PENDING_CLIENT_EVENTS {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "client session close exceeded the pending event limit before acknowledgement",
+                    ));
+                }
+                self.pending_events.push_back(event);
+                continue;
+            }
+            if ack_packet.metadata.len() != SESSION_CLOSE_ACK_METADATA_LEN {
+                return Err(RuntimeError::UnexpectedMessage(
+                    "client received malformed SESSION_CLOSE_ACK metadata length",
+                ));
+            }
+            Self::require_packet_session(
+                self.session_id,
+                &ack_packet,
+                "client received SESSION_CLOSE_ACK for another session",
+            )?;
 
-        let ack = SessionCloseAckMetadata::parse(&ack_packet.metadata)?;
-        self.lifecycle
-            .apply_session_close_ack(&ack_packet.header, &ack)?;
-        Ok(ack)
+            let ack = SessionCloseAckMetadata::parse(&ack_packet.metadata)?;
+            self.lifecycle
+                .apply_session_close_ack(&ack_packet.header, &ack)?;
+            match ack.close_status {
+                nnrp_core::SessionCloseStatus::Closed => return Ok(ack),
+                nnrp_core::SessionCloseStatus::Rejected => {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "server rejected SESSION_CLOSE",
+                    ));
+                }
+                nnrp_core::SessionCloseStatus::Acknowledged
+                | nnrp_core::SessionCloseStatus::Draining => {}
+            }
+        }
     }
 
     pub async fn close_transport(mut self) -> Result<(), RuntimeError> {
@@ -2358,7 +2534,15 @@ impl NnrpClientSession {
         packet: &RuntimePacket,
         message: &'static str,
     ) -> Result<(), RuntimeError> {
-        if packet.header.session_id != self.session_id {
+        Self::require_packet_session(self.session_id, packet, message)
+    }
+
+    fn require_packet_session(
+        session_id: u32,
+        packet: &RuntimePacket,
+        message: &'static str,
+    ) -> Result<(), RuntimeError> {
+        if packet.header.session_id != session_id {
             return Err(RuntimeError::UnexpectedMessage(message));
         }
         Ok(())
@@ -2408,6 +2592,15 @@ impl fmt::Debug for NnrpClient {
     }
 }
 
+fn normalize_transport_close_after_ack(
+    result: Result<(), RuntimeError>,
+) -> Result<(), RuntimeError> {
+    match result {
+        Err(RuntimeError::TransportClosed { .. }) => Ok(()),
+        result => result,
+    }
+}
+
 impl fmt::Debug for NnrpClientSession {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -2439,6 +2632,50 @@ mod config_tests {
         assert!(!config.allow_resume);
         assert_eq!(config.resume_token_bytes, 0);
         assert!(config.cache_hints.is_empty());
+    }
+
+    #[test]
+    fn acknowledged_session_close_accepts_an_already_closed_carrier() {
+        let closed = RuntimeError::TransportClosed {
+            transport: crate::RuntimeTransportKind::Ipc,
+            detail: "peer closed after SESSION_CLOSE_ACK".to_owned(),
+        };
+
+        assert!(normalize_transport_close_after_ack(Err(closed)).is_ok());
+        assert!(matches!(
+            normalize_transport_close_after_ack(Err(RuntimeError::Internal("close failed"))),
+            Err(RuntimeError::Internal("close failed"))
+        ));
+    }
+
+    #[test]
+    fn session_packet_validation_rejects_cross_session_close_ack() {
+        let mut matching_header = CommonHeader::new(
+            MessageType::SessionCloseAck,
+            SESSION_CLOSE_ACK_METADATA_LEN as u32,
+            0,
+        );
+        matching_header.session_id = 7;
+        let matching = RuntimePacket::new(
+            matching_header,
+            vec![0; SESSION_CLOSE_ACK_METADATA_LEN],
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(NnrpClientSession::require_packet_session(7, &matching, "wrong session",).is_ok());
+
+        let mut foreign_header = matching.header;
+        foreign_header.session_id = 9;
+        let foreign = RuntimePacket::new(
+            foreign_header,
+            vec![0; SESSION_CLOSE_ACK_METADATA_LEN],
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(matches!(
+            NnrpClientSession::require_packet_session(7, &foreign, "wrong session"),
+            Err(RuntimeError::UnexpectedMessage("wrong session"))
+        ));
     }
 
     #[test]

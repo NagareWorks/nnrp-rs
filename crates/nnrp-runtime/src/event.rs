@@ -8,7 +8,7 @@ use nnrp_core::{
     SupersedeMetadata, TraceContextMetadata,
 };
 
-use crate::{client::NnrpClientEvent, server::NnrpServerEvent, RuntimeFrameHeader};
+use crate::{client::NnrpClientEvent, server::DecodedServerEvent, RuntimeFrameHeader};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NnrpRuntimeEventMetadata {
@@ -102,16 +102,16 @@ pub enum NnrpRuntimeEventTail {
 }
 
 impl NnrpRuntimeEventTail {
-    fn append_to(self, payload: &mut Vec<u8>) {
+    fn append_to(&self, payload: &mut Vec<u8>) {
         match self {
             Self::None => {}
-            Self::Body(body) | Self::Diagnostic(body) => payload.extend_from_slice(&body),
+            Self::Body(body) | Self::Diagnostic(body) => payload.extend_from_slice(body),
             Self::MetadataBodyAndDelta {
                 metadata_body,
                 delta,
             } => {
-                payload.extend_from_slice(&metadata_body);
-                payload.extend_from_slice(&delta);
+                payload.extend_from_slice(metadata_body);
+                payload.extend_from_slice(delta);
             }
         }
     }
@@ -128,6 +128,28 @@ pub struct NnrpRuntimeEvent {
 pub struct OperationLifecycleEvent {
     pub operation_id: u64,
     pub state: OperationState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NnrpClientRoleEvent {
+    Runtime(NnrpRuntimeEvent),
+    Lifecycle(OperationLifecycleEvent),
+}
+
+impl NnrpClientRoleEvent {
+    pub fn as_runtime(&self) -> Option<&NnrpRuntimeEvent> {
+        match self {
+            Self::Runtime(event) => Some(event),
+            Self::Lifecycle(_) => None,
+        }
+    }
+
+    pub fn as_lifecycle(&self) -> Option<&OperationLifecycleEvent> {
+        match self {
+            Self::Runtime(_) => None,
+            Self::Lifecycle(event) => Some(event),
+        }
+    }
 }
 
 impl OperationLifecycleEvent {
@@ -167,7 +189,22 @@ impl NnrpTerminalEvent {
 }
 
 impl NnrpRuntimeEvent {
+    #[doc(hidden)]
+    pub fn into_wire_parts(self) -> Result<(RuntimeFrameHeader, Vec<u8>, Vec<u8>), NnrpError> {
+        let metadata = self.metadata.to_bytes()?;
+        let mut body = Vec::new();
+        self.tail.append_to(&mut body);
+        Ok((self.header, metadata, body))
+    }
+
     pub fn into_payload(self) -> Result<Vec<u8>, NnrpError> {
+        let mut payload = self.metadata.to_bytes()?;
+        self.tail.append_to(&mut payload);
+        Ok(payload)
+    }
+
+    #[doc(hidden)]
+    pub fn to_payload(&self) -> Result<Vec<u8>, NnrpError> {
         let mut payload = self.metadata.to_bytes()?;
         self.tail.append_to(&mut payload);
         Ok(payload)
@@ -287,84 +324,84 @@ impl NnrpRuntimeEvent {
         }
     }
 
-    pub(crate) fn from_server(header: RuntimeFrameHeader, event: NnrpServerEvent) -> Self {
+    pub(crate) fn from_server(header: RuntimeFrameHeader, event: DecodedServerEvent) -> Self {
         let (metadata, tail) = match event {
-            NnrpServerEvent::Submit(submit) => (
+            DecodedServerEvent::Submit(submit) => (
                 NnrpRuntimeEventMetadata::FrameSubmit(submit.metadata),
                 NnrpRuntimeEventTail::Body(submit.body),
             ),
-            NnrpServerEvent::FrameCancel(_) => {
+            DecodedServerEvent::FrameCancel(_) => {
                 (NnrpRuntimeEventMetadata::None, NnrpRuntimeEventTail::None)
             }
-            NnrpServerEvent::PartialResult { metadata, body } => (
+            DecodedServerEvent::PartialResult { metadata, body } => (
                 NnrpRuntimeEventMetadata::PartialResult(metadata),
                 NnrpRuntimeEventTail::Body(body),
             ),
-            NnrpServerEvent::Progress { metadata, body } => (
+            DecodedServerEvent::Progress { metadata, body } => (
                 NnrpRuntimeEventMetadata::Progress(metadata),
                 NnrpRuntimeEventTail::Body(body),
             ),
-            NnrpServerEvent::ResultDropReason { metadata, body } => (
+            DecodedServerEvent::ResultDropReason { metadata, body } => (
                 NnrpRuntimeEventMetadata::ResultDropReason(metadata),
                 NnrpRuntimeEventTail::Diagnostic(body),
             ),
-            NnrpServerEvent::Control(control) => (
+            DecodedServerEvent::Control(control) => (
                 NnrpRuntimeEventMetadata::ControlRequest(control.metadata),
                 NnrpRuntimeEventTail::Diagnostic(control.body),
             ),
-            NnrpServerEvent::Scheduling(update) => (
+            DecodedServerEvent::Scheduling(update) => (
                 NnrpRuntimeEventMetadata::Scheduling(update.metadata),
                 NnrpRuntimeEventTail::None,
             ),
-            NnrpServerEvent::Supersede { metadata, body } => (
+            DecodedServerEvent::Supersede { metadata, body } => (
                 NnrpRuntimeEventMetadata::Supersede(metadata),
                 NnrpRuntimeEventTail::Diagnostic(body),
             ),
-            NnrpServerEvent::Budget(metadata) => (
+            DecodedServerEvent::Budget(metadata) => (
                 NnrpRuntimeEventMetadata::Budget(metadata),
                 NnrpRuntimeEventTail::None,
             ),
-            NnrpServerEvent::FlowUpdate(metadata) => (
+            DecodedServerEvent::FlowUpdate(metadata) => (
                 NnrpRuntimeEventMetadata::FlowUpdate(metadata),
                 NnrpRuntimeEventTail::None,
             ),
-            NnrpServerEvent::Pressure(update) => (
+            DecodedServerEvent::Pressure(update) => (
                 NnrpRuntimeEventMetadata::Pressure(update.metadata),
                 NnrpRuntimeEventTail::None,
             ),
-            NnrpServerEvent::Capability { metadata, body, .. } => (
+            DecodedServerEvent::Capability { metadata, body, .. } => (
                 NnrpRuntimeEventMetadata::Capability(metadata),
                 NnrpRuntimeEventTail::Body(body),
             ),
-            NnrpServerEvent::RouteHint { metadata, body, .. } => (
+            DecodedServerEvent::RouteHint { metadata, body, .. } => (
                 NnrpRuntimeEventMetadata::RouteHint(metadata),
                 NnrpRuntimeEventTail::Body(body),
             ),
-            NnrpServerEvent::TraceContext { metadata, body, .. } => (
+            DecodedServerEvent::TraceContext { metadata, body, .. } => (
                 NnrpRuntimeEventMetadata::TraceContext(metadata),
                 NnrpRuntimeEventTail::Body(body),
             ),
-            NnrpServerEvent::RecoverableError { metadata, body } => (
+            DecodedServerEvent::RecoverableError { metadata, body } => (
                 NnrpRuntimeEventMetadata::RecoverableError(metadata),
                 NnrpRuntimeEventTail::Diagnostic(body),
             ),
-            NnrpServerEvent::RetryAfter { metadata, body } => (
+            DecodedServerEvent::RetryAfter { metadata, body } => (
                 NnrpRuntimeEventMetadata::RetryAfter(metadata),
                 NnrpRuntimeEventTail::Diagnostic(body),
             ),
-            NnrpServerEvent::ObjectDeclare { metadata, body } => (
+            DecodedServerEvent::ObjectDeclare { metadata, body } => (
                 NnrpRuntimeEventMetadata::ObjectDescriptor(metadata),
                 NnrpRuntimeEventTail::Body(body),
             ),
-            NnrpServerEvent::ObjectRef { metadata, body } => (
+            DecodedServerEvent::ObjectRef { metadata, body } => (
                 NnrpRuntimeEventMetadata::ObjectReference(metadata),
                 NnrpRuntimeEventTail::Body(body),
             ),
-            NnrpServerEvent::ObjectRelease { metadata, body } => (
+            DecodedServerEvent::ObjectRelease { metadata, body } => (
                 NnrpRuntimeEventMetadata::ObjectRelease(metadata),
                 NnrpRuntimeEventTail::Diagnostic(body),
             ),
-            NnrpServerEvent::ObjectDelta {
+            DecodedServerEvent::ObjectDelta {
                 metadata, mut body, ..
             } => {
                 let delta = body.split_off(metadata.metadata_bytes as usize);
@@ -376,19 +413,19 @@ impl NnrpRuntimeEvent {
                     },
                 )
             }
-            NnrpServerEvent::CacheReference { metadata, body } => (
+            DecodedServerEvent::CacheReference { metadata, body } => (
                 NnrpRuntimeEventMetadata::CacheReference(metadata),
                 NnrpRuntimeEventTail::Body(body),
             ),
-            NnrpServerEvent::CacheMiss { metadata, body } => (
+            DecodedServerEvent::CacheMiss { metadata, body } => (
                 NnrpRuntimeEventMetadata::CacheMiss(metadata),
                 NnrpRuntimeEventTail::Diagnostic(body),
             ),
-            NnrpServerEvent::CacheInvalidate(metadata) => (
+            DecodedServerEvent::CacheInvalidate(metadata) => (
                 NnrpRuntimeEventMetadata::CacheInvalidate(metadata),
                 NnrpRuntimeEventTail::None,
             ),
-            NnrpServerEvent::Close(metadata) => (
+            DecodedServerEvent::Close(metadata) => (
                 NnrpRuntimeEventMetadata::SessionClose(metadata),
                 NnrpRuntimeEventTail::None,
             ),
@@ -398,5 +435,50 @@ impl NnrpRuntimeEvent {
             metadata,
             tail,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nnrp_core::{HeaderFlags, MessageType, OperationState};
+
+    use super::{
+        NnrpClientRoleEvent, NnrpRuntimeEvent, NnrpRuntimeEventMetadata, NnrpRuntimeEventTail,
+        OperationLifecycleEvent,
+    };
+    use crate::RuntimeFrameHeader;
+
+    #[test]
+    fn client_role_event_union_preserves_exact_variant_and_wire_parts() {
+        let header = RuntimeFrameHeader {
+            version_major: 1,
+            wire_format: 0,
+            message_type: MessageType::Progress,
+            flags: HeaderFlags(0),
+            session_id: 7,
+            frame_id: 9,
+            view_id: 3,
+            route_id: 4,
+            trace_id: 11,
+        };
+        let runtime = NnrpRuntimeEvent {
+            header,
+            metadata: NnrpRuntimeEventMetadata::None,
+            tail: NnrpRuntimeEventTail::Body(b"progress".to_vec()),
+        };
+        let runtime_event = NnrpClientRoleEvent::Runtime(runtime.clone());
+        assert_eq!(runtime_event.as_runtime(), Some(&runtime));
+        assert!(runtime_event.as_lifecycle().is_none());
+        assert_eq!(runtime.to_payload().unwrap(), b"progress");
+
+        let (wire_header, metadata, body) = runtime.into_wire_parts().unwrap();
+        assert_eq!(wire_header, header);
+        assert!(metadata.is_empty());
+        assert_eq!(body, b"progress");
+
+        let lifecycle = OperationLifecycleEvent::new(41, OperationState::Cancelled).unwrap();
+        let lifecycle_event = NnrpClientRoleEvent::Lifecycle(lifecycle);
+        assert!(lifecycle_event.as_runtime().is_none());
+        assert_eq!(lifecycle_event.as_lifecycle(), Some(&lifecycle));
     }
 }

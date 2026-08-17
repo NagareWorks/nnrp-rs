@@ -1456,6 +1456,7 @@ mod tests {
             select_registry(&registry, &remote, TransportPolicy::Auto, None, &readiness)
                 .expect("one eligible provider should be selected directly");
 
+        assert_eq!(selection.selected_provider().name, "Tcp");
         assert_eq!(selection.selected_provider().transport_id, TransportId::Tcp);
         assert_eq!(selection.policy, TransportPolicy::Auto);
         assert_eq!(selection.diagnostic, None);
@@ -1723,6 +1724,13 @@ mod tests {
                 metrics: None,
                 diagnostic: None,
             },
+            TransportProbeObservation {
+                transport_id: TransportId::Tcp,
+                provider_id: providers[0].metadata.id.clone(),
+                state: ProbeState::NotRun,
+                metrics: None,
+                diagnostic: None,
+            },
         ] {
             assert!(matches!(
                 select_transport_with_probe(
@@ -1790,6 +1798,27 @@ mod tests {
                 Err(TransportSelectionError::InvalidEvidence { .. })
             ));
         }
+    }
+
+    #[test]
+    fn selection_treats_peer_support_as_a_set_and_accepts_zero_frame_requests() {
+        let providers = [available(TransportId::Tcp)];
+        let readiness = ready(&providers);
+        let selection = super::select_transport(
+            &providers,
+            &TransportSelectionOptions {
+                peer_supported_transports: vec![TransportId::Tcp, TransportId::Tcp],
+                policy: TransportPolicy::Auto,
+                requested_max_frame_bytes: Some(0),
+                candidate_readiness: readiness,
+                probe_observations: Vec::new(),
+            },
+        )
+        .expect("duplicate peer support entries and a zero-byte request are valid");
+
+        assert_eq!(selection.selected_provider.transport_id, TransportId::Tcp);
+        assert!(selection.candidates[0].peer_supported);
+        assert!(selection.candidates[0].within_limits);
     }
 
     #[test]

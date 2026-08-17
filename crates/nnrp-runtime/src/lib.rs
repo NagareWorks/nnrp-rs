@@ -4,6 +4,7 @@ pub mod error;
 pub mod event;
 mod multiplex;
 pub mod packet;
+mod pre_submit;
 pub mod pressure;
 pub mod route;
 pub mod server;
@@ -17,8 +18,8 @@ pub use client::{
 pub use client_provider::{NnrpClientOptions, NnrpClientProvider};
 pub use error::RuntimeError;
 pub use event::{
-    NnrpRuntimeEvent, NnrpRuntimeEventMetadata, NnrpRuntimeEventTail, NnrpTerminalEvent,
-    OperationLifecycleEvent,
+    NnrpClientRoleEvent, NnrpRuntimeEvent, NnrpRuntimeEventMetadata, NnrpRuntimeEventTail,
+    NnrpTerminalEvent, OperationLifecycleEvent,
 };
 pub use nnrp_core::{CacheLeaseResult, CachePolicyOptions};
 pub use packet::{RuntimeFrameHeader, RuntimePacket};
@@ -30,8 +31,8 @@ pub use route::{
 };
 pub use server::{
     AllowAllServerPolicy, NnrpCancel, NnrpMigration, NnrpPressureUpdate, NnrpRuntimeControl,
-    NnrpSchedulingUpdate, NnrpServer, NnrpServerAcceptOptions, NnrpServerConfig, NnrpServerPolicy,
-    NnrpServerPolicyDecision, NnrpServerSession, NnrpSubmit,
+    NnrpSchedulingUpdate, NnrpServer, NnrpServerAcceptOptions, NnrpServerConfig, NnrpServerEvent,
+    NnrpServerOperation, NnrpServerPolicy, NnrpServerPolicyDecision, NnrpServerSession,
 };
 pub use server_provider::{BoundServerProvider, NnrpServerOptions, NnrpServerProvider};
 pub use submit::{

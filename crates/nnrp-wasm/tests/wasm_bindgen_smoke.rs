@@ -6,27 +6,50 @@ use futures_util::future::{select, Either};
 use js_sys::{Array, Function, Promise, Reflect, Uint8Array};
 use nnrp_core::{
     BudgetMetadata, ClientHelloMetadata, CommonHeader, ControlRequestMetadata, FrameSubmitMetadata,
-    HeaderFlags, InputProfile, MessageType, PayloadKindBitmap, ProgressMetadata, ResultClass,
-    ResultPushMetadata, RuntimeRole, ServerHelloAckMetadata, SessionCloseAckMetadata,
-    SessionCloseMetadata, SessionCloseStatus, SessionOpenAckMetadata, SessionOpenMetadata,
-    SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata, SessionPatchRejectReason,
-    SessionPriorityClass, SessionStatus, SubmitMode, TileIndexMode,
+    HeaderFlags, InputProfile, MessageType, OperationState, PayloadKindBitmap, ProgressMetadata,
+    ResultClass, ResultPushMetadata, RuntimeRole, SchedulingMetadata, ServerHelloAckMetadata,
+    SessionCloseAckMetadata, SessionCloseMetadata, SessionCloseStatus, SessionOpenAckMetadata,
+    SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata,
+    SessionPatchRejectReason, SessionPriorityClass, SessionStatus, SubmitMode, TileIndexMode,
     CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED, CURRENT_VERSION_MAJOR, CURRENT_WIRE_FORMAT,
     PROGRESS_METADATA_LEN, RESULT_PUSH_METADATA_LEN, SERVER_HELLO_ACK_METADATA_LEN,
     SESSION_ACK_FLAG_RESUME_ENABLED, SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE,
     SESSION_FLAG_ALLOW_RESUME, SESSION_OPEN_ACK_METADATA_LEN, SESSION_PATCH_ACK_METADATA_LEN,
     STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
 };
-use nnrp_runtime::{NnrpSubmitHeaderContext, RuntimePacket};
+use nnrp_runtime::{
+    NnrpClientRoleEvent, NnrpSubmitHeaderContext, OperationLifecycleEvent, RuntimePacket,
+};
 use nnrp_wasm::{
     decode_runtime_control_metadata_json, decode_websocket_binary_frame_batch_json,
     decode_websocket_binary_frame_json, encode_runtime_control_metadata_json,
     encode_websocket_binary_frame_json, open_browser_client_connection, BrowserClientConnection,
+    BrowserClientEventPacket,
 };
 use serde_json::Value;
 use wasm_bindgen::{closure::Closure, JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::wasm_bindgen_test;
+
+#[wasm_bindgen_test]
+fn browser_lifecycle_event_projection_preserves_the_frozen_absent_header_shape() {
+    let projected = BrowserClientEventPacket::try_from(NnrpClientRoleEvent::Lifecycle(
+        OperationLifecycleEvent::new(41, OperationState::Cancelled).unwrap(),
+    ))
+    .unwrap();
+
+    assert_eq!(projected.event_kind(), 14);
+    assert_eq!(projected.header_present(), 0);
+    assert_eq!(projected.related_operation_id(), 41);
+    assert_eq!(
+        projected.operation_state(),
+        Some(OperationState::Cancelled as u8)
+    );
+    assert_eq!(projected.version_major(), 0);
+    assert_eq!(projected.message_type(), 0);
+    assert!(projected.metadata().to_vec().is_empty());
+    assert!(projected.body().to_vec().is_empty());
+}
 
 #[wasm_bindgen_test]
 fn wasm_bindgen_websocket_frame_codec_round_trips() {
@@ -244,6 +267,23 @@ async fn wasm_bindgen_browser_role_runs_real_session_submit_and_close() {
         .expect("browser role should open a real NNRP session");
 
     let submit = token_submit(42);
+    let deadline = SchedulingMetadata {
+        operation_id: submit.operation_id,
+        control_sequence: 1,
+        priority_class: 0,
+        priority_delta: 0,
+        deadline_unix_ms: 4_000_000_000_000,
+        flags: 0,
+    };
+    role.send_runtime_frame(
+        MessageType::Deadline as u8,
+        9,
+        &deadline
+            .to_bytes()
+            .expect("deadline metadata should encode"),
+    )
+    .await
+    .expect("browser role should reserve a deadline before submit");
     let mut payload = Vec::from(submit.to_bytes().expect("submit metadata should encode"));
     payload.extend_from_slice(b"prompt");
     assert_eq!(
@@ -431,6 +471,25 @@ async fn browser_role_routes_control_and_patch_while_event_receive_is_pending() 
             }
             MessageType::FrameSubmit => {
                 FrameSubmitMetadata::parse(metadata).expect("frame submit should parse");
+                let progress = ProgressMetadata {
+                    operation_id: 42,
+                    progress_sequence: 0,
+                    stage_code: 6,
+                    percent_x100: 2_500,
+                    object_id: 0,
+                    body_bytes: 0,
+                };
+                send_responses.borrow_mut().push_back(response_packet(
+                    MessageType::Progress,
+                    header.session_id,
+                    header.frame_id,
+                    progress
+                        .to_bytes()
+                        .expect("post-submit progress should encode")
+                        .to_vec(),
+                    Vec::new(),
+                    PROGRESS_METADATA_LEN,
+                ));
             }
             MessageType::Cancel => {
                 let cancel = ControlRequestMetadata::parse(metadata)
@@ -560,9 +619,22 @@ async fn browser_role_routes_control_and_patch_while_event_receive_is_pending() 
     let submit = token_submit(42);
     let mut submit_payload = Vec::from(submit.to_bytes().expect("submit metadata should encode"));
     submit_payload.extend_from_slice(b"prompt");
-    role.submit_no_wait(9, NnrpSubmitHeaderContext::default(), &submit_payload)
-        .await
-        .expect("concurrent browser role should submit");
+    let event_future = role.await_event();
+    let submit_future = role.submit_no_wait(9, NnrpSubmitHeaderContext::default(), &submit_payload);
+    let (event, submitted_frame_id) = drive_scripted_operation(
+        &connection,
+        &responses,
+        futures_util::future::join(event_future, submit_future),
+    )
+    .await;
+    assert_eq!(
+        submitted_frame_id.expect("concurrent browser role should submit"),
+        9
+    );
+    let event = event.expect("submit should wake a pending browser event receive");
+    assert_eq!(event.event_kind(), 13);
+    assert_eq!(event.header_present(), 1);
+    assert_eq!(event.message_type(), MessageType::Progress as u8);
 
     let cancel = ControlRequestMetadata {
         operation_id: 42,
@@ -585,15 +657,28 @@ async fn browser_role_routes_control_and_patch_while_event_receive_is_pending() 
     cancel_result.expect("cancel should write while receive remains pending");
     assert!(*cancel_observed.borrow());
     let event = event.expect("pending receive should finish after cancel is written");
-    assert_eq!(event.version_major(), 1);
-    assert_eq!(event.wire_format(), 0);
-    assert_eq!(event.message_type(), MessageType::Progress as u8);
-    assert_eq!(event.flags(), 0);
-    assert_eq!(event.session_id(), 7);
-    assert_eq!(event.frame_id(), 9);
-    assert_eq!(event.view_id(), 0);
-    assert_eq!(event.route_id(), 0);
-    assert_eq!(event.trace_id(), 0);
+    assert_eq!(event.event_kind(), 14);
+    assert_eq!(event.header_present(), 0);
+    assert_eq!(event.related_operation_id(), 42);
+    assert_eq!(
+        event.operation_state(),
+        Some(nnrp_core::OperationState::Cancelled as u8)
+    );
+
+    let progress = drive_scripted_operation(&connection, &responses, role.await_event())
+        .await
+        .expect("wire progress should remain available after local lifecycle delivery");
+    assert_eq!(progress.event_kind(), 13);
+    assert_eq!(progress.header_present(), 1);
+    assert_eq!(progress.version_major(), 1);
+    assert_eq!(progress.wire_format(), 0);
+    assert_eq!(progress.message_type(), MessageType::Progress as u8);
+    assert_eq!(progress.flags(), 0);
+    assert_eq!(progress.session_id(), 7);
+    assert_eq!(progress.frame_id(), 9);
+    assert_eq!(progress.view_id(), 0);
+    assert_eq!(progress.route_id(), 0);
+    assert_eq!(progress.trace_id(), 0);
 
     let patch = SessionPatchMetadata {
         profile_id: STANDARD_PROFILE_TOKEN,
@@ -847,6 +932,13 @@ fn browser_role_responses(packet: &[u8]) -> Vec<Vec<u8>> {
                 resume_token,
                 SESSION_OPEN_ACK_METADATA_LEN,
             )]
+        }
+        MessageType::Deadline => {
+            let deadline = SchedulingMetadata::parse(metadata).expect("deadline should parse");
+            assert_eq!(header.session_id, 7);
+            assert_eq!(header.frame_id, 9);
+            assert_eq!(deadline.operation_id, 42);
+            Vec::new()
         }
         MessageType::FrameSubmit => {
             FrameSubmitMetadata::parse(metadata).expect("frame submit should parse");

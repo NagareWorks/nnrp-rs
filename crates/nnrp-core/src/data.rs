@@ -9,6 +9,7 @@ pub const RESULT_PUSH_METADATA_LEN: usize = 64;
 pub const BODY_REGION_PRELUDE_LEN: usize = 32;
 pub const INLINE_OBJECT_BLOCK_HEADER_LEN: usize = 16;
 pub const OBJECT_REFERENCE_BLOCK_LEN: usize = 24;
+pub const EXTENSION_FRAME_DESCRIPTOR_LEN: usize = 16;
 pub const TENSOR_SECTION_DESCRIPTOR_LEN: usize = 32;
 
 pub const BUDGET_POLICY_KNOWN_MASK: u8 = 0x0f;
@@ -484,22 +485,45 @@ impl ResultPushMetadata {
     }
 
     pub fn validate_payload_shape(&self) -> Result<(), NnrpError> {
-        if self.payload_kind_bitmap.contains_tensor() {
-            return Ok(());
-        }
-
-        if self.section_count != 0
-            || self.tile_count != 0
-            || self.tile_base_id != 0
-            || self.tile_index_bytes != 0
-            || self.covered_tile_count != 0
-            || self.dropped_tile_count != 0
-        {
+        let is_stale =
+            self.result_class == ResultClass::StaleReuse || (self.result_flags & 0x0001) != 0;
+        if is_stale != (self.reused_frame_id != 0) {
             return Err(NnrpError::InvalidProtocolCombination {
-                rule: "non-tensor RESULT_PUSH must clear tensor coverage fields",
+                rule: "RESULT_PUSH stale semantics and reused_frame_id must agree",
             });
         }
 
+        if !self.payload_kind_bitmap.contains_tensor() {
+            if self.section_count != 0
+                || self.tile_count != 0
+                || self.tile_base_id != 0
+                || self.tile_index_bytes != 0
+                || self.covered_tile_count != 0
+                || self.dropped_tile_count != 0
+            {
+                return Err(NnrpError::InvalidProtocolCombination {
+                    rule: "non-tensor RESULT_PUSH must clear tensor coverage fields",
+                });
+            }
+            return Ok(());
+        }
+
+        let is_partial =
+            self.result_class == ResultClass::Partial || (self.result_flags & 0x0004) != 0;
+        if is_partial && self.dropped_tile_count == 0 {
+            return Err(NnrpError::InvalidProtocolCombination {
+                rule: "partial RESULT_PUSH must report dropped tiles",
+            });
+        }
+        if self.covered_tile_count > self.tile_count
+            || self.dropped_tile_count > self.tile_count
+            || u32::from(self.covered_tile_count) + u32::from(self.dropped_tile_count)
+                != u32::from(self.tile_count)
+        {
+            return Err(NnrpError::InvalidProtocolCombination {
+                rule: "RESULT_PUSH coverage must equal tile_count",
+            });
+        }
         Ok(())
     }
 }
@@ -572,6 +596,16 @@ impl BodyRegionPrelude {
         if self.object_reference_bytes as usize % OBJECT_REFERENCE_BLOCK_LEN != 0 {
             return Err(NnrpError::InvalidProtocolCombination {
                 rule: "object_reference_bytes must be a multiple of object reference block length",
+            });
+        }
+        if self.typed_payload_descriptor_bytes as usize % TYPED_PAYLOAD_DESCRIPTOR_LEN != 0 {
+            return Err(NnrpError::InvalidProtocolCombination {
+                rule: "typed_payload_descriptor_bytes must be a multiple of typed payload descriptor length",
+            });
+        }
+        if self.extension_descriptor_bytes as usize % EXTENSION_FRAME_DESCRIPTOR_LEN != 0 {
+            return Err(NnrpError::InvalidProtocolCombination {
+                rule: "extension_descriptor_bytes must be a multiple of extension frame descriptor length",
             });
         }
         Ok(())
@@ -1365,7 +1399,7 @@ mod tests {
     fn result_push_metadata_round_trips_frozen_layout() {
         let metadata = ResultPushMetadata {
             status_code: 0,
-            result_flags: 0x0004,
+            result_flags: 0x0005,
             section_count: 1,
             tile_count: 84,
             active_profile_id: 2,
@@ -1388,6 +1422,83 @@ mod tests {
 
         assert_eq!(bytes.len(), RESULT_PUSH_METADATA_LEN);
         assert_eq!(ResultPushMetadata::parse(&bytes).unwrap(), metadata);
+    }
+
+    #[test]
+    fn result_push_requires_partial_coverage_and_explicit_stale_reuse() {
+        let valid = ResultPushMetadata {
+            status_code: 0,
+            result_flags: 0x0005,
+            section_count: 1,
+            tile_count: 4,
+            active_profile_id: 1,
+            inference_ms: 1,
+            queue_ms: 0,
+            server_total_ms: 1,
+            tile_base_id: 0,
+            tile_index_bytes: 0,
+            result_class: ResultClass::Partial,
+            applied_budget_policy: 0x03,
+            reused_frame_id: 9,
+            covered_tile_count: 3,
+            dropped_tile_count: 1,
+            payload_kind_bitmap: PayloadKindBitmap(PayloadKindBitmap::TENSOR),
+            payload_frame_count: 1,
+        };
+
+        assert!(valid.to_bytes().is_ok());
+        assert_eq!(
+            ResultPushMetadata {
+                result_flags: 0x0004,
+                ..valid
+            }
+            .to_bytes(),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "RESULT_PUSH stale semantics and reused_frame_id must agree"
+            })
+        );
+        assert_eq!(
+            ResultPushMetadata {
+                reused_frame_id: 0,
+                ..valid
+            }
+            .to_bytes(),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "RESULT_PUSH stale semantics and reused_frame_id must agree"
+            })
+        );
+        assert_eq!(
+            ResultPushMetadata {
+                dropped_tile_count: 0,
+                ..valid
+            }
+            .to_bytes(),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "partial RESULT_PUSH must report dropped tiles"
+            })
+        );
+        assert_eq!(
+            ResultPushMetadata {
+                covered_tile_count: 2,
+                ..valid
+            }
+            .to_bytes(),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "RESULT_PUSH coverage must equal tile_count"
+            })
+        );
+        assert_eq!(
+            ResultPushMetadata {
+                tile_count: u16::MAX,
+                covered_tile_count: u16::MAX,
+                dropped_tile_count: u16::MAX,
+                ..valid
+            }
+            .to_bytes(),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "RESULT_PUSH coverage must equal tile_count"
+            })
+        );
     }
 
     #[test]
@@ -1521,6 +1632,30 @@ mod tests {
             prelude.to_bytes(),
             Err(NnrpError::InvalidProtocolCombination {
                 rule: "object_reference_bytes must be a multiple of object reference block length"
+            })
+        );
+
+        let prelude = BodyRegionPrelude {
+            object_reference_bytes: 0,
+            typed_payload_descriptor_bytes: TYPED_PAYLOAD_DESCRIPTOR_LEN as u32 - 1,
+            ..prelude
+        };
+        assert_eq!(
+            prelude.to_bytes(),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "typed_payload_descriptor_bytes must be a multiple of typed payload descriptor length"
+            })
+        );
+
+        let prelude = BodyRegionPrelude {
+            typed_payload_descriptor_bytes: 0,
+            extension_descriptor_bytes: EXTENSION_FRAME_DESCRIPTOR_LEN as u32 - 1,
+            ..prelude
+        };
+        assert_eq!(
+            prelude.to_bytes(),
+            Err(NnrpError::InvalidProtocolCombination {
+                rule: "extension_descriptor_bytes must be a multiple of extension frame descriptor length"
             })
         );
     }
