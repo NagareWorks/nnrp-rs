@@ -67,6 +67,23 @@ class ConformanceWorkflowSyncTests(unittest.TestCase):
                 self.assertNotIn("nnrp-1-preview2.capabilities.json", workflow)
                 self.assertNotIn("nnrp-1-preview3.capabilities.json", workflow)
 
+    def test_release_builds_every_artifact_from_one_immutable_source(self) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+
+        self.assertIn("prepare:", workflow)
+        self.assertIn("python scripts/release_identity.py resolve --github-output", workflow)
+        self.assertGreaterEqual(
+            workflow.count("ref: ${{ needs.prepare.outputs.source_commit }}"), 2
+        )
+        self.assertIn("NNRP_SOURCE_COMMIT: ${{ needs.prepare.outputs.source_commit }}", workflow)
+        self.assertIn("python scripts/release_identity.py verify-tag", workflow)
+        self.assertIn("python scripts/release_identity.py verify-registry", workflow)
+        self.assertIn("python scripts/release_identity.py create-bom", workflow)
+        self.assertIn("python scripts/release_identity.py verify-bom", workflow)
+        self.assertIn('--sdk-version "${{ needs.prepare.outputs.package_version }}"', workflow)
+        self.assertIn('--source-commit "${{ needs.prepare.outputs.source_commit }}"', workflow)
+        self.assertNotIn("steps.version.outputs", workflow.split("package:", 1)[1])
+
 
 if __name__ == "__main__":
     unittest.main()

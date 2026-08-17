@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -52,6 +53,20 @@ TRANSPORT_SCOPES = {
         },
     },
 }
+
+
+def artifact_identity() -> tuple[str, str]:
+    workspace = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+    version = os.environ.get("NNRP_RELEASE_VERSION") or workspace["workspace"]["package"]["version"]
+    source_commit = os.environ.get("NNRP_SOURCE_COMMIT")
+    if source_commit is None:
+        source_commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+        ).strip()
+    source_commit = source_commit.lower()
+    if re.fullmatch(r"[0-9a-f]{40}", source_commit) is None:
+        raise SystemExit("NNRP source commit must be a full 40-character Git SHA")
+    return version, source_commit
 
 
 def declared_string_union(typescript: str, name: str) -> set[str]:
@@ -200,6 +215,7 @@ def package_wasm(out_dir: Path, transport_scope: str) -> Path:
     shutil.copy2(source_wasm, package_dir / "nnrp_wasm_bg.wasm")
     shutil.copy2(source_glue, package_dir / "nnrp_wasm.js")
     shutil.copy2(source_dts, package_dir / "nnrp_wasm.d.ts")
+    sdk_version, source_commit = artifact_identity()
     manifest = {
         "package": scope["package"],
         "artifact": scope["artifact"],
@@ -207,6 +223,8 @@ def package_wasm(out_dir: Path, transport_scope: str) -> Path:
         "transport_scope": transport_scope,
         "transport_slots": scope["slots"],
         "protocol_version": PROTOCOL_VERSION,
+        "sdk_version": sdk_version,
+        "source_commit": source_commit,
         "abi_version": WASM_ABI_VERSION,
         "enabled_features": scope["features"],
         "provider": scope["provider"],
