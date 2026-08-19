@@ -1964,6 +1964,102 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
 }
 
 #[tokio::test]
+async fn tcp_loopback_enforces_trace_context_correlation_scopes() -> Result<(), RuntimeError> {
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
+    let addr = server.local_addr()?;
+
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        let submit = session.receive_submit().await?;
+        let metadata = trace_context(5);
+
+        assert!(matches!(
+            session
+                .send_trace_context(submit.frame_id + 1, metadata, b"trace".to_vec())
+                .await,
+            Err(RuntimeError::UnexpectedMessage(
+                "server TRACE_CONTEXT references an unknown operation frame"
+            ))
+        ));
+
+        for expected_frame_id in [0, submit.frame_id] {
+            match session.await_event().await? {
+                NnrpServerEvent::Runtime(NnrpRuntimeEvent {
+                    header,
+                    metadata: NnrpRuntimeEventMetadata::TraceContext(observed),
+                    tail: NnrpRuntimeEventTail::Body(body),
+                }) => {
+                    assert_eq!(header.frame_id, expected_frame_id);
+                    assert_eq!(header.trace_id, metadata.trace_id);
+                    assert_eq!(observed, metadata);
+                    assert_eq!(body, b"trace".to_vec());
+                }
+                event => panic!("expected client trace context, got {event:?}"),
+            }
+        }
+
+        session
+            .send_trace_context(0, metadata, b"trace".to_vec())
+            .await?;
+        session
+            .send_trace_context(submit.frame_id, metadata, b"trace".to_vec())
+            .await?;
+        submit
+            .send_result(&mut session, token_result(), b"done".to_vec())
+            .await?;
+        expect_completed_lifecycle(&mut session, submit.operation_id).await?;
+
+        let close = session.receive_close().await?;
+        session.ack_close(&close).await?;
+        session.close().await
+    });
+
+    let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
+    let mut session = client.open_session().await?;
+    let operation_id = 3_004;
+    let frame_id = session
+        .submit_encoded_nowait(token_submit(operation_id), b"prompt".to_vec())
+        .await?;
+    let metadata = trace_context(5);
+
+    assert!(matches!(
+        session
+            .send_trace_context(frame_id + 1, metadata, b"trace".to_vec())
+            .await,
+        Err(RuntimeError::UnexpectedMessage(
+            "client TRACE_CONTEXT references an unknown operation frame"
+        ))
+    ));
+    session
+        .send_trace_context(0, metadata, b"trace".to_vec())
+        .await?;
+    session
+        .send_trace_context(frame_id, metadata, b"trace".to_vec())
+        .await?;
+
+    for expected_frame_id in [0, frame_id] {
+        match expect_client_runtime_event(session.await_event().await?) {
+            NnrpRuntimeEvent {
+                header,
+                metadata: NnrpRuntimeEventMetadata::TraceContext(observed),
+                tail: NnrpRuntimeEventTail::Body(body),
+            } => {
+                assert_eq!(header.frame_id, expected_frame_id);
+                assert_eq!(header.trace_id, metadata.trace_id);
+                assert_eq!(observed, metadata);
+                assert_eq!(body, b"trace".to_vec());
+            }
+            event => panic!("expected server trace context, got {event:?}"),
+        }
+    }
+
+    assert_eq!(session.await_result().await?.operation_id, operation_id);
+    session.close().await?;
+    server_task.await.expect("server task should join")?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn tcp_loopback_releases_objects_after_cancel_and_reports_cache_miss(
 ) -> Result<(), RuntimeError> {
     let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default()).await?;
@@ -4256,9 +4352,7 @@ async fn scripted_client_session(
 async fn scripted_client_session_packets(
     mut packets: Vec<RuntimePacket>,
 ) -> Result<nnrp_runtime::NnrpClientSession, RuntimeError> {
-    let operation_correlated = packets
-        .iter()
-        .any(|packet| is_operation_correlated_message(packet.header.message_type));
+    let operation_correlated = packets.iter().any(packet_requires_operation);
     for packet in &mut packets {
         if is_operation_correlated_message(packet.header.message_type)
             && packet.header.frame_id == 0
@@ -5015,6 +5109,14 @@ fn mismatched_operation_packets() -> Result<Vec<RuntimePacket>, RuntimeError> {
         deadline_unix_ms: 0,
         flags: 0,
     };
+    let mut mismatched_trace_id = operation_event_packet(
+        MessageType::TraceContext,
+        1,
+        trace_context(0).to_bytes()?.to_vec(),
+        Vec::new(),
+    )?;
+    mismatched_trace_id.header.trace_id = trace_context(0).trace_id + 1;
+
     Ok(vec![
         operation_event_packet(
             MessageType::ResultDropReason,
@@ -5102,7 +5204,19 @@ fn mismatched_operation_packets() -> Result<Vec<RuntimePacket>, RuntimeError> {
                 .to_vec(),
             Vec::new(),
         )?,
+        operation_event_packet(
+            MessageType::TraceContext,
+            2,
+            trace_context(0).to_bytes()?.to_vec(),
+            Vec::new(),
+        )?,
+        mismatched_trace_id,
     ])
+}
+
+fn packet_requires_operation(packet: &RuntimePacket) -> bool {
+    is_operation_correlated_message(packet.header.message_type)
+        || (packet.header.message_type == MessageType::TraceContext && packet.header.frame_id != 0)
 }
 
 fn is_operation_correlated_message(message_type: MessageType) -> bool {
@@ -5125,6 +5239,17 @@ fn is_operation_correlated_message(message_type: MessageType) -> bool {
             | MessageType::ObjectRef
             | MessageType::ObjectRelease
     )
+}
+
+fn trace_context(body_bytes: u32) -> TraceContextMetadata {
+    TraceContextMetadata {
+        trace_id: 101,
+        span_id: 102,
+        parent_span_id: 100,
+        stage_code: 1,
+        flags: 0,
+        body_bytes,
+    }
 }
 
 fn object_event_packet(
