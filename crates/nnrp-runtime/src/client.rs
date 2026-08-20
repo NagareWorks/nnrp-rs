@@ -1464,6 +1464,12 @@ impl NnrpClientSession {
                 }
                 let metadata = TraceContextMetadata::parse(&packet.metadata)?;
                 validate_trace_context_semantics(&metadata)?;
+                self.require_trace_context_frame(packet.header.frame_id)?;
+                if packet.header.trace_id != 0 && packet.header.trace_id != metadata.trace_id {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "client TRACE_CONTEXT header trace id does not match metadata",
+                    ));
+                }
                 require_body_len(
                     packet.body.len(),
                     metadata.body_bytes as usize,
@@ -1577,6 +1583,27 @@ impl NnrpClientSession {
         if self.correlated_frame_id(operation_id)? != frame_id {
             return Err(RuntimeError::UnexpectedMessage(
                 "client runtime event frame id does not match its operation",
+            ));
+        }
+        Ok(())
+    }
+
+    fn require_trace_context_frame(&self, frame_id: u32) -> Result<(), RuntimeError> {
+        if frame_id == 0 {
+            return Ok(());
+        }
+        let operation_id = self.frame_operations.get(&frame_id).copied().ok_or(
+            RuntimeError::UnexpectedMessage(
+                "client TRACE_CONTEXT references an unknown operation frame",
+            ),
+        )?;
+        if self
+            .local_operation_states
+            .get(&operation_id)
+            .is_some_and(|state| state.is_terminal())
+        {
+            return Err(RuntimeError::UnexpectedMessage(
+                "client TRACE_CONTEXT references a terminal operation",
             ));
         }
         Ok(())
@@ -2011,13 +2038,22 @@ impl NnrpClientSession {
             metadata.body_bytes as usize,
             "client trace context body length mismatch",
         )?;
-        self.write_runtime_packet(
+        self.require_trace_context_frame(frame_id)?;
+        let mut header = CommonHeader::new(
             MessageType::TraceContext,
-            frame_id,
-            metadata.to_bytes()?.to_vec(),
-            body,
-        )
-        .await
+            TRACE_CONTEXT_METADATA_LEN as u32,
+            body.len() as u32,
+        );
+        header.session_id = self.session_id;
+        header.frame_id = frame_id;
+        header.trace_id = metadata.trace_id;
+        self.transport
+            .write_packet(&RuntimePacket::new(
+                header,
+                metadata.to_bytes()?.to_vec(),
+                body,
+            )?)
+            .await
     }
 
     pub async fn send_recoverable_error(

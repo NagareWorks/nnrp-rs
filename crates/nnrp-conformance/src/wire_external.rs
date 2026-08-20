@@ -928,6 +928,7 @@ mod tests {
     use crate::wire_endpoint::{ReferenceTransport, WireEndpointSecurity, WireReferenceEndpoint};
 
     const RESULT_DROP_REASON_SUPERSEDED: u16 = 0x0002;
+    const SESSION_SCOPED_FRAME_ID: u32 = 0;
 
     #[test]
     fn external_wire_expectation_rejects_headerless_client_lifecycle() {
@@ -1171,7 +1172,7 @@ mod tests {
             }
         }
         session
-            .send_trace_context(submit.frame_id, cancel_trace(), TRACE_BODY.to_vec())
+            .send_trace_context(SESSION_SCOPED_FRAME_ID, cancel_trace(), TRACE_BODY.to_vec())
             .await?;
         submit
             .send_result_drop(

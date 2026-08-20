@@ -1,5 +1,18 @@
 # NNRP/1 Preview4 Release Notes
 
+## 1.0.0-preview.4.24
+
+Preview4.24 closes operation-scoped `TRACE_CONTEXT` correlation across the Rust runtime, native
+FFI, downstream SDK contract, and independent wire Conformance. Session-scoped trace context uses
+frame id zero. Operation-scoped trace context uses the active operation's `FRAME_SUBMIT` frame id,
+rejects unknown, mismatched, or terminal operations, and preserves equality between a non-zero
+common-header trace id and `TraceContextMetadata.trace_id`.
+
+The native boundary remains coarse and the FFI ABI remains `4.4.0`; the correction adds no
+per-field or per-frame boundary calls. Release and CI inputs now bind the finalized payload-
+invariant Conformance merge commit and contract-version-15 documentation commit. GitHub releases
+for Preview versions are explicitly marked as prereleases.
+
 ## 1.0.0-preview.4.23
 
 Preview4.23 is the coordinated contract-version-15 baseline. It includes the server-event and

@@ -3,8 +3,8 @@ import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-CONFORMANCE_REVISION = "685505dc0624f68ff4d660c78d24ea7e9b1b0290"
-DOC_REVISION = "3439ded0d318bd736f6485b17f2563fae77627bf"
+CONFORMANCE_REVISION = "efb0d965d5a18d0a86fd50cb69efccce0b43c089"
+DOC_REVISION = "4319692b4c0a697fe5d360e55bafa2b83f5bbb3d"
 
 
 class ConformanceWorkflowSyncTests(unittest.TestCase):
@@ -83,6 +83,14 @@ class ConformanceWorkflowSyncTests(unittest.TestCase):
         self.assertIn('--sdk-version "${{ needs.prepare.outputs.package_version }}"', workflow)
         self.assertIn('--source-commit "${{ needs.prepare.outputs.source_commit }}"', workflow)
         self.assertNotIn("steps.version.outputs", workflow.split("package:", 1)[1])
+
+    def test_release_marks_prerelease_versions_as_prereleases(self) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "prerelease: ${{ contains(needs.prepare.outputs.package_version, '-') }}",
+            workflow,
+        )
 
 
 if __name__ == "__main__":
