@@ -1,5 +1,16 @@
 # NNRP/1 Preview4 Release Notes
 
+## 1.0.0-preview.4.25
+
+Preview4.25 closes the terminal-operation streaming boundary. Client and server roles now reject
+`PROGRESS` and `PARTIAL_RESULT` locally when their operation is already cancelled, superseded,
+failed, or completed, and receivers reject the same invalid wire sequence. The validation happens
+before another transport write, so an application error cannot surface later as an unrelated peer
+disconnect.
+
+The Windows native-artifact matrix now executes the IPC transport and native role-carrier E2E
+tests. The native FFI remains coarse and ABI `4.4.0` is unchanged.
+
 ## 1.0.0-preview.4.24
 
 Preview4.24 closes operation-scoped `TRACE_CONTEXT` correlation across the Rust runtime, native

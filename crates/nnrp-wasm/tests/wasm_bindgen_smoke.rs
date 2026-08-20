@@ -3,7 +3,7 @@
 use std::{cell::RefCell, collections::VecDeque, future::Future, rc::Rc};
 
 use futures_util::future::{select, Either};
-use js_sys::{Array, Function, Promise, Reflect, Uint8Array};
+use js_sys::{Array, Function, Promise, Uint8Array};
 use nnrp_core::{
     BudgetMetadata, ClientHelloMetadata, CommonHeader, ControlRequestMetadata, FrameSubmitMetadata,
     HeaderFlags, InputProfile, MessageType, OperationState, PayloadKindBitmap, ProgressMetadata,
@@ -497,51 +497,11 @@ async fn browser_role_routes_control_and_patch_while_event_receive_is_pending() 
                 assert_eq!(cancel.operation_id, 42);
                 assert_eq!(header.frame_id, 9);
                 *send_cancel_observed.borrow_mut() = true;
-
-                let progress = ProgressMetadata {
-                    operation_id: 42,
-                    progress_sequence: 1,
-                    stage_code: 7,
-                    percent_x100: 5_000,
-                    object_id: 0,
-                    body_bytes: 0,
-                };
-                let event = response_packet(
-                    MessageType::Progress,
-                    header.session_id,
-                    header.frame_id,
-                    progress
-                        .to_bytes()
-                        .expect("progress should encode")
-                        .to_vec(),
-                    Vec::new(),
-                    PROGRESS_METADATA_LEN,
-                );
-                send_responses.borrow_mut().push_back(event);
             }
             MessageType::SessionPatch => {
                 let patch = SessionPatchMetadata::parse(metadata)
                     .expect("concurrent session patch should parse");
                 let ack = session_patch_ack(&patch);
-                let progress = ProgressMetadata {
-                    operation_id: 42,
-                    progress_sequence: 2,
-                    stage_code: 8,
-                    percent_x100: 7_500,
-                    object_id: 0,
-                    body_bytes: 0,
-                };
-                send_responses.borrow_mut().push_back(response_packet(
-                    MessageType::Progress,
-                    header.session_id,
-                    9,
-                    progress
-                        .to_bytes()
-                        .expect("post-patch progress should encode")
-                        .to_vec(),
-                    Vec::new(),
-                    PROGRESS_METADATA_LEN,
-                ));
                 let ack_packet = response_packet(
                     MessageType::SessionPatchAck,
                     header.session_id,
@@ -665,21 +625,6 @@ async fn browser_role_routes_control_and_patch_while_event_receive_is_pending() 
         Some(nnrp_core::OperationState::Cancelled as u8)
     );
 
-    let progress = drive_scripted_operation(&connection, &responses, role.await_event())
-        .await
-        .expect("wire progress should remain available after local lifecycle delivery");
-    assert_eq!(progress.event_kind(), 13);
-    assert_eq!(progress.header_present(), 1);
-    assert_eq!(progress.version_major(), 1);
-    assert_eq!(progress.wire_format(), 0);
-    assert_eq!(progress.message_type(), MessageType::Progress as u8);
-    assert_eq!(progress.flags(), 0);
-    assert_eq!(progress.session_id(), 7);
-    assert_eq!(progress.frame_id(), 9);
-    assert_eq!(progress.view_id(), 0);
-    assert_eq!(progress.route_id(), 0);
-    assert_eq!(progress.trace_id(), 0);
-
     let patch = SessionPatchMetadata {
         profile_id: STANDARD_PROFILE_TOKEN,
         patch_mask: 0x01,
@@ -727,7 +672,7 @@ async fn browser_role_routes_control_and_patch_while_event_receive_is_pending() 
 
     ingest_scripted_responses(&connection, &responses).await;
     for _ in 0..64 {
-        if event_result.borrow().is_some() && patch_result.borrow().is_some() {
+        if patch_result.borrow().is_some() {
             break;
         }
         JsFuture::from(Promise::resolve(&JsValue::UNDEFINED))
@@ -745,34 +690,26 @@ async fn browser_role_routes_control_and_patch_while_event_receive_is_pending() 
     let patch_ack = SessionPatchAckMetadata::parse(&patch_ack)
         .expect("concurrent patch ack should remain canonical");
     assert_eq!(patch_ack.applied_patch_mask, 0x01);
-    let event = event_result
-        .borrow_mut()
-        .take()
-        .expect("exported event promise should complete after routing the patch ack")
-        .expect("exported event promise should resolve");
-    assert_eq!(
-        Reflect::get(&event, &JsValue::from_str("messageType"))
-            .expect("exported event should expose messageType")
-            .as_f64(),
-        Some(MessageType::Progress as u8 as f64)
-    );
-    assert_eq!(
-        Reflect::get(&event, &JsValue::from_str("frameId"))
-            .expect("exported event should expose frameId")
-            .as_f64(),
-        Some(9.0)
+    assert!(
+        event_result.borrow().is_none(),
+        "routing the patch ack must leave the unrelated event receive pending"
     );
 
-    let pending_event = role.await_event();
-    let close = role.close();
-    let (event_result, close_result) = drive_scripted_operation(
-        &connection,
-        &responses,
-        futures_util::future::join(pending_event, close),
-    )
-    .await;
+    let close_result = drive_scripted_operation(&connection, &responses, role.close()).await;
+    for _ in 0..64 {
+        if event_result.borrow().is_some() {
+            break;
+        }
+        JsFuture::from(Promise::resolve(&JsValue::UNDEFINED))
+            .await
+            .expect("pending event cancellation should advance a microtask turn");
+    }
     assert!(
-        event_result.is_err(),
+        event_result
+            .borrow_mut()
+            .take()
+            .expect("closing the role should complete the pending event promise")
+            .is_err(),
         "closing the role should cancel a pending event receive"
     );
     close_result.expect("concurrent browser role should close cleanly");
