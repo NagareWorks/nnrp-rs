@@ -21,7 +21,7 @@ use nnrp_core::{
     RESULT_PUSH_METADATA_LEN, RETRY_AFTER_METADATA_LEN, SERVER_HELLO_ACK_METADATA_LEN,
     SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE, SESSION_OPEN_ACK_METADATA_LEN,
     SESSION_OPEN_METADATA_LEN, STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID,
-    TOKEN_DELTA_SCHEMA_VERSION,
+    TOKEN_DELTA_SCHEMA_VERSION, TRACE_CONTEXT_METADATA_LEN,
 };
 use nnrp_runtime::{
     BoxedFramedTransport, FramedListener, FramedTransport, NnrpClient, NnrpClientConfig,
@@ -2008,6 +2008,14 @@ async fn tcp_loopback_enforces_trace_context_correlation_scopes() -> Result<(), 
             .send_result(&mut session, token_result(), b"done".to_vec())
             .await?;
         expect_completed_lifecycle(&mut session, submit.operation_id).await?;
+        assert!(matches!(
+            session
+                .send_trace_context(submit.frame_id, metadata, b"trace".to_vec())
+                .await,
+            Err(RuntimeError::UnexpectedMessage(
+                "server TRACE_CONTEXT references a terminal operation"
+            ))
+        ));
 
         let close = session.receive_close().await?;
         session.ack_close(&close).await?;
@@ -2021,6 +2029,25 @@ async fn tcp_loopback_enforces_trace_context_correlation_scopes() -> Result<(), 
         .submit_encoded_nowait(token_submit(operation_id), b"prompt".to_vec())
         .await?;
     let metadata = trace_context(5);
+
+    let mut terminal_trace_header = CommonHeader::new(
+        MessageType::TraceContext,
+        TRACE_CONTEXT_METADATA_LEN as u32,
+        5,
+    );
+    terminal_trace_header.session_id = 1;
+    terminal_trace_header.frame_id = 1;
+    terminal_trace_header.trace_id = metadata.trace_id;
+    let terminal_trace_error = server_receive_error_after_completed_submit(RuntimePacket::new(
+        terminal_trace_header,
+        metadata.to_bytes()?.to_vec(),
+        b"trace".to_vec(),
+    )?)
+    .await;
+    assert!(matches!(
+        terminal_trace_error,
+        RuntimeError::UnexpectedMessage("server TRACE_CONTEXT references a terminal operation")
+    ));
 
     assert!(matches!(
         session
@@ -2054,6 +2081,14 @@ async fn tcp_loopback_enforces_trace_context_correlation_scopes() -> Result<(), 
     }
 
     assert_eq!(session.await_result().await?.operation_id, operation_id);
+    assert!(matches!(
+        session
+            .send_trace_context(frame_id, metadata, b"trace".to_vec())
+            .await,
+        Err(RuntimeError::UnexpectedMessage(
+            "client TRACE_CONTEXT references an unknown operation frame"
+        ))
+    ));
     session.close().await?;
     server_task.await.expect("server task should join")?;
     Ok(())
@@ -2072,6 +2107,18 @@ async fn tcp_loopback_releases_objects_after_cancel_and_reports_cache_miss(
         let control = session.receive_runtime_control().await?;
         assert_eq!(control.message_type, MessageType::Cancel);
         assert!(control.body.is_empty());
+        let trace = trace_context(5);
+        assert!(matches!(
+            session
+                .send_trace_context(submit.frame_id, trace, b"trace".to_vec())
+                .await,
+            Err(RuntimeError::UnexpectedMessage(
+                "server TRACE_CONTEXT references a terminal operation"
+            ))
+        ));
+        session
+            .send_trace_context(0, trace, b"trace".to_vec())
+            .await?;
         session
             .send_object_release(
                 object_release(operation_id, ObjectReleaseReason::Cancelled, 6),
@@ -2090,10 +2137,21 @@ async fn tcp_loopback_releases_objects_after_cancel_and_reports_cache_miss(
     let client = NnrpClient::connect_tcp(addr, NnrpClientConfig::default()).await?;
     let mut session = client.open_session().await?;
     let operation_id = 4_004;
-    session
+    let frame_id = session
         .submit_encoded_nowait(token_submit(operation_id), b"prompt".to_vec())
         .await?;
     session.cancel_operation(operation_id, 7).await?;
+    let terminal_trace_error = session
+        .send_trace_context(frame_id, trace_context(5), b"trace".to_vec())
+        .await
+        .expect_err("client should reject operation-scoped trace after cancel");
+    assert!(
+        matches!(
+            terminal_trace_error,
+            RuntimeError::UnexpectedMessage("client TRACE_CONTEXT references a terminal operation")
+        ),
+        "unexpected terminal trace error: {terminal_trace_error:?}"
+    );
 
     expect_client_lifecycle(
         session.await_event().await?,
@@ -2101,6 +2159,18 @@ async fn tcp_loopback_releases_objects_after_cancel_and_reports_cache_miss(
         OperationState::Cancelled,
     );
 
+    match expect_client_runtime_event(session.await_event().await?) {
+        NnrpRuntimeEvent {
+            header,
+            metadata: NnrpRuntimeEventMetadata::TraceContext(metadata),
+            tail: NnrpRuntimeEventTail::Body(body),
+        } => {
+            assert_eq!(header.frame_id, 0);
+            assert_eq!(metadata, trace_context(5));
+            assert_eq!(body, b"trace".to_vec());
+        }
+        event => panic!("expected session-scoped trace context, got {event:?}"),
+    }
     match expect_client_runtime_event(session.await_event().await?) {
         NnrpRuntimeEvent {
             metadata: NnrpRuntimeEventMetadata::ObjectRelease(metadata),
@@ -4755,6 +4825,57 @@ where
         .await
         .expect("server task should join")
         .expect_err("server should reject mismatched correlation")
+}
+
+async fn server_receive_error_after_completed_submit(packet: RuntimePacket) -> RuntimeError {
+    let server = NnrpServer::bind_tcp("127.0.0.1:0", NnrpServerConfig::default())
+        .await
+        .expect("server should bind");
+    let addr = server.local_addr().expect("server should expose address");
+    let server_task = tokio::spawn(async move {
+        let mut session = server.accept().await?;
+        let submit = session.receive_submit().await?;
+        submit
+            .send_result(&mut session, token_result(), b"done".to_vec())
+            .await?;
+        expect_completed_lifecycle(&mut session, submit.operation_id).await?;
+        session.await_event().await.map(|_| ())
+    });
+
+    let mut transport = TcpTransport::connect(addr)
+        .await
+        .expect("client should connect");
+    open_scripted_server_session(&mut transport)
+        .await
+        .expect("scripted session should open");
+
+    let mut submit_header = CommonHeader::new(
+        MessageType::FrameSubmit,
+        FRAME_SUBMIT_METADATA_LEN as u32,
+        6,
+    );
+    submit_header.session_id = 1;
+    submit_header.frame_id = 1;
+    transport
+        .write_packet(
+            &RuntimePacket::new(
+                submit_header,
+                token_submit(1).to_bytes().unwrap().to_vec(),
+                b"prompt".to_vec(),
+            )
+            .expect("submit packet should build"),
+        )
+        .await
+        .expect("submit should write");
+    transport
+        .write_packet(&packet)
+        .await
+        .expect("packet should write");
+
+    server_task
+        .await
+        .expect("server task should join")
+        .expect_err("server should reject terminal operation correlation")
 }
 
 fn close_request() -> SessionCloseMetadata {

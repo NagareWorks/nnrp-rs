@@ -3230,12 +3230,26 @@ impl NnrpServerSession {
     }
 
     fn require_trace_context_frame(&self, frame_id: u32) -> Result<(), RuntimeError> {
-        if frame_id == 0 || self.frame_operations.contains_key(&frame_id) {
+        if frame_id == 0 {
             return Ok(());
         }
-        Err(RuntimeError::UnexpectedMessage(
-            "server TRACE_CONTEXT references an unknown operation frame",
-        ))
+        let operation_id = self.frame_operations.get(&frame_id).copied().ok_or(
+            RuntimeError::UnexpectedMessage(
+                "server TRACE_CONTEXT references an unknown operation frame",
+            ),
+        )?;
+        let operation =
+            self.operations
+                .operation(operation_id)
+                .ok_or(RuntimeError::UnexpectedMessage(
+                    "server TRACE_CONTEXT references an unknown operation",
+                ))?;
+        if operation.state.is_terminal() {
+            return Err(RuntimeError::UnexpectedMessage(
+                "server TRACE_CONTEXT references a terminal operation",
+            ));
+        }
+        Ok(())
     }
 
     fn operation_id_for_frame(&self, frame_id: u32) -> Result<u64, RuntimeError> {
