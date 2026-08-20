@@ -1508,6 +1508,11 @@ impl NnrpServerSession {
                     "server received PARTIAL_RESULT body length mismatch",
                 )?;
                 self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
+                self.require_nonterminal_operation(
+                    metadata.operation_id,
+                    "server received PARTIAL_RESULT for an unknown operation",
+                    "server received PARTIAL_RESULT for a terminal operation",
+                )?;
                 Ok(DecodedServerEvent::PartialResult {
                     metadata,
                     body: packet.body,
@@ -1531,6 +1536,11 @@ impl NnrpServerSession {
                     "server received PROGRESS body length mismatch",
                 )?;
                 self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
+                self.require_nonterminal_operation(
+                    metadata.operation_id,
+                    "server received PROGRESS for an unknown operation",
+                    "server received PROGRESS for a terminal operation",
+                )?;
                 Ok(DecodedServerEvent::Progress {
                     metadata,
                     body: packet.body,
@@ -2217,6 +2227,11 @@ impl NnrpServerSession {
                 "server PARTIAL_RESULT body length mismatch",
             ));
         }
+        self.require_nonterminal_operation(
+            metadata.operation_id,
+            "server PARTIAL_RESULT references an unknown operation",
+            "server PARTIAL_RESULT references a terminal operation",
+        )?;
         let mut header = CommonHeader::new(
             MessageType::PartialResult,
             PARTIAL_RESULT_METADATA_LEN as u32,
@@ -2244,6 +2259,11 @@ impl NnrpServerSession {
                 "server PROGRESS body length mismatch",
             ));
         }
+        self.require_nonterminal_operation(
+            metadata.operation_id,
+            "server PROGRESS references an unknown operation",
+            "server PROGRESS references a terminal operation",
+        )?;
         let mut header = CommonHeader::new(
             MessageType::Progress,
             PROGRESS_METADATA_LEN as u32,
@@ -3238,16 +3258,25 @@ impl NnrpServerSession {
                 "server TRACE_CONTEXT references an unknown operation frame",
             ),
         )?;
-        let operation =
-            self.operations
-                .operation(operation_id)
-                .ok_or(RuntimeError::UnexpectedMessage(
-                    "server TRACE_CONTEXT references an unknown operation",
-                ))?;
+        self.require_nonterminal_operation(
+            operation_id,
+            "server TRACE_CONTEXT references an unknown operation",
+            "server TRACE_CONTEXT references a terminal operation",
+        )
+    }
+
+    fn require_nonterminal_operation(
+        &self,
+        operation_id: u64,
+        unknown_message: &'static str,
+        terminal_message: &'static str,
+    ) -> Result<(), RuntimeError> {
+        let operation = self
+            .operations
+            .operation(operation_id)
+            .ok_or(RuntimeError::UnexpectedMessage(unknown_message))?;
         if operation.state.is_terminal() {
-            return Err(RuntimeError::UnexpectedMessage(
-                "server TRACE_CONTEXT references a terminal operation",
-            ));
+            return Err(RuntimeError::UnexpectedMessage(terminal_message));
         }
         Ok(())
     }

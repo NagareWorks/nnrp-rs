@@ -1106,6 +1106,10 @@ impl NnrpClientSession {
                     ));
                 }
                 self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
+                self.require_nonterminal_operation(
+                    metadata.operation_id,
+                    "client received PARTIAL_RESULT for a terminal operation",
+                )?;
                 Ok(NnrpClientEvent::PartialResult {
                     metadata,
                     body: packet.body,
@@ -1129,6 +1133,10 @@ impl NnrpClientSession {
                     ));
                 }
                 self.require_operation_frame(metadata.operation_id, packet.header.frame_id)?;
+                self.require_nonterminal_operation(
+                    metadata.operation_id,
+                    "client received PROGRESS for a terminal operation",
+                )?;
                 Ok(NnrpClientEvent::Progress {
                     metadata,
                     body: packet.body,
@@ -1597,14 +1605,23 @@ impl NnrpClientSession {
                 "client TRACE_CONTEXT references an unknown operation frame",
             ),
         )?;
+        self.require_nonterminal_operation(
+            operation_id,
+            "client TRACE_CONTEXT references a terminal operation",
+        )
+    }
+
+    fn require_nonterminal_operation(
+        &self,
+        operation_id: u64,
+        terminal_message: &'static str,
+    ) -> Result<(), RuntimeError> {
         if self
             .local_operation_states
             .get(&operation_id)
             .is_some_and(|state| state.is_terminal())
         {
-            return Err(RuntimeError::UnexpectedMessage(
-                "client TRACE_CONTEXT references a terminal operation",
-            ));
+            return Err(RuntimeError::UnexpectedMessage(terminal_message));
         }
         Ok(())
     }
@@ -1660,6 +1677,10 @@ impl NnrpClientSession {
             "client PROGRESS body length mismatch",
         )?;
         let frame_id = self.correlated_frame_id(metadata.operation_id)?;
+        self.require_nonterminal_operation(
+            metadata.operation_id,
+            "client PROGRESS references a terminal operation",
+        )?;
         self.write_runtime_packet(
             MessageType::Progress,
             frame_id,
@@ -1681,6 +1702,10 @@ impl NnrpClientSession {
             "client PARTIAL_RESULT body length mismatch",
         )?;
         let frame_id = self.correlated_frame_id(metadata.operation_id)?;
+        self.require_nonterminal_operation(
+            metadata.operation_id,
+            "client PARTIAL_RESULT references a terminal operation",
+        )?;
         self.write_runtime_packet(
             MessageType::PartialResult,
             frame_id,

@@ -229,6 +229,12 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Test Windows IPC role carrier
+        if: runner.os == 'Windows'
+        run: |
+          cargo test -p nnrp-transport-ipc
+          cargo test -p nnrp-ffi --no-default-features --features transport-ipc --test role_carrier_e2e named_pipe_role_runtime_adopts_carriers_and_completes_real_handshake
+
       - name: Build and verify native artifact
         run: python scripts/package_native_artifacts.py --out artifacts/native
 
