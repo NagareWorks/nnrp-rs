@@ -4,7 +4,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 CONFORMANCE_REVISION = "efb0d965d5a18d0a86fd50cb69efccce0b43c089"
-DOC_REVISION = "4319692b4c0a697fe5d360e55bafa2b83f5bbb3d"
+DOC_REVISION = "7ef8373828d17efc577d53285848d3b87fa29c62"
 
 
 class ConformanceWorkflowSyncTests(unittest.TestCase):

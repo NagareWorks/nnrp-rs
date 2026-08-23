@@ -2,14 +2,15 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
 use nnrp_core::{
-    validate_control_request_semantics, validate_partial_result_semantics,
-    validate_pressure_semantics, validate_progress_semantics, validate_result_drop_header,
-    validate_result_drop_reason_semantics, validate_scheduling_semantics,
-    validate_trace_context_semantics, BudgetMetadata, CacheAckMetadata, CacheInvalidateMetadata,
-    CacheMissMetadata, CacheObjectKind, CachePutMetadata, CacheReferenceMetadata,
-    CapabilityMetadata, ClientHelloMetadata, CommonHeader, ConnectionLifecycle,
-    ControlRequestMetadata, FlowUpdateMetadata, FrameSubmitMetadata, InFlightPolicy, MessageType,
-    ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata, ObjectReleaseMetadata,
+    decode_registered_capability_tokens, validate_control_request_semantics,
+    validate_partial_result_semantics, validate_pressure_semantics, validate_progress_semantics,
+    validate_result_drop_header, validate_result_drop_reason_semantics,
+    validate_scheduling_semantics, validate_trace_context_semantics, BudgetMetadata,
+    CacheAckMetadata, CacheInvalidateMetadata, CacheMissMetadata, CacheObjectKind,
+    CachePutMetadata, CacheReferenceMetadata, CapabilityMetadata, ClientHelloMetadata,
+    CommonHeader, ConnectionLifecycle, ControlRequestMetadata, FlowUpdateMetadata,
+    FrameSubmitMetadata, InFlightPolicy, MessageType, ObjectDeltaMetadata,
+    ObjectDescriptorMetadata, ObjectReferenceMetadata, ObjectReleaseMetadata,
     PartialResultMetadata, PressureMetadata, ProgressMetadata, RecoverableErrorMetadata,
     ResultDropReasonMetadata, ResultHintMetadata, ResultPushMetadata, ResultTerminalState,
     RetryAfterMetadata, RouteHintMetadata, SchedulingMetadata, ServerHelloAckMetadata,
@@ -1285,6 +1286,7 @@ impl NnrpClientSession {
                     metadata.body_bytes as usize,
                     "client received capability body length mismatch",
                 )?;
+                decode_registered_capability_tokens(&packet.body, metadata.capability_count, &[])?;
                 Ok(NnrpClientEvent::Capability {
                     message_type: packet.header.message_type,
                     metadata,
@@ -2023,6 +2025,7 @@ impl NnrpClientSession {
             metadata.body_bytes as usize,
             "client capability body length mismatch",
         )?;
+        decode_registered_capability_tokens(&body, metadata.capability_count, &[])?;
         self.write_runtime_packet(message_type, 0, metadata.to_bytes()?.to_vec(), body)
             .await
     }

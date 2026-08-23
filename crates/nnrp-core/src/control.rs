@@ -1,4 +1,7 @@
-use crate::{CommonHeader, MessageType, NnrpError, CURRENT_VERSION_MAJOR, CURRENT_WIRE_FORMAT};
+use crate::{
+    decode_capability_tokens, CommonHeader, MessageType, NnrpError, CURRENT_VERSION_MAJOR,
+    CURRENT_WIRE_FORMAT,
+};
 
 pub const CLIENT_HELLO_METADATA_LEN: usize = 64;
 pub const SERVER_HELLO_ACK_METADATA_LEN: usize = 80;
@@ -1184,6 +1187,7 @@ impl CapabilityMetadata {
             metadata.body_bytes as usize,
             "capability.body_bytes",
         )?;
+        decode_capability_tokens(body, metadata.capability_count)?;
         Ok((metadata, body))
     }
 
@@ -1193,6 +1197,7 @@ impl CapabilityMetadata {
             self.body_bytes as usize,
             body.len(),
         )?;
+        decode_capability_tokens(body, self.capability_count)?;
         let mut bytes = self.to_bytes()?.to_vec();
         bytes.extend_from_slice(body);
         Ok(bytes)
@@ -2545,6 +2550,12 @@ mod tests {
 
     #[test]
     fn runtime_control_metadata_round_trips_declared_tail_segments() {
+        let capability_body = crate::encode_capability_tokens(&[
+            crate::CACHE_REFERENCE,
+            crate::CONTROL_CAPABILITY_COSTS,
+            crate::CONTROL_ROUTE_EXECUTION_HINT,
+        ])
+        .unwrap();
         let control = ControlRequestMetadata {
             operation_id: 11,
             control_sequence: 12,
@@ -2594,13 +2605,13 @@ mod tests {
             preference_rank: 1,
             limit_bytes: 81,
             limit_units: 82,
-            body_bytes: 2,
+            body_bytes: capability_body.len() as u32,
             flags: CAPABILITY_FLAGS_KNOWN_MASK,
         };
-        let capability_bytes = capability.to_vec_with_body(&[1, 0]).unwrap();
+        let capability_bytes = capability.to_vec_with_body(&capability_body).unwrap();
         assert_eq!(
             CapabilityMetadata::parse_with_body(&capability_bytes).unwrap(),
-            (capability, &[1, 0][..])
+            (capability, capability_body.as_slice())
         );
 
         let route = RouteHintMetadata {

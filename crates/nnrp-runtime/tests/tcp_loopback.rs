@@ -1,12 +1,12 @@
 use async_trait::async_trait;
 use nnrp_core::NnrpError;
 use nnrp_core::{
-    BackpressureLevel, BudgetMetadata, CacheAckMetadata, CacheAckStatus, CacheInvalidateMetadata,
-    CacheInvalidateScope, CacheMissMetadata, CacheMissReason, CacheObjectId, CacheObjectKind,
-    CachePutMetadata, CacheReferenceMetadata, CacheReuseScope, CapabilityMetadata,
-    ClientHelloMetadata, CommonHeader, ControlRequestMetadata, FlowScopeKind, FlowUpdateMetadata,
-    FlowUpdateReason, FrameSubmitMetadata, HeaderFlags, InFlightPolicy, InputProfile,
-    MemoryLocationHint, MessageType, ObjectDeltaMetadata, ObjectDescriptorMetadata,
+    encode_capability_tokens, BackpressureLevel, BudgetMetadata, CacheAckMetadata, CacheAckStatus,
+    CacheInvalidateMetadata, CacheInvalidateScope, CacheMissMetadata, CacheMissReason,
+    CacheObjectId, CacheObjectKind, CachePutMetadata, CacheReferenceMetadata, CacheReuseScope,
+    CapabilityMetadata, ClientHelloMetadata, CommonHeader, ControlRequestMetadata, FlowScopeKind,
+    FlowUpdateMetadata, FlowUpdateReason, FrameSubmitMetadata, HeaderFlags, InFlightPolicy,
+    InputProfile, MemoryLocationHint, MessageType, ObjectDeltaMetadata, ObjectDescriptorMetadata,
     ObjectReferenceMetadata, ObjectReleaseMetadata, ObjectReleaseReason, OperationState,
     OwnershipHint, PartialResultMetadata, PayloadKindBitmap, PressureMetadata, ProgressMetadata,
     ResultClass, ResultDropReasonMetadata, ResultPushMetadata, ResultTerminalState,
@@ -16,7 +16,8 @@ use nnrp_core::{
     SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata,
     SessionPatchRejectReason, SessionPriorityClass, SessionStatus, SubmitMode, SupersedeMetadata,
     TileIndexMode, TraceContextMetadata, TransportId, TransportProbeAckMetadata,
-    TransportProbeMetadata, CLIENT_HELLO_METADATA_LEN, CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED,
+    TransportProbeMetadata, CLIENT_HELLO_METADATA_LEN, CONTROL_CAPABILITY_COSTS,
+    CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED, CONTROL_ROUTE_EXECUTION_HINT,
     FLOW_UPDATE_FLAG_CREDIT_VALID, FRAME_SUBMIT_METADATA_LEN, RESULT_DROP_REASON_DEADLINE_EXPIRED,
     RESULT_PUSH_METADATA_LEN, RETRY_AFTER_METADATA_LEN, SERVER_HELLO_ACK_METADATA_LEN,
     SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE, SESSION_OPEN_ACK_METADATA_LEN,
@@ -1776,7 +1777,7 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
             .send_capability(
                 MessageType::CapabilityNegotiation,
                 capability_metadata(),
-                b"cap!".to_vec(),
+                capability_body(),
             )
             .await?;
         session
@@ -1849,7 +1850,7 @@ async fn tcp_loopback_routes_preview4_object_and_cache_events() -> Result<(), Ru
             assert_eq!(metadata.profile_id, STANDARD_PROFILE_TOKEN);
             assert_eq!(metadata.capability_count, 2);
             assert_eq!(metadata.preference_rank, 1);
-            assert_eq!(body, b"cap!".to_vec());
+            assert_eq!(body, capability_body());
         }
         event => panic!("expected capability negotiation, got {event:?}"),
     }
@@ -2934,7 +2935,7 @@ async fn client_result_helper_rejects_preview4_control_non_result_events(
             MessageType::CapabilityNegotiation,
             1,
             capability_metadata().to_bytes()?.to_vec(),
-            b"cap!".to_vec(),
+            capability_body(),
         )?,
         control_event_packet(
             MessageType::RouteHint,
@@ -3648,6 +3649,19 @@ async fn server_preview4_control_readers_and_senders_reject_mismatches() -> Resu
             Vec::new(),
         )?)
         .await,
+        {
+            let body = encode_capability_tokens(&["vendor.private"])?;
+            let mut metadata = capability_metadata();
+            metadata.capability_count = 1;
+            metadata.body_bytes = body.len() as u32;
+            server_receive_runtime_control_error(control_event_packet(
+                MessageType::CapabilityNegotiation,
+                1,
+                metadata.to_bytes()?.to_vec(),
+                body,
+            )?)
+            .await
+        },
         server_send_control_error(|mut session| async move {
             session
                 .send_backpressure(nnrp_core::PressureMetadata {
@@ -3663,7 +3677,11 @@ async fn server_preview4_control_readers_and_senders_reject_mismatches() -> Resu
         .await,
         server_send_control_error(|mut session| async move {
             session
-                .send_capability(MessageType::Cancel, capability_metadata(), b"cap!".to_vec())
+                .send_capability(
+                    MessageType::Cancel,
+                    capability_metadata(),
+                    capability_body(),
+                )
                 .await
         })
         .await,
@@ -3674,6 +3692,16 @@ async fn server_preview4_control_readers_and_senders_reject_mismatches() -> Resu
                     capability_metadata(),
                     Vec::new(),
                 )
+                .await
+        })
+        .await,
+        server_send_control_error(|mut session| async move {
+            let body = encode_capability_tokens(&["vendor.private"])?;
+            let mut metadata = capability_metadata();
+            metadata.capability_count = 1;
+            metadata.body_bytes = body.len() as u32;
+            session
+                .send_capability(MessageType::CapabilityNegotiation, metadata, body)
                 .await
         })
         .await,
@@ -5208,6 +5236,7 @@ fn drop_reason(operation_id: u64) -> ResultDropReasonMetadata {
 }
 
 fn capability_metadata() -> CapabilityMetadata {
+    let body = capability_body();
     CapabilityMetadata {
         profile_id: STANDARD_PROFILE_TOKEN,
         capability_count: 2,
@@ -5215,9 +5244,14 @@ fn capability_metadata() -> CapabilityMetadata {
         preference_rank: 1,
         limit_bytes: 4096,
         limit_units: 8,
-        body_bytes: 4,
+        body_bytes: body.len() as u32,
         flags: 0,
     }
+}
+
+fn capability_body() -> Vec<u8> {
+    encode_capability_tokens(&[CONTROL_CAPABILITY_COSTS, CONTROL_ROUTE_EXECUTION_HINT])
+        .expect("runtime test capability tokens are canonical")
 }
 
 fn route_hint(operation_id: u64) -> RouteHintMetadata {

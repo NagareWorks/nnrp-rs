@@ -1,10 +1,12 @@
 use std::time::Instant;
 
 use nnrp_core::{
-    CacheMissMetadata, CacheMissReason, CacheReferenceMetadata, CacheReuseScope,
-    CapabilityMetadata, MessageType, OperationState, PartialResultMetadata, PayloadKindBitmap,
-    PressureMetadata, ProgressMetadata, ResultClass, ResultDropReasonMetadata, ResultPushMetadata,
-    RouteHintMetadata, SchedulingMetadata, TraceContextMetadata, STANDARD_PROFILE_TOKEN,
+    decode_registered_capability_tokens, encode_capability_tokens, CacheMissMetadata,
+    CacheMissReason, CacheReferenceMetadata, CacheReuseScope, CapabilityMetadata, MessageType,
+    OperationState, PartialResultMetadata, PayloadKindBitmap, PressureMetadata, ProgressMetadata,
+    ResultClass, ResultDropReasonMetadata, ResultPushMetadata, RouteHintMetadata,
+    SchedulingMetadata, TraceContextMetadata, CONTROL_CAPABILITY_COSTS,
+    CONTROL_ROUTE_EXECUTION_HINT, STANDARD_PROFILE_TOKEN,
 };
 use nnrp_runtime::{
     FramedListener, NnrpClientRoleEvent, NnrpRuntimeEvent, NnrpRuntimeEventMetadata,
@@ -21,7 +23,6 @@ use crate::wire_endpoint::{ReferenceTransport, WireReferenceEndpoint};
 
 const REQUEST_BODY: &[u8] = b"wire-external-request";
 const RESPONSE_BODY: &[u8] = b"wire-external-result";
-const CAPABILITY_BODY: &[u8] = b"cap!";
 const ROUTE_BODY: &[u8] = b"hint";
 const CACHE_BODY: &[u8] = b"ref!";
 const TRACE_BODY: &[u8] = b"trace";
@@ -423,8 +424,8 @@ async fn run_capability_route_cache_client(
     session
         .send_capability(
             MessageType::CapabilityNegotiation,
-            capability_metadata(),
-            CAPABILITY_BODY.to_vec(),
+            capability_metadata(2, capability_body().len()),
+            capability_body(),
         )
         .await?;
     observed.push(
@@ -432,6 +433,35 @@ async fn run_capability_route_cache_client(
         WireExternalFrame::CapabilityNegotiation,
         json!({ "session_id": session_id }),
     );
+    match expect_client_runtime_event(session.await_event().await?)? {
+        NnrpRuntimeEvent {
+            header,
+            metadata: NnrpRuntimeEventMetadata::Capability(metadata),
+            tail: NnrpRuntimeEventTail::Body(body),
+        } if header.message_type == MessageType::CapabilityNegotiation => {
+            let tokens =
+                decode_registered_capability_tokens(&body, metadata.capability_count, &[])?;
+            if tokens != [CONTROL_CAPABILITY_COSTS] {
+                return Err(RuntimeError::UnexpectedMessage(
+                    "capability/cache scenario received an unexpected accepted subset",
+                ));
+            }
+            observed.push(
+                WireExternalDirection::TargetToSuite,
+                WireExternalFrame::CapabilityNegotiation,
+                json!({
+                    "session_id": session_id,
+                    "capability_count": metadata.capability_count,
+                    "capabilities": tokens,
+                }),
+            );
+        }
+        _ => {
+            return Err(RuntimeError::UnexpectedMessage(
+                "capability/cache scenario expected a capability response",
+            ));
+        }
+    }
     session
         .send_route_hint(
             MessageType::RouteHint,
@@ -801,15 +831,26 @@ fn credit_update() -> PressureMetadata {
     }
 }
 
-fn capability_metadata() -> CapabilityMetadata {
+fn capability_body() -> Vec<u8> {
+    encode_capability_tokens(&[CONTROL_CAPABILITY_COSTS, CONTROL_ROUTE_EXECUTION_HINT])
+        .expect("wire external capability tokens are canonical")
+}
+
+#[cfg(test)]
+fn accepted_capability_body() -> Vec<u8> {
+    encode_capability_tokens(&[CONTROL_CAPABILITY_COSTS])
+        .expect("wire external accepted capability token is canonical")
+}
+
+fn capability_metadata(capability_count: u16, body_bytes: usize) -> CapabilityMetadata {
     CapabilityMetadata {
         profile_id: STANDARD_PROFILE_TOKEN,
-        capability_count: 2,
+        capability_count,
         cost_model_id: 1,
         preference_rank: 1,
         limit_bytes: 4096,
         limit_units: 8,
-        body_bytes: CAPABILITY_BODY.len() as u32,
+        body_bytes: body_bytes as u32,
         flags: 0,
     }
 }
@@ -910,6 +951,10 @@ pub fn canonical_trace_body() -> &'static [u8] {
 mod tests {
     use std::{net::SocketAddr, str::FromStr, time::Duration};
 
+    use nnrp_core::{
+        decode_registered_capability_tokens, MessageType, CONTROL_CAPABILITY_COSTS,
+        CONTROL_ROUTE_EXECUTION_HINT,
+    };
     use nnrp_runtime::{
         NnrpClientRoleEvent, NnrpRuntimeEvent, NnrpRuntimeEventMetadata, NnrpRuntimeEventTail,
         NnrpServerEvent, OperationLifecycleEvent, RuntimeError,
@@ -918,12 +963,12 @@ mod tests {
     use nnrp_transport_quic::QuicServerEndpointConfig;
 
     use super::{
-        cache_miss, cancel_drop_reason, cancel_trace, canonical_pre_submit_deadline,
-        canonical_response_body, drop_reason, expect_client_runtime_event,
-        expect_completed_lifecycle, run_wire_external_case, token_result, token_submit,
-        WireExternalCase, WireExternalMode, WireExternalTerminal, CACHE_BODY, CAPABILITY_BODY,
-        PARTIAL_BODY, PROGRESS_BODY, RESPONSE_BODY, RESULT_DROP_REASON_PEER_CANCELLED, ROUTE_BODY,
-        TRACE_BODY,
+        accepted_capability_body, cache_miss, cancel_drop_reason, cancel_trace,
+        canonical_pre_submit_deadline, canonical_response_body, capability_metadata, drop_reason,
+        expect_client_runtime_event, expect_completed_lifecycle, run_wire_external_case,
+        token_result, token_submit, WireExternalCase, WireExternalMode, WireExternalTerminal,
+        CACHE_BODY, PARTIAL_BODY, PROGRESS_BODY, RESPONSE_BODY, RESULT_DROP_REASON_PEER_CANCELLED,
+        ROUTE_BODY, TRACE_BODY,
     };
     use crate::wire_endpoint::{ReferenceTransport, WireEndpointSecurity, WireReferenceEndpoint};
 
@@ -1247,10 +1292,27 @@ mod tests {
         let submit = session.receive_submit().await?;
         match session.await_event().await? {
             NnrpServerEvent::Runtime(NnrpRuntimeEvent {
-                metadata: NnrpRuntimeEventMetadata::Capability(_),
+                header,
+                metadata: NnrpRuntimeEventMetadata::Capability(metadata),
                 tail: NnrpRuntimeEventTail::Body(body),
                 ..
-            }) if body == CAPABILITY_BODY => {}
+            }) if header.message_type == nnrp_core::MessageType::CapabilityNegotiation => {
+                let tokens =
+                    decode_registered_capability_tokens(&body, metadata.capability_count, &[])?;
+                if tokens != [CONTROL_CAPABILITY_COSTS, CONTROL_ROUTE_EXECUTION_HINT] {
+                    return Err(RuntimeError::UnexpectedMessage(
+                        "target received an unexpected capability offer",
+                    ));
+                }
+                let accepted = accepted_capability_body();
+                session
+                    .send_capability(
+                        MessageType::CapabilityNegotiation,
+                        capability_metadata(1, accepted.len()),
+                        accepted,
+                    )
+                    .await?;
+            }
             _ => {
                 return Err(RuntimeError::UnexpectedMessage(
                     "target expected capability",

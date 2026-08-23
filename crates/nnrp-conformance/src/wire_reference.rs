@@ -1,9 +1,10 @@
 use nnrp_core::{
-    BackpressureLevel, CacheInvalidateMetadata, CacheInvalidateScope, CacheReferenceMetadata,
-    CacheReuseScope, CapabilityMetadata, CommonHeader, FrameSubmitMetadata, InputProfile,
-    MessageType, OperationState, PartialResultMetadata, PayloadKindBitmap, PressureMetadata,
-    ProgressMetadata, ResultClass, ResultDropReasonMetadata, ResultPushMetadata, RouteHintMetadata,
-    SubmitMode, TileIndexMode, PRESSURE_METADATA_LEN, RESULT_DROP_REASON_DEADLINE_EXPIRED,
+    encode_capability_tokens, BackpressureLevel, CacheInvalidateMetadata, CacheInvalidateScope,
+    CacheReferenceMetadata, CacheReuseScope, CapabilityMetadata, CommonHeader, FrameSubmitMetadata,
+    InputProfile, MessageType, OperationState, PartialResultMetadata, PayloadKindBitmap,
+    PressureMetadata, ProgressMetadata, ResultClass, ResultDropReasonMetadata, ResultPushMetadata,
+    RouteHintMetadata, SubmitMode, TileIndexMode, CONTROL_CAPABILITY_COSTS,
+    CONTROL_ROUTE_EXECUTION_HINT, PRESSURE_METADATA_LEN, RESULT_DROP_REASON_DEADLINE_EXPIRED,
     STANDARD_PROFILE_TOKEN,
 };
 use nnrp_runtime::{
@@ -818,7 +819,7 @@ async fn reference_scenario_server_task(
                 .send_capability(
                     MessageType::CapabilityNegotiation,
                     capability_metadata(),
-                    b"cap!".to_vec(),
+                    capability_body(),
                 )
                 .await?;
             session
@@ -1736,6 +1737,7 @@ fn drop_reason(operation_id: u64) -> ResultDropReasonMetadata {
 }
 
 fn capability_metadata() -> CapabilityMetadata {
+    let body = capability_body();
     CapabilityMetadata {
         profile_id: STANDARD_PROFILE_TOKEN,
         capability_count: 2,
@@ -1743,9 +1745,14 @@ fn capability_metadata() -> CapabilityMetadata {
         preference_rank: 1,
         limit_bytes: 4096,
         limit_units: 8,
-        body_bytes: 4,
+        body_bytes: body.len() as u32,
         flags: 0,
     }
+}
+
+fn capability_body() -> Vec<u8> {
+    encode_capability_tokens(&[CONTROL_CAPABILITY_COSTS, CONTROL_ROUTE_EXECUTION_HINT])
+        .expect("wire reference capability tokens are canonical")
 }
 
 fn route_hint(operation_id: u64) -> RouteHintMetadata {
