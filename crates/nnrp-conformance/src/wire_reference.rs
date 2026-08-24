@@ -34,23 +34,6 @@ fn expect_client_runtime_event(
     }
 }
 
-fn expect_client_lifecycle(
-    event: NnrpClientRoleEvent,
-    operation_id: u64,
-    state: OperationState,
-) -> Result<(), RuntimeError> {
-    match event {
-        NnrpClientRoleEvent::Lifecycle(event)
-            if event.operation_id == operation_id && event.state == state =>
-        {
-            Ok(())
-        }
-        _ => Err(RuntimeError::UnexpectedMessage(
-            "wire reference case expected client lifecycle evidence",
-        )),
-    }
-}
-
 async fn expect_completed_lifecycle(
     session: &mut NnrpServerSession,
     operation_id: u64,
@@ -890,11 +873,6 @@ async fn run_reference_scenario_client(
                     "reason_code": RESULT_DROP_REASON_DEADLINE_EXPIRED,
                 }),
             );
-            expect_client_lifecycle(
-                session.await_event().await?,
-                operation_id,
-                OperationState::Cancelled,
-            )?;
             let drop_reason = expect_result_drop_reason(expect_client_runtime_event(
                 session.await_event().await?,
             )?)?;
@@ -946,11 +924,6 @@ async fn run_reference_scenario_client(
                     "reason_code": RESULT_DROP_REASON_DEADLINE_EXPIRED,
                 }),
             );
-            expect_client_lifecycle(
-                session.await_event().await?,
-                abort_operation_id,
-                OperationState::Failed,
-            )?;
             let pressure =
                 expect_backpressure(expect_client_runtime_event(session.await_event().await?)?)?;
             frames.push(

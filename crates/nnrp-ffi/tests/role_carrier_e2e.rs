@@ -1928,12 +1928,6 @@ unsafe fn assert_role_handshake(
         if matches!(message_type, MessageType::Cancel | MessageType::Abort) {
             assert_eq!(server_lifecycle.operation, server_control_operation);
         }
-        assert_lifecycle_event(
-            poll_client_event(client_session),
-            operation_id,
-            frame_id,
-            state,
-        );
         if matches!(message_type, MessageType::Cancel | MessageType::Abort) {
             if message_type == MessageType::Cancel {
                 let retry_after = retry_after_payload(RuntimeRole::Client);
@@ -1972,6 +1966,13 @@ unsafe fn assert_role_handshake(
                 .status_code,
                 nnrp_ffi::NnrpFfiStatusCode::InvalidHandle as u32,
                 "successful terminal drop must release the server operation handle"
+            );
+        } else {
+            assert_lifecycle_event(
+                poll_client_event(client_session),
+                operation_id,
+                frame_id,
+                state,
             );
         }
     }

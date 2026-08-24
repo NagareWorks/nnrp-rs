@@ -7,15 +7,16 @@ use js_sys::{Array, Function, Promise, Uint8Array};
 use nnrp_core::{
     BudgetMetadata, ClientHelloMetadata, CommonHeader, ControlRequestMetadata, FrameSubmitMetadata,
     HeaderFlags, InputProfile, MessageType, OperationState, PayloadKindBitmap, ProgressMetadata,
-    ResultClass, ResultPushMetadata, RuntimeRole, SchedulingMetadata, ServerHelloAckMetadata,
-    SessionCloseAckMetadata, SessionCloseMetadata, SessionCloseStatus, SessionOpenAckMetadata,
-    SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchAckStatus, SessionPatchMetadata,
-    SessionPatchRejectReason, SessionPriorityClass, SessionStatus, SubmitMode, TileIndexMode,
-    CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED, CURRENT_VERSION_MAJOR, CURRENT_WIRE_FORMAT,
-    PROGRESS_METADATA_LEN, RESULT_PUSH_METADATA_LEN, SERVER_HELLO_ACK_METADATA_LEN,
-    SESSION_ACK_FLAG_RESUME_ENABLED, SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE,
-    SESSION_FLAG_ALLOW_RESUME, SESSION_OPEN_ACK_METADATA_LEN, SESSION_PATCH_ACK_METADATA_LEN,
-    STANDARD_PROFILE_TOKEN, TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
+    ResultClass, ResultDropReasonMetadata, ResultPushMetadata, RuntimeRole, SchedulingMetadata,
+    ServerHelloAckMetadata, SessionCloseAckMetadata, SessionCloseMetadata, SessionCloseStatus,
+    SessionOpenAckMetadata, SessionOpenMetadata, SessionPatchAckMetadata, SessionPatchAckStatus,
+    SessionPatchMetadata, SessionPatchRejectReason, SessionPriorityClass, SessionStatus,
+    SubmitMode, TileIndexMode, CONTROL_REQUEST_FLAG_COOPERATIVE_ALLOWED, CURRENT_VERSION_MAJOR,
+    CURRENT_WIRE_FORMAT, PROGRESS_METADATA_LEN, RESULT_DROP_REASON_METADATA_LEN,
+    RESULT_PUSH_METADATA_LEN, SERVER_HELLO_ACK_METADATA_LEN, SESSION_ACK_FLAG_RESUME_ENABLED,
+    SESSION_CLOSE_ACK_METADATA_LEN, SESSION_ERROR_NONE, SESSION_FLAG_ALLOW_RESUME,
+    SESSION_OPEN_ACK_METADATA_LEN, SESSION_PATCH_ACK_METADATA_LEN, STANDARD_PROFILE_TOKEN,
+    TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
 };
 use nnrp_runtime::{
     NnrpClientRoleEvent, NnrpSubmitHeaderContext, OperationLifecycleEvent, RuntimePacket,
@@ -497,6 +498,25 @@ async fn browser_role_routes_control_and_patch_while_event_receive_is_pending() 
                 assert_eq!(cancel.operation_id, 42);
                 assert_eq!(header.frame_id, 9);
                 *send_cancel_observed.borrow_mut() = true;
+                let drop_reason = ResultDropReasonMetadata {
+                    operation_id: cancel.operation_id,
+                    result_sequence: 1,
+                    drop_reason_code: cancel.reason_code,
+                    source_role: RuntimeRole::Server as u8,
+                    flags: 0,
+                    diagnostic_bytes: 0,
+                };
+                send_responses.borrow_mut().push_back(response_packet(
+                    MessageType::ResultDropReason,
+                    header.session_id,
+                    header.frame_id,
+                    drop_reason
+                        .to_bytes()
+                        .expect("cancel drop reason should encode")
+                        .to_vec(),
+                    Vec::new(),
+                    RESULT_DROP_REASON_METADATA_LEN,
+                ));
             }
             MessageType::SessionPatch => {
                 let patch = SessionPatchMetadata::parse(metadata)
@@ -616,14 +636,14 @@ async fn browser_role_routes_control_and_patch_while_event_receive_is_pending() 
 
     cancel_result.expect("cancel should write while receive remains pending");
     assert!(*cancel_observed.borrow());
-    let event = event.expect("pending receive should finish after cancel is written");
-    assert_eq!(event.event_kind(), 14);
-    assert_eq!(event.header_present(), 0);
-    assert_eq!(event.related_operation_id(), 42);
-    assert_eq!(
-        event.operation_state(),
-        Some(nnrp_core::OperationState::Cancelled as u8)
-    );
+    let event = event.expect("pending receive should finish on remote terminal evidence");
+    assert_eq!(event.event_kind(), 13);
+    assert_eq!(event.header_present(), 1);
+    assert_eq!(event.message_type(), MessageType::ResultDropReason as u8);
+    let drop_reason = ResultDropReasonMetadata::parse(&event.metadata().to_vec())
+        .expect("browser terminal event should preserve result-drop metadata");
+    assert_eq!(drop_reason.operation_id, 42);
+    assert_eq!(drop_reason.drop_reason_code, 7);
 
     let patch = SessionPatchMetadata {
         profile_id: STANDARD_PROFILE_TOKEN,

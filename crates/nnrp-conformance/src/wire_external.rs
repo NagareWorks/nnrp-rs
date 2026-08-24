@@ -42,23 +42,6 @@ fn expect_client_runtime_event(
     }
 }
 
-fn expect_client_lifecycle(
-    event: NnrpClientRoleEvent,
-    operation_id: u64,
-    state: OperationState,
-) -> Result<(), RuntimeError> {
-    match event {
-        NnrpClientRoleEvent::Lifecycle(event)
-            if event.operation_id == operation_id && event.state == state =>
-        {
-            Ok(())
-        }
-        _ => Err(RuntimeError::UnexpectedMessage(
-            "wire external case expected client lifecycle evidence",
-        )),
-    }
-}
-
 async fn expect_completed_lifecycle(
     session: &mut NnrpServerSession,
     operation_id: u64,
@@ -332,12 +315,6 @@ async fn run_cancel_abort_client(
         WireExternalFrame::Cancel,
         json!({ "session_id": session_id, "operation_id": operation_id }),
     );
-    expect_client_lifecycle(
-        session.await_event().await?,
-        operation_id,
-        OperationState::Cancelled,
-    )?;
-
     let mut trace = None;
     let mut drop_reason = None;
     while trace.is_none() || drop_reason.is_none() {

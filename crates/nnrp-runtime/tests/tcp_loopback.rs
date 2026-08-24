@@ -790,6 +790,13 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
                 .state,
             OperationState::Failed
         );
+        abort_submit
+            .send_result_drop(
+                &mut session,
+                drop_reason(abort_submit.operation_id),
+                Vec::new(),
+            )
+            .await?;
         session.send_backpressure(soft_backpressure()).await?;
 
         match session.await_event().await? {
@@ -880,12 +887,6 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
         )
         .await?;
 
-    expect_client_lifecycle(
-        session.await_event().await?,
-        operation_id,
-        OperationState::Cancelled,
-    );
-
     match expect_client_runtime_event(session.await_event().await?) {
         NnrpRuntimeEvent {
             metadata: NnrpRuntimeEventMetadata::ResultDropReason(reason),
@@ -908,11 +909,18 @@ async fn tcp_loopback_routes_preview4_runtime_controls() -> Result<(), RuntimeEr
         .await?;
     session.abort_operation(abort_operation_id, 9).await?;
 
-    expect_client_lifecycle(
-        session.await_event().await?,
-        abort_operation_id,
-        OperationState::Failed,
-    );
+    match expect_client_runtime_event(session.await_event().await?) {
+        NnrpRuntimeEvent {
+            metadata: NnrpRuntimeEventMetadata::ResultDropReason(reason),
+            tail: NnrpRuntimeEventTail::Diagnostic(body),
+            ..
+        } => {
+            assert_eq!(reason.operation_id, abort_operation_id);
+            assert_eq!(reason.drop_reason_code, 7);
+            assert!(body.is_empty());
+        }
+        event => panic!("expected abort drop reason, got {event:?}"),
+    }
 
     match expect_client_runtime_event(session.await_event().await?) {
         NnrpRuntimeEvent {
@@ -1427,15 +1435,13 @@ async fn tcp_loopback_client_terminal_apis_feed_the_role_event_union() -> Result
             }
             event => panic!("expected cancelled server lifecycle, got {event:?}"),
         }
-        assert!(matches!(
-            session.receive_runtime_control().await,
-            Err(RuntimeError::Protocol(
-                NnrpError::InvalidOperationTransition {
-                    from: OperationState::Cancelled,
-                    to: OperationState::Failed,
-                }
-            ))
-        ));
+        cancelled
+            .send_result_drop(
+                &mut session,
+                drop_reason(cancelled.operation_id),
+                Vec::new(),
+            )
+            .await?;
 
         let failed = session.receive_submit().await?;
         let abort = session.receive_runtime_control().await?;
@@ -1448,6 +1454,9 @@ async fn tcp_loopback_client_terminal_apis_feed_the_role_event_union() -> Result
             }
             event => panic!("expected failed server lifecycle, got {event:?}"),
         }
+        failed
+            .send_result_drop(&mut session, drop_reason(failed.operation_id), Vec::new())
+            .await?;
 
         let superseded = session.receive_submit().await?;
         match session.await_event().await? {
@@ -1502,21 +1511,18 @@ async fn tcp_loopback_client_terminal_apis_feed_the_role_event_union() -> Result
     ));
     let cancelled = session.await_result().await?;
     assert_eq!(cancelled.operation_id, cancelled_operation);
-    assert_eq!(cancelled.terminal_state, ResultTerminalState::Cancelled);
-    assert!(matches!(cancelled.event, NnrpTerminalEvent::Lifecycle(_)));
+    assert_eq!(cancelled.terminal_state, ResultTerminalState::Dropped);
+    assert!(matches!(cancelled.event, NnrpTerminalEvent::Runtime(_)));
 
     let failed_operation = 6_102;
     session
         .submit_encoded_nowait(token_submit(failed_operation), b"abort".to_vec())
         .await?;
     session.abort_operation(failed_operation, 9).await?;
-    expect_client_lifecycle(
-        session
-            .poll_event()?
-            .expect("local abort must be immediately pollable"),
-        failed_operation,
-        OperationState::Failed,
-    );
+    let failed = session.await_result().await?;
+    assert_eq!(failed.operation_id, failed_operation);
+    assert_eq!(failed.terminal_state, ResultTerminalState::Dropped);
+    assert!(matches!(failed.event, NnrpTerminalEvent::Runtime(_)));
     assert!(session.poll_event()?.is_none());
 
     assert!(matches!(
@@ -2096,7 +2102,7 @@ async fn tcp_loopback_enforces_trace_context_correlation_scopes() -> Result<(), 
 }
 
 #[tokio::test]
-async fn tcp_loopback_rejects_stream_frames_for_terminal_operations() {
+async fn tcp_loopback_rejects_post_terminal_output_but_accepts_cancel_inflight_output() {
     let partial = partial_result(1);
     let partial_packet = operation_event_packet(
         MessageType::PartialResult,
@@ -2111,10 +2117,10 @@ async fn tcp_loopback_rejects_stream_frames_for_terminal_operations() {
         server_partial_error,
         RuntimeError::UnexpectedMessage("server received PARTIAL_RESULT for a terminal operation")
     ));
-    let client_partial_error = client_receive_error_after_cancel(partial_packet).await;
+    let client_partial = client_receive_after_cancel(partial_packet).await;
     assert!(matches!(
-        client_partial_error,
-        RuntimeError::UnexpectedMessage("client received PARTIAL_RESULT for a terminal operation")
+        client_partial.metadata,
+        NnrpRuntimeEventMetadata::PartialResult(_)
     ));
 
     let progress = progress(1);
@@ -2131,10 +2137,10 @@ async fn tcp_loopback_rejects_stream_frames_for_terminal_operations() {
         server_progress_error,
         RuntimeError::UnexpectedMessage("server received PROGRESS for a terminal operation")
     ));
-    let client_progress_error = client_receive_error_after_cancel(progress_packet).await;
+    let client_progress = client_receive_after_cancel(progress_packet).await;
     assert!(matches!(
-        client_progress_error,
-        RuntimeError::UnexpectedMessage("client received PROGRESS for a terminal operation")
+        client_progress.metadata,
+        NnrpRuntimeEventMetadata::Progress(_)
     ));
 }
 
@@ -2233,12 +2239,6 @@ async fn tcp_loopback_releases_objects_after_cancel_and_reports_cache_miss(
             RuntimeError::UnexpectedMessage("client TRACE_CONTEXT references a terminal operation")
         ),
         "unexpected terminal trace error: {terminal_trace_error:?}"
-    );
-
-    expect_client_lifecycle(
-        session.await_event().await?,
-        operation_id,
-        OperationState::Cancelled,
     );
 
     match expect_client_runtime_event(session.await_event().await?) {
@@ -4084,7 +4084,7 @@ async fn client_accepts_custom_quic_transport_slot() -> Result<(), RuntimeError>
 }
 
 #[tokio::test]
-async fn session_scoped_control_bypasses_a_full_local_lifecycle_queue() -> Result<(), RuntimeError>
+async fn session_scoped_control_bypasses_a_full_pending_terminal_queue() -> Result<(), RuntimeError>
 {
     let config = NnrpClientConfig {
         requested_session_id: 9,
@@ -4137,7 +4137,7 @@ async fn session_scoped_control_bypasses_a_full_local_lifecycle_queue() -> Resul
     assert!(matches!(
         session.cancel_operation(1_025, 1).await,
         Err(RuntimeError::UnexpectedMessage(
-            "client local lifecycle event queue exceeded its limit"
+            "client pending terminal control queue exceeded its limit"
         ))
     ));
 
@@ -4638,7 +4638,7 @@ async fn scripted_client_close_session_packets(
     Ok((client.open_session().await?, server_task))
 }
 
-async fn client_receive_error_after_cancel(packet: RuntimePacket) -> RuntimeError {
+async fn client_receive_after_cancel(packet: RuntimePacket) -> NnrpRuntimeEvent {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("scripted server should bind");
@@ -4677,6 +4677,15 @@ async fn client_receive_error_after_cancel(packet: RuntimePacket) -> RuntimeErro
                 "scripted server expected CANCEL",
             ));
         }
+        transport.write_packet(&packet).await?;
+        transport
+            .write_packet(&operation_event_packet(
+                MessageType::ResultDropReason,
+                1,
+                drop_reason(1).to_bytes()?.to_vec(),
+                Vec::new(),
+            )?)
+            .await?;
         transport.write_packet(&packet).await
     });
 
@@ -4695,23 +4704,30 @@ async fn client_receive_error_after_cancel(packet: RuntimePacket) -> RuntimeErro
         .cancel_operation(1, 7)
         .await
         .expect("client should cancel operation");
-    expect_client_lifecycle(
+    let event = expect_client_runtime_event(
         session
             .await_event()
             .await
-            .expect("cancel lifecycle should remain observable"),
-        1,
-        OperationState::Cancelled,
+            .expect("client should accept output already in flight when CANCEL was sent"),
     );
-    let error = session
-        .await_event()
+    let terminal = session
+        .await_result()
         .await
-        .expect_err("client should reject a stream frame after cancel");
+        .expect("server terminal evidence should complete the cancelled operation");
+    assert_eq!(terminal.operation_id, 1);
+    assert_eq!(terminal.terminal_state, ResultTerminalState::Dropped);
+    assert!(matches!(terminal.event, NnrpTerminalEvent::Runtime(_)));
+    assert!(matches!(
+        session.await_event().await,
+        Err(RuntimeError::UnexpectedMessage(
+            "client runtime event references an unknown operation"
+        ))
+    ));
     server_task
         .await
         .expect("scripted server should join")
-        .expect("scripted server should send the invalid frame");
-    error
+        .expect("scripted server should send the terminal sequence");
+    event
 }
 
 async fn client_patch_error(packet: RuntimePacket) -> RuntimeError {

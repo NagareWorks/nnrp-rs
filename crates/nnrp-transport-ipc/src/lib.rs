@@ -974,13 +974,6 @@ mod tests {
         session.cancel_operation(frame_id as u64, 7).await?;
 
         match session.await_event().await? {
-            nnrp_runtime::NnrpClientRoleEvent::Lifecycle(event) => {
-                assert_eq!(event.operation_id, frame_id as u64);
-                assert_eq!(event.state, nnrp_core::OperationState::Cancelled);
-            }
-            event => panic!("expected cancelled lifecycle event, got {event:?}"),
-        }
-        match session.await_event().await? {
             nnrp_runtime::NnrpClientRoleEvent::Runtime(nnrp_runtime::NnrpRuntimeEvent {
                 metadata: NnrpRuntimeEventMetadata::Pressure(pressure),
                 tail: NnrpRuntimeEventTail::None,
