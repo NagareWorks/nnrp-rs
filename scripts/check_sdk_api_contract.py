@@ -179,6 +179,10 @@ EXPECTED_RUST_PROJECTIONS = {
         "server_operation.send_progress": "send_progress",
         "server_operation.send_partial_result": "send_partial_result",
     },
+    "serverCapabilityMethods": {
+        "negotiate_capabilities": "send_capability",
+        "degrade_profile": "send_capability",
+    },
     "operationLifecycleEvent": "nnrp_runtime::OperationLifecycleEvent",
     "terminalEvent": "nnrp_runtime::NnrpTerminalEvent",
     "result": "nnrp_runtime::NnrpResult",
@@ -816,6 +820,21 @@ def check_contract(contract_path: Path) -> None:
     require(
         bool(session_impl_marker),
         "Rust server session implementation is missing",
+    )
+    require(
+        re.search(
+            r"pub\s+async\s+fn\s+send_capability\s*\(\s*&mut\s+self\s*,\s*"
+            r"message_type\s*:\s*MessageType\s*,\s*"
+            r"metadata\s*:\s*CapabilityMetadata\s*,\s*"
+            r"body\s*:\s*Vec\s*<\s*u8\s*>\s*,?\s*\)\s*"
+            r"->\s*Result\s*<\s*\(\)\s*,\s*RuntimeError\s*>",
+            session_impl,
+            re.DOTALL,
+        )
+        is not None
+        and "MessageType::CapabilityNegotiation | MessageType::DegradeProfile"
+        in session_impl,
+        "NnrpServerSession::send_capability no longer implements the frozen server capability surface",
     )
     for method in ("send_result", "send_result_drop", "send_progress", "send_partial_result"):
         require(

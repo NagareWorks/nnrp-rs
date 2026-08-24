@@ -390,6 +390,13 @@ impl NnrpServerOperation {
             self.check(contract)
 
         contract = frozen_contract()
+        contract["languageProjections"]["rust"]["serverCapabilityMethods"][
+            "degrade_profile"
+        ] = "degrade_profile"
+        with self.assertRaisesRegex(SystemExit, "Rust SDK projection map drifted"):
+            self.check(contract)
+
+        contract = frozen_contract()
         contract["roleOperations"]["server_operation.send_progress"]["terminal"] = True
         with self.assertRaisesRegex(
             SystemExit, "server_operation.send_progress role operation drifted"
