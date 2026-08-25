@@ -1,6 +1,6 @@
 use nnrp_core::{
-    validate_control_request_semantics, validate_partial_result_semantics,
-    validate_pressure_semantics, validate_progress_semantics,
+    encode_capability_tokens, validate_control_request_semantics,
+    validate_partial_result_semantics, validate_pressure_semantics, validate_progress_semantics,
     validate_result_drop_reason_semantics, validate_scheduling_semantics,
     validate_trace_context_semantics, BudgetMetadata, CacheInvalidateMetadata,
     CacheInvalidateScope, CacheMissMetadata, CacheMissReason, CacheReferenceMetadata,
@@ -424,7 +424,8 @@ fn control_capability_route_validation() -> Result<(), String> {
 }
 
 fn control_capability_costs_validation() -> Result<(), String> {
-    let capability_body = br#"{"supports":["partial-result","cache-reference"]}"#;
+    let capability_body = encode_capability_tokens(&[CACHE_REFERENCE, CONTROL_PROGRESS_PARTIAL])
+        .map_err(to_string)?;
     let capability = CapabilityMetadata {
         profile_id: 0x1001,
         capability_count: 2,
@@ -436,7 +437,7 @@ fn control_capability_costs_validation() -> Result<(), String> {
         flags: 1,
     };
     let capability_bytes = capability
-        .to_vec_with_body(capability_body)
+        .to_vec_with_body(&capability_body)
         .map_err(to_string)?;
     let (parsed_capability, parsed_capability_body) =
         CapabilityMetadata::parse_with_body(&capability_bytes).map_err(to_string)?;
@@ -479,7 +480,7 @@ fn control_route_validation() -> Result<(), String> {
 }
 
 fn control_degrade_budget_validation() -> Result<(), String> {
-    let body = br#"{"profile":"tensor-low-cost"}"#;
+    let body = encode_capability_tokens(&[CONTROL_DEGRADE_PROFILE]).map_err(to_string)?;
     let degrade = CapabilityMetadata {
         profile_id: 0x1001,
         capability_count: 1,
@@ -490,7 +491,7 @@ fn control_degrade_budget_validation() -> Result<(), String> {
         body_bytes: body.len() as u32,
         flags: 2,
     };
-    let bytes = degrade.to_vec_with_body(body).map_err(to_string)?;
+    let bytes = degrade.to_vec_with_body(&body).map_err(to_string)?;
     let (parsed, parsed_body) = CapabilityMetadata::parse_with_body(&bytes).map_err(to_string)?;
     if parsed != degrade || parsed_body != body {
         return Err("DEGRADE_PROFILE metadata roundtrip changed".to_string());

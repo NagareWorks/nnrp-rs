@@ -306,6 +306,9 @@ impl NnrpFfiStatus {
                 protocol_error_code: 0,
                 detail_code: 0,
             },
+            NnrpError::InvalidCapabilityTokenBody { .. }
+            | NnrpError::InvalidCapabilityToken(_)
+            | NnrpError::UnknownCapabilityToken(_) => Self::protocol(NnrpErrorFamily::Control, 0),
             NnrpError::UnknownEnumValue { enum_name, .. } => Self::protocol(
                 ffi_error_family_for_enum(enum_name).unwrap_or(NnrpErrorFamily::Transport),
                 0,
@@ -10848,6 +10851,12 @@ mod tests {
         assert_valid(MessageType::Backpressure, &pressure);
         assert_valid(MessageType::CreditUpdate, &pressure);
 
+        let capability_body = nnrp_core::encode_capability_tokens(&[
+            nnrp_core::CACHE_REFERENCE,
+            nnrp_core::CONTROL_CAPABILITY_COSTS,
+            nnrp_core::CONTROL_ROUTE_EXECUTION_HINT,
+        ])
+        .expect("capability tokens should encode");
         let capability = CapabilityMetadata {
             profile_id: 0x0100,
             capability_count: 3,
@@ -10855,10 +10864,10 @@ mod tests {
             preference_rank: 1,
             limit_bytes: 81,
             limit_units: 82,
-            body_bytes: 2,
+            body_bytes: capability_body.len() as u32,
             flags: nnrp_core::CAPABILITY_FLAGS_KNOWN_MASK,
         }
-        .to_vec_with_body(&[1, 0])
+        .to_vec_with_body(&capability_body)
         .expect("capability metadata should encode");
         assert_valid(MessageType::CapabilityNegotiation, &capability);
         assert_valid(MessageType::DegradeProfile, &capability);

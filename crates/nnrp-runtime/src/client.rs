@@ -2,14 +2,15 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
 use nnrp_core::{
-    validate_control_request_semantics, validate_partial_result_semantics,
-    validate_pressure_semantics, validate_progress_semantics, validate_result_drop_header,
-    validate_result_drop_reason_semantics, validate_scheduling_semantics,
-    validate_trace_context_semantics, BudgetMetadata, CacheAckMetadata, CacheInvalidateMetadata,
-    CacheMissMetadata, CacheObjectKind, CachePutMetadata, CacheReferenceMetadata,
-    CapabilityMetadata, ClientHelloMetadata, CommonHeader, ConnectionLifecycle,
-    ControlRequestMetadata, FlowUpdateMetadata, FrameSubmitMetadata, InFlightPolicy, MessageType,
-    ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata, ObjectReleaseMetadata,
+    decode_registered_capability_tokens, validate_control_request_semantics,
+    validate_partial_result_semantics, validate_pressure_semantics, validate_progress_semantics,
+    validate_result_drop_header, validate_result_drop_reason_semantics,
+    validate_scheduling_semantics, validate_trace_context_semantics, BudgetMetadata,
+    CacheAckMetadata, CacheInvalidateMetadata, CacheMissMetadata, CacheObjectKind,
+    CachePutMetadata, CacheReferenceMetadata, CapabilityMetadata, ClientHelloMetadata,
+    CommonHeader, ConnectionLifecycle, ControlRequestMetadata, FlowUpdateMetadata,
+    FrameSubmitMetadata, InFlightPolicy, MessageType, ObjectDeltaMetadata,
+    ObjectDescriptorMetadata, ObjectReferenceMetadata, ObjectReleaseMetadata,
     PartialResultMetadata, PressureMetadata, ProgressMetadata, RecoverableErrorMetadata,
     ResultDropReasonMetadata, ResultHintMetadata, ResultPushMetadata, ResultTerminalState,
     RetryAfterMetadata, RouteHintMetadata, SchedulingMetadata, ServerHelloAckMetadata,
@@ -109,6 +110,7 @@ pub struct NnrpClientSession {
     operation_frames: BTreeMap<u64, u32>,
     frame_operations: BTreeMap<u32, u64>,
     local_operation_states: BTreeMap<u64, nnrp_core::OperationState>,
+    pending_terminal_controls: BTreeMap<u64, nnrp_core::OperationState>,
     seen_operation_ids: BTreeSet<u64>,
     pre_submit_deadlines: PreSubmitDeadlineReservations,
     last_operation_id: u64,
@@ -571,6 +573,7 @@ impl NnrpClient {
             operation_frames: BTreeMap::new(),
             frame_operations: BTreeMap::new(),
             local_operation_states: BTreeMap::new(),
+            pending_terminal_controls: BTreeMap::new(),
             seen_operation_ids: BTreeSet::new(),
             pre_submit_deadlines: PreSubmitDeadlineReservations::new(ack.max_in_flight_operations),
             last_operation_id: 0,
@@ -1285,6 +1288,7 @@ impl NnrpClientSession {
                     metadata.body_bytes as usize,
                     "client received capability body length mismatch",
                 )?;
+                decode_registered_capability_tokens(&packet.body, metadata.capability_count, &[])?;
                 Ok(NnrpClientEvent::Capability {
                     message_type: packet.header.message_type,
                     metadata,
@@ -1611,6 +1615,21 @@ impl NnrpClientSession {
         )
     }
 
+    fn require_outbound_trace_context_frame(&self, frame_id: u32) -> Result<(), RuntimeError> {
+        if frame_id == 0 {
+            return Ok(());
+        }
+        let operation_id = self.frame_operations.get(&frame_id).copied().ok_or(
+            RuntimeError::UnexpectedMessage(
+                "client TRACE_CONTEXT references an unknown operation frame",
+            ),
+        )?;
+        self.require_outbound_nonterminal_operation(
+            operation_id,
+            "client TRACE_CONTEXT references a terminal operation",
+        )
+    }
+
     fn require_nonterminal_operation(
         &self,
         operation_id: u64,
@@ -1626,6 +1645,18 @@ impl NnrpClientSession {
         Ok(())
     }
 
+    fn require_outbound_nonterminal_operation(
+        &self,
+        operation_id: u64,
+        terminal_message: &'static str,
+    ) -> Result<(), RuntimeError> {
+        self.require_nonterminal_operation(operation_id, terminal_message)?;
+        if self.pending_terminal_controls.contains_key(&operation_id) {
+            return Err(RuntimeError::UnexpectedMessage(terminal_message));
+        }
+        Ok(())
+    }
+
     fn complete_operation_by_frame(&mut self, frame_id: u32) -> Result<u64, RuntimeError> {
         let operation_id =
             self.frame_operations
@@ -1635,6 +1666,7 @@ impl NnrpClientSession {
                 ))?;
         self.operation_frames.remove(&operation_id);
         self.local_operation_states.remove(&operation_id);
+        self.pending_terminal_controls.remove(&operation_id);
         Ok(operation_id)
     }
 
@@ -1643,6 +1675,7 @@ impl NnrpClientSession {
         self.operation_frames.remove(&operation_id);
         self.frame_operations.remove(&frame_id);
         self.local_operation_states.remove(&operation_id);
+        self.pending_terminal_controls.remove(&operation_id);
         Ok(())
     }
 
@@ -1677,7 +1710,7 @@ impl NnrpClientSession {
             "client PROGRESS body length mismatch",
         )?;
         let frame_id = self.correlated_frame_id(metadata.operation_id)?;
-        self.require_nonterminal_operation(
+        self.require_outbound_nonterminal_operation(
             metadata.operation_id,
             "client PROGRESS references a terminal operation",
         )?;
@@ -1702,7 +1735,7 @@ impl NnrpClientSession {
             "client PARTIAL_RESULT body length mismatch",
         )?;
         let frame_id = self.correlated_frame_id(metadata.operation_id)?;
-        self.require_nonterminal_operation(
+        self.require_outbound_nonterminal_operation(
             metadata.operation_id,
             "client PARTIAL_RESULT references a terminal operation",
         )?;
@@ -1795,8 +1828,33 @@ impl NnrpClientSession {
             metadata.diagnostic_bytes as usize,
             "client runtime control diagnostic body length mismatch",
         )?;
+        let pending_state = match message_type {
+            MessageType::Cancel => nnrp_core::OperationState::Cancelled,
+            MessageType::Abort => nnrp_core::OperationState::Failed,
+            _ => unreachable!("validated client control request is cancel or abort"),
+        };
         if metadata.operation_id != 0 {
-            self.ensure_pending_role_capacity()?;
+            self.correlated_frame_id(metadata.operation_id)?;
+            if self.pending_terminal_controls.len() >= MAX_PENDING_CLIENT_EVENTS
+                && !self
+                    .pending_terminal_controls
+                    .contains_key(&metadata.operation_id)
+            {
+                return Err(RuntimeError::UnexpectedMessage(
+                    "client pending terminal control queue exceeded its limit",
+                ));
+            }
+            if let Some(current) = self
+                .pending_terminal_controls
+                .get(&metadata.operation_id)
+                .or_else(|| self.local_operation_states.get(&metadata.operation_id))
+            {
+                return Err(nnrp_core::NnrpError::InvalidOperationTransition {
+                    from: *current,
+                    to: pending_state,
+                }
+                .into());
+            }
         }
         let mut header = CommonHeader::new(
             message_type,
@@ -1815,12 +1873,9 @@ impl NnrpClientSession {
         if metadata.operation_id == 0 {
             return Ok(());
         }
-        let state = match message_type {
-            MessageType::Cancel => nnrp_core::OperationState::Cancelled,
-            MessageType::Abort => nnrp_core::OperationState::Failed,
-            _ => unreachable!("validated client control request is cancel or abort"),
-        };
-        self.complete_local_operation(metadata.operation_id, state)
+        self.pending_terminal_controls
+            .insert(metadata.operation_id, pending_state);
+        Ok(())
     }
 
     pub async fn update_priority(
@@ -2023,6 +2078,7 @@ impl NnrpClientSession {
             metadata.body_bytes as usize,
             "client capability body length mismatch",
         )?;
+        decode_registered_capability_tokens(&body, metadata.capability_count, &[])?;
         self.write_runtime_packet(message_type, 0, metadata.to_bytes()?.to_vec(), body)
             .await
     }
@@ -2063,7 +2119,7 @@ impl NnrpClientSession {
             metadata.body_bytes as usize,
             "client trace context body length mismatch",
         )?;
-        self.require_trace_context_frame(frame_id)?;
+        self.require_outbound_trace_context_frame(frame_id)?;
         let mut header = CommonHeader::new(
             MessageType::TraceContext,
             TRACE_CONTEXT_METADATA_LEN as u32,

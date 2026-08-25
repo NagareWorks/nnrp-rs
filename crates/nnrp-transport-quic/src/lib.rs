@@ -274,17 +274,21 @@ impl FramedListener for QuicFramedListener {
     }
 
     async fn accept(&self) -> Result<BoxedFramedTransport, RuntimeError> {
-        let incoming = self
-            .endpoint
-            .accept()
-            .await
-            .ok_or(RuntimeError::Internal("QUIC endpoint closed"))?;
-        let connection = incoming.await.map_err(runtime_io)?;
-        Ok(Box::new(QuicTransport::new(
-            self.endpoint.clone(),
-            connection,
-            self.limits,
-        )))
+        loop {
+            let incoming = self
+                .endpoint
+                .accept()
+                .await
+                .ok_or(RuntimeError::Internal("QUIC endpoint closed"))?;
+            let Ok(connection) = incoming.await else {
+                continue;
+            };
+            return Ok(Box::new(QuicTransport::new(
+                self.endpoint.clone(),
+                connection,
+                self.limits,
+            )));
+        }
     }
 }
 
@@ -575,6 +579,34 @@ mod tests {
         );
         session.close().await?;
         server_task.await.expect("server task should join")?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quic_listener_survives_peer_tls_rejection() -> Result<(), RuntimeError> {
+        let (endpoint_config, certificate) =
+            QuicServerEndpointConfig::self_signed_localhost(stub_addr())?;
+        let listener = QuicFramedListener::bind(&endpoint_config)?;
+        let addr = listener.local_addr()?;
+        let server_task = tokio::spawn(async move { listener.accept().await });
+        let (_, untrusted) = QuicServerEndpointConfig::self_signed_localhost(stub_addr())?;
+        let wrong_config =
+            QuicClientEndpointConfig::localhost_with_root_certificate(untrusted.certificate_der);
+
+        QuicTransport::connect(addr, &wrong_config)
+            .await
+            .expect_err("the server certificate should not match the configured trust root");
+        let client = QuicTransport::connect(
+            addr,
+            &QuicClientEndpointConfig::localhost_with_root_certificate(certificate.certificate_der),
+        )
+        .await?;
+        let accepted = server_task
+            .await
+            .map_err(|_| RuntimeError::Internal("QUIC listener task panicked"))??;
+
+        assert_eq!(client.transport_kind(), RuntimeTransportKind::Quic);
+        assert_eq!(accepted.transport_kind(), RuntimeTransportKind::Quic);
         Ok(())
     }
 

@@ -6,19 +6,19 @@ use std::thread;
 use std::time::Duration;
 
 use nnrp_core::{
-    BackpressureLevel, BudgetMetadata, CacheInvalidateMetadata, CacheInvalidateScope,
-    CacheMissMetadata, CacheMissReason, CacheReferenceMetadata, CacheReuseScope,
-    CapabilityMetadata, ControlRequestMetadata, ErrorScope, FlowScopeKind, FlowUpdateMetadata,
-    FlowUpdateReason, FrameSubmitMetadata, InputProfile, MemoryLocationHint, MessageType,
-    ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata, ObjectReleaseMetadata,
-    ObjectReleaseReason, OperationState, OwnershipHint, PartialResultMetadata, PayloadKindBitmap,
-    PressureMetadata, ProgressMetadata, RecoverableErrorMetadata, ResultClass,
-    ResultDropReasonMetadata, ResultHintBudgetPolicy, ResultHintCongestionState,
-    ResultHintMetadata, ResultHintReason, ResultPushMetadata, RetryAfterMetadata,
-    RouteHintMetadata, RuntimeObjectKind, RuntimeRole, SchedulingMetadata, SessionOpenMetadata,
-    SessionPriorityClass, SubmitMode, SupersedeMetadata, TileIndexMode, TraceContextMetadata,
-    TransportId, FLOW_UPDATE_FLAG_CREDIT_VALID, PROFILE_TOKEN, SESSION_FLAG_ALLOW_RESUME,
-    TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
+    encode_capability_tokens, BackpressureLevel, BudgetMetadata, CacheInvalidateMetadata,
+    CacheInvalidateScope, CacheMissMetadata, CacheMissReason, CacheReferenceMetadata,
+    CacheReuseScope, CapabilityMetadata, ControlRequestMetadata, ErrorScope, FlowScopeKind,
+    FlowUpdateMetadata, FlowUpdateReason, FrameSubmitMetadata, InputProfile, MemoryLocationHint,
+    MessageType, ObjectDeltaMetadata, ObjectDescriptorMetadata, ObjectReferenceMetadata,
+    ObjectReleaseMetadata, ObjectReleaseReason, OperationState, OwnershipHint,
+    PartialResultMetadata, PayloadKindBitmap, PressureMetadata, ProgressMetadata,
+    RecoverableErrorMetadata, ResultClass, ResultDropReasonMetadata, ResultHintBudgetPolicy,
+    ResultHintCongestionState, ResultHintMetadata, ResultHintReason, ResultPushMetadata,
+    RetryAfterMetadata, RouteHintMetadata, RuntimeObjectKind, RuntimeRole, SchedulingMetadata,
+    SessionOpenMetadata, SessionPriorityClass, SubmitMode, SupersedeMetadata, TileIndexMode,
+    TraceContextMetadata, TransportId, CONTROL_CAPABILITY_COSTS, FLOW_UPDATE_FLAG_CREDIT_VALID,
+    PROFILE_TOKEN, SESSION_FLAG_ALLOW_RESUME, TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION,
 };
 use nnrp_ffi::{
     nnrp_buffer_release, nnrp_client_await_event, nnrp_client_await_events, nnrp_client_cancel,
@@ -462,6 +462,8 @@ fn flow_update_payload() -> Vec<u8> {
 }
 
 fn capability_payload() -> Vec<u8> {
+    let body = encode_capability_tokens(&[CONTROL_CAPABILITY_COSTS])
+        .expect("FFI role capability token is canonical");
     CapabilityMetadata {
         profile_id: PROFILE_TOKEN,
         capability_count: 1,
@@ -469,10 +471,10 @@ fn capability_payload() -> Vec<u8> {
         preference_rank: 1,
         limit_bytes: 4096,
         limit_units: 8,
-        body_bytes: 4,
+        body_bytes: body.len() as u32,
         flags: 0,
     }
-    .to_vec_with_body(b"caps")
+    .to_vec_with_body(&body)
     .expect("capability payload")
 }
 
@@ -1926,12 +1928,6 @@ unsafe fn assert_role_handshake(
         if matches!(message_type, MessageType::Cancel | MessageType::Abort) {
             assert_eq!(server_lifecycle.operation, server_control_operation);
         }
-        assert_lifecycle_event(
-            poll_client_event(client_session),
-            operation_id,
-            frame_id,
-            state,
-        );
         if matches!(message_type, MessageType::Cancel | MessageType::Abort) {
             if message_type == MessageType::Cancel {
                 let retry_after = retry_after_payload(RuntimeRole::Client);
@@ -1970,6 +1966,13 @@ unsafe fn assert_role_handshake(
                 .status_code,
                 nnrp_ffi::NnrpFfiStatusCode::InvalidHandle as u32,
                 "successful terminal drop must release the server operation handle"
+            );
+        } else {
+            assert_lifecycle_event(
+                poll_client_event(client_session),
+                operation_id,
+                frame_id,
+                state,
             );
         }
     }

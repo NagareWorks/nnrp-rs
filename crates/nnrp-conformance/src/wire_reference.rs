@@ -1,9 +1,10 @@
 use nnrp_core::{
-    BackpressureLevel, CacheInvalidateMetadata, CacheInvalidateScope, CacheReferenceMetadata,
-    CacheReuseScope, CapabilityMetadata, CommonHeader, FrameSubmitMetadata, InputProfile,
-    MessageType, OperationState, PartialResultMetadata, PayloadKindBitmap, PressureMetadata,
-    ProgressMetadata, ResultClass, ResultDropReasonMetadata, ResultPushMetadata, RouteHintMetadata,
-    SubmitMode, TileIndexMode, PRESSURE_METADATA_LEN, RESULT_DROP_REASON_DEADLINE_EXPIRED,
+    encode_capability_tokens, BackpressureLevel, CacheInvalidateMetadata, CacheInvalidateScope,
+    CacheReferenceMetadata, CacheReuseScope, CapabilityMetadata, CommonHeader, FrameSubmitMetadata,
+    InputProfile, MessageType, OperationState, PartialResultMetadata, PayloadKindBitmap,
+    PressureMetadata, ProgressMetadata, ResultClass, ResultDropReasonMetadata, ResultPushMetadata,
+    RouteHintMetadata, SubmitMode, TileIndexMode, CONTROL_CAPABILITY_COSTS,
+    CONTROL_ROUTE_EXECUTION_HINT, PRESSURE_METADATA_LEN, RESULT_DROP_REASON_DEADLINE_EXPIRED,
     STANDARD_PROFILE_TOKEN,
 };
 use nnrp_runtime::{
@@ -29,23 +30,6 @@ fn expect_client_runtime_event(
         NnrpClientRoleEvent::Runtime(event) => Ok(event),
         NnrpClientRoleEvent::Lifecycle(_) => Err(RuntimeError::UnexpectedMessage(
             "wire reference case expected a client wire event",
-        )),
-    }
-}
-
-fn expect_client_lifecycle(
-    event: NnrpClientRoleEvent,
-    operation_id: u64,
-    state: OperationState,
-) -> Result<(), RuntimeError> {
-    match event {
-        NnrpClientRoleEvent::Lifecycle(event)
-            if event.operation_id == operation_id && event.state == state =>
-        {
-            Ok(())
-        }
-        _ => Err(RuntimeError::UnexpectedMessage(
-            "wire reference case expected client lifecycle evidence",
         )),
     }
 }
@@ -818,7 +802,7 @@ async fn reference_scenario_server_task(
                 .send_capability(
                     MessageType::CapabilityNegotiation,
                     capability_metadata(),
-                    b"cap!".to_vec(),
+                    capability_body(),
                 )
                 .await?;
             session
@@ -889,11 +873,6 @@ async fn run_reference_scenario_client(
                     "reason_code": RESULT_DROP_REASON_DEADLINE_EXPIRED,
                 }),
             );
-            expect_client_lifecycle(
-                session.await_event().await?,
-                operation_id,
-                OperationState::Cancelled,
-            )?;
             let drop_reason = expect_result_drop_reason(expect_client_runtime_event(
                 session.await_event().await?,
             )?)?;
@@ -945,11 +924,6 @@ async fn run_reference_scenario_client(
                     "reason_code": RESULT_DROP_REASON_DEADLINE_EXPIRED,
                 }),
             );
-            expect_client_lifecycle(
-                session.await_event().await?,
-                abort_operation_id,
-                OperationState::Failed,
-            )?;
             let pressure =
                 expect_backpressure(expect_client_runtime_event(session.await_event().await?)?)?;
             frames.push(
@@ -1736,6 +1710,7 @@ fn drop_reason(operation_id: u64) -> ResultDropReasonMetadata {
 }
 
 fn capability_metadata() -> CapabilityMetadata {
+    let body = capability_body();
     CapabilityMetadata {
         profile_id: STANDARD_PROFILE_TOKEN,
         capability_count: 2,
@@ -1743,9 +1718,14 @@ fn capability_metadata() -> CapabilityMetadata {
         preference_rank: 1,
         limit_bytes: 4096,
         limit_units: 8,
-        body_bytes: 4,
+        body_bytes: body.len() as u32,
         flags: 0,
     }
+}
+
+fn capability_body() -> Vec<u8> {
+    encode_capability_tokens(&[CONTROL_CAPABILITY_COSTS, CONTROL_ROUTE_EXECUTION_HINT])
+        .expect("wire reference capability tokens are canonical")
 }
 
 fn route_hint(operation_id: u64) -> RouteHintMetadata {

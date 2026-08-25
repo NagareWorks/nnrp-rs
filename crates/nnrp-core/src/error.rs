@@ -81,4 +81,13 @@ pub enum NnrpError {
 
     #[error("message length overflow")]
     MessageLengthOverflow,
+
+    #[error("invalid capability token body: {reason}")]
+    InvalidCapabilityTokenBody { reason: &'static str },
+
+    #[error("invalid capability token: {0}")]
+    InvalidCapabilityToken(String),
+
+    #[error("unknown capability token: {0}")]
+    UnknownCapabilityToken(String),
 }

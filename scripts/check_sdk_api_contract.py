@@ -179,6 +179,10 @@ EXPECTED_RUST_PROJECTIONS = {
         "server_operation.send_progress": "send_progress",
         "server_operation.send_partial_result": "send_partial_result",
     },
+    "serverCapabilityMethods": {
+        "negotiate_capabilities": "send_capability",
+        "degrade_profile": "send_capability",
+    },
     "operationLifecycleEvent": "nnrp_runtime::OperationLifecycleEvent",
     "terminalEvent": "nnrp_runtime::NnrpTerminalEvent",
     "result": "nnrp_runtime::NnrpResult",
@@ -294,11 +298,7 @@ def require_mapping(value: Any, message: str) -> dict[str, Any]:
     return value
 
 
-def rust_impl_body(source: str, type_name: str) -> str | None:
-    match = re.search(rf"\bimpl\s+{re.escape(type_name)}\s*\{{", source)
-    if match is None:
-        return None
-    opening_brace = source.find("{", match.start())
+def rust_block_body(source: str, opening_brace: int) -> str | None:
     depth = 0
     for index in range(opening_brace, len(source)):
         if source[index] == "{":
@@ -308,6 +308,27 @@ def rust_impl_body(source: str, type_name: str) -> str | None:
             if depth == 0:
                 return source[opening_brace + 1 : index]
     return None
+
+
+def rust_impl_body(source: str, type_name: str) -> str | None:
+    match = re.search(rf"\bimpl\s+{re.escape(type_name)}\s*\{{", source)
+    if match is None:
+        return None
+    return rust_block_body(source, source.find("{", match.start()))
+
+
+def rust_function_body(source: str, function_name: str) -> str | None:
+    match = re.search(
+        rf"\b(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+"
+        rf"{re.escape(function_name)}\s*\(",
+        source,
+    )
+    if match is None:
+        return None
+    opening_brace = source.find("{", match.end())
+    if opening_brace < 0:
+        return None
+    return rust_block_body(source, opening_brace)
 
 
 def require_rust_baseline_metadata_codec(source: str, type_name: str) -> None:
@@ -816,6 +837,25 @@ def check_contract(contract_path: Path) -> None:
     require(
         bool(session_impl_marker),
         "Rust server session implementation is missing",
+    )
+    capability_method = re.search(
+        r"pub\s+async\s+fn\s+send_capability\s*\(\s*&mut\s+self\s*,\s*"
+        r"message_type\s*:\s*MessageType\s*,\s*"
+        r"metadata\s*:\s*CapabilityMetadata\s*,\s*"
+        r"body\s*:\s*Vec\s*<\s*u8\s*>\s*,?\s*\)\s*"
+        r"->\s*Result\s*<\s*\(\)\s*,\s*RuntimeError\s*>",
+        session_impl,
+        re.DOTALL,
+    )
+    capability_method_body = rust_function_body(session_impl, "send_capability")
+    require(
+        capability_method is not None
+        and capability_method_body is not None
+        and all(
+            f"MessageType::{message_type}" in capability_method_body
+            for message_type in ("CapabilityNegotiation", "DegradeProfile")
+        ),
+        "NnrpServerSession::send_capability no longer implements the frozen server capability surface",
     )
     for method in ("send_result", "send_result_drop", "send_progress", "send_partial_result"):
         require(
