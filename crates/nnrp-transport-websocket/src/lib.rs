@@ -258,17 +258,25 @@ impl FramedListener for WebSocketFramedListener {
     }
 
     async fn accept(&self) -> Result<BoxedFramedTransport, RuntimeError> {
-        let (stream, _) = self.listener.accept().await?;
-        if let Some(acceptor) = &self.tls_acceptor {
-            let stream = acceptor.accept(stream).await.map_err(runtime_io)?;
-            let websocket = accept_async(stream).await.map_err(runtime_ws)?;
-            return Ok(Box::new(WebSocketTransport::secure_server(
-                websocket,
-                self.limits,
-            )));
+        loop {
+            let (stream, _) = self.listener.accept().await?;
+            if let Some(acceptor) = &self.tls_acceptor {
+                let Ok(stream) = acceptor.accept(stream).await else {
+                    continue;
+                };
+                let Ok(websocket) = accept_async(stream).await else {
+                    continue;
+                };
+                return Ok(Box::new(WebSocketTransport::secure_server(
+                    websocket,
+                    self.limits,
+                )));
+            }
+            let Ok(websocket) = accept_async(stream).await else {
+                continue;
+            };
+            return Ok(Box::new(WebSocketTransport::server(websocket, self.limits)));
         }
-        let websocket = accept_async(stream).await.map_err(runtime_ws)?;
-        Ok(Box::new(WebSocketTransport::server(websocket, self.limits)))
     }
 }
 
@@ -546,6 +554,7 @@ mod tests {
         NnrpRuntimeEventMetadata, NnrpRuntimeEventTail,
     };
     use std::sync::Arc;
+    use tokio::io::AsyncWriteExt;
     use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
     #[test]
@@ -678,6 +687,65 @@ mod tests {
             .map_err(|_| RuntimeError::Internal("websocket text server task panicked"))?
             .expect_err("text messages should be rejected");
         assert!(matches!(error, RuntimeError::UnexpectedMessage(_)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn secure_websocket_listener_survives_peer_tls_rejection() -> Result<(), RuntimeError> {
+        let certified =
+            rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).map_err(runtime_io)?;
+        let certificate_der = certified.cert.der().to_vec();
+        let listener = WebSocketFramedListener::bind_secure_with_limits(
+            "127.0.0.1:0",
+            certificate_der.clone(),
+            certified.signing_key.serialize_der(),
+            RuntimeFrameLimits::default(),
+        )
+        .await?;
+        let endpoint = WebSocketEndpoint::wss(format!(
+            "wss://localhost:{}/nnrp",
+            listener.local_addr()?.port()
+        ))?;
+        let server_task = tokio::spawn(async move { listener.accept().await });
+
+        WebSocketTransport::connect(&endpoint)
+            .await
+            .expect_err("the self-signed certificate should not be trusted by default");
+        let client = WebSocketTransport::connect_secure_with_limits(
+            &endpoint,
+            "localhost",
+            certificate_der,
+            RuntimeFrameLimits::default(),
+        )
+        .await?;
+        let accepted = server_task
+            .await
+            .map_err(|_| RuntimeError::Internal("secure websocket listener task panicked"))??;
+
+        assert_eq!(client.transport_kind(), RuntimeTransportKind::WebSocket);
+        assert_eq!(accepted.transport_kind(), RuntimeTransportKind::WebSocket);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn websocket_listener_survives_peer_upgrade_rejection() -> Result<(), RuntimeError> {
+        let listener = WebSocketFramedListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let endpoint = WebSocketEndpoint::ws(format!("ws://{addr}/nnrp"))?;
+        let server_task = tokio::spawn(async move { listener.accept().await });
+        let mut invalid_peer = TcpStream::connect(addr).await?;
+
+        invalid_peer
+            .write_all(b"not-a-websocket-request\r\n\r\n")
+            .await?;
+        invalid_peer.shutdown().await?;
+        let client = WebSocketTransport::connect(&endpoint).await?;
+        let accepted = server_task
+            .await
+            .map_err(|_| RuntimeError::Internal("websocket listener task panicked"))??;
+
+        assert_eq!(client.transport_kind(), RuntimeTransportKind::WebSocket);
+        assert_eq!(accepted.transport_kind(), RuntimeTransportKind::WebSocket);
         Ok(())
     }
 

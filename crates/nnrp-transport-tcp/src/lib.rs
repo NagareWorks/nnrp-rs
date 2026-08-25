@@ -138,9 +138,13 @@ impl FramedListener for TcpTlsFramedListener {
     }
 
     async fn accept(&self) -> Result<BoxedFramedTransport, RuntimeError> {
-        let (stream, _) = self.listener.accept().await?;
-        let stream = self.acceptor.accept(stream).await.map_err(runtime_io)?;
-        Ok(Box::new(TcpTlsTransport::new(stream.into(), self.limits)))
+        loop {
+            let (stream, _) = self.listener.accept().await?;
+            let Ok(stream) = self.acceptor.accept(stream).await else {
+                continue;
+            };
+            return Ok(Box::new(TcpTlsTransport::new(stream.into(), self.limits)));
+        }
     }
 }
 
@@ -384,6 +388,40 @@ mod tests {
         );
         client.close().await.unwrap();
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tcp_tls_listener_survives_peer_tls_rejection() {
+        let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        let certificate_der = certified.cert.der().to_vec();
+        let listener = TcpTlsFramedListener::bind(
+            "127.0.0.1:0",
+            certificate_der.clone(),
+            certified.signing_key.serialize_der(),
+            RuntimeFrameLimits::default(),
+        )
+        .await
+        .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move { listener.accept().await });
+        let untrusted = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        let wrong_security =
+            ClientTransportSecurity::new("localhost", untrusted.cert.der().to_vec());
+
+        TcpTlsTransport::connect(addr, &wrong_security, RuntimeFrameLimits::default())
+            .await
+            .expect_err("the server certificate should not match the configured trust root");
+        let client = TcpTlsTransport::connect(
+            addr,
+            &ClientTransportSecurity::new("localhost", certificate_der),
+            RuntimeFrameLimits::default(),
+        )
+        .await
+        .unwrap();
+        let accepted = server_task.await.unwrap().unwrap();
+
+        assert_eq!(client.transport_kind(), RuntimeTransportKind::Tcp);
+        assert_eq!(accepted.transport_kind(), RuntimeTransportKind::Tcp);
     }
 
     #[tokio::test]
