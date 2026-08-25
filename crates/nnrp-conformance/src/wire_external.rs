@@ -398,11 +398,12 @@ async fn run_capability_route_cache_client(
         WireExternalFrame::Request,
         json!({ "session_id": session_id, "frame_id": frame_id, "operation_id": operation_id }),
     );
+    let capability_tokens = capability_body();
     session
         .send_capability(
             MessageType::CapabilityNegotiation,
-            capability_metadata(2, capability_body().len()),
-            capability_body(),
+            capability_metadata(2, capability_tokens.len()),
+            capability_tokens,
         )
         .await?;
     observed.push(

@@ -261,6 +261,21 @@ impl NnrpServerOperation {
         self.assertIsNotNone(body)
         self.assertIn("pub async fn send_result", body)
 
+    def test_rust_function_body_is_independent_of_match_arm_order(self):
+        source = """
+pub async fn send_capability(&mut self, message_type: MessageType) {
+    match message_type {
+        MessageType::DegradeProfile => send_degrade(),
+        MessageType::CapabilityNegotiation => send_negotiation(),
+        _ => reject(),
+    }
+}
+"""
+        body = self.checker.rust_function_body(source, "send_capability")
+        self.assertIsNotNone(body)
+        self.assertIn("MessageType::CapabilityNegotiation", body)
+        self.assertIn("MessageType::DegradeProfile", body)
+
     def check(self, contract):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "contract.json"
