@@ -307,6 +307,24 @@ async fn run_cancel_abort_client(
         WireExternalFrame::Request,
         json!({ "session_id": session_id, "frame_id": frame_id, "operation_id": operation_id }),
     );
+    match expect_client_runtime_event(session.await_event().await?)? {
+        NnrpRuntimeEvent {
+            metadata: NnrpRuntimeEventMetadata::PartialResult(metadata),
+            tail: NnrpRuntimeEventTail::Body(body),
+            ..
+        } if metadata.operation_id == operation_id && body == PARTIAL_BODY => {
+            observed.push(
+                WireExternalDirection::TargetToSuite,
+                WireExternalFrame::PartialResult,
+                json!({ "session_id": session_id, "operation_id": operation_id }),
+            );
+        }
+        _ => {
+            return Err(RuntimeError::UnexpectedMessage(
+                "cancel scenario expected PARTIAL_RESULT before CANCEL",
+            ));
+        }
+    }
     session
         .cancel_operation(operation_id, CONTROL_REASON_USER_CANCELLED)
         .await?;
@@ -943,10 +961,10 @@ mod tests {
     use super::{
         accepted_capability_body, cache_miss, cancel_drop_reason, cancel_trace,
         canonical_pre_submit_deadline, canonical_response_body, capability_metadata, drop_reason,
-        expect_client_runtime_event, expect_completed_lifecycle, run_wire_external_case,
-        token_result, token_submit, WireExternalCase, WireExternalMode, WireExternalTerminal,
-        CACHE_BODY, PARTIAL_BODY, PROGRESS_BODY, RESPONSE_BODY, RESULT_DROP_REASON_PEER_CANCELLED,
-        ROUTE_BODY, TRACE_BODY,
+        expect_client_runtime_event, expect_completed_lifecycle, partial_result,
+        run_wire_external_case, token_result, token_submit, WireExternalCase, WireExternalMode,
+        WireExternalTerminal, CACHE_BODY, PARTIAL_BODY, PROGRESS_BODY, RESPONSE_BODY,
+        RESULT_DROP_REASON_PEER_CANCELLED, ROUTE_BODY, TRACE_BODY,
     };
     use crate::wire_endpoint::{ReferenceTransport, WireEndpointSecurity, WireReferenceEndpoint};
 
@@ -981,6 +999,20 @@ mod tests {
             .expect("target should complete");
         assert_eq!(report.terminal, WireExternalTerminal::Cancelled);
         assert_eq!(report.mode, WireExternalMode::SuiteAsClient);
+        assert_eq!(
+            report
+                .observed_frames
+                .iter()
+                .map(|frame| frame.frame)
+                .collect::<Vec<_>>(),
+            vec![
+                super::WireExternalFrame::Request,
+                super::WireExternalFrame::PartialResult,
+                super::WireExternalFrame::Cancel,
+                super::WireExternalFrame::TraceContext,
+                super::WireExternalFrame::ResultDropReason,
+            ]
+        );
         assert_eq!(
             report
                 .result_drop_reason
@@ -1182,6 +1214,13 @@ mod tests {
     async fn cancel_target(server: nnrp_runtime::NnrpServer) -> Result<(), RuntimeError> {
         let mut session = server.accept().await?;
         let submit = session.receive_submit().await?;
+        submit
+            .send_partial_result(
+                &mut session,
+                partial_result(submit.operation_id),
+                PARTIAL_BODY.to_vec(),
+            )
+            .await?;
         match session.await_event().await? {
             NnrpServerEvent::Runtime(NnrpRuntimeEvent {
                 header,
